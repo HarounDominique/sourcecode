@@ -1,0 +1,10 @@
+target-version = "py39"
+line-length = 100
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",
+    "B008",    # Typer requires function calls (typer.Argument, typer.Option) in defaults
+    "UP045",   # Optional[X] es equivalente con from __future__ import annotations
+]

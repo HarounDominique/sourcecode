@@ -1,0 +1,133 @@
+"""Tests del schema de output y serializer."""
+import json
+from dataclasses import asdict
+from pathlib import Path
+
+import pytest
+
+from sourcecode.schema import (
+    AnalysisMetadata,
+    EntryPoint,
+    FrameworkDetection,
+    SourceMap,
+    StackDetection,
+)
+from sourcecode.serializer import compact_view, to_json, to_yaml, write_output
+
+
+def test_schema_version():
+    sm = SourceMap()
+    assert sm.metadata.schema_version == "1.0"
+
+
+def test_output_fields():
+    data = asdict(SourceMap())
+    for key in ("metadata", "file_tree", "stacks", "entry_points", "project_type"):
+        assert key in data, f"Falta campo '{key}' en el schema"
+
+
+def test_metadata_fields():
+    meta = asdict(AnalysisMetadata())
+    for key in ("schema_version", "generated_at", "sourcecode_version", "analyzed_path"):
+        assert key in meta, f"Falta campo '{key}' en AnalysisMetadata"
+
+
+def test_to_json_valid():
+    result = to_json(SourceMap())
+    data = json.loads(result)  # lanza si no es JSON valido
+    assert data["metadata"]["schema_version"] == "1.0"
+
+
+def test_yaml_json_equivalence():
+    from io import StringIO
+
+    from ruamel.yaml import YAML
+
+    sm = SourceMap(
+        file_tree={"main.py": None, "src": {"utils.py": None}},
+    )
+    json_data = json.loads(to_json(sm))
+    yaml_str = to_yaml(sm)
+    yaml_obj = YAML()
+    yaml_data = dict(yaml_obj.load(StringIO(yaml_str)))
+    # Comparar campos clave
+    assert json_data["metadata"]["schema_version"] == yaml_data["metadata"]["schema_version"]
+    assert json_data["file_tree"] == yaml_data["file_tree"]
+    assert json_data["stacks"] == yaml_data["stacks"]
+
+
+def test_compact_has_schema_version():
+    result = compact_view(SourceMap())
+    assert "schema_version" in result
+    assert result["schema_version"] == "1.0"
+
+
+def test_compact_has_depth1_tree():
+    sm = SourceMap(
+        file_tree={
+            "src": {"main.py": None, "utils": {"helpers.py": None}},
+            "pyproject.toml": None,
+            "tests": {"test_main.py": None},
+        }
+    )
+    result = compact_view(sm)
+    assert "file_tree_depth1" in result
+    # Solo el primer nivel: src={}, pyproject.toml=None, tests={}
+    assert "src" in result["file_tree_depth1"]
+    assert "pyproject.toml" in result["file_tree_depth1"]
+    # Los hijos de src NO deben aparecer en depth1
+    depth1_src = result["file_tree_depth1"]["src"]
+    assert depth1_src == {} or not isinstance(depth1_src, dict) or "main.py" not in depth1_src
+
+
+def test_compact_size():
+    sm = SourceMap(
+        file_tree={f"file_{i}.py": None for i in range(20)},
+    )
+    result = to_json(compact_view(sm))
+    # Aproximacion: numero de tokens ~ numero de palabras en JSON
+    word_count = len(result.split())
+    assert word_count <= 500, f"Compact demasiado grande: {word_count} palabras"
+
+
+def test_write_output_stdout(capsys: pytest.CaptureFixture):  # type: ignore[type-arg]
+    write_output('{"test": 1}', output=None)
+    captured = capsys.readouterr()
+    assert '{"test": 1}' in captured.out
+
+
+def test_write_output_file(tmp_path: Path):
+    out = tmp_path / "output.json"
+    write_output('{"test": 1}', output=out)
+    assert out.exists()
+    assert out.read_text() == '{"test": 1}'
+
+
+def test_generated_at_is_utc():
+    meta = AnalysisMetadata()
+    assert "+00:00" in meta.generated_at or meta.generated_at.endswith("Z")
+
+
+def test_schema_serializes_typed_detection_fields():
+    sm = SourceMap(
+        stacks=[
+            StackDetection(
+                stack="python",
+                frameworks=[FrameworkDetection(name="FastAPI", source="pyproject.toml")],
+                manifests=["pyproject.toml"],
+                primary=True,
+                signals=["manifest:pyproject.toml", "entry:src/main.py"],
+            )
+        ],
+        entry_points=[
+            EntryPoint(path="src/main.py", stack="python", kind="script", source="heuristic")
+        ],
+    )
+
+    data = json.loads(to_json(sm))
+
+    assert data["stacks"][0]["stack"] == "python"
+    assert data["stacks"][0]["primary"] is True
+    assert data["stacks"][0]["signals"] == ["manifest:pyproject.toml", "entry:src/main.py"]
+    assert data["stacks"][0]["frameworks"][0]["name"] == "FastAPI"
+    assert data["entry_points"][0]["path"] == "src/main.py"

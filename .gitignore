@@ -1,0 +1,33 @@
+# Python cache and build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+src/*.egg-info/
+
+# Editor / IDE
+.idea/
+.vscode/
+
+# Agent / local tooling state
+.claude/
+.codex/
+
+# Environment / secrets
+*.env
+*.secret.json
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+.planning
