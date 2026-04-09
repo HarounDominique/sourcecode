@@ -1,35 +1,163 @@
 """Tests unitarios para DocAnalyzer — extraccion JS/TS JSDoc/TSDoc.
 
-Wave 0: stubs que seran implementados en Plan 02.
+Plan 02: implementacion real de los 7 tests definidos en las especificaciones.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-
-def test_ts_module_jsdoc_extracted() -> None:
-    pytest.skip("Wave 0 stub — implementado en Plan 02")
+from sourcecode.doc_analyzer import DocAnalyzer
 
 
-def test_ts_function_jsdoc_extracted() -> None:
-    pytest.skip("Wave 0 stub — implementado en Plan 02")
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 
-def test_ts_method_only_in_full_depth() -> None:
-    pytest.skip("Wave 0 stub — implementado en Plan 02")
+def test_ts_module_jsdoc_extracted(tmp_path: Path) -> None:
+    """Primer bloque JSDoc del archivo produce DocRecord kind='module', source='docstring'."""
+    content = """\
+/** Module description. */
+
+export const VERSION = "1.0.0";
+"""
+    (tmp_path / "mod.ts").write_text(content, encoding="utf-8")
+    file_tree = {"mod.ts": None}
+
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="module")
+
+    assert len(records) >= 1
+    rec = records[0]
+    assert rec.kind == "module"
+    assert rec.source == "docstring"
+    assert "Module description" in (rec.doc_text or "")
+    assert rec.language in ("typescript", "javascript")
 
 
-def test_ts_class_jsdoc_extracted_depth_symbols() -> None:
-    pytest.skip("Wave 0 stub — implementado en Plan 02")
+def test_ts_function_jsdoc_extracted(tmp_path: Path) -> None:
+    """JSDoc antes de export function produce DocRecord kind='function', source='docstring'."""
+    content = """\
+/** Adds two numbers. */
+export function add(a: number, b: number): number {
+    return a + b;
+}
+"""
+    (tmp_path / "math.ts").write_text(content, encoding="utf-8")
+    file_tree = {"math.ts": None}
+
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="symbols")
+
+    func_recs = [r for r in records if r.kind == "function"]
+    assert len(func_recs) >= 1
+    func_rec = func_recs[0]
+    assert func_rec.source == "docstring"
+    assert "Adds two numbers" in (func_rec.doc_text or "")
 
 
-def test_ts_jsdoc_text_cleaned_no_at_tags() -> None:
-    pytest.skip("Wave 0 stub — implementado en Plan 02")
+def test_ts_method_only_in_full_depth(tmp_path: Path) -> None:
+    """JSDoc de constructor/metodo dentro de clase solo aparece en depth='full'."""
+    content = """\
+/** MyClass docs. */
+export class MyClass {
+    /** Constructor. */
+    constructor() {}
+}
+"""
+    (tmp_path / "myclass.ts").write_text(content, encoding="utf-8")
+    file_tree = {"myclass.ts": None}
+
+    analyzer = DocAnalyzer()
+    records_symbols, _ = analyzer.analyze(tmp_path, file_tree, depth="symbols")
+    records_full, _ = analyzer.analyze(tmp_path, file_tree, depth="full")
+
+    # Constructor should NOT be in symbols
+    symbols_kinds = {r.kind for r in records_symbols}
+    assert "method" not in symbols_kinds
+
+    # Constructor SHOULD be in full
+    full_kinds = {r.kind for r in records_full}
+    assert "method" in full_kinds
 
 
-def test_unsupported_language_emits_unavailable() -> None:
-    pytest.skip("Wave 0 stub — implementado en Plan 02")
+def test_ts_class_jsdoc_extracted_depth_symbols(tmp_path: Path) -> None:
+    """JSDoc antes de class produce DocRecord kind='class' en depth='symbols'."""
+    content = """\
+/** MyClass docs. */
+export class MyClass {
+    value: number = 0;
+}
+"""
+    (tmp_path / "myclass.ts").write_text(content, encoding="utf-8")
+    file_tree = {"myclass.ts": None}
+
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="symbols")
+
+    class_recs = [r for r in records if r.kind == "class"]
+    assert len(class_recs) >= 1
+    assert class_recs[0].source == "docstring"
+    assert "MyClass docs" in (class_recs[0].doc_text or "")
 
 
-def test_unsupported_language_adds_limitation() -> None:
-    pytest.skip("Wave 0 stub — implementado en Plan 02")
+def test_ts_jsdoc_text_cleaned_no_at_tags(tmp_path: Path) -> None:
+    """El doc_text no contiene lineas @param ni @returns."""
+    content = """\
+/**
+ * Adds two numbers.
+ * @param a First number
+ * @param b Second number
+ * @returns The sum
+ */
+export function add(a: number, b: number): number {
+    return a + b;
+}
+"""
+    (tmp_path / "add.ts").write_text(content, encoding="utf-8")
+    file_tree = {"add.ts": None}
+
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="symbols")
+
+    assert len(records) >= 1
+    for rec in records:
+        if rec.doc_text:
+            assert "@param" not in rec.doc_text
+            assert "@returns" not in rec.doc_text
+
+
+def test_unsupported_language_emits_unavailable(tmp_path: Path) -> None:
+    """Archivo .go produce DocRecord con source='unavailable', doc_text=None."""
+    content = """\
+package main
+
+// Main entry point
+func main() {}
+"""
+    (tmp_path / "main.go").write_text(content, encoding="utf-8")
+    file_tree = {"main.go": None}
+
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="symbols")
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.source == "unavailable"
+    assert rec.doc_text is None
+    assert rec.language == "go"
+
+
+def test_unsupported_language_adds_limitation(tmp_path: Path) -> None:
+    """Archivo .go agrega entrada a limitations con 'docs_unavailable'."""
+    content = "package main\nfunc main() {}\n"
+    (tmp_path / "main.go").write_text(content, encoding="utf-8")
+    file_tree = {"main.go": None}
+
+    analyzer = DocAnalyzer()
+    _, summary = analyzer.analyze(tmp_path, file_tree, depth="symbols")
+
+    assert any("docs_unavailable" in lim for lim in summary.limitations)
+    assert any("main.go" in lim for lim in summary.limitations)
