@@ -149,6 +149,36 @@ class ModuleGraph:
     summary: ModuleGraphSummary = field(default_factory=ModuleGraphSummary)
 
 
+DocsDepth = Literal["module", "symbols", "full"]
+
+
+@dataclass
+class DocRecord:
+    """Registro de documentacion extraida de un simbolo del codigo."""
+
+    symbol: str
+    kind: str
+    language: str
+    path: str
+    doc_text: Optional[str] = None
+    signature: Optional[str] = None
+    source: str = "unavailable"
+    workspace: Optional[str] = None
+
+
+@dataclass
+class DocSummary:
+    """Resumen del analisis de documentacion extraida."""
+
+    requested: bool = False
+    total_count: int = 0
+    symbol_count: int = 0
+    languages: list[str] = field(default_factory=list)
+    depth: Optional[DocsDepth] = None
+    truncated: bool = False
+    limitations: list[str] = field(default_factory=list)
+
+
 @dataclass
 class SourceMap:
     """Schema completo del output v1.0.
@@ -170,3 +200,5 @@ class SourceMap:
     dependency_summary: Optional[DependencySummary] = None
     module_graph: Optional[ModuleGraph] = None
     module_graph_summary: Optional[ModuleGraphSummary] = None
+    docs: list[DocRecord] = field(default_factory=list)
+    doc_summary: Optional[DocSummary] = None
