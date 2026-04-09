@@ -18,6 +18,7 @@ app = typer.Typer(
 FORMAT_CHOICES = ["json", "yaml"]
 GRAPH_DETAIL_CHOICES = ["high", "medium", "full"]
 GRAPH_EDGE_CHOICES = {"imports", "calls", "contains", "extends"}
+DOCS_DEPTH_CHOICES = ["module", "symbols", "full"]
 
 
 def version_callback(value: bool) -> None:
@@ -95,6 +96,17 @@ def main(
         min=1,
         max=20,
     ),
+    docs: bool = typer.Option(
+        False,
+        "--docs",
+        help="Incluir documentacion extraida: docstrings, firmas y comentarios de modulos y simbolos",
+    ),
+    docs_depth: str = typer.Option(
+        "symbols",
+        "--docs-depth",
+        help="Profundidad de extraccion de docs: module|symbols|full",
+        show_default=True,
+    ),
 ) -> None:
     """Genera un mapa de contexto estructurado del proyecto en formato JSON o YAML."""
     # Validar formato
@@ -107,6 +119,12 @@ def main(
     if graph_detail not in GRAPH_DETAIL_CHOICES:
         typer.echo(
             f"Error: valor invalido '{graph_detail}' para --graph-detail. Opciones: {', '.join(GRAPH_DETAIL_CHOICES)}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if docs_depth not in DOCS_DEPTH_CHOICES:
+        typer.echo(
+            f"Error: valor invalido '{docs_depth}' para --docs-depth. Opciones: {', '.join(DOCS_DEPTH_CHOICES)}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -125,10 +143,11 @@ def main(
 
     from sourcecode.dependency_analyzer import DependencyAnalyzer
     from sourcecode.detectors import ProjectDetector, build_default_detectors
+    from sourcecode.doc_analyzer import DocAnalyzer
     from sourcecode.graph_analyzer import GraphAnalyzer, GraphDetail
     from sourcecode.redactor import SecretRedactor, redact_dict
     from sourcecode.scanner import FileScanner
-    from sourcecode.schema import AnalysisMetadata, EntryPoint, SourceMap, StackDetection
+    from sourcecode.schema import AnalysisMetadata, DocsDepth, EntryPoint, SourceMap, StackDetection
     from sourcecode.serializer import compact_view, write_output
     from sourcecode.workspace import WorkspaceAnalyzer
 
@@ -191,6 +210,8 @@ def main(
             )
             raise typer.Exit(code=1)
     graph_detail_typed = cast(GraphDetail, graph_detail)
+    docs_depth_typed = cast(DocsDepth, docs_depth)
+    doc_analyzer = DocAnalyzer() if docs else None
 
     root_manifests = [
         manifest
@@ -228,6 +249,24 @@ def main(
                 entry_points=entry_points,
             )
         )
+    doc_records: list = []
+    doc_summaries: list = []
+    if doc_analyzer is not None:
+        root_doc_tree = (
+            prune_workspace_paths(
+                file_tree,
+                [workspace.path for workspace in workspace_analysis.workspaces],
+            )
+            if workspace_analysis.workspaces
+            else file_tree
+        )
+        root_doc_records, root_doc_summary = doc_analyzer.analyze(
+            target,
+            root_doc_tree,
+            depth=docs_depth_typed,
+        )
+        doc_records.extend(root_doc_records)
+        doc_summaries.append(root_doc_summary)
 
     for workspace in workspace_analysis.workspaces:
         workspace_root = target / workspace.path
@@ -271,6 +310,15 @@ def main(
             module_graphs.append(
                 graph_analyzer.prefix_graph(workspace_graph, workspace.path, workspace.path)
             )
+        if doc_analyzer is not None:
+            workspace_doc_records, workspace_doc_summary = doc_analyzer.analyze(
+                workspace_root,
+                workspace_tree,
+                workspace=workspace.path,
+                depth=docs_depth_typed,
+            )
+            doc_records.extend(workspace_doc_records)
+            doc_summaries.append(workspace_doc_summary)
 
     stacks, project_type = detector.classify_results(
         file_tree,
@@ -294,6 +342,11 @@ def main(
         if graph_analyzer is not None
         else None
     )
+    doc_summary = (
+        doc_analyzer.merge_summaries(doc_summaries)
+        if doc_analyzer is not None
+        else None
+    )
 
     # 3. Construir el schema
     metadata = AnalysisMetadata(analyzed_path=str(target))
@@ -307,6 +360,8 @@ def main(
         dependency_summary=dependency_summary,
         module_graph=module_graph,
         module_graph_summary=module_graph.summary if module_graph is not None else None,
+        docs=doc_records,
+        doc_summary=doc_summary,
     )
 
     # 4. Serializar (con o sin modo compact)
