@@ -317,7 +317,13 @@ def main(
                 workspace=workspace.path,
                 depth=docs_depth_typed,
             )
-            doc_records.extend(workspace_doc_records)
+            # Prefix paths with workspace.path so they are relative to repo root
+            # (same pattern as entry_points path prefixing)
+            prefixed_doc_records = [
+                replace(record, path=f"{workspace.path}/{record.path}")
+                for record in workspace_doc_records
+            ]
+            doc_records.extend(prefixed_doc_records)
             doc_summaries.append(workspace_doc_summary)
 
     stacks, project_type = detector.classify_results(
