@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from sourcecode.schema import DocRecord, DocSummary, DocsDepth
+from sourcecode.schema import DocRecord, DocsDepth, DocSummary
 from sourcecode.tree_utils import flatten_file_tree
 
 # ---------------------------------------------------------------------------
@@ -105,12 +105,15 @@ class DocAnalyzer:
         ]
 
         truncated = False
+        limitations_pre: list[str] = []
         if len(file_paths) > self._MAX_FILES:
             truncated = True
+            actual = len(file_paths)
+            limitations_pre.append(f"max_files_reached:{actual}>{self._MAX_FILES}")
             file_paths = file_paths[: self._MAX_FILES]
 
         records: list[DocRecord] = []
-        limitations: list[str] = []
+        limitations: list[str] = list(limitations_pre)
         languages: set[str] = set()
 
         for relative_path in file_paths:
@@ -245,7 +248,7 @@ class DocAnalyzer:
         def make_record(
             symbol: str,
             kind: str,
-            node: ast.AST,
+            node: ast.AsyncFunctionDef | ast.FunctionDef | ast.ClassDef | ast.Module,
         ) -> DocRecord | None:
             """Build a DocRecord from an AST node. Returns None if nothing to emit."""
             doc_raw = ast.get_docstring(node)
@@ -387,8 +390,9 @@ class DocAnalyzer:
         # keyword-only
         for i, a in enumerate(args.kwonlyargs):
             s = arg_repr(a)
-            if args.kw_defaults[i] is not None:
-                s += "=" + ast.unparse(args.kw_defaults[i])
+            kw_default = args.kw_defaults[i]
+            if kw_default is not None:
+                s += "=" + ast.unparse(kw_default)
             all_parts.append(s)
 
         # **kwargs
@@ -467,10 +471,9 @@ class DocAnalyzer:
                 # Only the first JSDoc block
                 if idx > 0:
                     break
-            elif depth == "symbols":
+            elif depth == "symbols" and brace_depth != 0:
                 # Only blocks at brace_depth == 0
-                if brace_depth != 0:
-                    continue
+                continue
             # depth == "full": include all blocks
 
             # Determine kind from the declaration that follows the JSDoc
@@ -484,9 +487,7 @@ class DocAnalyzer:
                 # group(4) = const/let/var name, group(5) = method-like name
                 if decl_match.group(3):
                     kind = "class"
-                elif decl_match.group(2):
-                    kind = "function"
-                elif decl_match.group(4):
+                elif decl_match.group(2) or decl_match.group(4):
                     kind = "function"
                 elif brace_depth > 0:
                     kind = "method"
