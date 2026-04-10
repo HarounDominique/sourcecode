@@ -131,3 +131,55 @@ def test_schema_serializes_typed_detection_fields():
     assert data["stacks"][0]["signals"] == ["manifest:pyproject.toml", "entry:src/main.py"]
     assert data["stacks"][0]["frameworks"][0]["name"] == "FastAPI"
     assert data["entry_points"][0]["path"] == "src/main.py"
+
+
+# Phase 9 — new fields on SourceMap
+
+def test_sourcemap_new_fields_defaults():
+    """SourceMap() without args has file_paths=[], project_summary=None, key_dependencies=[]."""
+    from sourcecode.schema import DependencyRecord
+    sm = SourceMap()
+    assert sm.file_paths == []
+    assert sm.project_summary is None
+    assert sm.key_dependencies == []
+
+
+def test_sourcemap_file_paths_persists():
+    """SourceMap(file_paths=[...]) persists the list."""
+    sm = SourceMap(file_paths=["src/main.py", "src/utils.py"])
+    assert sm.file_paths == ["src/main.py", "src/utils.py"]
+
+
+def test_sourcemap_project_summary_persists():
+    """SourceMap(project_summary="...") persists the string."""
+    sm = SourceMap(project_summary="API en Python (FastAPI).")
+    assert sm.project_summary == "API en Python (FastAPI)."
+
+
+def test_sourcemap_key_dependencies_persists():
+    """SourceMap(key_dependencies=[DependencyRecord(...)]) persists the list."""
+    from sourcecode.schema import DependencyRecord
+    dep = DependencyRecord(name="fastapi", ecosystem="python")
+    sm = SourceMap(key_dependencies=[dep])
+    assert len(sm.key_dependencies) == 1
+    assert sm.key_dependencies[0].name == "fastapi"
+
+
+def test_sourcemap_asdict_includes_new_keys():
+    """dataclasses.asdict(SourceMap()) includes 'file_paths', 'project_summary', 'key_dependencies'."""
+    data = asdict(SourceMap())
+    assert "file_paths" in data
+    assert "project_summary" in data
+    assert "key_dependencies" in data
+
+
+def test_sourcemap_backward_compat():
+    """Existing SourceMap without new fields still works (backward compat via defaults)."""
+    sm = SourceMap(
+        stacks=[StackDetection(stack="python")],
+        project_type="api",
+    )
+    # Should not raise, and new fields have their defaults
+    assert sm.file_paths == []
+    assert sm.project_summary is None
+    assert sm.key_dependencies == []

@@ -202,3 +202,7 @@ class SourceMap:
     module_graph_summary: Optional[ModuleGraphSummary] = None
     docs: list[DocRecord] = field(default_factory=list)
     doc_summary: Optional[DocSummary] = None
+    # Phase 9: LLM Output Quality
+    file_paths: list[str] = field(default_factory=list)
+    project_summary: Optional[str] = None
+    key_dependencies: list[DependencyRecord] = field(default_factory=list)
