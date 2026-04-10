@@ -14,7 +14,6 @@ from typing import Optional
 
 from sourcecode.schema import CoverageRecord
 
-
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
@@ -518,7 +517,7 @@ class CoverageParser:
                     "SELECT id, path FROM file"
                 ).fetchall()
 
-                for file_id, abs_path in file_rows:
+                for _file_id, abs_path in file_rows:
                     # Convert to relative path
                     try:
                         rel = Path(abs_path).relative_to(root)
