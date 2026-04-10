@@ -183,3 +183,46 @@ def test_sourcemap_backward_compat():
     assert sm.file_paths == []
     assert sm.project_summary is None
     assert sm.key_dependencies == []
+
+
+# Phase 9, Plan 02 — DocRecord.importance field tests
+
+def test_docrecord_importance_default_medium() -> None:
+    """DocRecord default importance is 'medium'."""
+    from sourcecode.schema import DocRecord
+    rec = DocRecord(symbol="f", kind="function", language="python", path="x.py")
+    assert rec.importance == "medium"
+
+
+def test_docrecord_importance_high_persists() -> None:
+    """DocRecord(importance='high') persists 'high'."""
+    from sourcecode.schema import DocRecord
+    rec = DocRecord(symbol="f", kind="function", language="python", path="x.py", importance="high")
+    assert rec.importance == "high"
+
+
+def test_docrecord_importance_low_persists() -> None:
+    """DocRecord(importance='low') persists 'low'."""
+    from sourcecode.schema import DocRecord
+    rec = DocRecord(symbol="f", kind="function", language="python", path="x.py", importance="low")
+    assert rec.importance == "low"
+
+
+def test_docrecord_asdict_includes_importance() -> None:
+    """asdict(DocRecord(...)) includes 'importance' key."""
+    from sourcecode.schema import DocRecord
+    rec = DocRecord(symbol="f", kind="function", language="python", path="x.py")
+    d = asdict(rec)
+    assert "importance" in d
+    assert d["importance"] == "medium"
+
+
+def test_sourcemap_with_docrecord_serializes_importance() -> None:
+    """SourceMap with docs=[DocRecord(...)] serializes importance in to_json()."""
+    from sourcecode.schema import DocRecord
+    from sourcecode.serializer import to_json
+    rec = DocRecord(symbol="f", kind="function", language="python", path="x.py", importance="high")
+    sm = SourceMap(docs=[rec])
+    data = json.loads(to_json(sm))
+    assert len(data["docs"]) == 1
+    assert data["docs"][0]["importance"] == "high"

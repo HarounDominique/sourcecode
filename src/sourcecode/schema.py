@@ -163,6 +163,7 @@ class DocRecord:
     doc_text: Optional[str] = None
     signature: Optional[str] = None
     source: str = "unavailable"
+    importance: Literal["high", "medium", "low"] = "medium"
     workspace: Optional[str] = None
 
 
