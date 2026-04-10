@@ -15,7 +15,7 @@ Sourcecode se construye en once fases que van desde el scaffold del proyecto has
 - [x] **Fase 7: Grafos de Codigo** - Grafo de modulos, imports, llamadas y jerarquias estructurales con `--graph-modules`
 - [ ] **Fase 8: Documentacion Extraida** - Docstrings, comentarios y resúmenes de modulos consumibles por IA con `--docs`
 - [ ] **Fase 9: LLM Output Quality** - Optimizar signal/noise del output: file_paths plano, project_summary NL, DocRecord.importance, key_dependencies, compact mejorado
-- [ ] **Fase 10: Metricas de Calidad** - LOC, complejidad, tests asociados y cobertura con `--full-metrics`
+- [x] **Fase 10: Metricas de Calidad** - LOC, complejidad, tests asociados y cobertura con `--full-metrics`
 - [ ] **Fase 11: Contexto Git y Operativo** - Historia git, volatilidad, CI/CD, Docker y metadata de entorno con `--git-history`
 
 ## Detalles de Fases
@@ -194,13 +194,14 @@ Plans:
   2. La herramienta detecta archivos o suites de tests relacionadas y asocia modulos productivos con evidencia de cobertura o ausencia de pruebas
   3. Cuando existe metadata de cobertura (`coverage.xml`, `.coverage`, `lcov.info`, `jacoco.xml`, etc.), el output la incorpora sin ejecutar tests por defecto
   4. El comando distingue claramente entre metricas medidas, inferidas y no disponibles para no transmitir precision falsa
+**Status**: COMPLETE — implemented 2026-04-10; --full-metrics flag wired, 4 E2E tests green, ruff+mypy gate passed
 **Plans**: 4 planes
 
 Plans:
 - [x] 10-01-PLAN.md — Schema + MetricsAnalyzer skeleton + LOC counters: FileMetrics, CoverageRecord, MetricsSummary en schema.py; MetricsAnalyzer con conteo LOC/simbolos por tier de lenguaje (METRICS-01, OUT-10)
 - [x] 10-02-PLAN.md — CoverageParser: parsers para Cobertura XML, .coverage SQLite, LCOV y JaCoCo XML con stdlib (METRICS-03, OUT-10)
 - [x] 10-03-PLAN.md — Test association + MetricsAnalyzer completo: is_test_file(), infer_production_target(), integracion CoverageParser en analyze(), merge_summaries() (METRICS-01, METRICS-02, METRICS-03, METRICS-04, OUT-10)
-- [ ] 10-04-PLAN.md — CLI wiring + E2E + quality gate: flag --full-metrics, workspace loop, ruff+mypy gate (METRICS-01, METRICS-02, METRICS-03, METRICS-04, OUT-10)
+- [x] 10-04-PLAN.md — CLI wiring + E2E + quality gate: flag --full-metrics, workspace loop, ruff+mypy gate (METRICS-01, METRICS-02, METRICS-03, METRICS-04, OUT-10)
 **UI hint**: no
 
 ### Fase 11: Contexto Git y Operativo
@@ -230,6 +231,6 @@ Las fases se ejecutan en orden numerico: 1 → 2 → 3 → 4 → 5 → 6 → 7 �
 | 6. Dependencias Inteligentes | 4/4 | Complete | 2026-04-08 |
 | 7. Grafos de Codigo | 4/4 | Complete | 2026-04-08 |
 | 8. Documentacion Extraida | 4/4 | Complete | 2026-04-09 |
-| 9. LLM Output Quality | 0/3 | Planned | - |
-| 10. Metricas de Calidad | 0/4 | Planned | - |
+| 9. LLM Output Quality | 3/3 | Complete | 2026-04-10 |
+| 10. Metricas de Calidad | 4/4 | Complete | 2026-04-10 |
 | 11. Contexto Git y Operativo | 0/0 | Not planned | - |
