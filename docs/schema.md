@@ -1,6 +1,21 @@
+<!-- generated-by: gsd-doc-writer -->
 # Schema de salida
 
 `sourcecode` serializa un objeto `SourceMap` con schema `1.0`.
+
+Los campos **siempre presentes** son: `metadata`, `file_tree`, `file_paths`, `stacks`, `project_type`, `entry_points` y `project_summary`.
+
+Los campos **opcionales** dependen de los flags activos en la invocacion:
+
+| Campo | Requiere |
+|---|---|
+| `dependencies` | `--dependencies` |
+| `dependency_summary` | `--dependencies` |
+| `key_dependencies` | `--dependencies` |
+| `module_graph` | `--graph-modules` |
+| `module_graph_summary` | `--graph-modules` |
+| `docs` | `--docs` |
+| `doc_summary` | `--docs` |
 
 ## Raiz
 
@@ -8,26 +23,37 @@
 {
   "metadata": {},
   "file_tree": {},
+  "file_paths": [],
   "stacks": [],
   "project_type": "webapp",
   "entry_points": [],
+  "project_summary": "Aplicacion web en Nodejs (Next.js). Entry points: app/page.tsx.",
   "dependencies": [],
   "dependency_summary": null,
-  "module_graph": null
+  "key_dependencies": [],
+  "module_graph": null,
+  "module_graph_summary": null,
+  "docs": [],
+  "doc_summary": null
 }
 ```
 
 Campos:
 
-- `metadata`: metadatos del analisis.
-- `file_tree`: arbol del repositorio.
-- `stacks`: stacks detectados.
-- `project_type`: clasificacion general del proyecto.
-- `entry_points`: puntos de entrada relevantes.
-- `dependencies`: dependencias detectadas cuando se solicita `--dependencies`.
-- `dependency_summary`: resumen del analisis de dependencias o `null` si no se solicito.
-- `module_graph`: grafo estructural de codigo o `null` si no se solicito `--graph-modules`.
-- `module_graph_summary`: resumen compacto del grafo pensado para consumo rapido por LLMs.
+- `metadata`: metadatos del analisis. Siempre presente.
+- `file_tree`: arbol del repositorio. Siempre presente.
+- `file_paths`: lista plana de todos los paths del repo con separador forward-slash. Siempre presente (Phase 9).
+- `stacks`: stacks detectados. Siempre presente (puede ser lista vacia).
+- `project_type`: clasificacion general del proyecto. Siempre presente (puede ser `null`).
+- `entry_points`: puntos de entrada relevantes. Siempre presente (puede ser lista vacia).
+- `project_summary`: descripcion en lenguaje natural del proyecto generada deterministicamente. Presente cuando hay stacks detectados; `null` si no (Phase 9).
+- `dependencies`: dependencias detectadas. Solo presente con `--dependencies`; lista vacia por defecto.
+- `dependency_summary`: resumen del analisis de dependencias. Solo presente con `--dependencies`; `null` por defecto.
+- `key_dependencies`: top-15 dependencias directas relevantes. Solo presente con `--dependencies`; lista vacia por defecto (Phase 9).
+- `module_graph`: grafo estructural de codigo. `null` si no se solicito `--graph-modules`.
+- `module_graph_summary`: resumen compacto del grafo para consumo rapido por LLMs. `null` si no se solicito `--graph-modules`.
+- `docs`: registros de documentacion extraida por simbolo. Solo presente con `--docs`; lista vacia por defecto.
+- `doc_summary`: resumen del analisis de documentacion. Solo presente con `--docs`; `null` por defecto.
 
 ## metadata
 
@@ -62,6 +88,71 @@ Ejemplo:
   }
 }
 ```
+
+## file_paths
+
+`file_paths` es una lista plana de todos los paths del repositorio, derivada de `file_tree` en el momento de la construccion del `SourceMap`. Siempre presente.
+
+```json
+[
+  "pyproject.toml",
+  "src/main.py",
+  "src/utils/helpers.py"
+]
+```
+
+- Los separadores son siempre forward-slash (`/`), independientemente del sistema operativo.
+- Los paths son relativos a la raiz analizada.
+- La lista respeta la profundidad de escaneo aplicada por `FileScanner` (por defecto `--depth 4`).
+- `file_tree` se conserva intacto para compatibilidad retroactiva; `file_paths` es un campo adicional.
+
+Vease tambien: `file_tree_depth1` en la seccion [Modo compacto](#modo-compacto).
+
+## project_summary
+
+`project_summary` es una descripcion en lenguaje natural del proyecto, generada deterministicamente a partir de los campos del `SourceMap` sin llamadas a API. Presente cuando hay stacks detectados; `null` si no.
+
+```json
+"Aplicacion web en Nodejs (Next.js, React). Entry points: app/page.tsx. 42 dependencias (nodejs)."
+```
+
+### Plantillas de generacion
+
+El valor se construye segun las siguientes plantillas:
+
+**Proyecto con stacks:**
+```
+{type_label} en {stack_primario} ({frameworks}). Entry points: {paths}. {N} dependencias ({ecosystems}).
+```
+
+**Monorepo:**
+```
+Monorepo con {N} workspaces en {stacks}.
+```
+
+**Sin stacks detectados:**
+```
+Proyecto sin stack detectado.
+```
+
+### Reglas de construccion
+
+- `type_label` se obtiene de la siguiente tabla:
+
+  | `project_type` | `type_label` |
+  |---|---|
+  | `webapp` | `Aplicacion web` |
+  | `api` | `API` |
+  | `library` | `Libreria` |
+  | `cli` | `CLI` |
+  | `monorepo` | `Monorepo` |
+  | `fullstack` | `Proyecto fullstack` |
+  | `unknown` | `Proyecto` |
+
+- Se listan como maximo 3 entry points y 3 frameworks.
+- La parte de dependencias solo aparece cuando `dependency_summary` esta disponible y tiene conteo mayor que cero. Si `dependency_summary` es `None`, se omite la parte de dependencias.
+- Para monorepos se usa la variante especial: se cuenta el numero de workspaces distintos (`s.workspace`) entre todos los stacks.
+- La generacion nunca lanza excepcion; en caso de error interno devuelve `"Proyecto analizado."`.
 
 ## stacks
 
@@ -130,7 +221,7 @@ Valores actuales:
 - `monorepo`
 - `unknown`
 
-`project_type` se calcula a partir de stacks, entry points y senales agregadas.
+`project_type` se calcula a partir de stacks, entry points y senales agregadas. Puede ser `null` si la clasificacion no pudo completarse.
 
 ## entry_points
 
@@ -154,7 +245,7 @@ Campos:
 
 ## dependencies
 
-Cada elemento de `dependencies` sigue este shape:
+Solo presente con `--dependencies`. Cada elemento sigue este shape:
 
 ```json
 {
@@ -184,7 +275,7 @@ Campos:
 
 ## dependency_summary
 
-Cuando se usa `--dependencies`, `dependency_summary` describe el alcance del analisis:
+Solo presente con `--dependencies`. Describe el alcance del analisis:
 
 ```json
 {
@@ -208,9 +299,45 @@ Campos:
 - `sources`: origenes usados para construir la salida.
 - `limitations`: limitaciones conocidas del analisis offline, por ejemplo ecosistemas donde no se pudo reconstruir un grafo transitivo fiable.
 
+Vease tambien: `key_dependencies` para el subconjunto de dependencias directas mas relevantes.
+
+## key_dependencies
+
+Solo presente con `--dependencies`. Es un subconjunto de hasta 15 `DependencyRecord` seleccionados de `dependencies` segun los siguientes criterios (Phase 9):
+
+**Criterios de filtrado:**
+- `scope != "transitive"` — solo dependencias directas (`direct`, `dev`, `peer`, `optional`).
+- `source in {"manifest", "lockfile"}` — excluye registros de tipo `tooling` u otros derivados.
+
+**Ordenacion:**
+1. Dependencias del ecosistema del stack primario primero.
+2. Luego orden alfabetico por nombre.
+
+**Limite:** maximo 15 registros.
+
+**Default:** lista vacia `[]` cuando `--dependencies` no esta activo.
+
+El shape de cada elemento es identico al de `dependencies`:
+
+```json
+{
+  "name": "fastapi",
+  "ecosystem": "python",
+  "scope": "direct",
+  "declared_version": ">=0.115",
+  "resolved_version": "0.115.2",
+  "source": "manifest",
+  "parent": null,
+  "manifest_path": "pyproject.toml",
+  "workspace": null
+}
+```
+
+`key_dependencies` es la vista prioritaria para consumidores que quieren identificar las dependencias principales sin procesar la lista completa potencialmente larga de `dependencies`.
+
 ## module_graph
 
-Cuando se usa `--graph-modules`, `module_graph` expone nodos, aristas y un resumen del analisis:
+Solo presente con `--graph-modules`. Expone nodos, aristas y un resumen del analisis:
 
 ```json
 {
@@ -301,35 +428,154 @@ Campos principales:
 - `truncated`
 - `limitations`
 
-## Modo compacto
+## docs
 
-Con `--compact`, la salida no incluye `metadata` ni el arbol completo. Devuelve:
+Solo presente con `--docs`. Es una lista de objetos `DocRecord`, uno por simbolo documentado extraido estaticamente del codigo fuente.
+
+```json
+[
+  {
+    "symbol": "create_user",
+    "kind": "function",
+    "language": "python",
+    "path": "src/api/users.py",
+    "doc_text": "Crea un nuevo usuario en la base de datos.",
+    "signature": "def create_user(name: str, email: str) -> User",
+    "source": "docstring",
+    "importance": "medium",
+    "workspace": null
+  }
+]
+```
+
+### DocRecord
+
+Cada registro tiene los siguientes campos:
+
+- `symbol` (`str`): nombre del simbolo documentado. Para registros de tipo `module`, el valor es el path relativo del fichero. Para funciones, clases y metodos es el nombre del simbolo (por ejemplo `"create_user"`, `"UserService"`).
+- `kind` (`str`): tipo del simbolo. Valores: `"module"`, `"class"`, `"function"`, `"method"`.
+- `language` (`str`): lenguaje del fichero fuente. Valores posibles: `"python"`, `"javascript"`, `"typescript"`.
+- `path` (`str`): ruta relativa al repo analizado con separador forward-slash.
+- `doc_text` (`str | null`): texto del docstring o bloque JSDoc extraido. `null` si no existe documentacion textual.
+- `signature` (`str | null`): firma tipada reconstruida desde el AST. Solo se emite cuando hay al menos una anotacion de tipo en Python. `null` en JS/TS y cuando no hay anotaciones.
+- `source` (`str`): origen de la documentacion. Valores: `"docstring"` (docstring Python o JSDoc), `"jsdoc"` (bloque JSDoc), `"comment"`, `"signature"` (solo firma, sin texto de doc).
+- `importance` (`"high" | "medium" | "low"`): importancia inferida del simbolo. Valor por defecto: `"medium"`. Vease las reglas de inferencia abajo.
+- `workspace` (`str | null`): ruta relativa del workspace cuando el proyecto es un monorepo. `null` en proyectos simples.
+
+### DocRecord.importance — reglas de inferencia
+
+La importancia se calcula en `DocAnalyzer._infer_importance()` en orden de prioridad:
+
+1. **`high`**: el `path` del fichero coincide con alguno de los entry points del proyecto, O la profundidad del path es `<= 1` (fichero en raiz: `"main.py"`; o un nivel de directorio: `"src/main.py"`).
+2. **`medium`**: la profundidad del path es exactamente `2` (por ejemplo `"src/core/base.py"`), O el `kind` es `"class"` o `"function"`.
+3. **`low`**: todo lo demas — metodos y helpers en subdirectorios a profundidad `>= 3`.
+
+La profundidad se calcula como el numero de `/` en el path relativo.
+
+### Lenguajes soportados y limitaciones
+
+El `DocAnalyzer` soporta extraccion activa para:
+- **Python** (`.py`): usando `ast` — extrae docstrings de modulos, clases, funciones y metodos; reconstruye firmas tipadas.
+- **JavaScript/TypeScript** (`.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`): usando regex — extrae bloques JSDoc en `depth="symbols"` o `"full"`.
+
+Para lenguajes no soportados (Go, Java, Rust, etc.), **no se emite ningun `DocRecord`**. En su lugar se registra una entrada en `doc_summary.limitations` con el formato `"docs_unavailable:{path}:language={lang}"`. Esto evita emitir registros vacios que aportan ruido sin informacion util.
+
+### Niveles de profundidad (`--docs-depth`)
+
+- `"module"`: solo docstrings de nivel modulo (primer docstring de cada fichero).
+- `"symbols"` (por defecto): modulos + clases + funciones a nivel top-level.
+- `"full"`: todo lo anterior mas metodos internos de clases.
+
+### Limites del analizador
+
+- Maximo 200 ficheros procesados por invocacion.
+- Maximo 50 simbolos emitidos por fichero.
+- Los docstrings se truncan a 1000 caracteres; si se truncan, el texto termina en `"...[truncated]"`.
+- Ficheros de mas de 200 000 bytes se omiten y se registra `"file_too_large:{path}"` en `limitations`.
+
+## doc_summary
+
+Solo presente con `--docs`. Resume el alcance y las limitaciones del analisis de documentacion.
 
 ```json
 {
-  "schema_version": "1.0",
-  "project_type": "webapp",
-  "stacks": [],
-  "entry_points": [],
-  "file_tree_depth1": {}
+  "requested": true,
+  "total_count": 48,
+  "symbol_count": 35,
+  "languages": ["python", "typescript"],
+  "depth": "symbols",
+  "truncated": false,
+  "limitations": [
+    "docs_unavailable:internal/server.go:language=go",
+    "file_too_large:vendor/bundle.js"
+  ]
 }
 ```
 
 Campos:
 
+- `requested` (`bool`): `true` si el usuario activo `--docs`.
+- `total_count` (`int`): numero total de `DocRecord` emitidos en `docs[]`.
+- `symbol_count` (`int`): numero de `DocRecord` cuyo `kind` no es `"module"` (funciones, clases y metodos).
+- `languages` (`list[str]`): lenguajes presentes en los registros emitidos, ordenados alfabeticamente.
+- `depth` (`"module" | "symbols" | "full" | null`): nivel de profundidad activo durante el analisis.
+- `truncated` (`bool`): `true` si alguno de los docstrings fue truncado por superar el limite de 1000 caracteres, o si se alcanzo el limite de 200 ficheros.
+- `limitations` (`list[str]`): lista de advertencias y limitaciones del analisis. Formatos posibles:
+  - `"docs_unavailable:{path}:language={lang}"` — fichero de lenguaje no soportado.
+  - `"file_too_large:{path}"` — fichero omitido por superar el limite de tamaño.
+  - `"read_error:{path}"` — error de lectura del fichero.
+  - `"python_parse_error:{path}"` — error de parseo de AST Python.
+  - `"max_files_reached:{actual}>{limit}"` — se alcanzo el limite de ficheros procesables.
+
+## Modo compacto
+
+Con `--compact`, la salida omite `metadata`, el arbol completo, `dependencies`, `docs` y `module_graph`. El resultado es una proyeccion de aproximadamente 500-700 tokens diseñada para consumo rapido por LLMs.
+
+```json
+{
+  "schema_version": "1.0",
+  "project_type": "webapp",
+  "project_summary": "Aplicacion web en Nodejs (Next.js, React). Entry points: app/page.tsx.",
+  "stacks": [],
+  "entry_points": [],
+  "file_paths": [
+    "package.json",
+    "app/page.tsx",
+    "app/layout.tsx"
+  ],
+  "file_tree_depth1": {
+    "package.json": null,
+    "app": {}
+  },
+  "dependency_summary": null
+}
+```
+
+Campos incluidos en el modo compacto:
+
 - `schema_version`: version del schema.
 - `project_type`: clasificacion general.
+- `project_summary`: descripcion NL del proyecto. Siempre incluido (Phase 9).
 - `stacks`: stacks detectados serializados.
 - `entry_points`: entry points serializados.
-- `file_tree_depth1`: solo el primer nivel de `file_tree`.
+- `file_paths`: lista plana de todos los paths con separador forward-slash. Siempre incluido (Phase 9).
+- `file_tree_depth1`: solo el primer nivel del `file_tree`. Se conserva por compatibilidad retroactiva.
+- `dependency_summary`: resumen de dependencias cuando `--dependencies` esta activo y `dependency_summary.requested == True`; `null` en cualquier otro caso (Phase 9).
 
-`--compact` no incluye `dependencies` ni `dependency_summary`, aunque se combine con `--dependencies`.
-Tampoco incluye `module_graph`, aunque se combine con `--graph-modules`.
-Tampoco incluye `module_graph_summary`.
+Campos **excluidos** en modo compacto aunque se combinen con otros flags:
+
+- `metadata`
+- `file_tree` (sustituido por `file_tree_depth1` y `file_paths`)
+- `dependencies`
+- `key_dependencies`
+- `module_graph`
+- `module_graph_summary`
+- `docs`
+- `doc_summary`
 
 ## Ejemplo completo
 
-Ejemplo real de salida para un monorepo con web Node.js y API Python:
+Ejemplo de salida para un monorepo con web Node.js y API Python con `--dependencies` y `--docs` activos:
 
 ```json
 {
@@ -356,20 +602,21 @@ Ejemplo real de salida para un monorepo con web Node.js y API Python:
       }
     }
   },
+  "file_paths": [
+    "pnpm-workspace.yaml",
+    "packages/api/pyproject.toml",
+    "packages/api/main.py",
+    "apps/web/package.json",
+    "apps/web/app/page.tsx"
+  ],
   "stacks": [
     {
       "stack": "nodejs",
       "detection_method": "manifest",
       "confidence": "high",
       "frameworks": [
-        {
-          "name": "Next.js",
-          "source": "package.json"
-        },
-        {
-          "name": "React",
-          "source": "package.json"
-        }
+        { "name": "Next.js", "source": "package.json" },
+        { "name": "React", "source": "package.json" }
       ],
       "package_manager": null,
       "manifests": ["package.json"],
@@ -380,7 +627,6 @@ Ejemplo real de salida para un monorepo con web Node.js y API Python:
         "manifest:package.json",
         "framework:Next.js",
         "framework:React",
-        "entry:app/page.tsx",
         "entry:apps/web/app/page.tsx"
       ]
     },
@@ -389,10 +635,7 @@ Ejemplo real de salida para un monorepo con web Node.js y API Python:
       "detection_method": "manifest",
       "confidence": "high",
       "frameworks": [
-        {
-          "name": "FastAPI",
-          "source": "manifest"
-        }
+        { "name": "FastAPI", "source": "manifest" }
       ],
       "package_manager": "pip",
       "manifests": ["pyproject.toml"],
@@ -403,7 +646,6 @@ Ejemplo real de salida para un monorepo con web Node.js y API Python:
         "manifest:pyproject.toml",
         "framework:FastAPI",
         "package_manager:pip",
-        "entry:main.py",
         "entry:packages/api/main.py"
       ]
     }
@@ -422,6 +664,90 @@ Ejemplo real de salida para un monorepo con web Node.js y API Python:
       "kind": "cli",
       "source": "manifest"
     }
-  ]
+  ],
+  "project_summary": "Monorepo con 2 workspaces en Nodejs, Python. Entry points: apps/web/app/page.tsx, packages/api/main.py. 18 dependencias (python, nodejs).",
+  "dependencies": [
+    {
+      "name": "fastapi",
+      "ecosystem": "python",
+      "scope": "direct",
+      "declared_version": ">=0.115",
+      "resolved_version": "0.115.2",
+      "source": "lockfile",
+      "parent": null,
+      "manifest_path": "packages/api/poetry.lock",
+      "workspace": "packages/api"
+    }
+  ],
+  "dependency_summary": {
+    "requested": true,
+    "total_count": 18,
+    "direct_count": 5,
+    "transitive_count": 13,
+    "ecosystems": ["python", "nodejs"],
+    "sources": ["lockfile", "manifest"],
+    "limitations": []
+  },
+  "key_dependencies": [
+    {
+      "name": "fastapi",
+      "ecosystem": "python",
+      "scope": "direct",
+      "declared_version": ">=0.115",
+      "resolved_version": "0.115.2",
+      "source": "lockfile",
+      "parent": null,
+      "manifest_path": "packages/api/poetry.lock",
+      "workspace": "packages/api"
+    },
+    {
+      "name": "next",
+      "ecosystem": "nodejs",
+      "scope": "direct",
+      "declared_version": "^14.0.0",
+      "resolved_version": "14.2.1",
+      "source": "lockfile",
+      "parent": null,
+      "manifest_path": "apps/web/package-lock.json",
+      "workspace": "apps/web"
+    }
+  ],
+  "module_graph": null,
+  "module_graph_summary": null,
+  "docs": [
+    {
+      "symbol": "packages/api/main.py",
+      "kind": "module",
+      "language": "python",
+      "path": "packages/api/main.py",
+      "doc_text": "API principal del proyecto.",
+      "signature": null,
+      "source": "docstring",
+      "importance": "high",
+      "workspace": "packages/api"
+    },
+    {
+      "symbol": "create_user",
+      "kind": "function",
+      "language": "python",
+      "path": "packages/api/main.py",
+      "doc_text": "Crea un nuevo usuario.",
+      "signature": "def create_user(name: str, email: str) -> User",
+      "source": "docstring",
+      "importance": "high",
+      "workspace": "packages/api"
+    }
+  ],
+  "doc_summary": {
+    "requested": true,
+    "total_count": 2,
+    "symbol_count": 1,
+    "languages": ["python"],
+    "depth": "symbols",
+    "truncated": false,
+    "limitations": [
+      "docs_unavailable:apps/web/app/page.tsx:language=typescript"
+    ]
+  }
 }
 ```
