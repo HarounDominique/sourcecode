@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 10-metricas-de-calidad-01-PLAN.md
-last_updated: "2026-04-10T10:21:50.613Z"
+stopped_at: Completed 10-metricas-de-calidad-10-02-PLAN.md
+last_updated: "2026-04-10T10:28:52.242Z"
 last_activity: 2026-04-10
 progress:
   total_phases: 11
   completed_phases: 9
   total_plans: 36
-  completed_plans: 33
-  percent: 92
+  completed_plans: 34
+  percent: 94
 ---
 
 # Project State
@@ -68,6 +68,7 @@ Progress: [█████████░░] 82%
 | Phase 09 P02 | 6 min | 3 tasks | 7 files |
 | Phase 09 P03 | 6 min | 3 tasks | 5 files |
 | Phase 10-metricas-de-calidad P01 | 35 | 3 tasks | 4 files |
+| Phase 10-metricas-de-calidad P02 | 4 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -104,6 +105,9 @@ Recent decisions affecting current work:
 - [Phase 09-03]: Pre-existing Windows backslash failures (7 tests) confirmed out-of-scope via git stash verification
 - [Phase 10-metricas-de-calidad]: _LANG_MAP imported from doc_analyzer (not redefined) — single source of truth for language detection
 - [Phase 10-metricas-de-calidad]: McCabe CC computed as average float across all functions in file, None when no functions
+- [Phase 10-metricas-de-calidad]: stdlib-only parsing: ET for XML formats, sqlite3 for .coverage — no lxml or external deps
+- [Phase 10-metricas-de-calidad]: dot_coverage returns line_rate=None: total_lines context required from MetricsAnalyzer in plan 10-03
+- [Phase 10-metricas-de-calidad]: build_file_coverage_map re-parses artifact for per-file data; priority cobertura_xml > lcov > jacoco_xml > dot_coverage
 
 ### Pending Todos
 
@@ -129,7 +133,7 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-10T10:21:50.610Z
-Stopped at: Completed 10-metricas-de-calidad-01-PLAN.md
+Last session: 2026-04-10T10:28:52.239Z
+Stopped at: Completed 10-metricas-de-calidad-10-02-PLAN.md
 Resume file: None
 Next action: Execute Phase 10 (git context) or Phase 10 (metricas)
