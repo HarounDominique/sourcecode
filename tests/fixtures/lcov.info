@@ -1,0 +1,16 @@
+SF:src/scanner.py
+FNF:3
+FNH:2
+DA:1,1
+DA:2,0
+LF:50
+LH:42
+BRF:10
+BRH:7
+end_of_record
+SF:src/schema.py
+LF:30
+LH:28
+BRF:4
+BRH:3
+end_of_record

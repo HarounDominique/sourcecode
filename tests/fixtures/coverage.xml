@@ -1,0 +1,15 @@
+<?xml version="1.0" ?>
+<coverage line-rate="0.85" branch-rate="0.72" lines-covered="170" lines-valid="200" timestamp="1712700000" version="7.4.0">
+  <packages>
+    <package name="src">
+      <classes>
+        <class filename="src/scanner.py" line-rate="0.90" branch-rate="0.75">
+          <lines/>
+        </class>
+        <class filename="src/schema.py" line-rate="0.80" branch-rate="0.70">
+          <lines/>
+        </class>
+      </classes>
+    </package>
+  </packages>
+</coverage>

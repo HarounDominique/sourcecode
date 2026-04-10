@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<report name="MyProject">
+  <package name="com/example">
+    <sourcefile name="Scanner.java">
+      <counter type="LINE" missed="5" covered="45"/>
+      <counter type="BRANCH" missed="2" covered="8"/>
+    </sourcefile>
+    <sourcefile name="Schema.java">
+      <counter type="LINE" missed="3" covered="27"/>
+    </sourcefile>
+  </package>
+  <counter type="LINE" missed="8" covered="72"/>
+  <counter type="BRANCH" missed="4" covered="16"/>
+</report>
