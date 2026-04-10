@@ -370,6 +370,31 @@ def main(
         doc_summary=doc_summary,
     )
 
+    # Phase 9: LLM Output Quality — poblar campos derivados
+    from sourcecode.tree_utils import flatten_file_tree
+    from sourcecode.summarizer import ProjectSummarizer
+
+    # LQN-01: lista plana de paths del file_tree con separador forward-slash
+    sm.file_paths = [
+        p.replace("\\", "/") for p in flatten_file_tree(sm.file_tree)
+    ]
+
+    # LQN-05: top-15 dependencias directas de manifest/lockfile
+    if dependency_analyzer is not None:
+        primary_ecosystem = sm.stacks[0].stack if sm.stacks else ""
+        direct_deps = [
+            d for d in sm.dependencies
+            if d.scope != "transitive" and d.source in {"manifest", "lockfile"}
+        ]
+
+        def _dep_sort_key(d: Any) -> tuple[int, str]:
+            return (0 if d.ecosystem == primary_ecosystem else 1, d.name.lower())
+
+        sm.key_dependencies = sorted(direct_deps, key=_dep_sort_key)[:15]
+
+    # LQN-02: resumen NL deterministico
+    sm.project_summary = ProjectSummarizer().generate(sm)
+
     # 4. Serializar (con o sin modo compact)
     if compact:
         data = compact_view(sm)
