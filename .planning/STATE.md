@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: in_progress
-stopped_at: "Phase 09 Plan 01 complete — schema+summarizer+cli wired"
-last_updated: "2026-04-10T05:12:06Z"
-last_activity: "2026-04-10 -- Phase 09 Plan 01 complete: file_paths, project_summary, key_dependencies"
+stopped_at: "Phase 09 Plan 02 complete — DocRecord.importance, filter unavailable, entry_points"
+last_updated: "2026-04-10T05:20:24Z"
+last_activity: "2026-04-10 -- Phase 09 Plan 02 complete: importance field, unavailable filter, entry_points forwarding"
 progress:
   total_phases: 11
   completed_phases: 8
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-07)
 
 **Core value:** Un agente IA que recibe el output de esta herramienta llega al proyecto ya informado — no necesita preguntar lo obvio ni explorar ciegamente el codigo.
-**Current focus:** Fase 09 LLM Output Quality — Plan 01 completo; siguiente: Plan 02
+**Current focus:** Fase 09 LLM Output Quality — Plan 02 completo; siguiente: Plan 03
 
 ## Current Position
 
 Phase: 09 (llm-output-quality) — IN PROGRESS
-Plan: 1 of 3 complete
-Status: Plan 01 completo — schema+summarizer+cli wired
+Plan: 2 of 3 complete
+Status: Plan 02 completo — DocRecord.importance, filter unavailable, entry_points forwarding
 Last activity: 2026-04-10
 
 Progress: [████████░░░] 75%
@@ -65,6 +65,7 @@ Progress: [████████░░░] 75%
 | Phase 08 P02 | 4 min | 2 tasks | 3 files |
 | Phase 08-documentacion-extraida P08-03 | 150 | 2 tasks | 2 files |
 | Phase 09 P01 | 15 min | 3 tasks | 5 files |
+| Phase 09 P02 | 6 min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -93,6 +94,9 @@ Recent decisions affecting current work:
 - [Phase 09-01]: Lazy imports for flatten_file_tree and ProjectSummarizer placed inside main() body following existing cli.py pattern
 - [Phase 09-01]: key_dependencies only populated when dependency_analyzer is not None (--dependencies flag active); empty list by design otherwise
 - [Phase 09-01]: ProjectSummarizer uses try/except outer guard so generate() never raises regardless of SourceMap state
+- [Phase 09-02]: Filter source=unavailable records from docs[] entirely (LQN-04): limitations[] retains the signal, output is cleaner for LLM consumption
+- [Phase 09-02]: importance uses path.count('/') on posix paths for depth — root=high, 1-level=high, 2-level=medium, 3+=low, entry_points match overrides all
+- [Phase 09-02]: Updated test_unsupported_language_emits_unavailable to match new LQN-04 semantics (no records for unsupported langs)
 
 ### Pending Todos
 
@@ -117,7 +121,7 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-10T05:12:06Z
-Stopped at: Completed 09-01-PLAN.md
+Last session: 2026-04-10T05:20:24Z
+Stopped at: Completed 09-02-PLAN.md
 Resume file: None
-Next action: Execute Phase 09 Plan 02
+Next action: Execute Phase 09 Plan 03
