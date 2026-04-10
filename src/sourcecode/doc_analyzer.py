@@ -12,9 +12,7 @@ import ast
 import re
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
-
-from typing import Literal
+from typing import Any, Literal
 
 from sourcecode.schema import DocRecord, DocsDepth, DocSummary
 from sourcecode.tree_utils import flatten_file_tree

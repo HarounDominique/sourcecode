@@ -147,7 +147,7 @@ def main(
     from sourcecode.graph_analyzer import GraphAnalyzer, GraphDetail
     from sourcecode.redactor import SecretRedactor, redact_dict
     from sourcecode.scanner import FileScanner
-    from sourcecode.schema import AnalysisMetadata, DocsDepth, EntryPoint, SourceMap, StackDetection
+    from sourcecode.schema import AnalysisMetadata, DocRecord, DocSummary, DocsDepth, EntryPoint, SourceMap, StackDetection
     from sourcecode.serializer import compact_view, write_output
     from sourcecode.workspace import WorkspaceAnalyzer
 
@@ -249,8 +249,8 @@ def main(
                 entry_points=entry_points,
             )
         )
-    doc_records: list = []
-    doc_summaries: list = []
+    doc_records: list[DocRecord] = []
+    doc_summaries: list[DocSummary] = []
     if doc_analyzer is not None:
         root_doc_tree = (
             prune_workspace_paths(
@@ -373,8 +373,8 @@ def main(
     )
 
     # Phase 9: LLM Output Quality — poblar campos derivados
-    from sourcecode.tree_utils import flatten_file_tree
     from sourcecode.summarizer import ProjectSummarizer
+    from sourcecode.tree_utils import flatten_file_tree
 
     # LQN-01: lista plana de paths del file_tree con separador forward-slash
     sm.file_paths = [
