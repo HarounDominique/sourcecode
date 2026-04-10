@@ -231,3 +231,129 @@ def test_python_no_docstring_no_types_source_is_unavailable(tmp_path: Path) -> N
     # Either not emitted OR source='unavailable'
     if func_rec is not None:
         assert func_rec.source == "unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 Plan 02 — importance inference tests (Tests A1-A8)
+# ---------------------------------------------------------------------------
+
+
+def test_A1_entry_point_path_importance_high(tmp_path: Path) -> None:
+    """A1: analyze() with entry_points=['main.py'] -> DocRecord for main.py has importance='high'."""
+    file_tree = _make_py_file(
+        tmp_path,
+        "main.py",
+        '''\
+        """Main module."""
+        ''',
+    )
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="module", entry_points=["main.py"])
+
+    assert len(records) >= 1
+    rec = records[0]
+    assert rec.path == "main.py"
+    assert rec.importance == "high"
+
+
+def test_A2_depth2_function_importance_medium(tmp_path: Path) -> None:
+    """A2: analyze() without entry_points -> DocRecord for 'src/core/base.py' (depth=2) kind='function' has importance='medium'."""
+    src = tmp_path / "src" / "core"
+    src.mkdir(parents=True)
+    (src / "base.py").write_text(
+        '"""Base module."""\n\ndef my_func(x: int) -> int:\n    """A function."""\n    return x\n',
+        encoding="utf-8",
+    )
+    file_tree = {"src": {"core": {"base.py": None}}}
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="symbols")
+
+    func_recs = [r for r in records if r.kind == "function" and "base.py" in r.path]
+    assert len(func_recs) >= 1
+    assert func_recs[0].importance == "medium"
+
+
+def test_A3_root_depth0_importance_high(tmp_path: Path) -> None:
+    """A3: analyze() -> DocRecord for 'main.py' (depth=0) has importance='high'."""
+    file_tree = _make_py_file(
+        tmp_path,
+        "main.py",
+        '''\
+        """Main module."""
+        ''',
+    )
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="module")
+
+    assert len(records) >= 1
+    rec = next(r for r in records if r.path == "main.py")
+    assert rec.importance == "high"
+
+
+def test_A4_depth1_importance_high(tmp_path: Path) -> None:
+    """A4: analyze() -> DocRecord for 'src/main.py' (depth=1) has importance='high'."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "main.py").write_text('"""Src main module."""\n', encoding="utf-8")
+    file_tree = {"src": {"main.py": None}}
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="module")
+
+    module_recs = [r for r in records if "src/main.py" in r.path.replace("\\", "/")]
+    assert len(module_recs) >= 1
+    assert module_recs[0].importance == "high"
+
+
+def test_A5_depth2_importance_medium_by_depth(tmp_path: Path) -> None:
+    """A5: analyze() -> DocRecord for 'src/core/utils.py' (depth=2) has importance='medium' (by depth)."""
+    src = tmp_path / "src" / "core"
+    src.mkdir(parents=True)
+    (src / "utils.py").write_text('"""Utils module."""\n', encoding="utf-8")
+    file_tree = {"src": {"core": {"utils.py": None}}}
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="module")
+
+    module_recs = [r for r in records if "utils.py" in r.path]
+    assert len(module_recs) >= 1
+    assert module_recs[0].importance == "medium"
+
+
+def test_A6_depth3_method_importance_low(tmp_path: Path) -> None:
+    """A6: analyze() -> DocRecord kind='method' in 'src/core/base/helpers.py' (depth=3) has importance='low'."""
+    deep = tmp_path / "src" / "core" / "base"
+    deep.mkdir(parents=True)
+    (deep / "helpers.py").write_text(
+        'class Helper:\n    def do_it(self) -> None:\n        """Does it."""\n        pass\n',
+        encoding="utf-8",
+    )
+    file_tree = {"src": {"core": {"base": {"helpers.py": None}}}}
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="full")
+
+    method_recs = [r for r in records if r.kind == "method" and "helpers.py" in r.path]
+    assert len(method_recs) >= 1
+    assert method_recs[0].importance == "low"
+
+
+def test_A7_unsupported_language_no_records(tmp_path: Path) -> None:
+    """A7: analyze() with unsupported language (.go) -> returned records do NOT contain source='unavailable'."""
+    (tmp_path / "main.go").write_text("package main\nfunc main() {}\n", encoding="utf-8")
+    file_tree = {"main.go": None}
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="symbols")
+
+    unavail = [r for r in records if r.source == "unavailable"]
+    assert len(unavail) == 0, f"Found unexpected unavailable records: {unavail}"
+
+
+def test_A8_unsupported_language_limitation_present(tmp_path: Path) -> None:
+    """A8: analyze() with .go -> DocSummary.limitations contains 'docs_unavailable:{path}:language=go'."""
+    (tmp_path / "main.go").write_text("package main\nfunc main() {}\n", encoding="utf-8")
+    file_tree = {"main.go": None}
+    analyzer = DocAnalyzer()
+    _, summary = analyzer.analyze(tmp_path, file_tree, depth="symbols")
+
+    assert any(
+        "docs_unavailable" in lim and "language=go" in lim
+        for lim in summary.limitations
+    ), f"Expected docs_unavailable limitation, got: {summary.limitations}"

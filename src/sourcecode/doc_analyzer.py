@@ -14,6 +14,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from typing import Literal
+
 from sourcecode.schema import DocRecord, DocsDepth, DocSummary
 from sourcecode.tree_utils import flatten_file_tree
 
@@ -78,6 +80,22 @@ class DocAnalyzer:
     # Public API
     # ---------------------------------------------------------------------------
 
+    @staticmethod
+    def _infer_importance(
+        path: str,
+        kind: str,
+        entry_points: list[str] | None,
+    ) -> Literal["high", "medium", "low"]:
+        """Infiere importancia desde senales estructurales."""
+        if entry_points and path in entry_points:
+            return "high"
+        depth = path.count("/")
+        if depth <= 1:   # raiz (0) o un nivel (1): src/main.py
+            return "high"
+        if depth == 2 or kind in {"class", "function"}:
+            return "medium"
+        return "low"
+
     def analyze(
         self,
         root: Path,
@@ -85,6 +103,7 @@ class DocAnalyzer:
         *,
         workspace: str | None = None,
         depth: DocsDepth = "symbols",
+        entry_points: list[str] | None = None,
     ) -> tuple[list[DocRecord], DocSummary]:
         """Extrae DocRecords del arbol de ficheros dado.
 
@@ -141,7 +160,7 @@ class DocAnalyzer:
 
             if suffix in self._PYTHON_EXTENSIONS:
                 file_records, file_limitations = self._analyze_python_file(
-                    norm_path, content, depth, workspace
+                    norm_path, content, depth, workspace, entry_points
                 )
                 records.extend(file_records)
                 limitations.extend(file_limitations)
@@ -149,28 +168,17 @@ class DocAnalyzer:
                     languages.add("python")
             elif suffix in self._NODE_EXTENSIONS:
                 file_records, file_limitations = self._analyze_node_file(
-                    norm_path, content, depth, workspace
+                    norm_path, content, depth, workspace, entry_points
                 )
                 records.extend(file_records)
                 limitations.extend(file_limitations)
                 if file_records:
                     languages.add(lang)
             else:
-                # Unsupported language — emit unavailable record (D-06)
-                records.append(
-                    DocRecord(
-                        symbol=norm_path,
-                        kind="module",
-                        language=lang,
-                        path=norm_path,
-                        doc_text=None,
-                        signature=None,
-                        source="unavailable",
-                        workspace=workspace,
-                    )
-                )
+                # Unsupported language — D-04: no emitir DocRecord, solo registrar limitation
                 limitations.append(f"docs_unavailable:{norm_path}:language={lang}")
                 languages.add(lang)
+                # NO records.append() here
 
         # Build summary
         symbol_count = sum(1 for r in records if r.kind != "module")
@@ -223,6 +231,7 @@ class DocAnalyzer:
         content: str,
         depth: DocsDepth,
         workspace: str | None,
+        entry_points: list[str] | None = None,
     ) -> tuple[list[DocRecord], list[str]]:
         """Extrae DocRecords de un archivo Python usando ast."""
         records: list[DocRecord] = []
@@ -267,6 +276,7 @@ class DocAnalyzer:
                 # Per spec: source='unavailable' or not emitted
                 source = "unavailable"
 
+            imp = self._infer_importance(relative_path, kind, entry_points)
             return DocRecord(
                 symbol=symbol,
                 kind=kind,
@@ -275,6 +285,7 @@ class DocAnalyzer:
                 doc_text=doc_text,
                 signature=signature,
                 source=source,
+                importance=imp,
                 workspace=workspace,
             )
 
@@ -291,6 +302,7 @@ class DocAnalyzer:
                     doc_text=module_doc,
                     signature=None,
                     source="docstring",
+                    importance=self._infer_importance(relative_path, "module", entry_points),
                     workspace=workspace,
                 )
             )
@@ -436,6 +448,7 @@ class DocAnalyzer:
         content: str,
         depth: DocsDepth,
         workspace: str | None,
+        entry_points: list[str] | None = None,
     ) -> tuple[list[DocRecord], list[str]]:
         """Extrae DocRecords de un archivo JS/TS usando regex JSDoc."""
         records: list[DocRecord] = []
@@ -511,6 +524,7 @@ class DocAnalyzer:
                     doc_text=doc_text_final,
                     signature=None,
                     source="docstring" if doc_text_final else "unavailable",
+                    importance=self._infer_importance(relative_path, kind, entry_points),
                     workspace=workspace,
                 )
             )

@@ -129,8 +129,8 @@ export function add(a: number, b: number): number {
             assert "@returns" not in rec.doc_text
 
 
-def test_unsupported_language_emits_unavailable(tmp_path: Path) -> None:
-    """Archivo .go produce DocRecord con source='unavailable', doc_text=None."""
+def test_unsupported_language_no_records_emitted(tmp_path: Path) -> None:
+    """LQN-04: Archivo .go NO produce DocRecord (filtrado del output), limitation registrada."""
     content = """\
 package main
 
@@ -141,13 +141,13 @@ func main() {}
     file_tree = {"main.go": None}
 
     analyzer = DocAnalyzer()
-    records, _ = analyzer.analyze(tmp_path, file_tree, depth="symbols")
+    records, summary = analyzer.analyze(tmp_path, file_tree, depth="symbols")
 
-    assert len(records) == 1
-    rec = records[0]
-    assert rec.source == "unavailable"
-    assert rec.doc_text is None
-    assert rec.language == "go"
+    # No records emitted for unsupported language
+    assert len(records) == 0
+    # But limitation is still recorded
+    assert any("docs_unavailable" in lim for lim in summary.limitations)
+    assert any("main.go" in lim for lim in summary.limitations)
 
 
 def test_unsupported_language_adds_limitation(tmp_path: Path) -> None:
@@ -161,3 +161,56 @@ def test_unsupported_language_adds_limitation(tmp_path: Path) -> None:
 
     assert any("docs_unavailable" in lim for lim in summary.limitations)
     assert any("main.go" in lim for lim in summary.limitations)
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 Plan 02 — importance inference tests for JS/TS (Tests B1-B3)
+# ---------------------------------------------------------------------------
+
+
+def test_B1_ts_entry_point_importance_high(tmp_path: Path) -> None:
+    """B1: analyze() with .ts entry point -> DocRecord for that path has importance='high'."""
+    content = "/** Entry module. */\nexport function main() {}\n"
+    (tmp_path / "index.ts").write_text(content, encoding="utf-8")
+    file_tree = {"index.ts": None}
+
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(
+        tmp_path, file_tree, depth="module", entry_points=["index.ts"]
+    )
+
+    assert len(records) >= 1
+    rec = records[0]
+    assert rec.path == "index.ts"
+    assert rec.importance == "high"
+
+
+def test_B2_ts_depth2_function_importance_medium(tmp_path: Path) -> None:
+    """B2: analyze() with .ts in 'src/utils/helper.ts' (depth=2) kind='function' -> importance='medium'."""
+    src = tmp_path / "src" / "utils"
+    src.mkdir(parents=True)
+    (src / "helper.ts").write_text(
+        "/** Helper function. */\nexport function helper(x: number): number { return x; }\n",
+        encoding="utf-8",
+    )
+    file_tree = {"src": {"utils": {"helper.ts": None}}}
+
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="symbols")
+
+    func_recs = [r for r in records if r.kind == "function" and "helper.ts" in r.path]
+    assert len(func_recs) >= 1
+    assert func_recs[0].importance == "medium"
+
+
+def test_B3_unsupported_language_no_records_for_file(tmp_path: Path) -> None:
+    """B3: analyze() with unsupported language -> records empty for that file."""
+    content = "package main\nfunc main() {}\n"
+    (tmp_path / "server.go").write_text(content, encoding="utf-8")
+    file_tree = {"server.go": None}
+
+    analyzer = DocAnalyzer()
+    records, _ = analyzer.analyze(tmp_path, file_tree, depth="symbols")
+
+    go_records = [r for r in records if r.path == "server.go"]
+    assert len(go_records) == 0, f"Expected no records for .go file, got: {go_records}"
