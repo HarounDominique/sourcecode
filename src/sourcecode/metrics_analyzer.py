@@ -166,6 +166,11 @@ class MetricsAnalyzer:
             limitations.append(f"max_files_reached:{actual}")
             file_paths = file_paths[: self._MAX_FILES]
 
+        # --- Coverage: parse all artifacts before iterating files ---
+        coverage_parser = CoverageParser()
+        coverage_records = coverage_parser.parse_all(root)
+        file_cov_map = coverage_parser.build_file_coverage_map(root, coverage_records)
+
         records: list[FileMetrics] = []
         languages: set[str] = set()
 
@@ -183,6 +188,32 @@ class MetricsAnalyzer:
                 continue
 
             fm = self._analyze_file(abs_path, rel_path, workspace)
+
+            # --- Test detection ---
+            norm_rel = Path(rel_path).as_posix()
+            fm.is_test = is_test_file(norm_rel)
+
+            # --- Production target resolution ---
+            if fm.is_test:
+                inferred_name = infer_production_target(norm_rel)
+                if inferred_name is not None:
+                    match = next(
+                        (
+                            Path(p).as_posix()
+                            for p in file_paths
+                            if not is_test_file(Path(p).as_posix())
+                            and Path(p).name == inferred_name
+                        ),
+                        None,
+                    )
+                    fm.production_target = match
+
+            # --- Coverage wiring ---
+            cov_entry = file_cov_map.get(norm_rel)
+            if cov_entry is not None:
+                fm.line_rate, fm.branch_rate, fm.coverage_source = cov_entry
+                fm.coverage_availability = "measured"
+
             records.append(fm)
             if fm.language != "unknown":
                 languages.add(fm.language)
@@ -193,8 +224,8 @@ class MetricsAnalyzer:
             test_file_count=sum(1 for r in records if r.is_test),
             languages=sorted(languages),
             total_loc=sum(r.code_lines for r in records),
-            coverage_records=[],
-            coverage_sources_found=[],
+            coverage_records=coverage_records,
+            coverage_sources_found=sorted({r.format for r in coverage_records}),
             limitations=limitations,
         )
         return records, summary
