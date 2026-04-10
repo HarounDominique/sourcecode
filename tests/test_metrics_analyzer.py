@@ -1,9 +1,7 @@
-"""Tests unitarios para MetricsAnalyzer — MQT-01..04 y MQT-13.
+"""Tests unitarios para MetricsAnalyzer — MQT-01..04, MQT-09, MQT-10 y MQT-13.
 
-Wave 0: Estos tests se escriben ANTES de la implementacion (TDD RED).
-Todos los tests no-skip fallan con ImportError hasta que metrics_analyzer.py exista.
-
-Stubs skip (MQT-09, MQT-10) seran implementados en el plan 10-03.
+Wave 0: Tests MQT-01..04 y MQT-13 escritos en 10-01.
+Wave 3 (10-03): MQT-09 y MQT-10 activados; tests de integracion agregados.
 """
 from __future__ import annotations
 
@@ -11,7 +9,7 @@ import textwrap
 
 import pytest
 
-from sourcecode.metrics_analyzer import MetricsAnalyzer
+from sourcecode.metrics_analyzer import MetricsAnalyzer, is_test_file, infer_production_target
 
 
 # ---------------------------------------------------------------------------
@@ -275,16 +273,184 @@ def test_graceful_degradation_analyze_no_exception(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Wave 0 stubs — to be implemented in plan 10-03
+# MQT-09: is_test_file() detection
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skip(reason="implementado en 10-03: is_test_file detection")
 def test_is_test_file():
-    """MQT-09: Files in tests/ or named test_*.py are detected as is_test=True."""
-    pass
+    """MQT-09: is_test_file() returns True for test file patterns across ecosystems."""
+    # True cases — test files
+    assert is_test_file("tests/test_scanner.py") is True       # Python tests/ directory
+    assert is_test_file("test_scanner.py") is True             # Python test_ prefix
+    assert is_test_file("scanner_test.go") is True             # Go _test.go suffix
+    assert is_test_file("scanner.spec.ts") is True             # TS .spec.ts
+    assert is_test_file("scanner.test.tsx") is True            # TSX .test.tsx
+    assert is_test_file("__tests__/scanner.js") is True        # JS __tests__ directory
+    assert is_test_file("ScannerTest.java") is True            # Java Test suffix
+    assert is_test_file("ScannerSpec.kt") is True              # Kotlin Spec suffix
+    assert is_test_file("spec/scanner_spec.rb") is True        # Ruby spec/ directory
+    assert is_test_file("tests/scanner_test.rs") is True       # Rust tests/ directory
+    assert is_test_file("scanner_test.dart") is True           # Dart _test.dart
+    assert is_test_file("test/scanner_test.dart") is True      # Dart test/ directory
+    assert is_test_file("tests/scanner_test.c") is True        # C tests/ directory
+    assert is_test_file("ScannerTest.php") is True             # PHP Test suffix
+    assert is_test_file("tests/scanner_test.php") is True      # PHP tests/ directory
+
+    # False cases — production files / pitfalls
+    assert is_test_file("src/scanner.py") is False                              # production module
+    assert is_test_file("src/utils/context_helpers_tested.py") is False         # pitfall: "tested" in name
+    assert is_test_file("testdata/fixtures/sample.py") is False                 # pitfall: testdata/, not tests/
+    assert is_test_file("src/schema.go") is False                               # Go without _test.go
 
 
-@pytest.mark.skip(reason="implementado en 10-03: infer_production_target")
-def test_infer_production(tmp_path):
-    """MQT-10: Test files have production_target inferred from naming conventions."""
-    pass
+# ---------------------------------------------------------------------------
+# MQT-10: infer_production_target() inference
+# ---------------------------------------------------------------------------
+
+def test_infer_production():
+    """MQT-10: infer_production_target() returns correct bare filename for each ecosystem."""
+    assert infer_production_target("test_scanner.py") == "scanner.py"       # Python test_ prefix
+    assert infer_production_target("scanner_test.go") == "scanner.go"       # Go _test.go
+    assert infer_production_target("ScannerTest.java") == "Scanner.java"    # Java Test suffix
+    assert infer_production_target("ScannerSpec.kt") == "Scanner.kt"        # Kotlin Spec suffix
+    assert infer_production_target("scanner.spec.ts") == "scanner.ts"       # TS .spec. infix
+    assert infer_production_target("scanner.test.tsx") == "scanner.tsx"     # TSX .test. infix
+    assert infer_production_target("scanner_spec.rb") == "scanner.rb"       # Ruby _spec suffix
+    assert infer_production_target("scanner_test.dart") == "scanner.dart"   # Dart _test suffix
+    assert infer_production_target("scanner.py") is None                    # not a test file
+    assert infer_production_target("unknown_file.xyz") is None              # no matching pattern
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — analyze() with is_test and coverage wiring (10-03)
+# ---------------------------------------------------------------------------
+
+def test_analyze_returns_records(tmp_path):
+    """test_analyze_returns_records: analyze() returns (list[FileMetrics], MetricsSummary)."""
+    (tmp_path / "main.py").write_text("def hello():\n    pass\n", encoding="utf-8")
+    (tmp_path / "test_main.py").write_text("def test_hello(): pass\n", encoding="utf-8")
+    file_tree = {"main.py": None, "test_main.py": None}
+
+    records, summary = MetricsAnalyzer().analyze(tmp_path, file_tree)
+
+    assert isinstance(records, list)
+    assert len(records) == 2
+    assert summary.file_count == 2
+
+
+def test_analyze_populates_is_test(tmp_path):
+    """analyze() sets is_test=True for test files and False for production files."""
+    (tmp_path / "scanner.py").write_text("def scan(): pass\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_scanner.py").write_text("def test_scan(): pass\n", encoding="utf-8")
+    file_tree = {"scanner.py": None, "tests": {"test_scanner.py": None}}
+
+    records, summary = MetricsAnalyzer().analyze(tmp_path, file_tree)
+
+    assert summary.test_file_count == 1
+    by_path = {r.path: r for r in records}
+    assert by_path["scanner.py"].is_test is False
+    assert by_path["tests/test_scanner.py"].is_test is True
+
+
+def test_analyze_populates_production_target(tmp_path):
+    """analyze() sets production_target to full relative path when production file found in tree."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "scanner.py").write_text("def scan(): pass\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_scanner.py").write_text("def test_scan(): pass\n", encoding="utf-8")
+    file_tree = {"src": {"scanner.py": None}, "tests": {"test_scanner.py": None}}
+
+    records, summary = MetricsAnalyzer().analyze(tmp_path, file_tree)
+
+    by_path = {r.path: r for r in records}
+    test_fm = by_path["tests/test_scanner.py"]
+    prod_fm = by_path["src/scanner.py"]
+
+    assert test_fm.is_test is True
+    # production_target is the full relative path, not just the filename
+    assert test_fm.production_target == "src/scanner.py"
+    assert prod_fm.production_target is None
+
+
+def test_analyze_coverage_integration(tmp_path):
+    """analyze() invokes CoverageParser and populates metrics_summary.coverage_records."""
+    # Create a minimal valid Cobertura XML
+    (tmp_path / "coverage.xml").write_text(
+        '<?xml version="1.0" ?>'
+        '<coverage line-rate="0.85" branch-rate="0.70"'
+        ' lines-covered="85" lines-valid="100"'
+        ' version="7.0" timestamp="1700000000">'
+        '<packages>'
+        '<package name="src" line-rate="0.85" branch-rate="0.70" complexity="1">'
+        '<classes>'
+        '<class name="main.py" filename="main.py" line-rate="0.85" branch-rate="0.70" complexity="1">'
+        '<lines/>'
+        '</class>'
+        '</classes>'
+        '</package>'
+        '</packages>'
+        '</coverage>',
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text("def hello(): pass\n", encoding="utf-8")
+    file_tree = {"main.py": None}
+
+    records, summary = MetricsAnalyzer().analyze(tmp_path, file_tree)
+
+    assert len(summary.coverage_records) >= 1
+    assert "cobertura_xml" in summary.coverage_sources_found
+
+
+def test_metrics_summary_totals(tmp_path):
+    """MetricsSummary totals: file_count, test_file_count, total_loc are correct."""
+    files = {
+        "a.py": "x = 1\n",
+        "b.py": "y = 2\n",
+        "c.py": "z = 3\n",
+        "test_a.py": "def test_a(): pass\n",
+        "test_b.py": "def test_b(): pass\n",
+    }
+    for name, content in files.items():
+        (tmp_path / name).write_text(content, encoding="utf-8")
+    file_tree = {name: None for name in files}
+
+    records, summary = MetricsAnalyzer().analyze(tmp_path, file_tree)
+
+    assert summary.file_count == 5
+    assert summary.test_file_count == 2
+    assert summary.total_loc == sum(r.code_lines for r in records)
+
+
+def test_merge_summaries():
+    """merge_summaries() correctly sums file counts, deduplicates languages and sources."""
+    from sourcecode.schema import MetricsSummary, CoverageRecord
+
+    s1 = MetricsSummary(
+        requested=True,
+        file_count=3,
+        test_file_count=1,
+        total_loc=100,
+        languages=["python", "go"],
+        coverage_sources_found=["cobertura_xml"],
+        limitations=["limit_a"],
+    )
+    s2 = MetricsSummary(
+        requested=False,
+        file_count=4,
+        test_file_count=1,
+        total_loc=200,
+        languages=["go", "java"],
+        coverage_sources_found=["lcov"],
+        limitations=["limit_b"],
+    )
+
+    merged = MetricsAnalyzer().merge_summaries([s1, s2])
+
+    assert merged.file_count == 7
+    assert merged.test_file_count == 2
+    assert merged.total_loc == 300
+    assert merged.languages == ["go", "java", "python"]  # sorted, deduplicated
+    assert merged.coverage_sources_found == ["cobertura_xml", "lcov"]
+    assert "limit_a" in merged.limitations
+    assert "limit_b" in merged.limitations
+    assert merged.requested is True  # any() of the two

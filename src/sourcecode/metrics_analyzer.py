@@ -14,12 +14,71 @@ from __future__ import annotations
 import ast
 import re
 from collections.abc import Iterable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from sourcecode.coverage_parser import CoverageParser
 from sourcecode.doc_analyzer import _LANG_MAP  # reusar, no redefinir
 from sourcecode.schema import FileMetrics, MetricsSummary
 from sourcecode.tree_utils import flatten_file_tree
+
+# ---------------------------------------------------------------------------
+# Test file detection — patterns from research (10-RESEARCH.md)
+# ---------------------------------------------------------------------------
+
+_TEST_FILE_PATTERNS: list[re.Pattern] = [
+    re.compile(p) for p in [
+        r"(?:^|/)tests?/.*\.py$",
+        r"(?:^|/)test_.*\.py$",
+        r"^.*_test\.py$",
+        r"^.*_test\.go$",
+        r"^.*\.(spec|test)\.(js|jsx|ts|tsx|mjs|cjs)$",
+        r"(?:^|/)__tests__/.*\.(js|jsx|ts|tsx|mjs|cjs)$",
+        r"^.*(Test|Tests|Spec|IT)\.(java|kt|scala)$",
+        r"(?:^|/)spec/.*\.rb$",
+        r"^.*(?:test|spec).*\.rb$",
+        r"(?:^|/)tests/.*\.rs$",
+        r"^.*_test\.dart$",
+        r"(?:^|/)test/.*\.dart$",
+        r"^.*(test|Test|spec)\.(c|cpp|cc|h|hpp)$",
+        r"(?:^|/)tests?/.*\.(c|cpp|cc)$",
+        r"^.*Test\.php$",
+        r"(?:^|/)tests?/.*\.php$",
+    ]
+]
+
+# Stem patterns for inferring production file name from test file name.
+# Each entry is (compiled_pattern, replacement_string).
+_STEM_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"^test_(.+)$"), r"\1"),
+    (re.compile(r"^(.+)_test(\.\w+)$"), r"\1\2"),
+    (re.compile(r"^(.+)(Test|Tests|Spec|IT)(\.\w+)$"), r"\1\3"),
+    (re.compile(r"^(.+)\.(spec|test)(\.\w+)$"), r"\1\3"),
+    (re.compile(r"^(.+)_spec(\.\w+)$"), r"\1\2"),
+]
+
+
+def is_test_file(path: str) -> bool:
+    """Return True if path corresponds to a test file based on ecosystem conventions.
+
+    Normalizes Windows backslashes to forward slashes before matching.
+    Patterns are anchored to avoid false positives (e.g., 'testdata/', '*_tested.py').
+    """
+    normalized = path.replace("\\", "/")
+    return any(p.search(normalized) for p in _TEST_FILE_PATTERNS)
+
+
+def infer_production_target(test_path: str) -> str | None:
+    """Infer the production module filename from a test file path.
+
+    Operates on the basename only (not the full path).
+    Returns the bare filename (e.g., 'scanner.py'), or None if no pattern matches.
+    """
+    name = PurePosixPath(test_path.replace("\\", "/")).name
+    for pattern, replacement in _STEM_PATTERNS:
+        if pattern.match(name):
+            return pattern.sub(replacement, name)
+    return None
 
 # ---------------------------------------------------------------------------
 # Regex patterns for inferred symbol counting (JS/TS, Go, Rust, Java)
