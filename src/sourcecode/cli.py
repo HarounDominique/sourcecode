@@ -264,6 +264,7 @@ def main(
             target,
             root_doc_tree,
             depth=docs_depth_typed,
+            entry_points=[ep.path for ep in entry_points],   # LQN-03
         )
         doc_records.extend(root_doc_records)
         doc_summaries.append(root_doc_summary)
@@ -316,6 +317,7 @@ def main(
                 workspace_tree,
                 workspace=workspace.path,
                 depth=docs_depth_typed,
+                entry_points=[ep.path for ep in workspace_entry_points],   # LQN-03
             )
             # Prefix paths with workspace.path so they are relative to repo root
             # (same pattern as entry_points path prefixing)

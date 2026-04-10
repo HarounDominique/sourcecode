@@ -105,7 +105,9 @@ def test_cli_without_docs_flag_docs_disabled(tmp_path: Path) -> None:
 
 
 def test_cli_docs_source_values_valid(tmp_path: Path) -> None:
-    """DOCS-ACC-02: Todos los DocRecord.source in {'docstring','signature','unavailable'}."""
+    """DOCS-ACC-02: Todos los DocRecord.source in {'docstring','signature','unavailable'}.
+    LQN-04: source='unavailable' records are NOT present in docs[] output.
+    """
     _build_docs_fixture(tmp_path)
     valid_sources = {"docstring", "signature", "unavailable"}
 
@@ -117,6 +119,11 @@ def test_cli_docs_source_values_valid(tmp_path: Path) -> None:
         assert record["source"] in valid_sources, (
             f"Unexpected source '{record['source']}' in record {record['symbol']}"
         )
+    # LQN-04: no source="unavailable" records in docs[] (filtered out)
+    unavail = [r for r in data["docs"] if r.get("source") == "unavailable"]
+    assert len(unavail) == 0, (
+        f"LQN-04: Expected no source='unavailable' in docs[], got {len(unavail)} records"
+    )
 
 
 def test_cli_docs_truncation_at_1000_chars(tmp_path: Path) -> None:
@@ -140,17 +147,19 @@ def test_cli_docs_truncation_at_1000_chars(tmp_path: Path) -> None:
         )
 
 
-def test_cli_docs_unsupported_language_unavailable(tmp_path: Path) -> None:
-    """DOCS-ACC-05: .go -> source='unavailable' presente, limitation en summary."""
+def test_cli_docs_unsupported_language_filtered_with_limitation(tmp_path: Path) -> None:
+    """DOCS-ACC-05 / LQN-04: .go -> NO record in docs[], limitation in doc_summary."""
     _build_docs_fixture(tmp_path)
 
     code, data = _run(["--docs", "--format", "json"], tmp_path)
 
     assert code == 0
+    # LQN-04: .go records must NOT appear in docs[]
     go_records = [rec for rec in data["docs"] if rec.get("path", "").endswith(".go")]
-    assert len(go_records) > 0, "Expected at least one record for .go file"
-    assert all(rec["source"] == "unavailable" for rec in go_records)
-    # Check limitation in summary
+    assert len(go_records) == 0, (
+        f"LQN-04: Expected no .go records in docs[], got: {go_records}"
+    )
+    # Limitation must still be recorded in doc_summary
     limitations = data["doc_summary"]["limitations"]
     assert any("docs_unavailable" in lim for lim in limitations), (
         f"Expected 'docs_unavailable' limitation, got: {limitations}"
@@ -224,4 +233,51 @@ def test_cli_docs_truncated_flag_when_limits_applied(tmp_path: Path) -> None:
     assert code == 0
     assert data["doc_summary"]["truncated"] is True, (
         "Expected doc_summary.truncated=True when docstring exceeds 1000 chars"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 Plan 02 — LQN-03 / LQN-04 integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_lqn03_all_docrecords_have_valid_importance(tmp_path: Path) -> None:
+    """LQN-03: With --docs, all DocRecords have importance in {high, medium, low}."""
+    _build_docs_fixture(tmp_path)
+
+    code, data = _run(["--docs", "--format", "json"], tmp_path)
+
+    assert code == 0
+    assert len(data["docs"]) > 0
+    valid_importances = {"high", "medium", "low"}
+    for record in data["docs"]:
+        assert "importance" in record, f"DocRecord missing 'importance' field: {record}"
+        assert record["importance"] in valid_importances, (
+            f"Invalid importance '{record['importance']}' for record {record['symbol']}"
+        )
+
+
+def test_lqn04_no_docrecord_source_unavailable(tmp_path: Path) -> None:
+    """LQN-04: With --docs, no DocRecord has source='unavailable' in docs[]."""
+    _build_docs_fixture(tmp_path)
+
+    code, data = _run(["--docs", "--format", "json"], tmp_path)
+
+    assert code == 0
+    unavail = [r for r in data["docs"] if r.get("source") == "unavailable"]
+    assert len(unavail) == 0, (
+        f"LQN-04: Found {len(unavail)} source='unavailable' records in docs[]: {unavail}"
+    )
+
+
+def test_lqn04_multilang_project_has_unavailable_limitation(tmp_path: Path) -> None:
+    """LQN-04: With --docs on multi-language project, doc_summary.limitations has 'docs_unavailable:' entry."""
+    _build_docs_fixture(tmp_path)  # includes .go file
+
+    code, data = _run(["--docs", "--format", "json"], tmp_path)
+
+    assert code == 0
+    limitations = data["doc_summary"]["limitations"]
+    assert any("docs_unavailable:" in lim for lim in limitations), (
+        f"Expected at least one 'docs_unavailable:' limitation for .go file, got: {limitations}"
     )
