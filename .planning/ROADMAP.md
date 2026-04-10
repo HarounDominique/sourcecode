@@ -197,9 +197,9 @@ Plans:
 **Plans**: 4 planes
 
 Plans:
-- [ ] 10-01-PLAN.md — Schema + MetricsAnalyzer skeleton + LOC counters: FileMetrics, CoverageRecord, MetricsSummary en schema.py; MetricsAnalyzer con conteo LOC/simbolos por tier de lenguaje (METRICS-01, OUT-10)
-- [ ] 10-02-PLAN.md — CoverageParser: parsers para Cobertura XML, .coverage SQLite, LCOV y JaCoCo XML con stdlib (METRICS-03, OUT-10)
-- [ ] 10-03-PLAN.md — Test association + MetricsAnalyzer completo: is_test_file(), infer_production_target(), integracion CoverageParser en analyze(), merge_summaries() (METRICS-01, METRICS-02, METRICS-03, METRICS-04, OUT-10)
+- [x] 10-01-PLAN.md — Schema + MetricsAnalyzer skeleton + LOC counters: FileMetrics, CoverageRecord, MetricsSummary en schema.py; MetricsAnalyzer con conteo LOC/simbolos por tier de lenguaje (METRICS-01, OUT-10)
+- [x] 10-02-PLAN.md — CoverageParser: parsers para Cobertura XML, .coverage SQLite, LCOV y JaCoCo XML con stdlib (METRICS-03, OUT-10)
+- [x] 10-03-PLAN.md — Test association + MetricsAnalyzer completo: is_test_file(), infer_production_target(), integracion CoverageParser en analyze(), merge_summaries() (METRICS-01, METRICS-02, METRICS-03, METRICS-04, OUT-10)
 - [ ] 10-04-PLAN.md — CLI wiring + E2E + quality gate: flag --full-metrics, workspace loop, ruff+mypy gate (METRICS-01, METRICS-02, METRICS-03, METRICS-04, OUT-10)
 **UI hint**: no
 
