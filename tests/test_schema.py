@@ -108,6 +108,92 @@ def test_generated_at_is_utc():
     assert "+00:00" in meta.generated_at or meta.generated_at.endswith("Z")
 
 
+# Phase 9 Plan 03 — compact_view() new fields (TDD C1-C10)
+
+def test_c1_compact_includes_project_summary_when_set():
+    """C1: compact_view includes 'project_summary' when it is a non-None string."""
+    from sourcecode.schema import SourceMap
+    sm = SourceMap(project_summary="API en Python.")
+    result = compact_view(sm)
+    assert "project_summary" in result
+    assert result["project_summary"] == "API en Python."
+
+
+def test_c2_compact_includes_project_summary_none():
+    """C2: compact_view includes 'project_summary': None when not set."""
+    sm = SourceMap()
+    result = compact_view(sm)
+    assert "project_summary" in result
+    assert result["project_summary"] is None
+
+
+def test_c3_compact_includes_file_paths_when_set():
+    """C3: compact_view includes 'file_paths' list when set."""
+    sm = SourceMap(file_paths=["src/a.py", "src/b.py"])
+    result = compact_view(sm)
+    assert "file_paths" in result
+    assert result["file_paths"] == ["src/a.py", "src/b.py"]
+
+
+def test_c4_compact_includes_file_paths_empty_list():
+    """C4: compact_view includes 'file_paths': [] when empty."""
+    sm = SourceMap(file_paths=[])
+    result = compact_view(sm)
+    assert "file_paths" in result
+    assert result["file_paths"] == []
+
+
+def test_c5_compact_dependency_summary_dict_when_requested():
+    """C5: compact_view includes dependency_summary as dict when requested=True."""
+    from sourcecode.schema import DependencySummary
+    sm = SourceMap(dependency_summary=DependencySummary(requested=True, total_count=5))
+    result = compact_view(sm)
+    assert "dependency_summary" in result
+    assert isinstance(result["dependency_summary"], dict)
+    assert result["dependency_summary"]["requested"] is True
+    assert result["dependency_summary"]["total_count"] == 5
+
+
+def test_c6_compact_dependency_summary_none_when_not_set():
+    """C6: compact_view includes 'dependency_summary': None when dependency_summary=None."""
+    sm = SourceMap(dependency_summary=None)
+    result = compact_view(sm)
+    assert "dependency_summary" in result
+    assert result["dependency_summary"] is None
+
+
+def test_c7_compact_dependency_summary_none_when_not_requested():
+    """C7: compact_view includes 'dependency_summary': None when requested=False."""
+    from sourcecode.schema import DependencySummary
+    sm = SourceMap(dependency_summary=DependencySummary(requested=False))
+    result = compact_view(sm)
+    assert "dependency_summary" in result
+    assert result["dependency_summary"] is None
+
+
+def test_c8_compact_has_file_tree_depth1_backward_compat():
+    """C8: compact_view still includes 'file_tree_depth1' (backward compat)."""
+    sm = SourceMap()
+    result = compact_view(sm)
+    assert "file_tree_depth1" in result
+
+
+def test_c9_compact_does_not_include_dependencies():
+    """C9: compact_view does NOT include the full 'dependencies' list."""
+    from sourcecode.schema import DependencyRecord
+    sm = SourceMap(dependencies=[DependencyRecord(name="fastapi", ecosystem="python")])
+    result = compact_view(sm)
+    assert "dependencies" not in result
+
+
+def test_c10_compact_does_not_include_docs_or_module_graph():
+    """C10: compact_view does NOT include 'docs' or 'module_graph'."""
+    sm = SourceMap()
+    result = compact_view(sm)
+    assert "docs" not in result
+    assert "module_graph" not in result
+
+
 def test_schema_serializes_typed_detection_fields():
     sm = SourceMap(
         stacks=[

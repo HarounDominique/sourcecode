@@ -49,29 +49,35 @@ def to_yaml(sm: SourceMap) -> str:
 
 
 def compact_view(sm: SourceMap) -> dict[str, Any]:
-    """Proyeccion compacta del SourceMap (~500 tokens).
+    """Proyeccion compacta del SourceMap (~500-700 tokens).
 
-    Incluye: schema_version, project_type, stacks, entry_points y
-    file_tree_depth1 (solo el primer nivel del arbol de ficheros).
+    Incluye: schema_version, project_type, stacks, entry_points,
+    project_summary (siempre), file_paths (siempre),
+    dependency_summary (cuando requested=True),
+    file_tree_depth1 (backward compat).
 
-    En Fase 1 stacks/project_type/entry_points estan vacios — el output
-    compact es principalmente el arbol de primer nivel.
+    Excluye: dependencies (lista larga), docs, module_graph.
     """
     depth1: dict[str, Any] = {}
     for name, value in sm.file_tree.items():
         if isinstance(value, dict):
-            # Directorio: mostrar como dict vacio en depth1 (solo la entrada raiz)
             depth1[name] = {}
         else:
-            # Fichero: mantener null
             depth1[name] = None
+
+    dep_summary_dict: Any = None
+    if sm.dependency_summary is not None and sm.dependency_summary.requested:
+        dep_summary_dict = asdict(sm.dependency_summary)
 
     return {
         "schema_version": sm.metadata.schema_version,
         "project_type": sm.project_type,
+        "project_summary": sm.project_summary,
         "stacks": [asdict(stack) for stack in sm.stacks],
         "entry_points": [asdict(entry_point) for entry_point in sm.entry_points],
+        "file_paths": sm.file_paths,
         "file_tree_depth1": depth1,
+        "dependency_summary": dep_summary_dict,
     }
 
 
