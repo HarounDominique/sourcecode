@@ -26,7 +26,7 @@ from sourcecode.tree_utils import flatten_file_tree
 # Test file detection — patterns from research (10-RESEARCH.md)
 # ---------------------------------------------------------------------------
 
-_TEST_FILE_PATTERNS: list[re.Pattern] = [
+_TEST_FILE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(p) for p in [
         r"(?:^|/)tests?/.*\.py$",
         r"(?:^|/)test_.*\.py$",
@@ -49,7 +49,7 @@ _TEST_FILE_PATTERNS: list[re.Pattern] = [
 
 # Stem patterns for inferring production file name from test file name.
 # Each entry is (compiled_pattern, replacement_string).
-_STEM_PATTERNS: list[tuple[re.Pattern, str]] = [
+_STEM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^test_(.+)$"), r"\1"),
     (re.compile(r"^(.+)_test(\.\w+)$"), r"\1\2"),
     (re.compile(r"^(.+)(Test|Tests|Spec|IT)(\.\w+)$"), r"\1\3"),
@@ -374,10 +374,9 @@ class MetricsAnalyzer:
                     comment += 1
                     if "*/" not in stripped[2:]:
                         in_block = True
-                elif "/*" in stripped:
+                elif "/*" in stripped and "*/" not in stripped[stripped.index("/*") + 2:]:
                     # inline block comment start on a code line — count as code
-                    if "*/" not in stripped[stripped.index("/*") + 2:]:
-                        in_block = True
+                    in_block = True
                 # else: code line (not counted as comment)
         else:
             # Python, Go, Rust, Java, and others: simple line-comment detection

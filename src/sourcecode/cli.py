@@ -107,6 +107,11 @@ def main(
         help="Profundidad de extraccion de docs: module|symbols|full",
         show_default=True,
     ),
+    full_metrics: bool = typer.Option(
+        False,
+        "--full-metrics",
+        help="Incluir metricas de calidad: LOC, simbolos, complejidad, tests y cobertura por fichero",
+    ),
 ) -> None:
     """Genera un mapa de contexto estructurado del proyecto en formato JSON o YAML."""
     # Validar formato
@@ -145,9 +150,18 @@ def main(
     from sourcecode.detectors import ProjectDetector, build_default_detectors
     from sourcecode.doc_analyzer import DocAnalyzer
     from sourcecode.graph_analyzer import GraphAnalyzer, GraphDetail
+    from sourcecode.metrics_analyzer import MetricsAnalyzer
     from sourcecode.redactor import SecretRedactor, redact_dict
     from sourcecode.scanner import FileScanner
-    from sourcecode.schema import AnalysisMetadata, DocRecord, DocSummary, DocsDepth, EntryPoint, SourceMap, StackDetection
+    from sourcecode.schema import (
+        AnalysisMetadata,
+        DocRecord,
+        DocsDepth,
+        DocSummary,
+        EntryPoint,
+        SourceMap,
+        StackDetection,
+    )
     from sourcecode.serializer import compact_view, write_output
     from sourcecode.workspace import WorkspaceAnalyzer
 
@@ -212,6 +226,7 @@ def main(
     graph_detail_typed = cast(GraphDetail, graph_detail)
     docs_depth_typed = cast(DocsDepth, docs_depth)
     doc_analyzer = DocAnalyzer() if docs else None
+    metrics_analyzer = MetricsAnalyzer() if full_metrics else None
 
     root_manifests = [
         manifest
@@ -268,6 +283,24 @@ def main(
         )
         doc_records.extend(root_doc_records)
         doc_summaries.append(root_doc_summary)
+
+    file_metrics_records: list = []
+    metrics_summaries = []
+    if metrics_analyzer is not None:
+        root_metrics_tree = (
+            prune_workspace_paths(
+                file_tree,
+                [workspace.path for workspace in workspace_analysis.workspaces],
+            )
+            if workspace_analysis.workspaces
+            else file_tree
+        )
+        root_file_metrics, root_metrics_summary = metrics_analyzer.analyze(
+            target,
+            root_metrics_tree,
+        )
+        file_metrics_records.extend(root_file_metrics)
+        metrics_summaries.append(root_metrics_summary)
 
     for workspace in workspace_analysis.workspaces:
         workspace_root = target / workspace.path
@@ -327,6 +360,18 @@ def main(
             ]
             doc_records.extend(prefixed_doc_records)
             doc_summaries.append(workspace_doc_summary)
+        if metrics_analyzer is not None:
+            ws_file_metrics, ws_metrics_summary = metrics_analyzer.analyze(
+                workspace_root,
+                workspace_tree,
+                workspace=workspace.path,
+            )
+            prefixed_file_metrics = [
+                replace(m, path=f"{workspace.path}/{m.path}")
+                for m in ws_file_metrics
+            ]
+            file_metrics_records.extend(prefixed_file_metrics)
+            metrics_summaries.append(ws_metrics_summary)
 
     stacks, project_type = detector.classify_results(
         file_tree,
@@ -355,6 +400,11 @@ def main(
         if doc_analyzer is not None
         else None
     )
+    metrics_summary = (
+        metrics_analyzer.merge_summaries(metrics_summaries)
+        if metrics_analyzer is not None
+        else None
+    )
 
     # 3. Construir el schema
     metadata = AnalysisMetadata(analyzed_path=str(target))
@@ -370,6 +420,8 @@ def main(
         module_graph_summary=module_graph.summary if module_graph is not None else None,
         docs=doc_records,
         doc_summary=doc_summary,
+        file_metrics=file_metrics_records,
+        metrics_summary=metrics_summary,
     )
 
     # Phase 9: LLM Output Quality — poblar campos derivados
