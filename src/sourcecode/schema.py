@@ -151,6 +151,62 @@ class ModuleGraph:
 
 DocsDepth = Literal["module", "symbols", "full"]
 
+MetricAvailability = Literal["measured", "inferred", "unavailable"]
+
+
+@dataclass
+class FileMetrics:
+    """Metricas de calidad de un fichero de codigo fuente."""
+
+    path: str
+    language: str
+    is_test: bool = False
+    production_target: Optional[str] = None
+    total_lines: int = 0
+    code_lines: int = 0
+    blank_lines: int = 0
+    comment_lines: int = 0
+    loc_availability: MetricAvailability = "unavailable"
+    function_count: int = 0
+    class_count: int = 0
+    symbol_availability: MetricAvailability = "unavailable"
+    cyclomatic_complexity: Optional[float] = None
+    complexity_availability: MetricAvailability = "unavailable"
+    line_rate: Optional[float] = None
+    branch_rate: Optional[float] = None
+    coverage_source: Optional[str] = None
+    coverage_availability: MetricAvailability = "unavailable"
+    workspace: Optional[str] = None
+
+
+@dataclass
+class CoverageRecord:
+    """Registro de cobertura de codigo de un fichero de cobertura."""
+
+    source_file: str
+    format: str
+    line_rate: Optional[float] = None
+    branch_rate: Optional[float] = None
+    lines_covered: Optional[int] = None
+    lines_valid: Optional[int] = None
+    timestamp: Optional[str] = None
+    tool_version: Optional[str] = None
+    file_count: int = 0
+
+
+@dataclass
+class MetricsSummary:
+    """Resumen del analisis de metricas de calidad de codigo."""
+
+    requested: bool = False
+    file_count: int = 0
+    test_file_count: int = 0
+    languages: list[str] = field(default_factory=list)
+    total_loc: int = 0
+    coverage_records: list[CoverageRecord] = field(default_factory=list)
+    coverage_sources_found: list[str] = field(default_factory=list)
+    limitations: list[str] = field(default_factory=list)
+
 
 @dataclass
 class DocRecord:
@@ -207,3 +263,6 @@ class SourceMap:
     file_paths: list[str] = field(default_factory=list)
     project_summary: Optional[str] = None
     key_dependencies: list[DependencyRecord] = field(default_factory=list)
+    # Phase 10: Code Quality Metrics
+    file_metrics: list[FileMetrics] = field(default_factory=list)
+    metrics_summary: Optional[MetricsSummary] = None
