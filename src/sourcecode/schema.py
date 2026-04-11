@@ -237,6 +237,66 @@ class DocSummary:
 
 
 @dataclass
+class SymbolRecord:
+    """Symbol definition found in a source file."""
+
+    symbol: str               # local name: "MyClass" or "my_func"
+    kind: str                 # "function" | "class" | "constant" | "method"
+    language: str
+    path: str                 # relative path to defining file
+    line: Optional[int] = None
+    qualified_name: Optional[str] = None  # "pkg.module.MyClass"
+    exported: bool = True     # False if name starts with _ and no __all__ override
+    workspace: Optional[str] = None
+
+
+@dataclass
+class CallRecord:
+    """A resolved call from one symbol to another, possibly across files."""
+
+    caller_path: str
+    caller_symbol: str
+    callee_path: str
+    callee_symbol: str
+    call_line: Optional[int] = None
+    confidence: Literal["high", "medium", "low"] = "medium"
+    method: Literal["ast", "heuristic", "unresolved"] = "heuristic"
+    args: list[str] = field(default_factory=list)
+    kwargs: dict[str, str] = field(default_factory=dict)
+    workspace: Optional[str] = None
+
+
+@dataclass
+class SymbolLink:
+    """A symbol imported in one file, resolved to its definition in another."""
+
+    importer_path: str
+    symbol: str
+    source_path: Optional[str] = None
+    source_line: Optional[int] = None
+    is_external: bool = False
+    confidence: Literal["high", "medium", "low"] = "high"
+    method: Literal["ast", "heuristic", "unresolved"] = "ast"
+    workspace: Optional[str] = None
+
+
+@dataclass
+class SemanticSummary:
+    """Summary of the --semantics analysis."""
+
+    requested: bool = False
+    call_count: int = 0
+    symbol_count: int = 0
+    link_count: int = 0
+    languages: list[str] = field(default_factory=list)
+    language_coverage: dict[str, str] = field(default_factory=dict)
+    files_analyzed: int = 0
+    files_skipped: int = 0
+    truncated: bool = False
+    limitations: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SourceMap:
     """Schema completo del output v1.0.
 
@@ -266,3 +326,8 @@ class SourceMap:
     # Phase 10: Code Quality Metrics
     file_metrics: list[FileMetrics] = field(default_factory=list)
     metrics_summary: Optional[MetricsSummary] = None
+    # Phase 12: Static Semantics
+    semantic_calls: list[CallRecord] = field(default_factory=list)
+    semantic_symbols: list[SymbolRecord] = field(default_factory=list)
+    semantic_links: list[SymbolLink] = field(default_factory=list)
+    semantic_summary: Optional[SemanticSummary] = None
