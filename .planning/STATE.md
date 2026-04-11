@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 10-metricas-de-calidad-04-PLAN.md
-last_updated: "2026-04-10T10:42:13.957Z"
-last_activity: 2026-04-10
+status: planned
+stopped_at: Completed 12-semantica-estatica-01-PLAN.md
+last_updated: "2026-04-11T00:00:00.000Z"
+last_activity: 2026-04-11
 progress:
-  total_phases: 11
+  total_phases: 16
   completed_phases: 10
-  total_plans: 36
-  completed_plans: 36
-  percent: 100
+  total_plans: 40
+  completed_plans: 37
+  percent: 65
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-04-07)
 
 ## Current Position
 
-Phase: 09 (llm-output-quality) — COMPLETE
-Plan: 3 of 3 complete
-Status: Phase complete — ready for verification
-Last activity: 2026-04-10
+Phase: 12 (semantica-estatica) — IN PROGRESS
+Plan: 1 of 4 complete
+Status: Plan 12-01 complete — schema + SemanticAnalyzer Python core done
+Last activity: 2026-04-11
 
-Progress: [█████████░░] 82%
+Progress: [██████████░] 65%
 
 ## Performance Metrics
 
@@ -71,6 +71,7 @@ Progress: [█████████░░] 82%
 | Phase 10-metricas-de-calidad P02 | 4 | 2 tasks | 5 files |
 | Phase 10-metricas-de-calidad P03 | 15 | 2 tasks | 2 files |
 | Phase 10-metricas-de-calidad P04 | 20 | 2 tasks | 3 files |
+| Phase 12-semantica-estatica P01 | 25 | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -113,6 +114,10 @@ Recent decisions affecting current work:
 - [Phase 10-metricas-de-calidad]: production_target stores full relative path resolved from file_paths; infer_production_target() returns bare name only
 - [Phase 10-metricas-de-calidad]: CoverageParser imported at module level in metrics_analyzer.py — same package, no circular dependency
 - [Phase 10-metricas-de-calidad]: Pre-existing Windows path separator failures in workspace tests are out of scope and pre-date Phase 10
+- [Phase 12-01]: CallRecord.args and CallRecord.kwargs use field(default_factory=...) to avoid shared mutable defaults
+- [Phase 12-01]: SemanticAnalyzer does NOT import GraphAnalyzer — _build_python_module_map is reimplemented locally
+- [Phase 12-01]: Dynamic calls (ast.Subscript, ast.Call as func) emit dynamic_call_skipped limitation; unresolved ast.Name calls are silently ignored per spec
+- [Phase 12-01]: Pass 1 _build_symbol_index also handles file-size and syntax guards to avoid double-processing in Pass 2
 
 ### Pending Todos
 
@@ -131,6 +136,9 @@ None.
 - Phase 6 completed: `--dependencies` ahora expone versiones declaradas/resueltas, transitivas conservadoras y contexto por workspace.
 - Phase 7 planned in 4 planes: base de schema/CLI, Python+Node, relaciones extra/polyglot y cierre end-to-end con workspaces/docs.
 - Phase 7 completed: `--graph-modules` ahora expone nodos, aristas, metodos y limitaciones del grafo con soporte por workspace.
+- Phase 11 (Contexto Git y Operativo) reemplazada por segundo milestone semantico: Fases 12-17 anadidas al roadmap.
+- Fase 12: Semantica Estatica (call graph, cross-file symbol linking, dataflow, import resolution) — proxima a planificar.
+- Fases 13-17: Inferencia Arquitectonica, Flujo de Ejecucion, Context Engine LLM, Orquestador, Agent Backend — en roadmap sin planes.
 
 ### Blockers/Concerns
 
@@ -138,7 +146,7 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-10T10:42:13.954Z
-Stopped at: Completed 10-metricas-de-calidad-04-PLAN.md
+Last session: 2026-04-11T00:00:00.000Z
+Stopped at: Completed 12-semantica-estatica-01-PLAN.md
 Resume file: None
-Next action: Execute Phase 10 (git context) or Phase 10 (metricas)
+Next action: Execute Plan 12-02 (import resolution avanzada: reexports, star imports, namespace packages)
