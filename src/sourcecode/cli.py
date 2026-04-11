@@ -112,6 +112,11 @@ def main(
         "--full-metrics",
         help="Incluir metricas de calidad: LOC, simbolos, complejidad, tests y cobertura por fichero",
     ),
+    semantics: bool = typer.Option(
+        False,
+        "--semantics",
+        help="Incluir call graph semantico, linking cross-file de simbolos y resolucion avanzada de imports",
+    ),
 ) -> None:
     """Genera un mapa de contexto estructurado del proyecto en formato JSON o YAML."""
     # Validar formato
@@ -227,6 +232,9 @@ def main(
     docs_depth_typed = cast(DocsDepth, docs_depth)
     doc_analyzer = DocAnalyzer() if docs else None
     metrics_analyzer = MetricsAnalyzer() if full_metrics else None
+
+    from sourcecode.semantic_analyzer import SemanticAnalyzer
+    semantic_analyzer = SemanticAnalyzer() if semantics else None
 
     root_manifests = [
         manifest
@@ -423,6 +431,47 @@ def main(
         file_metrics=file_metrics_records,
         metrics_summary=metrics_summary,
     )
+
+    # Semantic analysis (--semantics flag)
+    if semantic_analyzer is not None:
+        if workspace_analysis.workspaces:
+            all_sem_calls: list[Any] = []
+            all_sem_symbols: list[Any] = []
+            all_sem_links: list[Any] = []
+            all_sem_summaries: list[Any] = []
+            for ws in workspace_analysis.workspaces:
+                ws_calls, ws_syms, ws_links, ws_sum = semantic_analyzer.analyze(
+                    target / ws.path,
+                    (
+                        filter_sensitive_files(
+                            FileScanner(target / ws.path, max_depth=depth).scan_tree()
+                        )
+                    ),
+                    workspace=ws.path,
+                )
+                all_sem_calls.extend(ws_calls)
+                all_sem_symbols.extend(ws_syms)
+                all_sem_links.extend(ws_links)
+                all_sem_summaries.append(ws_sum)
+            merged_sem = semantic_analyzer.merge_summaries(all_sem_summaries)
+            sm = replace(
+                sm,
+                semantic_calls=all_sem_calls,
+                semantic_symbols=all_sem_symbols,
+                semantic_links=all_sem_links,
+                semantic_summary=merged_sem,
+            )
+        else:
+            sem_calls, sem_syms, sem_links, sem_sum = semantic_analyzer.analyze(
+                target, file_tree
+            )
+            sm = replace(
+                sm,
+                semantic_calls=sem_calls,
+                semantic_symbols=sem_syms,
+                semantic_links=sem_links,
+                semantic_summary=sem_sum,
+            )
 
     # Phase 9: LLM Output Quality — poblar campos derivados
     from sourcecode.summarizer import ProjectSummarizer
