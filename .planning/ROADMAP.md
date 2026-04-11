@@ -16,7 +16,7 @@ Sourcecode se construye en dieciseis fases que van desde el scaffold del proyect
 - [ ] **Fase 8: Documentacion Extraida** - Docstrings, comentarios y resúmenes de modulos consumibles por IA con `--docs`
 - [ ] **Fase 9: LLM Output Quality** - Optimizar signal/noise del output: file_paths plano, project_summary NL, DocRecord.importance, key_dependencies, compact mejorado
 - [x] **Fase 10: Metricas de Calidad** - LOC, complejidad, tests asociados y cobertura con `--full-metrics`
-- [ ] **Fase 12: Semantica Estatica** - Call graph real, linking cross-file de simbolos, dataflow basico y resolucion de imports avanzada con `--semantics`
+- [x] **Fase 12: Semantica Estatica** - Call graph real, linking cross-file de simbolos, dataflow basico y resolucion de imports avanzada con `--semantics`
 - [ ] **Fase 13: Inferencia Arquitectonica** - Clustering por dominios, deteccion de capas, clasificacion arquitectonica y bounded contexts con `--architecture`
 - [ ] **Fase 14: Flujo de Ejecucion** - Request flow tracing, pipelines end-to-end, eventos/async flows y critical path extraction con `--execution-flow`
 - [ ] **Fase 15: Context Engine para LLM** - Contexto jerarquico, vistas por rol, incremental diff y compresion estructurada para reasoning con `--context-engine`
@@ -225,7 +225,7 @@ Plans:
 - [x] 12-01-PLAN.md — Schema + SemanticAnalyzer skeleton + Python call graph core (SEM-01, SEM-03, SEM-04)
 - [x] 12-02-PLAN.md — Python import resolution avanzada + symbol linker (SEM-01, SEM-02)
 - [x] 12-03-PLAN.md — JS/TS semantic layer + basic dataflow (SEM-01, SEM-04)
-- [ ] 12-04-PLAN.md — Polyglot heuristics + CLI wiring + E2E + quality gate (SEM-01, SEM-02, SEM-03, SEM-04)
+- [x] 12-04-PLAN.md — Polyglot heuristics + CLI wiring + E2E + quality gate (SEM-01, SEM-02, SEM-03, SEM-04)
 
 ### Fase 13: Inferencia Arquitectonica
 **Goal**: La herramienta agrupa modulos en dominios funcionales e infiere la arquitectura en capas del sistema (controller/service/repo, frontend/backend, etc.) sin configuracion previa.
@@ -302,7 +302,7 @@ Las fases se ejecutan en orden numerico: 1 → 2 → 3 → 4 → 5 → 6 → 7 �
 | 8. Documentacion Extraida | 4/4 | Complete | 2026-04-09 |
 | 9. LLM Output Quality | 3/3 | Complete | 2026-04-10 |
 | 10. Metricas de Calidad | 4/4 | Complete | 2026-04-10 |
-| 12. Semantica Estatica | 3/4 | In Progress|  |
+| 12. Semantica Estatica | 4/4 | Complete | 2026-04-11 |
 | 13. Inferencia Arquitectonica | 0/0 | Not planned | - |
 | 14. Flujo de Ejecucion | 0/0 | Not planned | - |
 | 15. Context Engine para LLM | 0/0 | Not planned | - |
