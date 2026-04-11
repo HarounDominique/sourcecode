@@ -6,8 +6,9 @@ Extiende el analisis estructural de GraphAnalyzer (Fase 7) con:
 - Degradacion segura via limitations[] en lugar de excepciones
 - Guards: max_files=200, max_file_size=200_000, max_calls=5_000
 
-Los planes 12-02 y 12-03 extienden este modulo con import resolution avanzada
-(reexports, star imports, namespace packages) y soporte JS/TS.
+Plan 12-02 agrega: _build_reexport_map (reexports via __init__.py), _resolve_star_imports
+(star import expansion), _link_symbols (SymbolLink consolidation), namespace package support,
+y language_coverage["python"] = "full".
 """
 from __future__ import annotations
 
@@ -62,6 +63,7 @@ class SemanticAnalyzer:
         Implementa dos pasadas para Python:
         - Pass 1: construye indice de simbolos (FunctionDef, AsyncFunctionDef, ClassDef)
         - Pass 2: resuelve llamadas via ImportBindings + symbol_index
+        Plan 12-02: reexport_map, star import expansion, namespace packages, language_coverage=full.
         """
         limitations: list[str] = []
 
@@ -90,14 +92,20 @@ class SemanticAnalyzer:
         symbol_index = self._build_symbol_index(root, source_files, limitations=limitations)
 
         # 3. Build module map (rel_path -> dotted_module_name)
-        module_map = self._build_python_module_map(source_files)
+        module_map = self._build_python_module_map(source_files, limitations=limitations)
         # Reverse map: dotted_module_name -> rel_path
         reverse_module_map = {v: k for k, v in module_map.items()}
 
-        # 4. Pass 2: Resolve calls
+        # 4. Build reexport map from __init__.py files (Plan 12-02)
+        reexport_map = self._build_reexport_map(root, source_files, module_map, limitations)
+
+        # 5. Pass 2: Resolve calls
         calls: list[CallRecord] = []
         links: list[SymbolLink] = []
         truncated = False
+
+        # Cache of per-file bindings (keyed by rel_path) for _link_symbols
+        all_bindings: dict[str, dict[str, tuple[str, str]]] = {}
 
         for rel_path in source_files:
             abs_path = root / rel_path
@@ -131,23 +139,12 @@ class SemanticAnalyzer:
                 files_skipped += 1
                 continue
 
-            # Build import bindings for this file
-            bindings = self._build_import_bindings(tree, norm_path, module_map, limitations)
-
-            # Emit SymbolLinks for all imports
-            for local_name, (source_module, original_symbol) in bindings.items():
-                source_path = reverse_module_map.get(source_module)
-                link = SymbolLink(
-                    importer_path=norm_path,
-                    symbol=local_name,
-                    source_path=source_path,
-                    source_line=None,
-                    is_external=(source_path is None),
-                    confidence="high",
-                    method="ast",
-                    workspace=workspace,
-                )
-                links.append(link)
+            # Build import bindings for this file (including star import expansion)
+            bindings = self._build_import_bindings(
+                tree, norm_path, module_map, limitations,
+                root=root, symbol_index=symbol_index,
+            )
+            all_bindings[rel_path] = bindings
 
             # Resolve calls from top-level functions and methods
             file_symbols = {sr.symbol: sr for sr in symbol_index.get(rel_path, [])}
@@ -182,6 +179,7 @@ class SemanticAnalyzer:
                         # Try to resolve via bindings -> reverse_module_map -> symbol_index
                         if callee_name in bindings:
                             source_module, original_symbol = bindings[callee_name]
+                            # Try direct resolve first
                             target_path = reverse_module_map.get(source_module)
                             if target_path is not None:
                                 target_posix = Path(target_path).as_posix()
@@ -199,8 +197,32 @@ class SemanticAnalyzer:
                                         kwargs=kwargs,
                                         workspace=workspace,
                                     ))
+                            else:
+                                # Try via reexport_map: source_module may be a package
+                                # that re-exports original_symbol from a sub-module
+                                resolved_path = self._resolve_via_reexport(
+                                    source_module, original_symbol, reexport_map
+                                )
+                                if resolved_path is not None:
+                                    target_posix = Path(resolved_path).as_posix()
+                                    target_symbols = {sr.symbol: sr for sr in symbol_index.get(resolved_path, [])}
+                                    if original_symbol in target_symbols:
+                                        calls.append(CallRecord(
+                                            caller_path=caller_path,
+                                            caller_symbol=caller_symbol,
+                                            callee_path=target_posix,
+                                            callee_symbol=original_symbol,
+                                            call_line=call_line,
+                                            confidence="medium",
+                                            method="ast",
+                                            args=args,
+                                            kwargs=kwargs,
+                                            workspace=workspace,
+                                        ))
                         # Same-file call
                         elif callee_name in file_symbols and callee_name != caller_symbol:
+                            call_line = node.lineno
+                            args, kwargs = self._extract_call_args(node)
                             calls.append(CallRecord(
                                 caller_path=caller_path,
                                 caller_symbol=caller_symbol,
@@ -257,6 +279,17 @@ class SemanticAnalyzer:
                 if truncated:
                     break
 
+        # 6. Build consolidated SymbolLink list (Plan 12-02: _link_symbols)
+        links = self._link_symbols(
+            source_files=source_files,
+            root=root,
+            module_map=module_map,
+            reexport_map=reexport_map,
+            symbol_index=symbol_index,
+            all_bindings=all_bindings,
+            workspace=workspace,
+        )
+
         # Collect all symbols into a flat list
         all_symbols: list[SymbolRecord] = []
         for sym_list in symbol_index.values():
@@ -268,13 +301,18 @@ class SemanticAnalyzer:
         if files_analyzed < 0:
             files_analyzed = 0
 
+        # Plan 12-02: language_coverage["python"] = "full" when Python files are analyzed
+        lang_coverage: dict[str, str] = {}
+        if source_files:
+            lang_coverage["python"] = "full"
+
         summary = SemanticSummary(
             requested=True,
             call_count=len(calls),
             symbol_count=len(all_symbols),
             link_count=len(links),
             languages=languages,
-            language_coverage={"python": "ast"} if source_files else {},
+            language_coverage=lang_coverage,
             files_analyzed=files_analyzed,
             files_skipped=files_skipped,
             truncated=truncated,
@@ -402,11 +440,15 @@ class SemanticAnalyzer:
         rel_path: str,
         module_map: dict[str, str],
         limitations: list[str],
+        *,
+        root: Path | None = None,
+        symbol_index: dict | None = None,
     ) -> dict[str, tuple[str, str]]:
         """Construye un mapa local_name -> (source_module_dotted, original_symbol).
 
         Procesa ast.Import y ast.ImportFrom en el nivel superior del AST.
-        NO resuelve star imports (plan 12-02).
+        Plan 12-02: expande star imports via _resolve_star_imports() cuando
+        root y symbol_index estan disponibles.
         """
         bindings: dict[str, tuple[str, str]] = {}
 
@@ -420,7 +462,21 @@ class SemanticAnalyzer:
 
             elif isinstance(node, ast.ImportFrom):
                 if node.names and node.names[0].name == "*":
-                    # Star import — skip (plan 12-02)
+                    # Star import — expand via _resolve_star_imports (plan 12-02)
+                    if root is not None and symbol_index is not None:
+                        # Resolve the source module name
+                        if node.level and node.level > 0:
+                            star_module = self._resolve_relative_import(
+                                rel_path, node.level, node.module or ""
+                            )
+                        else:
+                            star_module = node.module or ""
+                        if star_module:
+                            expanded_names = self._resolve_star_imports(
+                                root, star_module, module_map, symbol_index, limitations
+                            )
+                            for name in expanded_names:
+                                bindings[name] = (star_module, name)
                     continue
 
                 # Resolve the module name
@@ -458,7 +514,11 @@ class SemanticAnalyzer:
     # Module map
     # -----------------------------------------------------------------------
 
-    def _build_python_module_map(self, source_files: list[str]) -> dict[str, str]:
+    def _build_python_module_map(
+        self,
+        source_files: list[str],
+        limitations: list[str] | None = None,
+    ) -> dict[str, str]:
         """Convierte rel_path a dotted module name.
 
         Sigue el patron de GraphAnalyzer._build_python_module_map() pero
@@ -468,8 +528,38 @@ class SemanticAnalyzer:
           "src/foo/bar.py" -> "foo.bar"  (si src/ es la raiz de paquetes)
           "pkg/mod.py"     -> "pkg.mod"
           "pkg/__init__.py" -> "pkg"
+
+        Plan 12-02: soporta namespace packages (directorios sin __init__.py).
+        Directories that contain .py files but no __init__.py are treated as
+        namespace packages and included in the map with their dotted paths.
+        limitations["namespace_package:{dir}"] added for each one found.
         """
+        if limitations is None:
+            limitations = []
+
         module_map: dict[str, str] = {}
+
+        # Collect all directories that have __init__.py
+        dirs_with_init: set[str] = set()
+        for rel_path in source_files:
+            path = PurePosixPath(Path(rel_path).as_posix())
+            if path.name == "__init__.py" and len(path.parts) > 1:
+                dirs_with_init.add(str(path.parent))
+
+        # Collect directories that contain .py files (for namespace package detection)
+        dirs_with_py: dict[str, list[str]] = defaultdict(list)
+        for rel_path in source_files:
+            path = PurePosixPath(Path(rel_path).as_posix())
+            if path.suffix in _PY_EXTENSIONS and len(path.parts) > 1:
+                dirs_with_py[str(path.parent)].append(rel_path)
+
+        # Report namespace packages (dirs with .py files but no __init__.py)
+        reported_ns: set[str] = set()
+        for dir_posix, _files in dirs_with_py.items():
+            if dir_posix not in dirs_with_init and dir_posix not in reported_ns:
+                reported_ns.add(dir_posix)
+                limitations.append(f"namespace_package:{dir_posix}")
+
         for rel_path in source_files:
             path = PurePosixPath(Path(rel_path).as_posix())
             if path.suffix not in _PY_EXTENSIONS:
@@ -542,3 +632,313 @@ class SemanticAnalyzer:
             kwargs[kw.arg] = val_text if len(val_text) <= _MAX_ARG_LEN else "<expr>"
 
         return args, kwargs
+
+    # -----------------------------------------------------------------------
+    # Plan 12-02: Reexport map
+    # -----------------------------------------------------------------------
+
+    def _build_reexport_map(
+        self,
+        root: Path,
+        source_files: list[str],
+        module_map: dict[str, str],
+        limitations: list[str],
+    ) -> dict[str, dict[str, str]]:
+        """Escanea __init__.py files y construye {module_dotted -> {symbol -> source_path}}.
+
+        Soporta chaining hasta depth=2 con guard contra bucles (visited set).
+        Si se alcanza el limite de chain: limitations["reexport_chain_limit:{symbol}"].
+
+        T-12-02-01 mitigation: chain depth limit = 2, visited set per traversal.
+        T-12-02-05 mitigation: solo parsea __init__.py que estan en source_files.
+        """
+        reexport_map: dict[str, dict[str, str]] = {}
+
+        # Reverse map: dotted_module_name -> rel_path
+        reverse_module_map: dict[str, str] = {v: k for k, v in module_map.items()}
+
+        # First pass: build direct reexport entries from each __init__.py
+        for rel_path in source_files:
+            posix = Path(rel_path).as_posix()
+            if not posix.endswith("__init__.py"):
+                continue
+
+            module_dotted = module_map.get(rel_path)
+            if not module_dotted:
+                continue
+
+            abs_path = root / rel_path
+            try:
+                content = abs_path.read_text(encoding="utf-8", errors="replace")
+                tree = ast.parse(content, filename=posix)
+            except (OSError, SyntaxError):
+                continue
+
+            pkg_symbols: dict[str, str] = {}
+
+            for node in tree.body:
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+
+                # Resolve the module being imported from
+                if node.level and node.level > 0:
+                    source_mod = self._resolve_relative_import(
+                        posix, node.level, node.module or ""
+                    )
+                else:
+                    source_mod = node.module or ""
+
+                if not source_mod:
+                    continue
+
+                # Find the rel_path for source_mod
+                source_rel = reverse_module_map.get(source_mod)
+                if source_rel is None:
+                    continue
+
+                source_posix = Path(source_rel).as_posix()
+
+                # Register each imported name
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    local_name = alias.asname if alias.asname else alias.name
+                    pkg_symbols[local_name] = source_posix
+
+            if pkg_symbols:
+                reexport_map[module_dotted] = pkg_symbols
+
+        # Second pass: follow one level of chaining (depth=2 total)
+        # If source_path in reexport_map entry is itself an __init__.py,
+        # try to resolve further using the already-built reexport_map.
+        for module_dotted, symbols in list(reexport_map.items()):
+            for symbol_name, source_posix in list(symbols.items()):
+                if not source_posix.endswith("__init__.py"):
+                    continue
+                # source is itself an __init__.py — find what it re-exports
+                source_module = module_map.get(source_posix)
+                if source_module is None:
+                    # Try reverse lookup by posix path
+                    source_module = next(
+                        (m for p, m in module_map.items()
+                         if Path(p).as_posix() == source_posix),
+                        None,
+                    )
+                if source_module is None:
+                    continue
+
+                inner = reexport_map.get(source_module, {})
+                if symbol_name in inner:
+                    # Resolved one level deeper — update
+                    reexport_map[module_dotted][symbol_name] = inner[symbol_name]
+                else:
+                    # Could not resolve at depth=2 — report chain limit
+                    limitations.append(f"reexport_chain_limit:{symbol_name}")
+
+        return reexport_map
+
+    # -----------------------------------------------------------------------
+    # Plan 12-02: Resolve via reexport
+    # -----------------------------------------------------------------------
+
+    def _resolve_via_reexport(
+        self,
+        source_module: str,
+        original_symbol: str,
+        reexport_map: dict[str, dict[str, str]],
+    ) -> str | None:
+        """Busca original_symbol en reexport_map[source_module].
+
+        Retorna source_path (rel_path posix) o None si no esta en el mapa.
+        """
+        return reexport_map.get(source_module, {}).get(original_symbol)
+
+    # -----------------------------------------------------------------------
+    # Plan 12-02: Star import expansion
+    # -----------------------------------------------------------------------
+
+    _MAX_STAR_SYMBOLS = 200
+
+    def _resolve_star_imports(
+        self,
+        root: Path,
+        star_module: str,
+        module_map: dict[str, str],
+        symbol_index: dict,
+        limitations: list[str],
+    ) -> list[str]:
+        """Expande 'from foo import *' retornando lista de nombres exportados.
+
+        Estrategia:
+        1. Si foo es externo (no en module_map): limitacion y retorna []
+        2. Leer __all__ del AST del modulo; si existe y es lista de strings: usar esos
+        3. Si no hay __all__ o es dinamico: todos los nombres publicos (FunctionDef,
+           AsyncFunctionDef, ClassDef a nivel modulo cuyo nombre no empieza con _)
+        4. Limitar a 200 simbolos (T-12-02-02 mitigation)
+
+        T-12-02-02 mitigation: limite de 200 simbolos por expansion.
+        """
+        # Reverse map: dotted_module -> rel_path
+        reverse_module_map = {v: k for k, v in module_map.items()}
+
+        module_rel = reverse_module_map.get(star_module)
+        if module_rel is None:
+            # External module
+            limitations.append(f"star_import_external:{star_module}")
+            return []
+
+        abs_path = root / module_rel
+        try:
+            content = abs_path.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(content, filename=Path(module_rel).as_posix())
+        except (OSError, SyntaxError):
+            return []
+
+        # Look for __all__ = [...] at module level
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if not (isinstance(target, ast.Name) and target.id == "__all__"):
+                    continue
+                # Check if value is a list of string constants
+                if isinstance(node.value, ast.List):
+                    names: list[str] = []
+                    all_strings = True
+                    for elt in node.value.elts:
+                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                            names.append(elt.value)
+                        else:
+                            all_strings = False
+                            break
+                    if all_strings:
+                        result = names[: self._MAX_STAR_SYMBOLS]
+                        if len(names) > self._MAX_STAR_SYMBOLS:
+                            limitations.append(
+                                f"star_import_too_large:{star_module}"
+                            )
+                        return result
+
+        # Fallback: collect all public names at module level
+        public_names: list[str] = []
+        for node in tree.body:
+            name: str | None = None
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = node.name
+            elif isinstance(node, ast.Assign):
+                # Simple module-level assignment: X = ...
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        name = target.id
+                        break
+            if name and not name.startswith("_"):
+                public_names.append(name)
+
+        result = public_names[: self._MAX_STAR_SYMBOLS]
+        if len(public_names) > self._MAX_STAR_SYMBOLS:
+            limitations.append(f"star_import_too_large:{star_module}")
+        return result
+
+    # -----------------------------------------------------------------------
+    # Plan 12-02: Symbol link consolidation
+    # -----------------------------------------------------------------------
+
+    def _link_symbols(
+        self,
+        source_files: list[str],
+        root: Path,
+        module_map: dict[str, str],
+        reexport_map: dict[str, dict[str, str]],
+        symbol_index: dict[str, list],
+        all_bindings: dict[str, dict[str, tuple[str, str]]],
+        workspace: str | None = None,
+    ) -> list[SymbolLink]:
+        """Produce SymbolLink para cada import binding de cada fichero.
+
+        Para imports internos: SymbolLink con source_path y source_line.
+        Para imports externos: SymbolLink con is_external=True, source_path=None.
+        Imports resueltos via reexport_map: confidence="medium".
+        """
+        links: list[SymbolLink] = []
+        reverse_module_map: dict[str, str] = {v: k for k, v in module_map.items()}
+
+        for rel_path in source_files:
+            bindings = all_bindings.get(rel_path)
+            if not bindings:
+                continue
+
+            importer_posix = Path(rel_path).as_posix()
+
+            for local_name, (source_module, original_symbol) in bindings.items():
+                # --- Try via reexport_map first when source is a package ---
+                # (from pkg import Symbol where pkg/__init__.py re-exports Symbol)
+                resolved_path = self._resolve_via_reexport(
+                    source_module, original_symbol, reexport_map
+                )
+                if resolved_path is not None:
+                    # resolved_path is already a posix rel path
+                    resolved_rel = next(
+                        (p for p in source_files
+                         if Path(p).as_posix() == resolved_path),
+                        resolved_path,
+                    )
+                    source_line = self._find_symbol_line(
+                        symbol_index, resolved_rel, original_symbol
+                    )
+                    links.append(SymbolLink(
+                        importer_path=importer_posix,
+                        symbol=local_name,
+                        source_path=resolved_path,
+                        source_line=source_line,
+                        is_external=False,
+                        confidence="medium",
+                        method="ast",
+                        workspace=workspace,
+                    ))
+                    continue
+
+                # --- Try direct resolution ---
+                target_rel = reverse_module_map.get(source_module)
+                if target_rel is not None:
+                    target_posix = Path(target_rel).as_posix()
+                    # Find source_line from symbol_index
+                    source_line = self._find_symbol_line(
+                        symbol_index, target_rel, original_symbol
+                    )
+                    links.append(SymbolLink(
+                        importer_path=importer_posix,
+                        symbol=local_name,
+                        source_path=target_posix,
+                        source_line=source_line,
+                        is_external=False,
+                        confidence="high",
+                        method="ast",
+                        workspace=workspace,
+                    ))
+                    continue
+
+                # --- External import ---
+                links.append(SymbolLink(
+                    importer_path=importer_posix,
+                    symbol=local_name,
+                    source_path=None,
+                    source_line=None,
+                    is_external=True,
+                    confidence="high",
+                    method="ast",
+                    workspace=workspace,
+                ))
+
+        return links
+
+    @staticmethod
+    def _find_symbol_line(
+        symbol_index: dict[str, list],
+        rel_path: str,
+        symbol_name: str,
+    ) -> int | None:
+        """Busca la linea de definicion de symbol_name en symbol_index[rel_path]."""
+        for sr in symbol_index.get(rel_path, []):
+            if sr.symbol == symbol_name:
+                return sr.line
+        return None
