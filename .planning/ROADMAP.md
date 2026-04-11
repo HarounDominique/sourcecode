@@ -224,7 +224,7 @@ Plans:
 Plans:
 - [x] 12-01-PLAN.md — Schema + SemanticAnalyzer skeleton + Python call graph core (SEM-01, SEM-03, SEM-04)
 - [x] 12-02-PLAN.md — Python import resolution avanzada + symbol linker (SEM-01, SEM-02)
-- [ ] 12-03-PLAN.md — JS/TS semantic layer + basic dataflow (SEM-01, SEM-04)
+- [x] 12-03-PLAN.md — JS/TS semantic layer + basic dataflow (SEM-01, SEM-04)
 - [ ] 12-04-PLAN.md — Polyglot heuristics + CLI wiring + E2E + quality gate (SEM-01, SEM-02, SEM-03, SEM-04)
 
 ### Fase 13: Inferencia Arquitectonica
@@ -302,7 +302,7 @@ Las fases se ejecutan en orden numerico: 1 → 2 → 3 → 4 → 5 → 6 → 7 �
 | 8. Documentacion Extraida | 4/4 | Complete | 2026-04-09 |
 | 9. LLM Output Quality | 3/3 | Complete | 2026-04-10 |
 | 10. Metricas de Calidad | 4/4 | Complete | 2026-04-10 |
-| 12. Semantica Estatica | 2/4 | In Progress|  |
+| 12. Semantica Estatica | 3/4 | In Progress|  |
 | 13. Inferencia Arquitectonica | 0/0 | Not planned | - |
 | 14. Flujo de Ejecucion | 0/0 | Not planned | - |
 | 15. Context Engine para LLM | 0/0 | Not planned | - |

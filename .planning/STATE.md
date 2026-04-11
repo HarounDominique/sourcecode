@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 12-semantica-estatica-02-PLAN.md
-last_updated: "2026-04-11T15:41:16.221Z"
+stopped_at: Completed 12-semantica-estatica-03-PLAN.md
+last_updated: "2026-04-11T15:48:52.776Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 12
   completed_phases: 10
   total_plans: 40
-  completed_plans: 38
-  percent: 95
+  completed_plans: 39
+  percent: 98
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-07)
 ## Current Position
 
 Phase: 12 (semantica-estatica) — IN PROGRESS
-Plan: 2 of 4 complete
+Plan: 3 of 4 complete
 Status: Ready to execute
 Last activity: 2026-04-11
 
@@ -73,6 +73,7 @@ Progress: [██████████░] 65%
 | Phase 10-metricas-de-calidad P04 | 20 | 2 tasks | 3 files |
 | Phase 12-semantica-estatica P01 | 25 | 3 tasks | 4 files |
 | Phase 12-semantica-estatica P02 | 30 | 2 tasks | 2 files |
+| Phase 12-semantica-estatica P03 | 35 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -121,6 +122,7 @@ Recent decisions affecting current work:
 - [Phase 12-01]: Pass 1 _build_symbol_index also handles file-size and syntax guards to avoid double-processing in Pass 2
 - [Phase 12-semantica-estatica]: _link_symbols checks reexport_map before module_map — ensures from-pkg-import resolves to defining submodule not __init__.py
 - [Phase 12-semantica-estatica]: Star import symbols stored as regular bindings enabling reuse of existing Pass 2 call resolution pipeline
+- [Phase 12-semantica-estatica]: _JS_KEYWORD_EXCLUSIONS is module-level frozenset so it can be imported directly by tests; _detect_js_calls only emits CallRecord if identifier is in js_bindings (no speculative calls); string literal args replaced with '<string_literal>' for security; export default function regex required 'default' keyword in optional group
 
 ### Pending Todos
 
@@ -149,7 +151,7 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-11T15:41:16.217Z
-Stopped at: Completed 12-semantica-estatica-02-PLAN.md
+Last session: 2026-04-11T15:48:52.772Z
+Stopped at: Completed 12-semantica-estatica-03-PLAN.md
 Resume file: None
 Next action: Execute Plan 12-02 (import resolution avanzada: reexports, star imports, namespace packages)
