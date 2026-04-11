@@ -9,10 +9,15 @@ Extiende el analisis estructural de GraphAnalyzer (Fase 7) con:
 Plan 12-02 agrega: _build_reexport_map (reexports via __init__.py), _resolve_star_imports
 (star import expansion), _link_symbols (SymbolLink consolidation), namespace package support,
 y language_coverage["python"] = "full".
+
+Plan 12-03 agrega: capa JS/TS con _extract_js_imports, _resolve_js_module_path,
+_analyze_js_file, _detect_js_calls, integracion en analyze() para JS/TS files,
+y language_coverage["nodejs"] = "heuristic".
 """
 from __future__ import annotations
 
 import ast
+import re
 from collections import defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Optional
@@ -30,9 +35,34 @@ _MAX_FILE_SIZE = 200_000
 _MAX_CALLS = 5_000
 _MAX_SYMBOLS = 10_000
 
+# ---------------------------------------------------------------------------
+# JS/TS keyword and builtin exclusions (Plan 12-03)
+# ---------------------------------------------------------------------------
+
+_JS_KEYWORD_EXCLUSIONS: frozenset[str] = frozenset({
+    # JS reserved words
+    "if", "else", "for", "while", "do", "switch", "case", "break", "continue",
+    "return", "throw", "try", "catch", "finally", "new", "delete", "typeof",
+    "instanceof", "void", "in", "of", "async", "await", "yield", "import",
+    "export", "default", "class", "extends", "super", "this", "static",
+    "get", "set", "let", "const", "var", "function", "debugger", "with",
+    # Common builtins / globals
+    "console", "Math", "Object", "Array", "String", "Number", "Boolean",
+    "Promise", "Error", "TypeError", "RangeError", "Symbol", "Map", "Set",
+    "WeakMap", "WeakSet", "Proxy", "Reflect", "JSON", "RegExp", "Date",
+    "setTimeout", "clearTimeout", "setInterval", "clearInterval", "queueMicrotask",
+    "require", "module", "exports", "process", "global", "window", "document",
+    "navigator", "location", "fetch", "URL", "URLSearchParams", "FormData",
+    # TypeScript keywords
+    "type", "interface", "namespace", "declare", "abstract", "enum", "as",
+    "from", "keyof", "typeof", "infer", "never", "unknown", "any",
+})
+
 
 class SemanticAnalyzer:
     """Analisis semantico estatico del proyecto — Python call graph en dos pasadas."""
+
+    _NODE_EXTENSIONS: frozenset[str] = frozenset({".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"})
 
     def __init__(
         self,
@@ -290,12 +320,12 @@ class SemanticAnalyzer:
             workspace=workspace,
         )
 
-        # Collect all symbols into a flat list
+        # Collect all Python symbols into a flat list
         all_symbols: list[SymbolRecord] = []
         for sym_list in symbol_index.values():
             all_symbols.extend(sym_list)
 
-        # Build summary
+        # Build summary bases
         languages = ["python"] if source_files else []
         files_analyzed = len(source_files) - files_skipped
         if files_analyzed < 0:
@@ -305,6 +335,148 @@ class SemanticAnalyzer:
         lang_coverage: dict[str, str] = {}
         if source_files:
             lang_coverage["python"] = "full"
+
+        # -----------------------------------------------------------------------
+        # Plan 12-03: JS/TS analysis block
+        # -----------------------------------------------------------------------
+        js_source_files = [
+            p for p in all_paths
+            if Path(p).suffix in self._NODE_EXTENSIONS and (root / p).is_file()
+        ]
+        internal_module_paths: set[str] = set(js_source_files)
+
+        if js_source_files:
+            # Build JS symbol index: rel_path -> list[SymbolRecord]
+            js_symbol_index: dict[str, list[SymbolRecord]] = {}
+            # Build import bindings per file: rel_path -> {local_name -> (specifier, orig)}
+            js_all_bindings: dict[str, dict[str, tuple[str, str]]] = {}
+
+            # Pass 1: index symbols for all JS/TS files
+            for rel_path in js_source_files:
+                abs_path = root / rel_path
+                norm_path = Path(rel_path).as_posix()
+                try:
+                    file_size = abs_path.stat().st_size
+                except OSError:
+                    limitations.append(f"read_error:{norm_path}")
+                    files_skipped += 1
+                    continue
+                if file_size > self.max_file_size:
+                    limitations.append(f"file_too_large:{norm_path}")
+                    files_skipped += 1
+                    continue
+                try:
+                    content = abs_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    limitations.append(f"read_error:{norm_path}")
+                    files_skipped += 1
+                    continue
+
+                js_symbol_index[rel_path] = self._analyze_js_file(content, norm_path)
+                js_all_bindings[rel_path] = self._extract_js_imports(content, norm_path)
+                files_analyzed += 1
+
+            # Pass 2: detect calls using import bindings
+            for rel_path in js_source_files:
+                if rel_path not in js_symbol_index:
+                    continue  # was skipped above
+                abs_path = root / rel_path
+                norm_path = Path(rel_path).as_posix()
+                try:
+                    content = abs_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+
+                js_bindings = js_all_bindings.get(rel_path, {})
+                file_js_symbols = js_symbol_index.get(rel_path, [])
+
+                # Detect calls for each function symbol as caller context
+                for sym in file_js_symbols:
+                    if sym.kind not in ("function",):
+                        continue
+                    if len(calls) >= self.max_calls:
+                        if not truncated:
+                            truncated = True
+                            limitations.append("call_budget_reached")
+                        break
+                    new_calls = self._detect_js_calls(
+                        content=content,
+                        rel_path=norm_path,
+                        caller_symbol=sym.symbol,
+                        js_bindings=js_bindings,
+                        js_symbol_index=js_symbol_index,
+                        internal_module_paths=internal_module_paths,
+                        root=root,
+                        workspace=workspace,
+                    )
+                    # Apply budget
+                    remaining = self.max_calls - len(calls)
+                    if len(new_calls) > remaining:
+                        calls.extend(new_calls[:remaining])
+                        if not truncated:
+                            truncated = True
+                            limitations.append("call_budget_reached")
+                    else:
+                        calls.extend(new_calls)
+
+                if truncated:
+                    break
+
+            # Build SymbolLinks for JS/TS imports
+            for rel_path, js_bindings in js_all_bindings.items():
+                if rel_path not in js_symbol_index:
+                    continue
+                norm_path = Path(rel_path).as_posix()
+                for local_name, (specifier, _orig) in js_bindings.items():
+                    resolved = self._resolve_js_module_path(
+                        specifier, norm_path, internal_module_paths, root=root
+                    )
+                    if resolved is not None:
+                        # Internal
+                        source_line: int | None = None
+                        resolved_syms = js_symbol_index.get(resolved, [])
+                        for sr in resolved_syms:
+                            if sr.symbol == local_name:
+                                source_line = sr.line
+                                break
+                        links.append(SymbolLink(
+                            importer_path=norm_path,
+                            symbol=local_name,
+                            source_path=resolved,
+                            source_line=source_line,
+                            is_external=False,
+                            confidence="medium",
+                            method="heuristic",
+                            workspace=workspace,
+                        ))
+                    else:
+                        # External (npm package or unresolvable)
+                        links.append(SymbolLink(
+                            importer_path=norm_path,
+                            symbol=local_name,
+                            source_path=None,
+                            source_line=None,
+                            is_external=True,
+                            confidence="medium",
+                            method="heuristic",
+                            workspace=workspace,
+                        ))
+
+            # Collect JS/TS symbols
+            for sym_list in js_symbol_index.values():
+                all_symbols.extend(sym_list)
+
+            # Update language coverage and languages list
+            js_languages: set[str] = set()
+            for rel_path in js_source_files:
+                if rel_path in js_symbol_index:
+                    suffix = Path(rel_path).suffix
+                    if suffix in {".ts", ".tsx"}:
+                        js_languages.add("typescript")
+                    else:
+                        js_languages.add("javascript")
+            languages.extend(sorted(js_languages))
+            lang_coverage["nodejs"] = "heuristic"
 
         summary = SemanticSummary(
             requested=True,
@@ -942,3 +1114,442 @@ class SemanticAnalyzer:
             if sr.symbol == symbol_name:
                 return sr.line
         return None
+
+    # -----------------------------------------------------------------------
+    # Plan 12-03: JS/TS semantic layer
+    # -----------------------------------------------------------------------
+
+    def _extract_js_imports(
+        self,
+        content: str,
+        rel_path: str,
+    ) -> dict[str, tuple[str, str]]:
+        """Extrae import bindings de JS/TS.
+
+        Soporta (en orden de precedencia):
+        - import * as ns from './foo'                -> {"ns": ("./foo", "*")}
+        - import { Foo, Bar as B } from './foo'      -> {"Foo": ("./foo","Foo"), "B": ("./foo","Bar")}
+        - import DefaultName from './foo'             -> {"DefaultName": ("./foo", "default")}
+        - import DefaultName, { Named } from './foo' -> combined
+        - const { fn } = require('./foo')            -> {"fn": ("./foo", "fn")}
+        - const foo = require('./foo')               -> {"foo": ("./foo", "default")}
+        """
+        bindings: dict[str, tuple[str, str]] = {}
+
+        # Pattern 1: namespace import  — import * as ns from 'specifier'
+        _pat_namespace = re.compile(
+            r"""import\s+\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+['"]([^'"]+)['"]""",
+            re.MULTILINE,
+        )
+        for m in _pat_namespace.finditer(content):
+            local_name = m.group(1)
+            specifier = m.group(2)
+            bindings[local_name] = (specifier, "*")
+
+        # Pattern 2: named imports  — import { Foo, Bar as B } from 'specifier'
+        # Also handles: import Default, { Named } from 'specifier'
+        _pat_named = re.compile(
+            r"""import\s+(?:[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*)?\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]""",
+            re.MULTILINE,
+        )
+        for m in _pat_named.finditer(content):
+            named_block = m.group(1)
+            specifier = m.group(2)
+            for item in named_block.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                if " as " in item:
+                    orig, alias = item.split(" as ", 1)
+                    bindings[alias.strip()] = (specifier, orig.strip())
+                else:
+                    bindings[item] = (specifier, item)
+
+        # Pattern 3: default import  — import DefaultName from 'specifier'
+        # Must NOT match namespace ("* as") or named ("{") imports already handled
+        _pat_default = re.compile(
+            r"""import\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+['"]([^'"]+)['"]""",
+            re.MULTILINE,
+        )
+        for m in _pat_default.finditer(content):
+            local_name = m.group(1)
+            specifier = m.group(2)
+            # Skip if this local_name was already set by namespace pattern (import * as ...)
+            # or if it looks like a keyword
+            if local_name in bindings and bindings[local_name][1] == "*":
+                continue
+            # Don't override named import bindings for this specifier
+            if local_name not in bindings:
+                bindings[local_name] = (specifier, "default")
+
+        # Pattern 4: CommonJS destructure  — const { fn, bar } = require('specifier')
+        _pat_cjs_destruct = re.compile(
+            r"""(?:const|let|var)\s+\{([^}]+)\}\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)""",
+            re.MULTILINE,
+        )
+        for m in _pat_cjs_destruct.finditer(content):
+            named_block = m.group(1)
+            specifier = m.group(2)
+            for item in named_block.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                if " as " in item:
+                    orig, alias = item.split(" as ", 1)
+                    bindings[alias.strip()] = (specifier, orig.strip())
+                else:
+                    bindings[item] = (specifier, item)
+
+        # Pattern 5: CommonJS plain  — const foo = require('specifier')
+        _pat_cjs_plain = re.compile(
+            r"""(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)""",
+            re.MULTILINE,
+        )
+        for m in _pat_cjs_plain.finditer(content):
+            local_name = m.group(1)
+            specifier = m.group(2)
+            # Only set if not already set by destructure pattern
+            if local_name not in bindings:
+                bindings[local_name] = (specifier, "default")
+
+        return bindings
+
+    def _resolve_js_module_path(
+        self,
+        specifier: str,
+        caller_path: str,
+        internal_module_paths: set[str],
+        *,
+        root: Path | None = None,
+    ) -> str | None:
+        """Resuelve un import specifier JS/TS a un rel_path del proyecto.
+
+        - Si specifier no empieza con '.' o '/' -> externo, retornar None
+        - Resolver path relativo desde caller_path
+        - Probar extensiones en orden: as-is, .js, .ts, .jsx, .tsx, /index.js, /index.ts
+        - Verificar que el resultado esta en internal_module_paths
+        - Usa Path.resolve() con root para prevenir path traversal (T-12-03-05)
+        """
+        if not specifier.startswith(".") and not specifier.startswith("/"):
+            return None  # external npm package
+
+        caller_dir = PurePosixPath(caller_path).parent
+
+        # Extension probe order
+        candidates: list[str] = []
+        base = str(caller_dir / specifier) if str(caller_dir) != "." else specifier
+        # Normalize PurePosixPath
+        base_posix = str(PurePosixPath(base))
+
+        candidates.append(base_posix)
+        if not any(base_posix.endswith(ext) for ext in (".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs")):
+            candidates.append(base_posix + ".js")
+            candidates.append(base_posix + ".ts")
+            candidates.append(base_posix + ".jsx")
+            candidates.append(base_posix + ".tsx")
+            candidates.append(base_posix + "/index.js")
+            candidates.append(base_posix + "/index.ts")
+
+        # Path traversal guard: if root is provided, ensure resolved path is under root
+        for candidate in candidates:
+            # Normalise dots/double-dots
+            try:
+                if root is not None:
+                    resolved_abs = (root / candidate).resolve()
+                    root_resolved = root.resolve()
+                    # Must be under root
+                    resolved_abs.relative_to(root_resolved)
+                    # Convert back to rel_path using forward slashes
+                    rel = resolved_abs.relative_to(root_resolved)
+                    candidate_posix = str(PurePosixPath(rel))
+                else:
+                    candidate_posix = str(PurePosixPath(candidate))
+            except (ValueError, OSError):
+                continue
+
+            if candidate_posix in internal_module_paths:
+                return candidate_posix
+
+        return None
+
+    def _analyze_js_file(
+        self,
+        content: str,
+        rel_path: str,
+    ) -> list[SymbolRecord]:
+        """Detecta funciones y clases JS/TS exportadas usando regex con numeros de linea.
+
+        Patrones (re.MULTILINE):
+        - function declarations (export optional, async optional)
+        - class declarations (export optional)
+        - const arrow/function expressions (export optional)
+
+        language: "typescript" for .ts/.tsx, "javascript" for others.
+        """
+        suffix = Path(rel_path).suffix.lower()
+        language = "typescript" if suffix in {".ts", ".tsx"} else "javascript"
+
+        symbols: list[SymbolRecord] = []
+
+        patterns: list[tuple[re.Pattern[str], str]] = [
+            (
+                re.compile(
+                    r"(?:^|\n)\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+                    re.MULTILINE,
+                ),
+                "function",
+            ),
+            (
+                re.compile(
+                    r"(?:^|\n)\s*(?:export\s+(?:default\s+)?)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+                    re.MULTILINE,
+                ),
+                "class",
+            ),
+            (
+                re.compile(
+                    r"(?:^|\n)\s*(?:export\s+)?const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?(?:function|\()",
+                    re.MULTILINE,
+                ),
+                "function",
+            ),
+        ]
+
+        seen: set[str] = set()
+        for pattern, kind in patterns:
+            for m in pattern.finditer(content):
+                name = m.group(1)
+                if name in seen:
+                    continue
+                seen.add(name)
+                line = content[: m.start()].count("\n") + 1
+                exported = True  # regex already filters exported/top-level
+                symbols.append(SymbolRecord(
+                    symbol=name,
+                    kind=kind,
+                    language=language,
+                    path=rel_path,
+                    line=line,
+                    exported=exported,
+                    workspace=None,
+                ))
+
+        return symbols
+
+    def _detect_js_calls(
+        self,
+        content: str,
+        rel_path: str,
+        caller_symbol: str,
+        js_bindings: dict[str, tuple[str, str]],
+        js_symbol_index: dict[str, list[SymbolRecord]],
+        internal_module_paths: set[str],
+        *,
+        root: Path | None = None,
+        workspace: str | None = None,
+    ) -> list[CallRecord]:
+        """Detecta call sites en JS/TS usando regex heuristico.
+
+        Solo emite CallRecord si el identificador esta en js_bindings.
+        Filtra _JS_KEYWORD_EXCLUSIONS.
+        method='heuristic', confidence='medium' para calls en bindings.
+        String literals en args -> '<string_literal>' (T-12-03-03).
+        max_calls guard compartido (chequeado por el caller en analyze()).
+        """
+        calls: list[CallRecord] = []
+
+        # Pattern 1: namespace member call — ns.method(
+        _pat_member = re.compile(
+            r"\b([A-Za-z_$][A-Za-z0-9_$]*)\.([A-Za-z_$][A-Za-z0-9_$]*)\s*\(",
+            re.MULTILINE,
+        )
+        # Pattern 2: direct identifier call — name(
+        _pat_ident = re.compile(
+            r"\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\(",
+            re.MULTILINE,
+        )
+
+        emitted: set[tuple[str, str]] = set()
+
+        # --- Pattern 1: namespace member calls (obj.method()) ---
+        for m in _pat_member.finditer(content):
+            obj_name = m.group(1)
+            method_name = m.group(2)
+
+            if obj_name in _JS_KEYWORD_EXCLUSIONS or method_name in _JS_KEYWORD_EXCLUSIONS:
+                continue
+            if obj_name not in js_bindings:
+                continue
+
+            specifier, orig = js_bindings[obj_name]
+            if orig != "*":
+                continue  # only namespace imports for Pattern 1
+
+            resolved = self._resolve_js_module_path(
+                specifier, rel_path, internal_module_paths, root=root
+            )
+            if resolved is None:
+                continue
+
+            # Check the resolved module has this symbol
+            resolved_syms = {sr.symbol for sr in js_symbol_index.get(resolved, [])}
+            if method_name not in resolved_syms:
+                continue
+
+            call_key = (method_name, resolved)
+            if call_key in emitted:
+                continue
+            emitted.add(call_key)
+
+            # Capture args from the call site
+            args = self._capture_js_call_args(content, m.end() - 1)
+
+            call_line = content[: m.start()].count("\n") + 1
+            calls.append(CallRecord(
+                caller_path=rel_path,
+                caller_symbol=caller_symbol,
+                callee_path=resolved,
+                callee_symbol=method_name,
+                call_line=call_line,
+                confidence="medium",
+                method="heuristic",
+                args=args,
+                kwargs={},
+                workspace=workspace,
+            ))
+
+        # --- Pattern 2: direct identifier calls (name()) ---
+        for m in _pat_ident.finditer(content):
+            name = m.group(1)
+
+            if name in _JS_KEYWORD_EXCLUSIONS:
+                continue
+            if name not in js_bindings:
+                continue
+
+            specifier, orig = js_bindings[name]
+
+            resolved = self._resolve_js_module_path(
+                specifier, rel_path, internal_module_paths, root=root
+            )
+            if resolved is None:
+                continue
+
+            # Determine callee_symbol
+            if orig == "default":
+                # For default imports, the local binding name IS the callee symbol
+                callee_symbol = name
+                # Verify the resolved file has a matching symbol (any function)
+                resolved_syms = {sr.symbol for sr in js_symbol_index.get(resolved, [])}
+                if callee_symbol not in resolved_syms:
+                    # Try first function in the file as fallback
+                    fn_syms = [sr for sr in js_symbol_index.get(resolved, []) if sr.kind == "function"]
+                    if fn_syms:
+                        callee_symbol = fn_syms[0].symbol
+                    else:
+                        continue
+            elif orig == "*":
+                # Already handled by Pattern 1
+                continue
+            else:
+                callee_symbol = orig
+                resolved_syms = {sr.symbol for sr in js_symbol_index.get(resolved, [])}
+                if callee_symbol not in resolved_syms:
+                    continue
+
+            call_key = (callee_symbol, resolved)
+            if call_key in emitted:
+                continue
+            emitted.add(call_key)
+
+            args = self._capture_js_call_args(content, m.end() - 1)
+
+            call_line = content[: m.start()].count("\n") + 1
+            calls.append(CallRecord(
+                caller_path=rel_path,
+                caller_symbol=caller_symbol,
+                callee_path=resolved,
+                callee_symbol=callee_symbol,
+                call_line=call_line,
+                confidence="medium",
+                method="heuristic",
+                args=args,
+                kwargs={},
+                workspace=workspace,
+            ))
+
+        return calls
+
+    @staticmethod
+    def _capture_js_call_args(content: str, paren_pos: int) -> list[str]:
+        """Captura argumentos de una llamada JS/TS desde la posicion del '(' inicial.
+
+        Estrategia: encuentra el cierre de parentesis balanceado, split por ',', hasta 5 args.
+        - Identifier simple o literal numerico -> textual
+        - String literal ('...', "...", `...`) -> '<string_literal>'
+        - Expresion compleja -> '<expr>'
+
+        T-12-03-03 mitigation: string literals no se exponen en el output.
+        """
+        _MAX_JS_ARGS = 5
+        _SIMPLE_IDENT = re.compile(r'^[A-Za-z_$][A-Za-z0-9_$.]*$')
+        _NUMERIC_LIT = re.compile(r'^-?\d+(\.\d+)?$')
+
+        # Find matching closing paren (balanced)
+        if paren_pos >= len(content) or content[paren_pos] != "(":
+            return []
+
+        depth = 0
+        end = paren_pos
+        for i in range(paren_pos, min(paren_pos + 2000, len(content))):
+            ch = content[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+
+        arg_content = content[paren_pos + 1: end]
+
+        # Simple split by comma (up to _MAX_JS_ARGS)
+        raw_args: list[str] = []
+        current = []
+        depth2 = 0
+        for ch in arg_content:
+            if ch in "([{":
+                depth2 += 1
+                current.append(ch)
+            elif ch in ")]}":
+                depth2 -= 1
+                current.append(ch)
+            elif ch == "," and depth2 == 0:
+                raw_args.append("".join(current).strip())
+                current = []
+                if len(raw_args) >= _MAX_JS_ARGS:
+                    break
+            else:
+                current.append(ch)
+        if current and len(raw_args) < _MAX_JS_ARGS:
+            raw_args.append("".join(current).strip())
+
+        args: list[str] = []
+        for raw in raw_args:
+            if not raw:
+                continue
+            # String literal check (single, double, backtick)
+            if (
+                (raw.startswith("'") and raw.endswith("'"))
+                or (raw.startswith('"') and raw.endswith('"'))
+                or (raw.startswith("`") and raw.endswith("`"))
+            ):
+                args.append("<string_literal>")
+            elif _SIMPLE_IDENT.match(raw):
+                args.append(raw)
+            elif _NUMERIC_LIT.match(raw):
+                args.append(raw)
+            else:
+                args.append("<expr>")
+
+        return args
