@@ -63,6 +63,9 @@ class SemanticAnalyzer:
     """Analisis semantico estatico del proyecto — Python call graph en dos pasadas."""
 
     _NODE_EXTENSIONS: frozenset[str] = frozenset({".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"})
+    _GO_EXTENSIONS: frozenset[str] = frozenset({".go"})
+    _RUST_EXTENSIONS: frozenset[str] = frozenset({".rs"})
+    _JVM_EXTENSIONS: frozenset[str] = frozenset({".java", ".kt", ".scala"})
 
     def __init__(
         self,
@@ -478,6 +481,129 @@ class SemanticAnalyzer:
             languages.extend(sorted(js_languages))
             lang_coverage["nodejs"] = "heuristic"
 
+        # -----------------------------------------------------------------------
+        # Plan 12-04: Go analysis block
+        # -----------------------------------------------------------------------
+        go_source_files = [
+            p for p in all_paths
+            if Path(p).suffix in self._GO_EXTENSIONS and (root / p).is_file()
+        ]
+        if go_source_files:
+            for rel_path in go_source_files:
+                abs_path = root / rel_path
+                norm_path = Path(rel_path).as_posix()
+                try:
+                    file_size = abs_path.stat().st_size
+                except OSError:
+                    limitations.append(f"read_error:{norm_path}")
+                    files_skipped += 1
+                    continue
+                if file_size > self.max_file_size:
+                    limitations.append(f"file_too_large:{norm_path}")
+                    files_skipped += 1
+                    continue
+                try:
+                    content = abs_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    limitations.append(f"read_error:{norm_path}")
+                    files_skipped += 1
+                    continue
+                go_syms, go_calls = self._analyze_go_file(content, norm_path)
+                all_symbols.extend(go_syms)
+                remaining = self.max_calls - len(calls)
+                if len(go_calls) > remaining:
+                    calls.extend(go_calls[:remaining])
+                    if not truncated:
+                        truncated = True
+                        limitations.append("call_budget_reached")
+                else:
+                    calls.extend(go_calls)
+                files_analyzed += 1
+            languages.append("go")
+            lang_coverage["go"] = "heuristic"
+
+        # -----------------------------------------------------------------------
+        # Plan 12-04: Rust analysis block
+        # -----------------------------------------------------------------------
+        rust_source_files = [
+            p for p in all_paths
+            if Path(p).suffix in self._RUST_EXTENSIONS and (root / p).is_file()
+        ]
+        if rust_source_files:
+            for rel_path in rust_source_files:
+                abs_path = root / rel_path
+                norm_path = Path(rel_path).as_posix()
+                try:
+                    file_size = abs_path.stat().st_size
+                except OSError:
+                    limitations.append(f"read_error:{norm_path}")
+                    files_skipped += 1
+                    continue
+                if file_size > self.max_file_size:
+                    limitations.append(f"file_too_large:{norm_path}")
+                    files_skipped += 1
+                    continue
+                try:
+                    content = abs_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    limitations.append(f"read_error:{norm_path}")
+                    files_skipped += 1
+                    continue
+                rs_syms, rs_calls = self._analyze_rust_file(content, norm_path)
+                all_symbols.extend(rs_syms)
+                remaining = self.max_calls - len(calls)
+                if len(rs_calls) > remaining:
+                    calls.extend(rs_calls[:remaining])
+                    if not truncated:
+                        truncated = True
+                        limitations.append("call_budget_reached")
+                else:
+                    calls.extend(rs_calls)
+                files_analyzed += 1
+            languages.append("rust")
+            lang_coverage["rust"] = "heuristic"
+
+        # -----------------------------------------------------------------------
+        # Plan 12-04: JVM analysis block (Java, Kotlin, Scala)
+        # -----------------------------------------------------------------------
+        jvm_source_files = [
+            p for p in all_paths
+            if Path(p).suffix in self._JVM_EXTENSIONS and (root / p).is_file()
+        ]
+        if jvm_source_files:
+            for rel_path in jvm_source_files:
+                abs_path = root / rel_path
+                norm_path = Path(rel_path).as_posix()
+                try:
+                    file_size = abs_path.stat().st_size
+                except OSError:
+                    limitations.append(f"read_error:{norm_path}")
+                    files_skipped += 1
+                    continue
+                if file_size > self.max_file_size:
+                    limitations.append(f"file_too_large:{norm_path}")
+                    files_skipped += 1
+                    continue
+                try:
+                    content = abs_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    limitations.append(f"read_error:{norm_path}")
+                    files_skipped += 1
+                    continue
+                jvm_syms, jvm_calls = self._analyze_java_file(content, norm_path)
+                all_symbols.extend(jvm_syms)
+                remaining = self.max_calls - len(calls)
+                if len(jvm_calls) > remaining:
+                    calls.extend(jvm_calls[:remaining])
+                    if not truncated:
+                        truncated = True
+                        limitations.append("call_budget_reached")
+                else:
+                    calls.extend(jvm_calls)
+                files_analyzed += 1
+            languages.append("java")
+            lang_coverage["java"] = "heuristic"
+
         summary = SemanticSummary(
             requested=True,
             call_count=len(calls),
@@ -519,6 +645,212 @@ class SemanticAnalyzer:
         result.language_coverage = language_coverage
         result.limitations = limitations
         return result
+
+    # -----------------------------------------------------------------------
+    # Plan 12-04: Polyglot heuristics
+    # -----------------------------------------------------------------------
+
+    def _analyze_go_file(
+        self,
+        content: str,
+        rel_path: str,
+    ) -> tuple[list[SymbolRecord], list[CallRecord]]:
+        """Heuristic Go: detecta func declarations y call sites locales.
+
+        method="heuristic", confidence="low" para todos los edges Go.
+        """
+        symbols: list[SymbolRecord] = []
+        calls: list[CallRecord] = []
+
+        func_pat = re.compile(
+            r"^func\s+(?:\([^)]+\)\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            re.MULTILINE,
+        )
+        func_names: set[str] = set()
+        for m in func_pat.finditer(content):
+            name = m.group(1)
+            line = content[: m.start()].count("\n") + 1
+            symbols.append(SymbolRecord(
+                symbol=name,
+                kind="function",
+                language="go",
+                path=rel_path,
+                line=line,
+                exported=name[0].isupper() if name else False,
+            ))
+            func_names.add(name)
+
+        call_pat = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+        for m in call_pat.finditer(content):
+            callee = m.group(1)
+            if callee in func_names:
+                line = content[: m.start()].count("\n") + 1
+                calls.append(CallRecord(
+                    caller_path=rel_path,
+                    caller_symbol="",
+                    callee_path=rel_path,
+                    callee_symbol=callee,
+                    call_line=line,
+                    confidence="low",
+                    method="heuristic",
+                ))
+
+        return symbols, calls
+
+    def _analyze_rust_file(
+        self,
+        content: str,
+        rel_path: str,
+    ) -> tuple[list[SymbolRecord], list[CallRecord]]:
+        """Heuristic Rust: detecta fn/struct declarations y call sites.
+
+        method="heuristic", confidence="low" para todos los edges Rust.
+        """
+        _RUST_KEYWORDS: frozenset[str] = frozenset({
+            "if", "for", "while", "match", "loop", "let", "mut", "use", "mod",
+            "impl", "pub", "fn", "struct", "enum", "trait", "return", "break",
+            "continue", "where", "type", "unsafe", "extern",
+        })
+
+        symbols: list[SymbolRecord] = []
+        calls: list[CallRecord] = []
+
+        fn_pat = re.compile(
+            r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+([a-z_][a-zA-Z0-9_]*)",
+            re.MULTILINE,
+        )
+        fn_names: set[str] = set()
+        for m in fn_pat.finditer(content):
+            name = m.group(1)
+            line = content[: m.start()].count("\n") + 1
+            symbols.append(SymbolRecord(
+                symbol=name,
+                kind="function",
+                language="rust",
+                path=rel_path,
+                line=line,
+                exported=False,
+            ))
+            fn_names.add(name)
+
+        struct_pat = re.compile(
+            r"^\s*(?:pub\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)",
+            re.MULTILINE,
+        )
+        for m in struct_pat.finditer(content):
+            name = m.group(1)
+            line = content[: m.start()].count("\n") + 1
+            symbols.append(SymbolRecord(
+                symbol=name,
+                kind="class",
+                language="rust",
+                path=rel_path,
+                line=line,
+                exported=False,
+            ))
+
+        # Module-qualified calls: foo::bar(
+        mod_call_pat = re.compile(
+            r"\b([a-z_][a-zA-Z0-9_]*)::([a-z_][a-zA-Z0-9_]*)\s*\("
+        )
+        for m in mod_call_pat.finditer(content):
+            callee = m.group(2)
+            line = content[: m.start()].count("\n") + 1
+            calls.append(CallRecord(
+                caller_path=rel_path,
+                caller_symbol="",
+                callee_path=rel_path,
+                callee_symbol=callee,
+                call_line=line,
+                confidence="low",
+                method="heuristic",
+            ))
+
+        # Local calls filtered by known fn names
+        local_call_pat = re.compile(r"\b([a-z_][a-zA-Z0-9_]*)\s*\(")
+        for m in local_call_pat.finditer(content):
+            callee = m.group(1)
+            if callee in fn_names and callee not in _RUST_KEYWORDS:
+                line = content[: m.start()].count("\n") + 1
+                calls.append(CallRecord(
+                    caller_path=rel_path,
+                    caller_symbol="",
+                    callee_path=rel_path,
+                    callee_symbol=callee,
+                    call_line=line,
+                    confidence="low",
+                    method="heuristic",
+                ))
+
+        return symbols, calls
+
+    def _analyze_java_file(
+        self,
+        content: str,
+        rel_path: str,
+    ) -> tuple[list[SymbolRecord], list[CallRecord]]:
+        """Heuristic Java/Kotlin: detecta class/method declarations y call sites.
+
+        method="heuristic", confidence="low" para todos los edges Java.
+        """
+        _JAVA_KEYWORDS: frozenset[str] = frozenset({
+            "if", "for", "while", "switch", "catch", "super", "this", "new",
+            "return", "break", "continue", "throw", "try", "finally", "instanceof",
+        })
+
+        symbols: list[SymbolRecord] = []
+        calls: list[CallRecord] = []
+
+        class_pat = re.compile(
+            r"(?:class|interface|enum)\s+([A-Z][A-Za-z0-9_]*)"
+        )
+        for m in class_pat.finditer(content):
+            name = m.group(1)
+            line = content[: m.start()].count("\n") + 1
+            symbols.append(SymbolRecord(
+                symbol=name,
+                kind="class",
+                language="java",
+                path=rel_path,
+                line=line,
+                exported=True,
+            ))
+
+        method_pat = re.compile(
+            r"(?:public|private|protected|static|\s)+\w[\w<>\[\]]*\s+([a-z][A-Za-z0-9_]*)\s*\("
+        )
+        method_names: set[str] = set()
+        for m in method_pat.finditer(content):
+            name = m.group(1)
+            if name in _JAVA_KEYWORDS:
+                continue
+            line = content[: m.start()].count("\n") + 1
+            symbols.append(SymbolRecord(
+                symbol=name,
+                kind="function",
+                language="java",
+                path=rel_path,
+                line=line,
+                exported=False,
+            ))
+            method_names.add(name)
+
+        call_pat = re.compile(r"\b([a-z][A-Za-z0-9_]*)\s*\(")
+        for m in call_pat.finditer(content):
+            callee = m.group(1)
+            if callee in method_names and callee not in _JAVA_KEYWORDS:
+                line = content[: m.start()].count("\n") + 1
+                calls.append(CallRecord(
+                    caller_path=rel_path,
+                    caller_symbol="",
+                    callee_path=rel_path,
+                    callee_symbol=callee,
+                    call_line=line,
+                    confidence="low",
+                    method="heuristic",
+                ))
+
+        return symbols, calls
 
     # -----------------------------------------------------------------------
     # Pass 1: Symbol index

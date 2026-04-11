@@ -272,23 +272,31 @@ def test_js_call_resolution():
     pass
 
 
-@pytest.mark.skip(reason="Implementado en plan 12-04: Go heuristic call resolution")
-def test_go_heuristic_calls():
-    """SEM-GO-STUB: Llamadas heuristicas en Go (plan 12-04).
+def test_go_heuristic_calls(tmp_path: Path) -> None:
+    """SEM-GO: _analyze_go_file emite CallRecord con method='heuristic' para llamadas locales Go."""
+    content = "func hello() {}\nfunc main() {\n    hello()\n}\n"
+    analyzer = SemanticAnalyzer()
+    syms, calls = analyzer._analyze_go_file(content, "main.go")
 
-    Dado un fichero Go que llama a una funcion de otro paquete interno,
-    analyze() debe emitir CallRecord con method='heuristic'.
-    Implementado en plan 12-04.
+    func_names = {s.symbol for s in syms}
+    assert "hello" in func_names, f"Expected 'hello' in symbols. Got: {func_names}"
+    assert "main" in func_names, f"Expected 'main' in symbols. Got: {func_names}"
+
+    heuristic_calls = [c for c in calls if c.method == "heuristic"]
+    assert len(heuristic_calls) > 0, f"Expected heuristic calls. Got: {calls}"
+    assert all(c.confidence == "low" for c in heuristic_calls), (
+        f"All Go calls should have confidence='low'. Got: {heuristic_calls}"
+    )
+
+
+def test_semantics_cli_flag(tmp_path: Path) -> None:
+    """SEM-CLI: --semantics produce semantic_summary.requested=True en el output JSON.
+
+    Coverage delegada a test_integration_semantics.py::test_semantics_flag_no_affect_base.
+    Este test verifica el contrato minimo directamente via SemanticAnalyzer.
     """
-    pass
-
-
-@pytest.mark.skip(reason="Implementado en plan 12-04: --semantics CLI flag integration")
-def test_semantics_cli_flag():
-    """SEM-CLI-STUB: Flag --semantics en la CLI (plan 12-04).
-
-    Al ejecutar 'sourcecode analyze --semantics', el output JSON debe contener
-    los campos semantic_calls, semantic_symbols, semantic_links y semantic_summary.
-    Implementado en plan 12-04.
-    """
-    pass
+    (tmp_path / "a.py").write_text("def foo():\n    return 1\n", encoding="utf-8")
+    file_tree = {"a.py": None}
+    calls, symbols, links, summary = SemanticAnalyzer().analyze(tmp_path, file_tree)
+    assert summary.requested is True
+    assert summary.files_analyzed >= 1
