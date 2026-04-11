@@ -2,7 +2,7 @@
 
 ## Descripcion General
 
-Sourcecode se construye en once fases que van desde el scaffold del proyecto hasta la publicacion y evolucion hacia un scanner de proyectos cada vez mas universal. La Fase 1 entrega una CLI funcional con escaner, seguridad y output estructurado. La Fase 2 implementa los detectores de los 8 ecosistemas principales y el pipeline de deteccion. La Fase 3 anade clasificacion de tipo de proyecto y soporte multi-stack. La Fase 4 pule, prueba sobre proyectos reales y publica en PyPI. La Fase 5 expande cobertura de stacks, ecosistemas y senales. Las Fases 6 a 8 anaden inteligencia opcional para dependencias, grafos internos y documentacion estructurada. La Fase 9 optimiza el output para consumo por LLMs. Las Fases 10 y 11 anaden metricas de calidad e historia operativa, manteniendo `sourcecode .` como comando base rapido.
+Sourcecode se construye en dieciseis fases que van desde el scaffold del proyecto hasta una plataforma de analisis semantico e infraestructura para agentes. Las Fases 1 a 10 entregan la herramienta base: CLI instalable, deteccion universal de stacks, dependencias, grafos de modulos, documentacion extraida, calidad de output para LLMs y metricas de codigo. Las Fases 12 a 17 elevan la herramienta hacia comprension semantica real: call graphs, inferencia arquitectonica, flujo de ejecucion, context engine jerarquico para agentes, orquestador interactivo y backend de IR unificado como infraestructura de agentes.
 
 ## Fases
 
@@ -16,7 +16,12 @@ Sourcecode se construye en once fases que van desde el scaffold del proyecto has
 - [ ] **Fase 8: Documentacion Extraida** - Docstrings, comentarios y resúmenes de modulos consumibles por IA con `--docs`
 - [ ] **Fase 9: LLM Output Quality** - Optimizar signal/noise del output: file_paths plano, project_summary NL, DocRecord.importance, key_dependencies, compact mejorado
 - [x] **Fase 10: Metricas de Calidad** - LOC, complejidad, tests asociados y cobertura con `--full-metrics`
-- [ ] **Fase 11: Contexto Git y Operativo** - Historia git, volatilidad, CI/CD, Docker y metadata de entorno con `--git-history`
+- [ ] **Fase 12: Semantica Estatica** - Call graph real, linking cross-file de simbolos, dataflow basico y resolucion de imports avanzada con `--semantics`
+- [ ] **Fase 13: Inferencia Arquitectonica** - Clustering por dominios, deteccion de capas, clasificacion arquitectonica y bounded contexts con `--architecture`
+- [ ] **Fase 14: Flujo de Ejecucion** - Request flow tracing, pipelines end-to-end, eventos/async flows y critical path extraction con `--execution-flow`
+- [ ] **Fase 15: Context Engine para LLM** - Contexto jerarquico, vistas por rol, incremental diff y compresion estructurada para reasoning con `--context-engine`
+- [ ] **Fase 16: Orquestador (wizard)** - whoami, pipeline por fases, ejecucion interactiva y seleccion de analisis por tipo de repo
+- [ ] **Fase 17: Agent Backend System** - IR unificado (SourceMap), tool chaining, outputs para reasoning loops e integracion con agentes autonomos
 
 ## Detalles de Fases
 
@@ -204,22 +209,86 @@ Plans:
 - [x] 10-04-PLAN.md — CLI wiring + E2E + quality gate: flag --full-metrics, workspace loop, ruff+mypy gate (METRICS-01, METRICS-02, METRICS-03, METRICS-04, OUT-10)
 **UI hint**: no
 
-### Fase 11: Contexto Git y Operativo
-**Goal**: La herramienta añade contexto historico y operativo del repositorio para identificar volatilidad, expertos, integraciones de despliegue y superficie de automatizacion.
+### Fase 12: Semantica Estatica
+**Goal**: La herramienta construye un grafo de llamadas real con linking cross-file de simbolos y resolucion de imports avanzada, permitiendo entender que hace el codigo mas alla de que archivos existen.
 **Depends on**: Fase 10
-**Requirements**: GIT-01, OPS-01, OPS-02, OUT-11
+**Requirements**: SEM-01, SEM-02, SEM-03, SEM-04
 **Success Criteria** (what must be TRUE):
-  1. Ejecutado como `sourcecode . --git-history`, el output resume commits recientes, autores, frecuencia de cambio y archivos o modulos mas volatiles sin requerir llamadas de red
-  2. La herramienta identifica configuraciones operativas relevantes como `Dockerfile`, `docker-compose`, workflows de GitHub Actions, Terraform, Helm, Makefiles o scripts de despliegue y los agrega como metadata estructurada
-  3. Las variables de entorno o secretos solo se reportan como metadata segura (`nombre`, `origen`, `uso aproximado`) sin exponer valores sensibles
-  4. El comando base `sourcecode .` sigue centrado en estructura + stacks + workflows, mientras que el contexto historico/operativo ampliado queda detras de flags explicitamente solicitados
+  1. Ejecutado como `sourcecode . --semantics`, el output incluye un call graph que relaciona funciones/metodos entre archivos del mismo proyecto para Python y JS/TS como minimo
+  2. El output resuelve que simbolos (clases, funciones, constantes) son importados en cada archivo y desde que modulo origen provienen, diferenciando imports internos de externos
+  3. El analisis degrada con seguridad en proyectos grandes mediante limites de profundidad y tamano, reportando que porcion del proyecto fue analizada
+  4. El schema expone el nivel de confianza del call graph (`full`, `partial`, `heuristic`) por lenguaje para que el consumidor entienda las limitaciones
+**Plans**: 4 planes
+**UI hint**: no
+
+Plans:
+- [x] 12-01-PLAN.md — Schema + SemanticAnalyzer skeleton + Python call graph core (SEM-01, SEM-03, SEM-04)
+- [x] 12-02-PLAN.md — Python import resolution avanzada + symbol linker (SEM-01, SEM-02)
+- [ ] 12-03-PLAN.md — JS/TS semantic layer + basic dataflow (SEM-01, SEM-04)
+- [ ] 12-04-PLAN.md — Polyglot heuristics + CLI wiring + E2E + quality gate (SEM-01, SEM-02, SEM-03, SEM-04)
+
+### Fase 13: Inferencia Arquitectonica
+**Goal**: La herramienta agrupa modulos en dominios funcionales e infiere la arquitectura en capas del sistema (controller/service/repo, frontend/backend, etc.) sin configuracion previa.
+**Depends on**: Fase 12
+**Requirements**: ARCH-01, ARCH-02, ARCH-03, ARCH-04
+**Success Criteria** (what must be TRUE):
+  1. Ejecutado como `sourcecode . --architecture`, el output agrupa archivos y modulos en dominios funcionales inferidos del analisis del call graph y rutas
+  2. La herramienta detecta patrones de capas comunes: MVC, controller/service/repository, hexagonal y capas frontend/backend en proyectos fullstack
+  3. El output identifica bounded contexts aproximados en proyectos de dominio rico usando senales del module graph y nomenclatura de simbolos
+  4. En proyectos sin arquitectura clara, el output lo indica explicitamente en lugar de generar agrupaciones sin soporte de evidencia
+**Plans**: 0 planes
+**UI hint**: no
+
+### Fase 14: Flujo de Ejecucion
+**Goal**: La herramienta traza como fluye una request o evento desde su entrada hasta su resolucion, exponiendo pipelines end-to-end y rutas criticas del sistema.
+**Depends on**: Fase 13
+**Requirements**: EXEC-01, EXEC-02, EXEC-03, EXEC-04
+**Success Criteria** (what must be TRUE):
+  1. Ejecutado como `sourcecode . --execution-flow`, el output traza el flujo de una request HTTP desde el entry point hasta la respuesta en proyectos API (FastAPI, Express, Spring, etc.)
+  2. El output identifica pipelines de procesamiento: middleware chains, async event flows, worker queues y jobs programados cuando hay senales suficientes
+  3. La herramienta extrae la ruta critica del sistema: el camino de codigo mas largo o mas cargado desde entrada hasta salida
+  4. El analisis de flujo es puramente estatico — no ejecuta codigo del proyecto y no requiere un servidor activo
+**Plans**: 0 planes
+**UI hint**: no
+
+### Fase 15: Context Engine para LLM
+**Goal**: La herramienta genera contexto optimizado y jerarquico para agentes IA, con vistas especializadas por rol, diff incremental y compresion estructurada para ventanas de contexto limitadas.
+**Depends on**: Fase 14
+**Requirements**: CTX-01, CTX-02, CTX-03, CTX-04
+**Success Criteria** (what must be TRUE):
+  1. La herramienta genera vistas de contexto especializadas por rol de agente: `--context-engine --role architect`, `--role debugger`, `--role onboarding` con distinto nivel de detalle y foco
+  2. El output incluye contexto jerarquico colapsable: resumen de alto nivel que expande a detalle por dominio o modulo bajo demanda
+  3. La herramienta soporta diff incremental: dado un analisis anterior, emite solo lo que ha cambiado para minimizar tokens consumidos en actualizaciones de contexto
+  4. El output de `--compact --context-engine` se mantiene en un presupuesto de tokens configurable sin perder la informacion mas relevante
+**Plans**: 0 planes
+**UI hint**: no
+
+### Fase 16: Orquestador (wizard)
+**Goal**: La herramienta guia al usuario (humano o agente) en la exploracion del repositorio con un pipeline interactivo que selecciona que analisis ejecutar segun el tipo de proyecto.
+**Depends on**: Fase 15
+**Requirements**: WIZ-01, WIZ-02, WIZ-03
+**Success Criteria** (what must be TRUE):
+  1. `sourcecode . whoami` emite un resumen en lenguaje natural del proyecto en menos de 500 tokens, combinando project_summary con los analisis disponibles mas relevantes
+  2. La herramienta detecta el tipo de repo y propone automaticamente el conjunto optimo de flags: `--dependencies --semantics` para librerias, `--execution-flow --architecture` para backends, etc.
+  3. La ejecucion interactiva permite al agente solicitar analisis adicionales incrementalmente sin re-escanear el arbol de ficheros
+**Plans**: 0 planes
+**UI hint**: no
+
+### Fase 17: Agent Backend System
+**Goal**: La herramienta sirve como infraestructura de analisis para agentes autonomos con una representacion intermedia unificada (SourceMap IR), tool chaining y outputs optimizados para reasoning loops.
+**Depends on**: Fase 16
+**Requirements**: AGENT-01, AGENT-02, AGENT-03
+**Success Criteria** (what must be TRUE):
+  1. El SourceMap IR unifica todos los analisis en una representacion navegable por agentes: stacks, semantica, arquitectura, flujo y contexto accesibles via un API determinista
+  2. La herramienta expone una API de tool chaining donde un agente puede solicitar analisis especificos y combinar sus outputs en un grafo de razonamiento
+  3. Los outputs de la herramienta estan optimizados para reasoning loops: cada artefacto incluye metadatos de confianza, cobertura y limitaciones para que el agente sepa cuanto confiar en cada dato
 **Plans**: 0 planes
 **UI hint**: no
 
 ## Progreso
 
 **Orden de ejecucion:**
-Las fases se ejecutan en orden numerico: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
+Las fases se ejecutan en orden numerico: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 12 → 13 → 14 → 15 → 16 → 17
 
 | Fase | Planes Completos | Estado | Completada |
 |------|-----------------|--------|------------|
@@ -233,4 +302,9 @@ Las fases se ejecutan en orden numerico: 1 → 2 → 3 → 4 → 5 → 6 → 7 �
 | 8. Documentacion Extraida | 4/4 | Complete | 2026-04-09 |
 | 9. LLM Output Quality | 3/3 | Complete | 2026-04-10 |
 | 10. Metricas de Calidad | 4/4 | Complete | 2026-04-10 |
-| 11. Contexto Git y Operativo | 0/0 | Not planned | - |
+| 12. Semantica Estatica | 2/4 | In Progress|  |
+| 13. Inferencia Arquitectonica | 0/0 | Not planned | - |
+| 14. Flujo de Ejecucion | 0/0 | Not planned | - |
+| 15. Context Engine para LLM | 0/0 | Not planned | - |
+| 16. Orquestador (wizard) | 0/0 | Not planned | - |
+| 17. Agent Backend System | 0/0 | Not planned | - |
