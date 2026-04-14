@@ -77,20 +77,33 @@ class NodejsDetector(AbstractDetector):
     def _collect_entry_points(
         self, context: DetectionContext, package_json: dict[str, Any]
     ) -> list[EntryPoint]:
-        candidate_paths: list[str] = []
+        entry_points: list[EntryPoint] = []
+        seen: set[str] = set()
         main = package_json.get("main")
         if isinstance(main, str) and main.strip():
-            candidate_paths.append(main.strip())
+            path = main.strip()
+            if path_exists_in_tree(context.file_tree, path):
+                seen.add(path)
+                entry_points.append(
+                    EntryPoint(
+                        path=path,
+                        stack="nodejs",
+                        kind="server",
+                        source="package.json",
+                        confidence="high",
+                    )
+                )
 
+        convention_candidates: list[str] = []
         bin_field = package_json.get("bin")
         if isinstance(bin_field, str) and bin_field.strip():
-            candidate_paths.append(bin_field.strip())
+            convention_candidates.append(bin_field.strip())
         elif isinstance(bin_field, dict):
-            candidate_paths.extend(
+            convention_candidates.extend(
                 str(value).strip() for value in bin_field.values() if isinstance(value, str) and value.strip()
             )
 
-        candidate_paths.extend(
+        convention_candidates.extend(
             [
                 "server.js",
                 "src/index.js",
@@ -103,11 +116,17 @@ class NodejsDetector(AbstractDetector):
             ]
         )
 
-        entry_points: list[EntryPoint] = []
-        for path in unique_strings(candidate_paths):
-            if path_exists_in_tree(context.file_tree, path):
-                kind = "web" if path.startswith(("app/", "pages/")) else "server"
-                entry_points.append(
-                    EntryPoint(path=path, stack="nodejs", kind=kind, source="package.json")
+        for path in unique_strings(convention_candidates):
+            if path in seen or not path_exists_in_tree(context.file_tree, path):
+                continue
+            kind = "web" if path.startswith(("app/", "pages/")) else "server"
+            entry_points.append(
+                EntryPoint(
+                    path=path,
+                    stack="nodejs",
+                    kind=kind,
+                    source="convention",
+                    confidence="medium",
                 )
+            )
         return entry_points

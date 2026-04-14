@@ -132,7 +132,7 @@ class PythonDetector(AbstractDetector):
         return {match.lower() for match in matches}
 
     def _collect_entry_points(self, context: DetectionContext) -> list[EntryPoint]:
-        candidates: list[str] = []
+        declared_candidates: list[str] = []
         pyproject = load_toml_file(context.root / "pyproject.toml")
         if pyproject:
             project = pyproject.get("project", {})
@@ -142,16 +142,38 @@ class PythonDetector(AbstractDetector):
                     for value in scripts.values():
                         if isinstance(value, str) and ":" in value:
                             module, _callable = value.split(":", 1)
-                            candidates.append(module.replace(".", "/") + ".py")
+                            declared_candidates.append(module.replace(".", "/") + ".py")
 
-        candidates.extend(["__main__.py", "main.py", "app.py", "manage.py", "src/main.py"])
         entry_points: list[EntryPoint] = []
-        for path in unique_strings(candidates):
+        declared = set()
+        for path in unique_strings(declared_candidates):
             if path_exists_in_tree(context.file_tree, path):
-                kind = "cli" if path.endswith(("__main__.py", "main.py")) else "app"
+                declared.add(path)
+                kind = "cli" if path.endswith(("__main__.py", "main.py", "cli.py")) else "app"
                 entry_points.append(
-                    EntryPoint(path=path, stack="python", kind=kind, source="manifest")
+                    EntryPoint(
+                        path=path,
+                        stack="python",
+                        kind=kind,
+                        source="pyproject.toml",
+                        confidence="high",
+                    )
                 )
+
+        convention_candidates = ["cli.py", "__main__.py", "main.py", "app.py", "manage.py", "src/main.py"]
+        for path in unique_strings(convention_candidates):
+            if path in declared or not path_exists_in_tree(context.file_tree, path):
+                continue
+            kind = "cli" if path.endswith(("__main__.py", "main.py", "cli.py")) else "app"
+            entry_points.append(
+                EntryPoint(
+                    path=path,
+                    stack="python",
+                    kind=kind,
+                    source="convention",
+                    confidence="medium",
+                )
+            )
         return entry_points
 
     def _detect_package_manager(

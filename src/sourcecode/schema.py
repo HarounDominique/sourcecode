@@ -66,6 +66,7 @@ class EntryPoint:
     stack: str
     kind: str = "entry"
     source: str = "manifest"
+    confidence: Literal["high", "medium", "low"] = "high"
 
 
 @dataclass
@@ -322,6 +323,7 @@ class SourceMap:
     # Phase 9: LLM Output Quality
     file_paths: list[str] = field(default_factory=list)
     project_summary: Optional[str] = None
+    architecture_summary: Optional[str] = None
     key_dependencies: list[DependencyRecord] = field(default_factory=list)
     # Phase 10: Code Quality Metrics
     file_metrics: list[FileMetrics] = field(default_factory=list)

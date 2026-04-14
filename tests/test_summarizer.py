@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 from sourcecode.schema import (
     DependencySummary,
@@ -143,3 +144,49 @@ def test_entry_points_capped_at_three():
     # Count how many entry paths appear in the summary
     mentioned = sum(1 for p in paths if p in result)
     assert mentioned <= 3, f"Expected at most 3 entry paths in summary, got {mentioned}: {result}"
+
+
+def test_prefers_pyproject_description(tmp_path: Path) -> None:
+    """When pyproject.toml has a description, it dominates the summary."""
+    (tmp_path / "pyproject.toml").write_text(
+        """
+[project]
+name = "sourcecode"
+description = "Genera contexto estructurado para agentes IA"
+        """.strip()
+    )
+    sm = SourceMap(stacks=[StackDetection(stack="python", primary=True)])
+    result = ProjectSummarizer(tmp_path).generate(sm)
+    assert "Genera contexto estructurado para agentes IA" in result
+
+
+def test_falls_back_to_readme_paragraph(tmp_path: Path) -> None:
+    """When no manifest description exists, the first useful README paragraph is used."""
+    (tmp_path / "README.md").write_text(
+        "# Demo\n\nHerramienta para inspeccionar repositorios y resumir su arquitectura.\n\n## Uso\n"
+    )
+    sm = SourceMap(stacks=[StackDetection(stack="python", primary=True)])
+    result = ProjectSummarizer(tmp_path).generate(sm)
+    assert "Herramienta para inspeccionar repositorios y resumir su arquitectura." in result
+
+
+def test_description_ignores_tooling_entry_points(tmp_path: Path) -> None:
+    """Tooling entry points under .claude/.vscode/bin do not contaminate the summary narrative."""
+    (tmp_path / "pyproject.toml").write_text(
+        """
+[project]
+name = "sourcecode"
+description = "CLI principal para analizar proyectos"
+        """.strip()
+    )
+    sm = SourceMap(
+        stacks=[StackDetection(stack="python", primary=True)],
+        entry_points=[
+            EntryPoint(path=".claude/hooks/main.py", stack="python", kind="cli", source="convention"),
+            EntryPoint(path="src/main.py", stack="python", kind="cli", source="convention"),
+        ],
+    )
+    result = ProjectSummarizer(tmp_path).generate(sm)
+    assert "CLI principal para analizar proyectos" in result
+    assert "src/main.py" in result
+    assert ".claude/hooks/main.py" not in result

@@ -52,7 +52,7 @@ def compact_view(sm: SourceMap) -> dict[str, Any]:
     """Proyeccion compacta del SourceMap (~500-700 tokens).
 
     Incluye: schema_version, project_type, stacks, entry_points,
-    project_summary (siempre), file_paths (siempre),
+    project_summary (siempre), architecture_summary (siempre),
     dependency_summary (cuando requested=True),
     file_tree_depth1 (backward compat).
 
@@ -73,9 +73,9 @@ def compact_view(sm: SourceMap) -> dict[str, Any]:
         "schema_version": sm.metadata.schema_version,
         "project_type": sm.project_type,
         "project_summary": sm.project_summary,
+        "architecture_summary": sm.architecture_summary,
         "stacks": [asdict(stack) for stack in sm.stacks],
         "entry_points": [asdict(entry_point) for entry_point in sm.entry_points],
-        "file_paths": sm.file_paths,
         "file_tree_depth1": depth1,
         "dependency_summary": dep_summary_dict,
     }

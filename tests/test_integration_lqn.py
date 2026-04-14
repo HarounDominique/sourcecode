@@ -62,6 +62,12 @@ def test_lqn02_project_summary() -> None:
     ps = output["project_summary"]
     assert isinstance(ps, str), f"LQN-02: project_summary must be str, got {type(ps)}"
     assert len(ps) > 10, f"LQN-02: project_summary too short ({len(ps)} chars): {ps!r}"
+    assert "contexto estructurado" in ps.lower(), (
+        f"LQN-02: project_summary should reflect the real project description, got: {ps!r}"
+    )
+    assert "Stack principal: Python" in ps, (
+        f"LQN-02: project_summary should ignore tooling-only Node.js signals, got: {ps!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +144,21 @@ def test_lqn06_compact_has_project_summary() -> None:
     assert "project_summary" in compact, "LQN-06a: project_summary missing from compact output"
     assert compact["project_summary"] is not None, (
         "LQN-06a: compact project_summary must be non-None for a real project"
+    )
+
+
+def test_lqn06_compact_has_architecture_summary_and_no_file_paths() -> None:
+    """LQN-06a+: compact view includes architecture_summary and omits file_paths."""
+    compact = _invoke_json("--compact")
+
+    assert "architecture_summary" in compact, (
+        "LQN-06a+: architecture_summary missing from compact output"
+    )
+    assert compact["architecture_summary"] is not None, (
+        "LQN-06a+: compact architecture_summary must be non-None for a real project"
+    )
+    assert "file_paths" not in compact, (
+        "LQN-06a+: compact output should omit file_paths in Phase 13"
     )
 
 

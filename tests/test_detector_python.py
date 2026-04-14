@@ -44,6 +44,8 @@ def test_python_detector_detects_django_manage_py(tmp_path: Path) -> None:
 
     assert stacks[0].frameworks[0].name == "Django"
     assert entry_points[0].path == "manage.py"
+    assert entry_points[0].source == "convention"
+    assert entry_points[0].confidence == "medium"
     assert project_type == "api"
 
 
@@ -70,4 +72,24 @@ smg = "src.main:app"
 
     assert stacks[0].frameworks[0].name == "Typer"
     assert [entry.path for entry in entry_points] == ["src/main.py"]
+    assert entry_points[0].source == "pyproject.toml"
+    assert entry_points[0].confidence == "high"
+    assert project_type == "cli"
+
+
+def test_python_detector_detects_cli_py_by_convention(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text("typer>=0.12\n")
+    (tmp_path / "cli.py").write_text("app = object()")
+
+    detector = ProjectDetector([PythonDetector()])
+    stacks, entry_points, project_type = detector.detect(
+        root=tmp_path,
+        file_tree={"requirements.txt": None, "cli.py": None},
+        manifests=["requirements.txt"],
+    )
+
+    assert stacks[0].stack == "python"
+    assert entry_points[0].path == "cli.py"
+    assert entry_points[0].source == "convention"
+    assert entry_points[0].confidence == "medium"
     assert project_type == "cli"

@@ -26,6 +26,8 @@ def test_go_detector_detects_gin_cmd_entry(tmp_path: Path) -> None:
 
     assert stacks[0].frameworks[0].name == "Gin"
     assert entry_points[0].path == "cmd/api/main.go"
+    assert entry_points[0].source == "convention"
+    assert entry_points[0].confidence == "medium"
     assert project_type == "api"
 
 

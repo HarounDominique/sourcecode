@@ -127,20 +127,20 @@ def test_c2_compact_includes_project_summary_none():
     assert result["project_summary"] is None
 
 
-def test_c3_compact_includes_file_paths_when_set():
-    """C3: compact_view includes 'file_paths' list when set."""
-    sm = SourceMap(file_paths=["src/a.py", "src/b.py"])
+def test_c3_compact_includes_architecture_summary_when_set():
+    """C3: compact_view includes 'architecture_summary' when it is a non-None string."""
+    sm = SourceMap(architecture_summary="Entry point CLI orquesta scanner y serializer.")
     result = compact_view(sm)
-    assert "file_paths" in result
-    assert result["file_paths"] == ["src/a.py", "src/b.py"]
+    assert "architecture_summary" in result
+    assert result["architecture_summary"] == "Entry point CLI orquesta scanner y serializer."
 
 
-def test_c4_compact_includes_file_paths_empty_list():
-    """C4: compact_view includes 'file_paths': [] when empty."""
-    sm = SourceMap(file_paths=[])
+def test_c4_compact_includes_architecture_summary_none():
+    """C4: compact_view includes 'architecture_summary': None when not set."""
+    sm = SourceMap()
     result = compact_view(sm)
-    assert "file_paths" in result
-    assert result["file_paths"] == []
+    assert "architecture_summary" in result
+    assert result["architecture_summary"] is None
 
 
 def test_c5_compact_dependency_summary_dict_when_requested():
@@ -217,16 +217,18 @@ def test_schema_serializes_typed_detection_fields():
     assert data["stacks"][0]["signals"] == ["manifest:pyproject.toml", "entry:src/main.py"]
     assert data["stacks"][0]["frameworks"][0]["name"] == "FastAPI"
     assert data["entry_points"][0]["path"] == "src/main.py"
+    assert data["entry_points"][0]["confidence"] == "high"
 
 
 # Phase 9 — new fields on SourceMap
 
 def test_sourcemap_new_fields_defaults():
-    """SourceMap() without args has file_paths=[], project_summary=None, key_dependencies=[]."""
+    """SourceMap() without args has file_paths=[], project_summary=None, architecture_summary=None, key_dependencies=[]."""
     from sourcecode.schema import DependencyRecord
     sm = SourceMap()
     assert sm.file_paths == []
     assert sm.project_summary is None
+    assert sm.architecture_summary is None
     assert sm.key_dependencies == []
 
 
@@ -242,6 +244,12 @@ def test_sourcemap_project_summary_persists():
     assert sm.project_summary == "API en Python (FastAPI)."
 
 
+def test_sourcemap_architecture_summary_persists():
+    """SourceMap(architecture_summary='...') persists the string."""
+    sm = SourceMap(architecture_summary="CLI entry point orquesta scanner, detectores y serializer.")
+    assert sm.architecture_summary == "CLI entry point orquesta scanner, detectores y serializer."
+
+
 def test_sourcemap_key_dependencies_persists():
     """SourceMap(key_dependencies=[DependencyRecord(...)]) persists the list."""
     from sourcecode.schema import DependencyRecord
@@ -252,10 +260,11 @@ def test_sourcemap_key_dependencies_persists():
 
 
 def test_sourcemap_asdict_includes_new_keys():
-    """dataclasses.asdict(SourceMap()) includes 'file_paths', 'project_summary', 'key_dependencies'."""
+    """dataclasses.asdict(SourceMap()) includes 'file_paths', 'project_summary', 'architecture_summary', 'key_dependencies'."""
     data = asdict(SourceMap())
     assert "file_paths" in data
     assert "project_summary" in data
+    assert "architecture_summary" in data
     assert "key_dependencies" in data
 
 
@@ -268,6 +277,7 @@ def test_sourcemap_backward_compat():
     # Should not raise, and new fields have their defaults
     assert sm.file_paths == []
     assert sm.project_summary is None
+    assert sm.architecture_summary is None
     assert sm.key_dependencies == []
 
 

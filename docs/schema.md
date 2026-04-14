@@ -3,7 +3,7 @@
 
 `sourcecode` serializa un objeto `SourceMap` con schema `1.0`.
 
-Los campos **siempre presentes** son: `metadata`, `file_tree`, `file_paths`, `stacks`, `project_type`, `entry_points` y `project_summary`.
+Los campos **siempre presentes** son: `metadata`, `file_tree`, `file_paths`, `stacks`, `project_type`, `entry_points`, `project_summary` y `architecture_summary`.
 
 Los campos **opcionales** dependen de los flags activos en la invocacion:
 
@@ -28,6 +28,7 @@ Los campos **opcionales** dependen de los flags activos en la invocacion:
   "project_type": "webapp",
   "entry_points": [],
   "project_summary": "Aplicacion web en Nodejs (Next.js). Entry points: app/page.tsx.",
+  "architecture_summary": null,
   "dependencies": [],
   "dependency_summary": null,
   "key_dependencies": [],
@@ -47,6 +48,7 @@ Campos:
 - `project_type`: clasificacion general del proyecto. Siempre presente (puede ser `null`).
 - `entry_points`: puntos de entrada relevantes. Siempre presente (puede ser lista vacia).
 - `project_summary`: descripcion en lenguaje natural del proyecto generada deterministicamente. Presente cuando hay stacks detectados; `null` si no (Phase 9).
+- `architecture_summary`: resumen arquitectonico estatico del flujo principal, modulos orquestados y output producido. `null` si no hay evidencia suficiente (Phase 13).
 - `dependencies`: dependencias detectadas. Solo presente con `--dependencies`; lista vacia por defecto.
 - `dependency_summary`: resumen del analisis de dependencias. Solo presente con `--dependencies`; `null` por defecto.
 - `key_dependencies`: top-15 dependencias directas relevantes. Solo presente con `--dependencies`; lista vacia por defecto (Phase 9).
@@ -232,7 +234,8 @@ Cada elemento de `entry_points` sigue este shape:
   "path": "app/page.tsx",
   "stack": "nodejs",
   "kind": "web",
-  "source": "package.json"
+  "source": "package.json",
+  "confidence": "high"
 }
 ```
 
@@ -242,6 +245,7 @@ Campos:
 - `stack`: stack al que pertenece.
 - `kind`: tipo de entry point, por ejemplo `web`, `api`, `cli` o `entry`.
 - `source`: origen de la deteccion.
+- `confidence`: confianza del entry point detectado (`high`, `medium` o `low`).
 
 ## dependencies
 
@@ -536,13 +540,9 @@ Con `--compact`, la salida omite `metadata`, el arbol completo, `dependencies`, 
   "schema_version": "1.0",
   "project_type": "webapp",
   "project_summary": "Aplicacion web en Nodejs (Next.js, React). Entry points: app/page.tsx.",
+  "architecture_summary": null,
   "stacks": [],
   "entry_points": [],
-  "file_paths": [
-    "package.json",
-    "app/page.tsx",
-    "app/layout.tsx"
-  ],
   "file_tree_depth1": {
     "package.json": null,
     "app": {}
@@ -556,16 +556,17 @@ Campos incluidos en el modo compacto:
 - `schema_version`: version del schema.
 - `project_type`: clasificacion general.
 - `project_summary`: descripcion NL del proyecto. Siempre incluido (Phase 9).
+- `architecture_summary`: resumen arquitectonico estatico del flujo principal. Siempre incluido; puede ser `null` si la evidencia es insuficiente (Phase 13).
 - `stacks`: stacks detectados serializados.
 - `entry_points`: entry points serializados.
-- `file_paths`: lista plana de todos los paths con separador forward-slash. Siempre incluido (Phase 9).
 - `file_tree_depth1`: solo el primer nivel del `file_tree`. Se conserva por compatibilidad retroactiva.
 - `dependency_summary`: resumen de dependencias cuando `--dependencies` esta activo y `dependency_summary.requested == True`; `null` en cualquier otro caso (Phase 9).
 
 Campos **excluidos** en modo compacto aunque se combinen con otros flags:
 
 - `metadata`
-- `file_tree` (sustituido por `file_tree_depth1` y `file_paths`)
+- `file_tree` (sustituido por `file_tree_depth1`)
+- `file_paths`
 - `dependencies`
 - `key_dependencies`
 - `module_graph`

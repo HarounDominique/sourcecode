@@ -39,7 +39,13 @@ class GoDetector(AbstractDetector):
         ]
         preferred = [path for path in entry_candidates if path.startswith("cmd/")] or entry_candidates
         entry_points = [
-            EntryPoint(path=path, stack="go", kind="binary", source="go.mod")
+            EntryPoint(
+                path=path,
+                stack="go",
+                kind="binary",
+                source="convention",
+                confidence="medium",
+            )
             for path in unique_strings(preferred)
         ]
         stack = StackDetection(

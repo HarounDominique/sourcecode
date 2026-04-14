@@ -78,7 +78,7 @@ sourcecode --version
 | `PATH` | `.` | Directory to analyze. |
 | `--format json\|yaml` | `json` | Output format. |
 | `--output PATH` | stdout | Write to a file instead of stdout. |
-| `--compact` | off | Reduced output (~500-700 tokens): `schema_version`, `project_type`, `project_summary`, `stacks`, `entry_points`, `file_paths`, `file_tree_depth1`, and `dependency_summary` when available. |
+| `--compact` | off | Reduced output (~500-700 tokens): `schema_version`, `project_type`, `project_summary`, `architecture_summary`, `stacks`, `entry_points`, `file_tree_depth1`, and `dependency_summary` when available. |
 | `--dependencies` | off | Include direct dependencies, resolved versions, and transitive relationships when lockfiles make that possible. Also populates `key_dependencies`. |
 | `--graph-modules` | off | Include a structural module graph with imports and simple relations. |
 | `--graph-detail high\|medium\|full` | `high` | Graph detail level: summarized (high), balanced (medium), or full-fidelity (full). |
@@ -102,6 +102,7 @@ The full schema (`SourceMap`) includes the following fields:
 | `file_tree` | object | Repository tree where `null` represents a file and `{}` represents a directory. |
 | `file_paths` | array | Flat list of all project paths derived from `file_tree`, with forward-slash separators. Always present; respects `--depth`. |
 | `project_summary` | string\|null | Deterministic natural-language description of the project generated from detected stacks, entry points, and dependencies. Present when stacks are detected. |
+| `architecture_summary` | string\|null | Static summary of the main execution flow, orchestrated modules, and output produced by the project. Present when enough structural evidence is available. |
 | `stacks` | array | Stack detections with confidence, frameworks, manifests, `primary`, `root`, `workspace`, and `signals`. |
 | `project_type` | string\|null | Overall project classification. |
 | `entry_points` | array | Detected entry points by stack. |
@@ -139,6 +140,7 @@ Real output from a Python FastAPI project:
   "schema_version": "1.0",
   "project_type": "api",
   "project_summary": "API en Python (FastAPI). Entry points: src/main.py. 12 dependencias (python).",
+  "architecture_summary": null,
   "stacks": [
     {
       "stack": "python",
@@ -163,7 +165,6 @@ Real output from a Python FastAPI project:
       "source": "manifest"
     }
   ],
-  "file_paths": ["pyproject.toml", "src/main.py", "src/routes.py", "tests/test_main.py"],
   "file_tree_depth1": {
     "pyproject.toml": null,
     "src": {},
@@ -355,7 +356,7 @@ Different modes optimize for different tradeoffs between context size and depth 
 
 Best for: initial orientation, deciding what to explore next, fast handoffs between agents.
 
-Includes: `project_summary` (instant project description), `stacks`, `entry_points`, `file_paths` (flat path list for easy grep/reasoning), `file_tree_depth1`, and `dependency_summary` when `--dependencies` was also requested.
+Includes: `project_summary` (instant project description), `architecture_summary` (execution-oriented static summary), `stacks`, `entry_points`, `file_tree_depth1`, and `dependency_summary` when `--dependencies` was also requested.
 
 ```bash
 sourcecode --compact .
@@ -388,9 +389,9 @@ sourcecode --docs --docs-depth full .   # include methods
 - `"Aplicacion web en Node.js (Next.js, React). Entry points: app/page.tsx."`
 - `"Monorepo con 2 workspaces en Node.js, Python."`
 
-**`file_paths` field**
+**`architecture_summary` field**
 
-`file_paths` is a flat list of all project paths (forward-slash separated). It is easier for LLMs to reason about than the nested `file_tree` dict — grep it, count by extension, or identify modules by path pattern without recursive traversal.
+`architecture_summary` is a static 3-5 line summary oriented to execution flow. It answers what the main entry point does, which modules it orchestrates, and what the project produces. In compact mode it replaces the low-signal value that `file_paths` used to occupy.
 
 **`key_dependencies` field**
 

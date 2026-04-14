@@ -54,6 +54,8 @@ def test_nodejs_detector_detects_express_server_entry(tmp_path: Path) -> None:
 
     assert stacks[0].frameworks[0].name == "Express"
     assert entry_points[0].path == "server.js"
+    assert entry_points[0].source == "package.json"
+    assert entry_points[0].confidence == "high"
     assert project_type == "api"
 
 
@@ -73,4 +75,26 @@ def test_nodejs_detector_detects_vite_typescript_entry(tmp_path: Path) -> None:
 
     assert {framework.name for framework in stacks[0].frameworks} == {"React", "Vite"}
     assert entry_points[0].path == "src/main.tsx"
+    assert entry_points[0].source == "convention"
+    assert entry_points[0].confidence == "medium"
     assert project_type == "webapp"
+
+
+def test_nodejs_detector_uses_bin_as_convention_entry(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "cli", "bin": {"sourcecode": "bin/sourcecode.js"}})
+    )
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "sourcecode.js").write_text("console.log('cli')")
+
+    detector = ProjectDetector([NodejsDetector()])
+    stacks, entry_points, _project_type = detector.detect(
+        root=tmp_path,
+        file_tree={"package.json": None, "bin": {"sourcecode.js": None}},
+        manifests=["package.json"],
+    )
+
+    assert stacks[0].stack == "nodejs"
+    assert entry_points[0].path == "bin/sourcecode.js"
+    assert entry_points[0].source == "convention"
+    assert entry_points[0].confidence == "medium"

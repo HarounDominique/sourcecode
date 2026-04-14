@@ -474,6 +474,7 @@ def main(
             )
 
     # Phase 9: LLM Output Quality — poblar campos derivados
+    from sourcecode.architecture_summary import ArchitectureSummarizer
     from sourcecode.summarizer import ProjectSummarizer
     from sourcecode.tree_utils import flatten_file_tree
 
@@ -496,7 +497,8 @@ def main(
         sm.key_dependencies = sorted(direct_deps, key=_dep_sort_key)[:15]
 
     # LQN-02: resumen NL deterministico
-    sm.project_summary = ProjectSummarizer().generate(sm)
+    sm.project_summary = ProjectSummarizer(target).generate(sm)
+    sm.architecture_summary = ArchitectureSummarizer(target).generate(sm)
 
     # 4. Serializar (con o sin modo compact)
     if compact:
