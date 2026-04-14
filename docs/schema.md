@@ -63,7 +63,7 @@ Campos:
 {
   "schema_version": "1.0",
   "generated_at": "2026-04-07T19:41:05.686277+00:00",
-  "sourcecode_version": "0.9.0",
+  "sourcecode_version": "0.10.0",
   "analyzed_path": "/abs/path/to/project"
 }
 ```
@@ -583,7 +583,7 @@ Ejemplo de salida para un monorepo con web Node.js y API Python con `--dependenc
   "metadata": {
     "schema_version": "1.0",
     "generated_at": "2026-04-07T19:41:05.686277+00:00",
-    "sourcecode_version": "0.9.0",
+    "sourcecode_version": "0.10.0",
     "analyzed_path": "/abs/path/to/project"
   },
   "file_tree": {
