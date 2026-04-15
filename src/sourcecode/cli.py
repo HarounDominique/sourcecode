@@ -535,3 +535,34 @@ def main(
 
     # 5. Escribir output (CLI-04)
     write_output(content, output=output)
+
+    from sourcecode.prepare_context import ContextBuilder
+
+    @app.command("prepare-context")
+    def prepare_context_cmd(
+            task: str = typer.Argument(..., help="Descripción de la tarea"),
+            path: Path = typer.Option(".", help="Directorio del proyecto"),
+    ):
+        """
+        Prepara contexto mínimo optimizado para que un LLM modifique el código.
+        """
+        target = path.resolve()
+
+        if not target.exists() or not target.is_dir():
+            typer.echo(f"Error: '{target}' no es un directorio válido.", err=True)
+            raise typer.Exit(code=1)
+
+        builder = ContextBuilder(target)
+        result = builder.prepare(task)
+
+        output = {
+            "task": result.task,
+            "entry_points": result.entry_points,
+            "relevant_files": [f.__dict__ for f in result.relevant_files],
+            "call_flow": result.call_flow,
+            "snippets": [s.__dict__ for s in result.snippets],
+            "tests": result.tests,
+            "notes": result.notes,
+        }
+
+        typer.echo(json.dumps(output, indent=2, ensure_ascii=False))
