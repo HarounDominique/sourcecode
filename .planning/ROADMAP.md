@@ -236,8 +236,14 @@ Plans:
   2. La herramienta detecta patrones de capas comunes: MVC, controller/service/repository, hexagonal y capas frontend/backend en proyectos fullstack
   3. El output identifica bounded contexts aproximados en proyectos de dominio rico usando senales del module graph y nomenclatura de simbolos
   4. En proyectos sin arquitectura clara, el output lo indica explicitamente en lugar de generar agrupaciones sin soporte de evidencia
-**Plans**: 0 planes
+**Plans**: 4 planes
 **UI hint**: no
+
+Plans:
+- [x] 13-01-PLAN.md — Schema SourceMap.architecture_summary + EntryPoint.confidence + compact_view contract (ARCH-01, ARCH-04)
+- [x] 13-02-PLAN.md — ProjectSummarizer + entry point source/confidence distinction (ARCH-01, ARCH-04)
+- [x] 13-03-PLAN.md — ArchitectureSummarizer estatico + CLI wiring + docs (ARCH-01, ARCH-02, ARCH-04)
+- [ ] 13-04-PLAN.md — ArchitectureAnalyzer: flag --architecture, domain clustering, layer detection, bounded context inference (ARCH-01, ARCH-02, ARCH-03)
 
 ### Fase 14: Flujo de Ejecucion
 **Goal**: La herramienta traza como fluye una request o evento desde su entrada hasta su resolucion, exponiendo pipelines end-to-end y rutas criticas del sistema.
