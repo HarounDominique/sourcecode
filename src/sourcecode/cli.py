@@ -1,5 +1,4 @@
 """CLI de sourcecode — interfaz de linea de comandos principal."""
-from sourcecode.prepare_context import prepare_context as build_llm_context
 from __future__ import annotations
 
 import json
