@@ -33,6 +33,37 @@ _CODE_EXTENSIONS = {
 }
 _GENERIC_NAMES = {"utils", "helpers", "common", "shared", "misc", "core", "root", ""}
 
+_TEST_DIRS: frozenset[str] = frozenset({"tests", "test", "spec", "specs", "__tests__", "e2e"})
+
+# Exact file stems that signal a specific architectural layer
+_LAYER_STEM_EXACT: dict[str, str] = {
+    "cli":      "orchestration",
+    "main":     "orchestration",
+    "app":      "orchestration",
+    "server":   "orchestration",
+    "schema":   "data",
+    "model":    "data",
+    "models":   "data",
+    "config":   "data",
+    "settings": "data",
+    "store":    "data",
+}
+
+# Suffix patterns (stem == suffix OR stem ends with "_" + suffix) → layer
+_LAYER_STEM_SUFFIXES: list[tuple[str, str]] = [
+    ("analyzer",   "processing"),
+    ("processor",  "processing"),
+    ("parser",     "processing"),
+    ("detector",   "processing"),
+    ("scanner",    "processing"),
+    ("handler",    "orchestration"),
+    ("controller", "orchestration"),
+    ("repository", "data"),
+    ("repo",       "data"),
+    ("serializer", "data"),
+    ("formatter",  "data"),
+]
+
 DOMAIN_ROLES: dict[str, str] = {
     "controllers": "HTTP request handlers",
     "handlers":    "HTTP request handlers",
@@ -120,8 +151,9 @@ class ArchitectureAnalyzer:
 
         # Overall confidence
         confidence: Literal["high", "medium", "low"]
-        if len(domains) >= 3 and pattern not in (None, "unknown"):
-            confidence = "high"
+        if pattern not in (None, "unknown", "flat"):
+            # A recognised pattern was detected — at least medium confidence
+            confidence = "high" if len(domains) >= 3 else "medium"
         elif len(domains) >= 1:
             confidence = "medium"
         else:
@@ -165,7 +197,13 @@ class ArchitectureAnalyzer:
         if len(parts) == 1:
             return "root"
         first = parts[0]
-        if first in _SRC_TRANSPARENT and len(parts) >= 3:
+        if first in _SRC_TRANSPARENT:
+            if len(parts) == 2:
+                return "root"
+            if len(parts) >= 4:
+                # src/pkg/subpkg/file.py → subpkg is the meaningful module
+                return parts[2]
+            # src/pkg/file.py → pkg
             return parts[1]
         return first
 
@@ -173,6 +211,8 @@ class ArchitectureAnalyzer:
         groups: dict[str, list[str]] = {}
         for p in paths:
             seg = self._extract_domain_segment(p)
+            if seg.lower() in _TEST_DIRS:
+                continue  # tests are infrastructure, not architecture domains
             groups.setdefault(seg, []).append(p)
 
         domains: list[ArchitectureDomain] = []
@@ -191,12 +231,21 @@ class ArchitectureAnalyzer:
         return domains
 
     def _detect_layers(self, paths: list[str]) -> tuple[str, list[ArchitectureLayer]]:
+        # Exclude test paths so test directories don't skew layer scoring
+        source_paths = [
+            p for p in paths
+            if not any(part.lower() in _TEST_DIRS for part in p.replace("\\", "/").split("/"))
+        ]
+        if not source_paths:
+            return "unknown", []
+
         dir_names: set[str] = set()
-        for p in paths:
+        for p in source_paths:
             parts = p.replace("\\", "/").split("/")
             for part in parts[:-1]:
                 dir_names.add(part.lower())
 
+        # 1. Classical keyword-based pattern matching (MVC, layered, hexagonal, fullstack)
         best_pattern = ""
         best_score = 0
         best_matched: dict[str, list[str]] = {}
@@ -213,34 +262,96 @@ class ArchitectureAnalyzer:
                 best_pattern = pattern_name
                 best_matched = matched
 
-        if best_score < 2:
-            # Check depth for flat vs unknown
-            max_depth = max(
-                len(p.replace("\\", "/").split("/")) - 1
-                for p in paths
-            )
-            flat_pattern = "flat" if max_depth <= 2 else "unknown"
-            return flat_pattern, []
+        if best_score >= 2:
+            layer_confidence: Literal["high", "medium", "low"] = "high" if best_score >= 3 else "medium"
+            layers: list[ArchitectureLayer] = []
+            for layer_key, matched_dirs in best_matched.items():
+                matched_files = [
+                    p for p in source_paths
+                    if any(
+                        seg.lower() in matched_dirs
+                        for seg in p.replace("\\", "/").split("/")[:-1]
+                    )
+                ]
+                layers.append(ArchitectureLayer(
+                    name=layer_key,
+                    pattern=best_pattern,
+                    files=matched_files,
+                    confidence=layer_confidence,
+                ))
+            return best_pattern, layers
 
-        # Build ArchitectureLayer list
-        layer_confidence: Literal["high", "medium", "low"] = "high" if best_score >= 3 else "medium"
-        layers: list[ArchitectureLayer] = []
-        for layer_key, matched_dirs in best_matched.items():
-            matched_files = [
-                p for p in paths
-                if any(
-                    seg.lower() in matched_dirs
-                    for seg in p.replace("\\", "/").split("/")[:-1]
-                )
+        # 2. Functional file-naming heuristic: *_analyzer.py, cli.py, schema.py, …
+        func_result = self._detect_layered_functional(source_paths)
+        if func_result is not None:
+            return func_result
+
+        # 3. Modular sub-package heuristic: ≥2 distinct named sub-packages
+        modular_result = self._detect_modular(source_paths)
+        if modular_result is not None:
+            return modular_result
+
+        # 4. Fallback: flat (shallow) vs truly unknown (deep but unrecognised)
+        max_depth = max(
+            (len(p.replace("\\", "/").split("/")) - 1 for p in source_paths),
+            default=0,
+        )
+        return ("flat" if max_depth <= 2 else "unknown"), []
+
+    def _detect_layered_functional(
+        self, paths: list[str]
+    ) -> Optional[tuple[str, list[ArchitectureLayer]]]:
+        """Detect layered architecture from file-naming conventions.
+
+        Recognises three logical layers without requiring classical directory names:
+        - orchestration: cli.py, main.py, *_handler.py, *_controller.py
+        - processing:    *_analyzer.py, *_processor.py, *_parser.py, *_detector.py, *_scanner.py
+        - data:          schema.py, model.py, *_repository.py, *_serializer.py, config.py, …
+        """
+        layer_files: dict[str, list[str]] = {"orchestration": [], "processing": [], "data": []}
+        for p in paths:
+            stem = Path(p.replace("\\", "/").split("/")[-1]).stem.lower()
+            if stem in _LAYER_STEM_EXACT:
+                layer_files[_LAYER_STEM_EXACT[stem]].append(p)
+                continue
+            for suffix, layer in _LAYER_STEM_SUFFIXES:
+                if stem == suffix or stem.endswith("_" + suffix):
+                    layer_files[layer].append(p)
+                    break
+
+        non_empty = {k: v for k, v in layer_files.items() if v}
+        if len(non_empty) >= 2:
+            return "layered", [
+                ArchitectureLayer(name=k, pattern="layered", files=v, confidence="medium")
+                for k, v in non_empty.items()
             ]
-            layers.append(ArchitectureLayer(
-                name=layer_key,
-                pattern=best_pattern,
-                files=matched_files,
-                confidence=layer_confidence,
-            ))
+        return None
 
-        return best_pattern or "unknown", layers
+    def _detect_modular(
+        self, paths: list[str]
+    ) -> Optional[tuple[str, list[ArchitectureLayer]]]:
+        """Detect modular architecture from ≥2 distinct named sub-packages.
+
+        Each top-level (or first non-transparent) directory that is not a test or
+        generic name is treated as a self-contained module.
+        """
+        module_files: dict[str, list[str]] = {}
+        for p in paths:
+            parts = p.replace("\\", "/").split("/")
+            for part in parts[:-1]:
+                if (part not in _SRC_TRANSPARENT
+                        and part.lower() not in _TEST_DIRS
+                        and part.lower() not in _GENERIC_NAMES):
+                    module_files.setdefault(part, []).append(p)
+                    break
+
+        meaningful = {k: v for k, v in module_files.items() if len(v) >= 2}
+        if len(meaningful) >= 2:
+            return "modular", [
+                ArchitectureLayer(name=k, pattern="modular", files=v, confidence="medium")
+                for k, v in meaningful.items()
+            ]
+        return None
 
     def _infer_bounded_contexts(
         self,

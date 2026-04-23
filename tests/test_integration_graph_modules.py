@@ -50,8 +50,14 @@ def test_cli_without_graph_modules_keeps_graph_disabled(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert data["module_graph"] is None
-    assert data["module_graph_summary"] is None
+    # Normalization fills None → empty typed struct so consumers never null-check.
+    # The `requested=False` sentinel signals the graph was not requested.
+    assert data["module_graph"] is not None
+    assert data["module_graph"]["summary"]["requested"] is False
+    assert data["module_graph"]["nodes"] == []
+    assert data["module_graph"]["edges"] == []
+    assert data["module_graph_summary"] is not None
+    assert data["module_graph_summary"]["requested"] is False
 
 
 def test_cli_graph_modules_preserves_workspace_context_in_monorepo(tmp_path: Path) -> None:

@@ -127,6 +127,24 @@ def test_empty_dir_is_empty_dict(tmp_path: Path):
     assert tree["empty_dir"] == {}
 
 
+def test_no_cli_flag_filenames_in_tree(tmp_path: Path):
+    """Flag-shaped filenames (e.g. "-o", "--format") must never appear in file_tree.
+
+    These are shell redirect / CLI invocation artifacts and are never legitimate
+    source files.  Regression guard for the -o artifact bug.
+    """
+    (tmp_path / "-o").write_text('{"stale": true}')
+    (tmp_path / "--format").write_text("stale")
+    (tmp_path / "-v").write_text("stale")
+    (tmp_path / "app.py").write_text("# real file")
+    scanner = FileScanner(tmp_path)
+    tree = scanner.scan_tree()
+    assert "-o" not in tree
+    assert "--format" not in tree
+    assert "-v" not in tree
+    assert "app.py" in tree
+
+
 def test_gitignore_relative_path(tmp_path: Path):
     (tmp_path / ".gitignore").write_text("*.pyc\n")
     (tmp_path / "app.py").write_text("# app")

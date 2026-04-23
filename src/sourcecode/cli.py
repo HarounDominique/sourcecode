@@ -202,7 +202,7 @@ def main(
         SourceMap,
         StackDetection,
     )
-    from sourcecode.serializer import compact_view, write_output
+    from sourcecode.serializer import compact_view, normalize_source_map, validate_cross_analyzer_consistency, validate_source_map, write_output
     from sourcecode.workspace import WorkspaceAnalyzer
 
     # 1. Escanear el directorio (SCAN-01 a SCAN-05)
@@ -556,6 +556,20 @@ def main(
         from sourcecode.code_notes_analyzer import CodeNotesAnalyzer
         cn_notes, cn_adrs, cn_summary = CodeNotesAnalyzer().analyze(target)
         sm = replace(sm, code_notes=cn_notes, code_adrs=cn_adrs, code_notes_summary=cn_summary)
+
+    # Normalize optional analyzer outputs → validate schema contracts.
+    # normalize_source_map fills None fields with typed empty defaults so that
+    # consumers never need to null-check architecture or module_graph.
+    # validate_source_map then asserts the contracts hold; it raises here
+    # (pre-serialization) rather than silently producing invalid JSON.
+    sm = normalize_source_map(sm)
+    validate_source_map(sm)
+
+    # Cross-analyzer semantic consistency (non-blocking: warnings to stderr).
+    # strict=False so a mismatched dependency or orphan semantic link never
+    # aborts a run — findings are informational until the team decides to harden.
+    for _finding in validate_cross_analyzer_consistency(sm, strict=False):
+        typer.echo(f"[consistency] {_finding}", err=True)
 
     # 4. Serializar (con o sin modo compact)
     if compact:

@@ -128,6 +128,10 @@ class FileScanner:
 
             # Agregar ficheros al nodo (null = fichero segun D-02)
             for fname in filenames:
+                # Skip flag-shaped names (e.g. "-o", "--format") — shell redirect artifacts.
+                # No legitimate source file starts with "-".
+                if fname.startswith("-"):
+                    continue
                 fpath = current / fname
                 # SCAN-03: no incluir symlinks de fichero
                 if fpath.is_symlink():

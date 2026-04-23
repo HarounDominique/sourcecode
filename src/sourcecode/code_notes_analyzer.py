@@ -5,6 +5,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Optional
 
+# Schema imports are hoisted here (not lazily inside _scan_source_file) so that
+# a stale .pyc / editable-install mismatch is caught at import time rather than
+# silently dropping notes mid-scan on the first failed late-import.
+from sourcecode.schema import AdrRecord, CodeNote, CodeNotesSummary
+
 _MAX_NOTES = 500
 _MAX_NOTES_PER_FILE = 30
 _MAX_ADRS = 50
@@ -103,7 +108,6 @@ def _scan_source_file(
         line_num = content.count("\n", 0, m.start()) + 1
         symbol = _find_nearby_symbol(lines, line_num - 1)
 
-        from sourcecode.schema import CodeNote
         notes.append(CodeNote(
             kind=kind,
             path=rel_path,
@@ -120,8 +124,6 @@ def _parse_adr(path: Path, rel_path: str) -> Optional[object]:
         content = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-
-    from sourcecode.schema import AdrRecord
 
     title: Optional[str] = None
     status: Optional[str] = None
@@ -167,15 +169,13 @@ def _parse_adr(path: Path, rel_path: str) -> Optional[object]:
     if not title:
         title = path.stem
 
-    return AdrRecord(path=rel_path, title=title, status=status, summary=summary)
+    return AdrRecord(path=rel_path, title=title, status=status, summary=summary)  # noqa: RET504
 
 
 class CodeNotesAnalyzer:
     """Extrae notas de código (TODO/FIXME/HACK/etc.) y ADRs del proyecto."""
 
     def analyze(self, root: Path) -> tuple[list, list, object]:
-        from sourcecode.schema import CodeNotesSummary
-
         notes: list = []
         adrs: list = []
         limitations: list[str] = []
@@ -186,9 +186,19 @@ class CodeNotesAnalyzer:
         if total_count[0] >= _MAX_NOTES:
             limitations.append(f"notes_truncated_at:{_MAX_NOTES}")
 
+        # Explicit canonical sort guarantees identical output for identical input
+        # regardless of filesystem traversal order or OS/platform differences.
+        # Without this, output order depended on sorted(Path.iterdir()) which
+        # varies across Python versions, APFS vs ext4, and future walk refactors.
+        notes.sort(key=lambda n: (n.path, n.line))
+        adrs.sort(key=lambda a: a.path)
+
         kind_counts: Counter = Counter(n.kind for n in notes)
         file_counts: Counter = Counter(n.path for n in notes)
-        top_files = [f for f, _ in file_counts.most_common(5)]
+        # Secondary sort by path makes top_files stable when counts are tied.
+        top_files = [
+            f for f, _ in sorted(file_counts.items(), key=lambda x: (-x[1], x[0]))[:5]
+        ]
 
         summary = CodeNotesSummary(
             requested=True,
@@ -211,7 +221,10 @@ class CodeNotesAnalyzer:
     ) -> None:
         try:
             entries = sorted(current.iterdir())
-        except PermissionError:
+        except OSError:
+            # Catches PermissionError, EMFILE (too many open files), and other
+            # OS-level errors that previously aborted the entire walk mid-scan,
+            # returning an empty or partial list depending on when the error hit.
             return
 
         for entry in entries:
@@ -237,5 +250,8 @@ class CodeNotesAnalyzer:
                                 adrs.append(adr)
                         continue
 
-                if suffix in _CODE_EXTENSIONS and total_count[0] < _MAX_NOTES:
+                # The quota check lives inside _scan_source_file; the pre-check
+                # here was redundant and caused files to be silently skipped when
+                # traversal order varied (different files filled the quota first).
+                if suffix in _CODE_EXTENSIONS:
                     _scan_source_file(entry, rel, notes, total_count)

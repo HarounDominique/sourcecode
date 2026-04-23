@@ -98,3 +98,70 @@ def test_graceful_degradation_flat_project() -> None:
 def test_no_architecture_flag_omits_field() -> None:
     sm = SourceMap()
     assert sm.architecture is None
+
+
+def test_atlas_cli_structure_detects_layered() -> None:
+    """atlas-cli repo structure must classify as layered, not unknown.
+
+    The project has no classical directory names (controllers/, services/) but
+    its file-naming conventions clearly signal three layers:
+      - orchestration: cli.py
+      - processing:    *_analyzer.py, scanner.py, coverage_parser.py
+      - data:          schema.py, serializer.py
+    Tests must not be counted as an architecture domain.
+    """
+    sm = _sm_with_paths(
+        # orchestration layer
+        "src/sourcecode/cli.py",
+        "src/sourcecode/prepare_context.py",
+        # processing layer
+        "src/sourcecode/scanner.py",
+        "src/sourcecode/architecture_analyzer.py",
+        "src/sourcecode/dependency_analyzer.py",
+        "src/sourcecode/graph_analyzer.py",
+        "src/sourcecode/semantic_analyzer.py",
+        "src/sourcecode/doc_analyzer.py",
+        "src/sourcecode/metrics_analyzer.py",
+        "src/sourcecode/coverage_parser.py",
+        # detectors sub-package
+        "src/sourcecode/detectors/__init__.py",
+        "src/sourcecode/detectors/base.py",
+        "src/sourcecode/detectors/python.py",
+        "src/sourcecode/detectors/nodejs.py",
+        # data/schema layer
+        "src/sourcecode/schema.py",
+        "src/sourcecode/serializer.py",
+        # support modules
+        "src/sourcecode/classifier.py",
+        "src/sourcecode/redactor.py",
+        "src/sourcecode/workspace.py",
+        "src/sourcecode/tree_utils.py",
+        # tests — must NOT appear as a domain
+        "tests/test_cli.py",
+        "tests/test_scanner.py",
+        "tests/test_architecture_analyzer.py",
+        "tests/test_schema.py",
+    )
+    analysis = ArchitectureAnalyzer().analyze(ROOT, sm)
+
+    assert analysis.pattern == "layered", (
+        f"Expected 'layered', got '{analysis.pattern}'. "
+        f"Layers detected: {[la.name for la in analysis.layers]}"
+    )
+    assert analysis.pattern != "unknown"
+
+    domain_names = {d.name for d in analysis.domains}
+    assert "tests" not in domain_names, "tests must not be an architecture domain"
+
+    layer_names = {la.name for la in analysis.layers}
+    assert "processing" in layer_names, "processing layer expected (*_analyzer.py, scanner.py)"
+    assert "data" in layer_names, "data layer expected (schema.py, serializer.py)"
+
+    assert analysis.confidence in ("high", "medium"), (
+        f"Confidence should not be low for a recognised pattern, got '{analysis.confidence}'"
+    )
+
+    # detectors sub-package must surface as its own domain, not collapse into 'sourcecode'
+    assert "detectors" in domain_names, (
+        "src/sourcecode/detectors/ should be its own domain, not merged into 'sourcecode'"
+    )

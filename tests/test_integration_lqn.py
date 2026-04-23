@@ -219,9 +219,12 @@ def test_architecture_flag_produces_analysis() -> None:
 
 
 def test_no_architecture_flag_omits_key() -> None:
-    """ARCH: sourcecode . (sin --architecture) -> architecture field is None."""
+    """ARCH: sourcecode . (sin --architecture) -> architecture present but not requested."""
     output = _invoke_json()
 
-    assert output.get("architecture") is None, (
-        "architecture should be None when --architecture flag is not passed"
+    # Normalization fills None → empty typed struct; requested=False signals not run.
+    arch = output.get("architecture")
+    assert arch is not None, "architecture must not be null after normalization"
+    assert arch["requested"] is False, (
+        "architecture.requested must be False when --architecture flag is not passed"
     )
