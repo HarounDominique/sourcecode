@@ -47,7 +47,7 @@ def main(
     compact: bool = typer.Option(
         False,
         "--compact",
-        help="Output reducido (~500 tokens): tipo de proyecto, stacks, entradas y arbol nivel 1",
+        help="Output reducido (~500-700 tokens): tipo, stacks, entradas, arbol nivel 1 y summaries de flags opcionales activos",
     ),
     dependencies: bool = typer.Option(
         False,
@@ -117,6 +117,41 @@ def main(
         "--semantics",
         help="Incluir call graph semantico, linking cross-file de simbolos y resolucion avanzada de imports",
     ),
+    architecture: bool = typer.Option(
+        False,
+        "--architecture",
+        help="Inferencia arquitectonica: dominios funcionales, capas (MVC/layered/hexagonal) y bounded contexts aproximados",
+    ),
+    git_context: bool = typer.Option(
+        False,
+        "--git-context",
+        "-g",
+        help="Incluir contexto git: commits recientes, ficheros mas activos y cambios pendientes",
+    ),
+    git_depth: int = typer.Option(
+        20,
+        "--git-depth",
+        help="Numero de commits recientes a incluir con --git-context (default: 20)",
+        min=1,
+        max=100,
+    ),
+    git_days: int = typer.Option(
+        90,
+        "--git-days",
+        help="Ventana temporal en dias para detectar ficheros mas activos con --git-context (default: 90)",
+        min=1,
+        max=3650,
+    ),
+    env_map: bool = typer.Option(
+        False,
+        "--env-map",
+        help="Incluir mapa de variables de entorno: claves, tipos, categorias y ficheros que las referencian",
+    ),
+    code_notes: bool = typer.Option(
+        False,
+        "--code-notes",
+        help="Extraer anotaciones TODO/FIXME/HACK/NOTE/DEPRECATED/WARNING/BUG/XXX/OPTIMIZE con ubicacion y simbolo envolvente, y detectar ADRs en docs/decisions/, docs/adr/ y similares",
+    ),
 ) -> None:
     """Genera un mapa de contexto estructurado del proyecto en formato JSON o YAML."""
     # Validar formato
@@ -158,6 +193,7 @@ def main(
     from sourcecode.metrics_analyzer import MetricsAnalyzer
     from sourcecode.redactor import SecretRedactor, redact_dict
     from sourcecode.scanner import FileScanner
+    from sourcecode.semantic_analyzer import SemanticAnalyzer
     from sourcecode.schema import (
         AnalysisMetadata,
         DocRecord,
@@ -233,7 +269,6 @@ def main(
     doc_analyzer = DocAnalyzer() if docs else None
     metrics_analyzer = MetricsAnalyzer() if full_metrics else None
 
-    from sourcecode.semantic_analyzer import SemanticAnalyzer
     semantic_analyzer = SemanticAnalyzer() if semantics else None
 
     root_manifests = [
@@ -292,7 +327,7 @@ def main(
         doc_records.extend(root_doc_records)
         doc_summaries.append(root_doc_summary)
 
-    file_metrics_records: list = []
+    file_metrics_records: list[Any] = []
     metrics_summaries = []
     if metrics_analyzer is not None:
         root_metrics_tree = (
@@ -500,6 +535,29 @@ def main(
     sm.project_summary = ProjectSummarizer(target).generate(sm)
     sm.architecture_summary = ArchitectureSummarizer(target).generate(sm)
 
+    # Phase 13 Plan 04: Architectural Inference (--architecture flag)
+    if architecture:
+        from sourcecode.architecture_analyzer import ArchitectureAnalyzer
+        arch_graph = module_graph  # None si --graph-modules no fue pasado
+        sm.architecture = ArchitectureAnalyzer().analyze(target, sm, arch_graph)
+
+    # Git Context (--git-context flag)
+    if git_context:
+        from sourcecode.git_analyzer import GitAnalyzer
+        sm.git_context = GitAnalyzer().analyze(target, depth=git_depth, days=git_days)
+
+    # Env Map (--env-map flag)
+    if env_map:
+        from sourcecode.env_analyzer import EnvAnalyzer
+        env_records, env_summary = EnvAnalyzer().analyze(target, file_tree)
+        sm = replace(sm, env_map=env_records, env_summary=env_summary)
+
+    # Code Notes (--code-notes flag)
+    if code_notes:
+        from sourcecode.code_notes_analyzer import CodeNotesAnalyzer
+        cn_notes, cn_adrs, cn_summary = CodeNotesAnalyzer().analyze(target)
+        sm = replace(sm, code_notes=cn_notes, code_adrs=cn_adrs, code_notes_summary=cn_summary)
+
     # 4. Serializar (con o sin modo compact)
     if compact:
         data = compact_view(sm)
@@ -536,33 +594,34 @@ def main(
     # 5. Escribir output (CLI-04)
     write_output(content, output=output)
 
+
+@app.command("prepare-context")
+def prepare_context_cmd(
+    task: str = typer.Argument(..., help="Descripción de la tarea"),
+    path: Path = typer.Option(".", "--path", "-p", help="Directorio del proyecto"),
+) -> None:
+    """Prepara contexto mínimo optimizado para que un LLM modifique el código."""
+    from dataclasses import asdict
+
     from sourcecode.prepare_context import ContextBuilder
 
-    @app.command("prepare-context")
-    def prepare_context_cmd(
-            task: str = typer.Argument(..., help="Descripción de la tarea"),
-            path: Path = typer.Option(".", help="Directorio del proyecto"),
-    ):
-        """
-        Prepara contexto mínimo optimizado para que un LLM modifique el código.
-        """
-        target = path.resolve()
+    target = path.resolve()
 
-        if not target.exists() or not target.is_dir():
-            typer.echo(f"Error: '{target}' no es un directorio válido.", err=True)
-            raise typer.Exit(code=1)
+    if not target.exists() or not target.is_dir():
+        typer.echo(f"Error: '{target}' no es un directorio válido.", err=True)
+        raise typer.Exit(code=1)
 
-        builder = ContextBuilder(target)
-        result = builder.prepare(task)
+    builder = ContextBuilder(target)
+    result = builder.prepare(task)
 
-        output = {
-            "task": result.task,
-            "entry_points": result.entry_points,
-            "relevant_files": [f.__dict__ for f in result.relevant_files],
-            "call_flow": result.call_flow,
-            "snippets": [s.__dict__ for s in result.snippets],
-            "tests": result.tests,
-            "notes": result.notes,
-        }
+    out = {
+        "task": result.task,
+        "entry_points": result.entry_points,
+        "relevant_files": [asdict(f) for f in result.relevant_files],
+        "call_flow": result.call_flow,
+        "snippets": [asdict(s) for s in result.snippets],
+        "tests": result.tests,
+        "notes": result.notes,
+    }
 
-        typer.echo(json.dumps(output, indent=2, ensure_ascii=False))
+    typer.echo(json.dumps(out, indent=2, ensure_ascii=False))

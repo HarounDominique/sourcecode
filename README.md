@@ -86,6 +86,14 @@ sourcecode --version
 | `--graph-edges imports,calls,contains,extends` | none | Override the default edge kinds for the selected detail level. |
 | `--docs` | off | Include extracted documentation: docstrings, signatures, and comments from Python and JS/TS modules and symbols. |
 | `--docs-depth module\|symbols\|full` | `symbols` | Documentation extraction depth: module-level only, modules and top-level symbols (functions/classes), or all symbols including methods. |
+| `--full-metrics` | off | Include code quality metrics: LOC, symbols, complexity, tests, and coverage per file. |
+| `--semantics` | off | Include semantic call graph, cross-file symbol linking, and advanced import resolution. |
+| `--architecture` | off | Architectural inference: groups files into functional domains, detects layer patterns (MVC, layered, hexagonal, fullstack), and infers approximate bounded contexts. Optionally uses `--graph-modules` for more precise bounded context inference. |
+| `--git-context` / `-g` | off | Include git context: recent commits, most-changed files (hotspots), uncommitted changes, contributors, and a natural-language summary. |
+| `--git-depth INTEGER` | `20` | Number of recent commits to include with `--git-context`. Range: 1–100. |
+| `--git-days INTEGER` | `90` | Time window in days for hotspot detection with `--git-context`. Range: 1–3650. |
+| `--env-map` | off | Map all environment variables referenced in source code: key name, required/optional status, inferred type (`string`, `int`, `bool`, `url`, `path`, `enum`), functional category (`database`, `auth`, `cache`, `storage`, `service`, `observability`, `feature_flag`, `server`, `general`), default value when present, and source file locations. Supplements with descriptions from `.env.example`, `.env.sample`, and similar reference files. |
+| `--code-notes` | off | Extract inline code annotations — `TODO`, `FIXME`, `HACK`, `NOTE`, `DEPRECATED`, `WARNING`, `XXX`, `BUG`, `OPTIMIZE` — with file path, line number, annotation text, and the nearest enclosing function or class. Also detects Architecture Decision Records (ADRs) in `docs/decisions/`, `docs/adr/`, `adr/`, and similar directories, extracting title, status, and summary. |
 | `--depth INTEGER` | `4` | Maximum file tree depth. Range: 1–20. |
 | `--no-redact` | off | Disable secret redaction (enabled by default). |
 | `--version` | — | Show version and exit. |
@@ -101,7 +109,7 @@ The full schema (`SourceMap`) includes the following fields:
 | `metadata` | object | Schema version, timestamp, `sourcecode` version, and analyzed path. |
 | `file_tree` | object | Repository tree where `null` represents a file and `{}` represents a directory. |
 | `file_paths` | array | Flat list of all project paths derived from `file_tree`, with forward-slash separators. Always present; respects `--depth`. |
-| `project_summary` | string\|null | Deterministic natural-language description of the project generated from detected stacks, entry points, and dependencies. Present when stacks are detected. |
+| `project_summary` | string\|null | Deterministic natural-language description of the project. Includes: manifest/README description when available, detected architecture pattern (`layered`, `mvc`, `hexagonal`, `fullstack`), business domain names inferred from directory structure, entry points (when no domains are detected), and dependency count. Present when stacks are detected. |
 | `architecture_summary` | string\|null | Static summary of the main execution flow, orchestrated modules, and output produced by the project. Present when enough structural evidence is available. |
 | `stacks` | array | Stack detections with confidence, frameworks, manifests, `primary`, `root`, `workspace`, and `signals`. |
 | `project_type` | string\|null | Overall project classification. |
@@ -129,9 +137,77 @@ The full schema (`SourceMap`) includes the following fields:
 | `docs` | array | Extracted `DocRecord` objects for each documented symbol. |
 | `doc_summary` | object | Summary with total count, languages, depth used, truncation status, and limitations. |
 
+### With `--env-map`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `env_map` | array | One `EnvVarRecord` per detected environment variable. |
+| `env_summary` | object | Summary: total count, required vs optional counts, categories present, and example files found. Also included in `--compact` output when the flag is active. |
+
+Each `EnvVarRecord`:
+
+| Field | Description |
+|-------|-------------|
+| `key` | Environment variable name (e.g. `DATABASE_URL`). |
+| `required` | `true` if the code reads the variable without a fallback default (`os.environ["KEY"]`, `process.env.KEY`). `false` if a default was found (`os.getenv("KEY", "default")`). |
+| `default` | Default value detected in code, or `null` if none. |
+| `type_hint` | Inferred type: `string`, `int`, `bool`, `url`, `path`, or `enum`. Derived from the key name (e.g. `_PORT` → `int`, `_URL` → `url`, `ENABLE_*` → `bool`). |
+| `category` | Functional group inferred from the key name: `database`, `cache`, `storage`, `auth`, `service`, `observability`, `feature_flag`, `server`, or `general`. |
+| `description` | Description extracted from a comment above the variable in `.env.example`, or `null`. |
+| `files` | Up to 10 `"path:line"` references where the variable is read in source code. Empty for variables found only in `.env.example`. |
+
+Supported languages: Python (`os.getenv`, `os.environ`), JavaScript/TypeScript (`process.env`), Go (`os.Getenv`, `os.LookupEnv`), Ruby (`ENV[]`, `ENV.fetch`), Java (`System.getenv`), PHP (`getenv`, `$_ENV`), Rust (`env::var`).
+
+### With `--code-notes`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `code_notes` | array | One `CodeNote` per annotation found in source files. |
+| `code_adrs` | array | One `AdrRecord` per Architecture Decision Record detected. |
+| `code_notes_summary` | object | Summary: total count, counts by kind, top files with most annotations, and ADR count. Also included in `--compact` output when the flag is active. |
+
+Each `CodeNote`:
+
+| Field | Description |
+|-------|-------------|
+| `kind` | Annotation type: `TODO`, `FIXME`, `HACK`, `NOTE`, `DEPRECATED`, `WARNING`, `XXX`, `BUG`, or `OPTIMIZE`. |
+| `path` | File path relative to project root. |
+| `line` | 1-based line number. |
+| `text` | Annotation text (truncated to 200 characters). |
+| `symbol` | Name of the nearest enclosing function or class found by scanning backward up to 25 lines. `null` at module level. |
+
+Each `AdrRecord`:
+
+| Field | Description |
+|-------|-------------|
+| `path` | File path relative to project root. |
+| `title` | Title extracted from the first heading (`# ...`) in the file. |
+| `status` | Normalized status: `accepted`, `proposed`, `deprecated`, or `superseded`. `null` if no status line was found. |
+| `summary` | First paragraph of body text after the title. `null` if not parseable. |
+
+ADR detection looks for Markdown files in `docs/decisions/`, `docs/adr/`, `adr/`, `decisions/`, and `architecture/decisions/`, and for files with names matching `ADR-*.md`, `0001-*.md`, or `DECISION-*.md` patterns.
+
+### With `--git-context`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `git_context` | object | Git context with recent commits, change hotspots, uncommitted changes, contributors, and a natural-language summary. |
+
+`git_context` fields:
+
+| Field | Description |
+|-------|-------------|
+| `branch` | Current branch name. |
+| `recent_commits` | Up to `--git-depth` commits (default 20). Each includes `hash`, `message`, `author`, `date`, and `files_changed` (capped at 10 per commit). |
+| `change_hotspots` | Up to 20 files sorted by commit frequency within the `--git-days` window (default 90 days). Each includes `file`, `commit_count`, and `last_changed`. |
+| `uncommitted_changes` | Object with `staged`, `unstaged`, and `untracked` file lists from `git status`. |
+| `contributors` | Unique author names active within the `--git-days` window. |
+| `git_summary` | Deterministic natural-language summary: branch, pending changes, top hotspots, and last commit. |
+| `limitations` | List of errors or degraded analysis signals (e.g. `no_git_repo`, `git_not_found`). |
+
 ## Compact Mode
 
-`--compact` returns a reduced JSON view optimized for LLM prompts (~500-700 tokens). It excludes the full `dependencies` list, `docs`, and `module_graph`, while retaining the fields most useful for project orientation.
+`--compact` returns a reduced JSON view optimized for LLM prompts (~500-700 tokens). It excludes the full `dependencies` list, `docs`, and `module_graph`, while retaining the fields most useful for project orientation. When optional flags are also active, their summaries are included: `dependency_summary` (with `--dependencies`), `env_summary` (with `--env-map`), and `code_notes_summary` (with `--code-notes`).
 
 Real output from a Python FastAPI project:
 
@@ -383,10 +459,17 @@ sourcecode --docs --docs-depth full .   # include methods
 
 **`project_summary` field**
 
-`project_summary` is always generated when stacks are detected. It provides instant project context without requiring the LLM to parse the full structure. Example values:
+`project_summary` is always generated when stacks are detected. It provides instant project context without requiring the LLM to parse the full structure. The content adapts to what is detectable:
 
-- `"API en Python (FastAPI). Entry points: src/main.py. 12 dependencias (python)."`
-- `"Aplicacion web en Node.js (Next.js, React). Entry points: app/page.tsx."`
+- If `pyproject.toml`, `package.json`, or the README provides a description, it leads the summary; stack, architecture pattern, and domains are appended as context.
+- If the directory structure reveals a known architecture pattern (`layered`, `mvc`, `hexagonal`, `fullstack`), it is included.
+- Business domain names (directories that are not architectural layers or generic utilities) replace entry points when two or more distinct domains are detected.
+
+Example values:
+
+- `"API en Python (FastAPI) con arquitectura layered. Dominios: auth, users, billing. 12 dependencias (python)."` (structured project)
+- `"API en Python (FastAPI). Entry points: src/main.py. 12 dependencias (python)."` (flat project, no domains detected)
+- `"Aplicacion web en Node.js (Next.js) con arquitectura mvc. Dominios: products, orders. 24 dependencias (nodejs)."`
 - `"Monorepo con 2 workspaces en Node.js, Python."`
 
 **`architecture_summary` field**
@@ -396,6 +479,132 @@ sourcecode --docs --docs-depth full .   # include methods
 **`key_dependencies` field**
 
 When `--dependencies` is active, `key_dependencies` contains the top-15 direct dependencies sorted by primary ecosystem first. Use it to understand core library choices without scanning hundreds of transitive records.
+
+**`--git-context` — temporal project context**
+
+Best for: understanding recent activity before touching code, debugging regressions, onboarding to an active repository.
+
+Answers questions a static analysis cannot: what changed recently, which files are actively maintained, whether there is uncommitted work in progress, and who is driving the project.
+
+```bash
+sourcecode --git-context .
+sourcecode --git-context --git-depth 10 --git-days 30 .
+```
+
+`git_summary` condenses the key signals into a single line:
+
+```
+"Rama main. 3 cambios pendientes (staged: 1, unstaged: 2, untracked: 0). Archivos más activos: src/cli.py (18 commits), src/schema.py (14 commits). Último commit: 2026-04-22 — docs(13): add gap closure plan."
+```
+
+Combine with `--compact` for fast handoffs that include both static structure and recent activity:
+
+```bash
+sourcecode --compact --dependencies --git-context .
+```
+
+Note: `git_context` is excluded from the `--compact` token budget but is always present in full output when the flag is active.
+
+**`--env-map` — configuration surface**
+
+Best for: onboarding a new agent to an unfamiliar project, understanding what environment a service requires to run, reviewing configuration completeness before deployment.
+
+Answers: what variables does this project expect, which ones are required vs optional, where are they read, and what type and category are they?
+
+```bash
+sourcecode --env-map .
+sourcecode --compact --env-map .   # configuration surface in ~700 tokens
+```
+
+Example output (excerpt):
+
+```json
+{
+  "env_map": [
+    {
+      "key": "DATABASE_URL",
+      "required": true,
+      "default": null,
+      "type_hint": "url",
+      "category": "database",
+      "description": "PostgreSQL connection string",
+      "files": ["src/db.py:12", "src/config.py:5"]
+    },
+    {
+      "key": "LOG_LEVEL",
+      "required": false,
+      "default": "INFO",
+      "type_hint": "enum",
+      "category": "observability",
+      "description": null,
+      "files": ["src/logger.py:3"]
+    }
+  ],
+  "env_summary": {
+    "requested": true,
+    "total": 14,
+    "required_count": 6,
+    "optional_count": 8,
+    "categories": ["auth", "database", "observability", "server"],
+    "example_files_found": [".env.example"]
+  }
+}
+```
+
+**`--code-notes` — technical debt and intent**
+
+Best for: understanding known issues before modifying code, identifying deprecated APIs, discovering design decisions embedded in comments, and locating ADRs when they exist.
+
+Answers: what do the authors know is broken or suboptimal, what is explicitly marked for removal, what architectural decisions were recorded, and which areas carry the most annotation debt?
+
+```bash
+sourcecode --code-notes .
+sourcecode --compact --code-notes .   # debt overview in compact form
+```
+
+Example output (excerpt):
+
+```json
+{
+  "code_notes": [
+    {
+      "kind": "FIXME",
+      "path": "src/payments.py",
+      "line": 42,
+      "text": "currency conversion is broken for EUR",
+      "symbol": "process_payment"
+    },
+    {
+      "kind": "DEPRECATED",
+      "path": "src/auth.py",
+      "line": 18,
+      "text": "use AuthService instead",
+      "symbol": "UserService"
+    }
+  ],
+  "code_adrs": [
+    {
+      "path": "docs/decisions/0001-use-postgresql.md",
+      "title": "ADR-0001: Use PostgreSQL as primary database",
+      "status": "accepted",
+      "summary": "PostgreSQL was chosen for its JSONB support and strong ACID guarantees."
+    }
+  ],
+  "code_notes_summary": {
+    "requested": true,
+    "total": 23,
+    "by_kind": {"TODO": 10, "FIXME": 7, "HACK": 3, "DEPRECATED": 2, "WARNING": 1},
+    "top_files": ["src/payments.py", "src/legacy.py"],
+    "adr_count": 3
+  }
+}
+```
+
+Combine flags for a comprehensive project handoff:
+
+```bash
+sourcecode --compact --env-map --code-notes --git-context .
+```
 
 ## Development
 

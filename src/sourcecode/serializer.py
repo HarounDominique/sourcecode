@@ -69,6 +69,14 @@ def compact_view(sm: SourceMap) -> dict[str, Any]:
     if sm.dependency_summary is not None and sm.dependency_summary.requested:
         dep_summary_dict = asdict(sm.dependency_summary)
 
+    env_summary_dict: Any = None
+    if sm.env_summary is not None and sm.env_summary.requested:
+        env_summary_dict = asdict(sm.env_summary)
+
+    code_notes_summary_dict: Any = None
+    if sm.code_notes_summary is not None and sm.code_notes_summary.requested:
+        code_notes_summary_dict = asdict(sm.code_notes_summary)
+
     return {
         "schema_version": sm.metadata.schema_version,
         "project_type": sm.project_type,
@@ -78,6 +86,8 @@ def compact_view(sm: SourceMap) -> dict[str, Any]:
         "entry_points": [asdict(entry_point) for entry_point in sm.entry_points],
         "file_tree_depth1": depth1,
         "dependency_summary": dep_summary_dict,
+        "env_summary": env_summary_dict,
+        "code_notes_summary": code_notes_summary_dict,
     }
 
 

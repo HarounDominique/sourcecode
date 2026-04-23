@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from sourcecode.cli import app
@@ -65,7 +64,7 @@ def test_lqn02_project_summary() -> None:
     assert "contexto estructurado" in ps.lower(), (
         f"LQN-02: project_summary should reflect the real project description, got: {ps!r}"
     )
-    assert "Stack principal: Python" in ps, (
+    assert "Stack: Python" in ps, (
         f"LQN-02: project_summary should ignore tooling-only Node.js signals, got: {ps!r}"
     )
 
@@ -196,4 +195,32 @@ def test_lqn06_compact_no_dep_summary_without_flag() -> None:
     assert dep_sum is None, (
         f"LQN-06c: compact without --dependencies should have dependency_summary=None, "
         f"got {dep_sum!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ARCH-01..03: --architecture flag produces architectural analysis
+# ---------------------------------------------------------------------------
+
+
+def test_architecture_flag_produces_analysis() -> None:
+    """ARCH-01..03: sourcecode . --architecture -> architecture field present with pattern/domains/layers/bounded_contexts."""
+    output = _invoke_json("--architecture")
+
+    assert "architecture" in output, "architecture key missing from output"
+    arch = output["architecture"]
+    assert arch is not None, "architecture must not be None when --architecture is passed"
+    assert "pattern" in arch, "architecture.pattern missing"
+    assert "domains" in arch, "architecture.domains missing"
+    assert "layers" in arch, "architecture.layers missing"
+    assert "bounded_contexts" in arch, "architecture.bounded_contexts missing"
+    assert arch["requested"] is True, "architecture.requested must be True"
+
+
+def test_no_architecture_flag_omits_key() -> None:
+    """ARCH: sourcecode . (sin --architecture) -> architecture field is None."""
+    output = _invoke_json()
+
+    assert output.get("architecture") is None, (
+        "architecture should be None when --architecture flag is not passed"
     )

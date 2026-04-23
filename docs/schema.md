@@ -16,6 +16,14 @@ Los campos **opcionales** dependen de los flags activos en la invocacion:
 | `module_graph_summary` | `--graph-modules` |
 | `docs` | `--docs` |
 | `doc_summary` | `--docs` |
+| `file_metrics` | `--full-metrics` |
+| `metrics_summary` | `--full-metrics` |
+| `semantic_calls` | `--semantics` |
+| `semantic_symbols` | `--semantics` |
+| `semantic_links` | `--semantics` |
+| `semantic_summary` | `--semantics` |
+| `architecture` | `--architecture` |
+| `git_context` | `--git-context` |
 
 ## Raiz
 
@@ -35,7 +43,15 @@ Los campos **opcionales** dependen de los flags activos en la invocacion:
   "module_graph": null,
   "module_graph_summary": null,
   "docs": [],
-  "doc_summary": null
+  "doc_summary": null,
+  "file_metrics": [],
+  "metrics_summary": null,
+  "semantic_calls": [],
+  "semantic_symbols": [],
+  "semantic_links": [],
+  "semantic_summary": null,
+  "architecture": null,
+  "git_context": null
 }
 ```
 
@@ -49,6 +65,8 @@ Campos:
 - `entry_points`: puntos de entrada relevantes. Siempre presente (puede ser lista vacia).
 - `project_summary`: descripcion en lenguaje natural del proyecto generada deterministicamente. Presente cuando hay stacks detectados; `null` si no (Phase 9).
 - `architecture_summary`: resumen arquitectonico estatico del flujo principal, modulos orquestados y output producido. `null` si no hay evidencia suficiente (Phase 13).
+- `architecture`: analisis arquitectonico completo. Solo presente con `--architecture`; `null` por defecto (Phase 13).
+- `git_context`: contexto temporal del repositorio git. Solo presente con `--git-context`; `null` por defecto.
 - `dependencies`: dependencias detectadas. Solo presente con `--dependencies`; lista vacia por defecto.
 - `dependency_summary`: resumen del analisis de dependencias. Solo presente con `--dependencies`; `null` por defecto.
 - `key_dependencies`: top-15 dependencias directas relevantes. Solo presente con `--dependencies`; lista vacia por defecto (Phase 9).
@@ -63,7 +81,7 @@ Campos:
 {
   "schema_version": "1.0",
   "generated_at": "2026-04-07T19:41:05.686277+00:00",
-  "sourcecode_version": "0.13.0",
+  "sourcecode_version": "0.14.0",
   "analyzed_path": "/abs/path/to/project"
 }
 ```
@@ -115,22 +133,34 @@ Vease tambien: `file_tree_depth1` en la seccion [Modo compacto](#modo-compacto).
 `project_summary` es una descripcion en lenguaje natural del proyecto, generada deterministicamente a partir de los campos del `SourceMap` sin llamadas a API. Presente cuando hay stacks detectados; `null` si no.
 
 ```json
-"Aplicacion web en Nodejs (Next.js, React). Entry points: app/page.tsx. 42 dependencias (nodejs)."
+"API en Python (FastAPI) con arquitectura layered. Dominios: auth, users, billing. 12 dependencias (python)."
 ```
 
 ### Plantillas de generacion
 
-El valor se construye segun las siguientes plantillas:
+El valor se construye segun las siguientes plantillas (en orden de prioridad):
 
-**Proyecto con stacks:**
+**Proyecto con descripcion en manifest o README:**
 ```
-{type_label} en {stack_primario} ({frameworks}). Entry points: {paths}. {N} dependencias ({ecosystems}).
+{descripcion}. Stack: {stack_primario} ({frameworks}) con arquitectura {patron}. Dominios: {dominios}.
+```
+Si no hay dominios detectables, `Dominios: ...` se sustituye por `Entry points: {paths}`.
+
+**Proyecto sin descripcion, con dominios detectados:**
+```
+{type_label} en {stack_primario} ({frameworks}) con arquitectura {patron}. Dominios: {dominios}. {N} dependencias ({ecosystems}).
+```
+
+**Proyecto sin descripcion ni dominios:**
+```
+{type_label} en {stack_primario} ({frameworks}) con arquitectura {patron}. Entry points: {paths}. {N} dependencias ({ecosystems}).
 ```
 
 **Monorepo:**
 ```
-Monorepo con {N} workspaces en {stacks}.
+Monorepo con {N} workspaces en {stacks}. Dominios: {dominios}.
 ```
+Si no hay dominios, la parte `Dominios: ...` se omite.
 
 **Sin stacks detectados:**
 ```
@@ -151,9 +181,20 @@ Proyecto sin stack detectado.
   | `fullstack` | `Proyecto fullstack` |
   | `unknown` | `Proyecto` |
 
-- Se listan como maximo 3 entry points y 3 frameworks.
-- La parte de dependencias solo aparece cuando `dependency_summary` esta disponible y tiene conteo mayor que cero. Si `dependency_summary` es `None`, se omite la parte de dependencias.
+- **Descripcion del proyecto:** se lee en este orden: `pyproject.toml[project.description]`, `package.json.description`, primer parrafo util del README. Si hay descripcion, el stack y los dominios se agregan como sufijo.
+
+- **Patron arquitectonico (`{patron}`):** se infiere comparando los segmentos de directorio de `file_paths` contra cuatro patrones conocidos (`mvc`, `layered`, `hexagonal`, `fullstack`). Se elige el patron con mas capas coincidentes; se requiere un minimo de 2 capas para reportarlo. Si no se alcanza ese umbral, la parte `con arquitectura {patron}` se omite.
+
+- **Dominios de negocio (`{dominios}`):** primeros segmentos de directorio de cada fichero de codigo en `file_paths`, excluyendo prefijos transparentes (`src`, `lib`, `app`, `pkg`), nombres de capas arquitectonicas (`controllers`, `services`, `repos`, `models`, `infra`, etc.) y nombres genericos (`utils`, `helpers`, `common`, etc.). Solo se reportan dominios cuando hay **al menos 2 nombres distintos** (para no confundir el nombre del paquete raiz con un dominio de negocio). Se listan hasta 5 dominios, ordenados por numero de ficheros descendente.
+
+- Cuando se detectan dominios, los entry points se omiten del resumen (estan cubiertos por `architecture_summary`). Si no hay dominios, se incluyen hasta 3 entry points.
+
+- Se listan como maximo 3 frameworks.
+
+- La parte de dependencias solo aparece cuando `dependency_summary` esta disponible y tiene conteo mayor que cero. Si `dependency_summary` es `None`, se omite.
+
 - Para monorepos se usa la variante especial: se cuenta el numero de workspaces distintos (`s.workspace`) entre todos los stacks.
+
 - La generacion nunca lanza excepcion; en caso de error interno devuelve `"Proyecto analizado."`.
 
 ## stacks
@@ -531,6 +572,27 @@ Campos:
   - `"python_parse_error:{path}"` — error de parseo de AST Python.
   - `"max_files_reached:{actual}>{limit}"` — se alcanzo el limite de ficheros procesables.
 
+## architecture (ArchitectureAnalysis | null)
+
+Solo presente con `--architecture`. Resultado del analisis arquitectonico completo del proyecto.
+
+| Campo | Tipo | Descripcion |
+|-------|------|-------------|
+| `requested` | bool | Siempre `true` cuando el campo esta presente |
+| `pattern` | string | Patron detectado: `mvc`, `layered`, `hexagonal`, `fullstack`, `flat`, `unknown` |
+| `domains` | ArchitectureDomain[] | Dominios funcionales agrupados por directorio |
+| `layers` | ArchitectureLayer[] | Capas arquitectonicas detectadas con sus archivos |
+| `bounded_contexts` | BoundedContext[] | Contextos acotados aproximados |
+| `confidence` | high/medium/low | Confianza global del analisis |
+| `method` | string | `heuristic` o `graph+heuristic` |
+| `limitations` | string[] | Razones de degradacion si el patron no pudo inferirse |
+
+**ArchitectureDomain**: `name`, `files[]`, `role` (descripcion del rol del directorio), `confidence`
+
+**ArchitectureLayer**: `name` (e.g. "controller"), `pattern` (e.g. "mvc"), `files[]`, `confidence`
+
+**BoundedContext**: `name`, `modules[]` (paths de los archivos del contexto), `entry_files[]`, `confidence`
+
 ## Modo compacto
 
 Con `--compact`, la salida omite `metadata`, el arbol completo, `dependencies`, `docs` y `module_graph`. El resultado es una proyeccion de aproximadamente 500-700 tokens diseñada para consumo rapido por LLMs.
@@ -583,7 +645,7 @@ Ejemplo de salida para un monorepo con web Node.js y API Python con `--dependenc
   "metadata": {
     "schema_version": "1.0",
     "generated_at": "2026-04-07T19:41:05.686277+00:00",
-    "sourcecode_version": "0.13.0",
+    "sourcecode_version": "0.14.0",
     "analyzed_path": "/abs/path/to/project"
   },
   "file_tree": {
@@ -666,7 +728,7 @@ Ejemplo de salida para un monorepo con web Node.js y API Python con `--dependenc
       "source": "manifest"
     }
   ],
-  "project_summary": "Monorepo con 2 workspaces en Nodejs, Python. Entry points: apps/web/app/page.tsx, packages/api/main.py. 18 dependencias (python, nodejs).",
+  "project_summary": "Monorepo con 2 workspaces en Nodejs, Python. 18 dependencias (python, nodejs).",
   "dependencies": [
     {
       "name": "fastapi",
@@ -752,3 +814,81 @@ Ejemplo de salida para un monorepo con web Node.js y API Python con `--dependenc
   }
 }
 ```
+
+## git_context
+
+Solo presente con `--git-context`. Expone el historial reciente y el estado actual del repositorio git.
+
+```json
+{
+  "git_context": {
+    "requested": true,
+    "branch": "main",
+    "recent_commits": [
+      {
+        "hash": "d7a9316",
+        "message": "docs(13): add gap closure plan 13-04 to ROADMAP",
+        "author": "m3-dhl",
+        "date": "2026-04-22",
+        "files_changed": [".planning/ROADMAP.md"]
+      }
+    ],
+    "change_hotspots": [
+      { "file": "src/sourcecode/cli.py", "commit_count": 18, "last_changed": "2026-04-22" },
+      { "file": "src/sourcecode/schema.py", "commit_count": 14, "last_changed": "2026-04-20" }
+    ],
+    "uncommitted_changes": {
+      "staged": [".planning/STATE.md"],
+      "unstaged": ["README.md", "src/sourcecode/cli.py"],
+      "untracked": ["src/sourcecode/git_analyzer.py"]
+    },
+    "contributors": ["alice", "m3-dhl"],
+    "git_summary": "Rama main. 4 cambios pendientes (staged: 1, unstaged: 2, untracked: 1). Archivos más activos: src/sourcecode/cli.py (18 commits), src/sourcecode/schema.py (14 commits). Último commit: 2026-04-22 — docs(13): add gap closure plan 13-04 to ROADMAP.",
+    "limitations": []
+  }
+}
+```
+
+Campos:
+
+- `requested` (`bool`): siempre `true` cuando el campo esta presente.
+- `branch` (`str | null`): nombre de la rama activa. `null` si no pudo determinarse.
+- `recent_commits` (`CommitRecord[]`): lista de hasta `--git-depth` commits (por defecto 20), del mas reciente al mas antiguo.
+- `change_hotspots` (`ChangeHotspot[]`): hasta 20 ficheros ordenados por frecuencia de commits dentro de la ventana `--git-days` (por defecto 90 dias).
+- `uncommitted_changes` (`UncommittedChanges | null`): ficheros con cambios pendientes segun `git status`. `null` si el comando fallo.
+- `contributors` (`str[]`): nombres de autores unicos activos en la ventana `--git-days`, ordenados alfabeticamente.
+- `git_summary` (`str | null`): resumen en lenguaje natural generado deterministicamente a partir de los campos anteriores.
+- `limitations` (`str[]`): senales de error o analisis degradado. Valores posibles: `no_git_repo`, `git_not_found`, `git_timeout`, `branch_unavailable`, `commits_timeout`, `hotspots_timeout`, `status_timeout`.
+
+### CommitRecord
+
+Cada elemento de `recent_commits`:
+
+- `hash` (`str`): los primeros 8 caracteres del hash del commit.
+- `message` (`str`): asunto del commit (primera linea del mensaje).
+- `author` (`str`): nombre del autor.
+- `date` (`str`): fecha del commit en formato `YYYY-MM-DD`.
+- `files_changed` (`str[]`): paths de ficheros modificados en ese commit, limitados a 10 por commit.
+
+### ChangeHotspot
+
+Cada elemento de `change_hotspots`:
+
+- `file` (`str`): path relativo del fichero.
+- `commit_count` (`int`): numero de commits que tocaron ese fichero en la ventana temporal.
+- `last_changed` (`str`): fecha del commit mas reciente que toco el fichero en formato `YYYY-MM-DD`.
+
+### UncommittedChanges
+
+- `staged` (`str[]`): ficheros con cambios en el index (area de staging).
+- `unstaged` (`str[]`): ficheros modificados en el working tree pero no staged.
+- `untracked` (`str[]`): ficheros nuevos no rastreados por git.
+
+### Limites del analizador
+
+- Maximo 20 commits recientes por defecto; configurable hasta 100 con `--git-depth`.
+- Maximo 10 ficheros por commit en `files_changed`.
+- Maximo 20 entradas en `change_hotspots`.
+- Maximo 20 contribuidores en `contributors`.
+- Ventana temporal para hotspots y contributors: 90 dias por defecto; configurable hasta 3650 con `--git-days`.
+- Cada comando git tiene un timeout independiente (5-30 s segun la operacion). Los fallos parciales se registran en `limitations` sin abortar el resto del analisis.

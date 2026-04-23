@@ -297,6 +297,160 @@ class SemanticSummary:
     limitations: list[str] = field(default_factory=list)
 
 
+# --- Phase 13 Plan 04: Architectural Inference ---
+
+@dataclass
+class ArchitectureDomain:
+    """Un dominio funcional inferido del codigo."""
+
+    name: str
+    files: list[str] = field(default_factory=list)
+    role: str = ""
+    confidence: Literal["high", "medium", "low"] = "low"
+
+
+@dataclass
+class ArchitectureLayer:
+    """Una capa arquitectonica detectada."""
+
+    name: str
+    pattern: str
+    files: list[str] = field(default_factory=list)
+    confidence: Literal["high", "medium", "low"] = "low"
+
+
+@dataclass
+class BoundedContext:
+    """Un contexto acotado aproximado inferido."""
+
+    name: str
+    modules: list[str] = field(default_factory=list)
+    entry_files: list[str] = field(default_factory=list)
+    confidence: Literal["high", "medium", "low"] = "low"
+
+
+@dataclass
+class ArchitectureAnalysis:
+    """Resultado del analisis arquitectonico completo."""
+
+    requested: bool = False
+    pattern: Optional[str] = None
+    domains: list[ArchitectureDomain] = field(default_factory=list)
+    layers: list[ArchitectureLayer] = field(default_factory=list)
+    bounded_contexts: list[BoundedContext] = field(default_factory=list)
+    confidence: Literal["high", "medium", "low"] = "low"
+    method: str = "heuristic"
+    limitations: list[str] = field(default_factory=list)
+
+
+# --- Env Map ---
+
+@dataclass
+class EnvVarRecord:
+    """Variable de entorno referenciada en el codigo del proyecto."""
+
+    key: str
+    required: bool = True
+    default: Optional[str] = None
+    type_hint: Optional[str] = None   # string | int | bool | url | path | enum
+    category: Optional[str] = None    # database | cache | storage | auth | service | observability | feature_flag | server | general
+    description: Optional[str] = None
+    files: list[str] = field(default_factory=list)  # "path:line"
+
+
+@dataclass
+class EnvSummary:
+    """Resumen del analisis de variables de entorno."""
+
+    requested: bool = False
+    total: int = 0
+    required_count: int = 0
+    optional_count: int = 0
+    categories: list[str] = field(default_factory=list)
+    example_files_found: list[str] = field(default_factory=list)
+    limitations: list[str] = field(default_factory=list)
+
+
+# --- Code Notes ---
+
+@dataclass
+class CodeNote:
+    """Nota de codigo: TODO, FIXME, HACK, NOTE, DEPRECATED, WARNING, XXX, BUG, OPTIMIZE."""
+
+    kind: str                   # TODO | FIXME | HACK | NOTE | DEPRECATED | WARNING | XXX | BUG | OPTIMIZE
+    path: str                   # ruta relativa al fichero
+    line: int                   # numero de linea (1-based)
+    text: str                   # texto de la nota (truncado a 200 chars)
+    symbol: Optional[str] = None  # funcion o clase envolvente mas cercana
+
+
+@dataclass
+class AdrRecord:
+    """Architecture Decision Record detectado en el repositorio."""
+
+    path: str
+    title: str
+    status: Optional[str] = None    # accepted | proposed | deprecated | superseded
+    summary: Optional[str] = None   # primer parrafo del ADR
+
+
+@dataclass
+class CodeNotesSummary:
+    """Resumen del analisis de notas de codigo y ADRs."""
+
+    requested: bool = False
+    total: int = 0
+    by_kind: dict[str, int] = field(default_factory=dict)
+    top_files: list[str] = field(default_factory=list)   # ficheros con mas notas
+    adr_count: int = 0
+    limitations: list[str] = field(default_factory=list)
+
+
+# --- Git Context ---
+
+@dataclass
+class CommitRecord:
+    """Un commit reciente del repositorio."""
+
+    hash: str
+    message: str
+    author: str
+    date: str
+    files_changed: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ChangeHotspot:
+    """Fichero con mayor frecuencia de cambios en la ventana de tiempo."""
+
+    file: str
+    commit_count: int
+    last_changed: str
+
+
+@dataclass
+class UncommittedChanges:
+    """Cambios pendientes en el working tree."""
+
+    staged: list[str] = field(default_factory=list)
+    unstaged: list[str] = field(default_factory=list)
+    untracked: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GitContext:
+    """Contexto temporal del repositorio git."""
+
+    requested: bool = False
+    branch: Optional[str] = None
+    recent_commits: list[CommitRecord] = field(default_factory=list)
+    change_hotspots: list[ChangeHotspot] = field(default_factory=list)
+    uncommitted_changes: Optional[UncommittedChanges] = None
+    contributors: list[str] = field(default_factory=list)
+    git_summary: Optional[str] = None
+    limitations: list[str] = field(default_factory=list)
+
+
 @dataclass
 class SourceMap:
     """Schema completo del output v1.0.
@@ -333,3 +487,14 @@ class SourceMap:
     semantic_symbols: list[SymbolRecord] = field(default_factory=list)
     semantic_links: list[SymbolLink] = field(default_factory=list)
     semantic_summary: Optional[SemanticSummary] = None
+    # Phase 13 Plan 04: Architectural Inference
+    architecture: Optional[ArchitectureAnalysis] = None
+    # Git Context
+    git_context: Optional[GitContext] = None
+    # Env Map
+    env_map: list[EnvVarRecord] = field(default_factory=list)
+    env_summary: Optional[EnvSummary] = None
+    # Code Notes
+    code_notes: list[CodeNote] = field(default_factory=list)
+    code_adrs: list[AdrRecord] = field(default_factory=list)
+    code_notes_summary: Optional[CodeNotesSummary] = None
