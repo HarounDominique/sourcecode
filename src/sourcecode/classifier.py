@@ -1,4 +1,3 @@
-"""Clasificacion de tipo de proyecto y scoring de confianza."""
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence

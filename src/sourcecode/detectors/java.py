@@ -1,4 +1,3 @@
-"""Detector de proyectos Java."""
 from __future__ import annotations
 
 from pathlib import Path

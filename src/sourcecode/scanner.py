@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Scanner de ficheros para sourcecode.
 
 Construye un arbol JSON anidado del proyecto respetando .gitignore,
@@ -7,7 +9,6 @@ Convencion de nodos (D-01, D-02):
   - null (None en Python) = fichero
   - dict = directorio (vacio o con hijos)
 """
-from __future__ import annotations
 
 import os
 from pathlib import Path

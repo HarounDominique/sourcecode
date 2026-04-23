@@ -1,4 +1,3 @@
-"""Tests del analizador de workspaces."""
 from __future__ import annotations
 
 from pathlib import Path

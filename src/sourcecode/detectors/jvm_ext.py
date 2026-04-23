@@ -1,4 +1,3 @@
-"""Detector JVM ampliado para Kotlin y Scala."""
 from __future__ import annotations
 
 from sourcecode.detectors.base import (

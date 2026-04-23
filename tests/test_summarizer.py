@@ -1,4 +1,3 @@
-"""Tests unitarios para ProjectSummarizer — todas las ramas del template."""
 from __future__ import annotations
 
 import pytest

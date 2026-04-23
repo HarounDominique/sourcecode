@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 """Tests del schema semantico — SEM-SCHEMA-01..05.
 
 Wave 0: Tests escritos en 12-01 antes de implementar el schema.
 Estos tests pasan de RED (ImportError) a GREEN despues de Tarea 1.
 """
-from __future__ import annotations
 
 import dataclasses
 

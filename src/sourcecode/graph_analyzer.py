@@ -1,4 +1,3 @@
-"""Analisis estructural offline optimizado para LLMs y modo full."""
 from __future__ import annotations
 
 import ast

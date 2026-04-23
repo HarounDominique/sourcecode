@@ -1,4 +1,3 @@
-"""Tests del schema de grafo de codigo."""
 from __future__ import annotations
 
 import json

@@ -1,4 +1,3 @@
-"""Tests unitarios para ArchitectureAnalyzer (ARCH-01..03, plan 13-04)."""
 from __future__ import annotations
 
 from pathlib import Path

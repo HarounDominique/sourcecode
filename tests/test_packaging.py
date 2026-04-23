@@ -1,4 +1,3 @@
-"""Smoke tests de packaging local."""
 from __future__ import annotations
 
 import shutil

@@ -1,4 +1,3 @@
-"""Descubrimiento de workspaces y señales de monorepo."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

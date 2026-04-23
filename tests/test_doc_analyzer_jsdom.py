@@ -1,8 +1,9 @@
+from __future__ import annotations
+
 """Tests unitarios para DocAnalyzer — extraccion JS/TS JSDoc/TSDoc.
 
 Plan 02: implementacion real de los 7 tests definidos en las especificaciones.
 """
-from __future__ import annotations
 
 from pathlib import Path
 

@@ -1,4 +1,3 @@
-"""Tests end-to-end de la cobertura universal ampliada."""
 from __future__ import annotations
 
 import json

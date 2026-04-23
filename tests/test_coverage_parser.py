@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 """Tests para CoverageParser — MQT-05..08 y tests adicionales.
 
 Wave 0 (TDD RED): Estos tests se escriben ANTES de la implementacion.
 Fallan con ImportError hasta que coverage_parser.py exista.
 """
-from __future__ import annotations
 
 import shutil
 from pathlib import Path

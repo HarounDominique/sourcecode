@@ -1,4 +1,3 @@
-"""Tests del clasificador de proyecto y scoring de confianza."""
 from __future__ import annotations
 
 from sourcecode.classifier import TypeClassifier

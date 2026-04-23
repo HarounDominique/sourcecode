@@ -1,4 +1,3 @@
-"""Fallback heuristico por extension de fichero."""
 from __future__ import annotations
 
 from collections import Counter

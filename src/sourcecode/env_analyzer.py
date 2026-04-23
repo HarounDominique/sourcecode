@@ -1,4 +1,3 @@
-"""Analizador de variables de entorno para --env-map."""
 from __future__ import annotations
 
 import re

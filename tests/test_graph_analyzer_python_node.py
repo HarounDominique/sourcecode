@@ -1,4 +1,3 @@
-"""Tests del analizador de grafo para Python y Node.js."""
 from __future__ import annotations
 
 from pathlib import Path

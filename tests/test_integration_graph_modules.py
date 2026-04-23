@@ -1,4 +1,3 @@
-"""Tests end-to-end del grafo de modulos via CLI."""
 from __future__ import annotations
 
 import json

@@ -1,4 +1,3 @@
-"""Senales universales de tooling y helpers transversales."""
 from __future__ import annotations
 
 from sourcecode.tree_utils import flatten_file_tree

@@ -1,4 +1,3 @@
-"""Tests del detector Node.js."""
 from __future__ import annotations
 
 import json

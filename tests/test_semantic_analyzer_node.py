@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Tests for SemanticAnalyzer JS/TS layer — SEM-NODE-01..06.
 
 Wave 0 for plan 12-03: these tests are written in RED before implementing
@@ -11,7 +13,6 @@ Tests cover:
   SEM-NODE-05 — Keyword exclusion (if, for, console -> not in calls)
   SEM-NODE-06 — Basic dataflow: args captured textually
 """
-from __future__ import annotations
 
 import textwrap
 from pathlib import Path

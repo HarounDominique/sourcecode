@@ -1,4 +1,3 @@
-"""Helpers neutrales para trabajar con el file_tree."""
 from __future__ import annotations
 
 from typing import Any

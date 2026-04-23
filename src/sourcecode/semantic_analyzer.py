@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Analisis semantico estatico: call graph, symbol linking e import resolution.
 
 Extiende el analisis estructural de GraphAnalyzer (Fase 7) con:
@@ -14,7 +16,6 @@ Plan 12-03 agrega: capa JS/TS con _extract_js_imports, _resolve_js_module_path,
 _analyze_js_file, _detect_js_calls, integracion en analyze() para JS/TS files,
 y language_coverage["nodejs"] = "heuristic".
 """
-from __future__ import annotations
 
 import ast
 import re

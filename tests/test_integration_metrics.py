@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Tests de integracion E2E para el flag --full-metrics de la CLI.
 
 MQT-11: file_metrics y metrics_summary presentes con --full-metrics
@@ -5,7 +7,6 @@ MQT-12: backward compat sin --full-metrics (file_metrics=[], metrics_summary=nul
 MQT-13: availability labels validos en todos los FileMetrics
 MQT-14: deteccion de ficheros de test con is_test
 """
-from __future__ import annotations
 
 import json
 from pathlib import Path

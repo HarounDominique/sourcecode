@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Tests unitarios para SemanticAnalyzer — SEM-PY-01..05 + stubs skip para planes futuros.
 
 Wave 0: Tests SEM-PY-01..05 escritos en 12-01 (RED antes de implementar semantic_analyzer.py).
@@ -10,7 +12,6 @@ Stubs skip para planes futuros:
   - test_go_heuristic_calls: plan 12-04
   - test_semantics_cli_flag: plan 12-04
 """
-from __future__ import annotations
 
 import textwrap
 from pathlib import Path

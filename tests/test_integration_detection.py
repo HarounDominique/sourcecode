@@ -1,4 +1,3 @@
-"""Tests end-to-end de deteccion core en CLI."""
 from __future__ import annotations
 
 import json

@@ -1,8 +1,9 @@
+from __future__ import annotations
+
 """Generador deterministico de resumen en lenguaje natural del proyecto.
 
 Sin llamadas a API — solo templates aplicados sobre SourceMap.
 """
-from __future__ import annotations
 
 from pathlib import Path
 

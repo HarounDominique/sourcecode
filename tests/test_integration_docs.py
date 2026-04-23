@@ -1,8 +1,9 @@
+from __future__ import annotations
+
 """Tests de integracion CLI para el flag --docs.
 
 Cubre los acceptance criteria DOCS-ACC-01 a DOCS-ACC-10 del Phase 8.
 """
-from __future__ import annotations
 
 import json
 from pathlib import Path

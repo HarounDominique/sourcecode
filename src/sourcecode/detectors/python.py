@@ -1,4 +1,3 @@
-"""Detector de proyectos Python."""
 from __future__ import annotations
 
 import re

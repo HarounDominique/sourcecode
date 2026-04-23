@@ -1,8 +1,9 @@
+from __future__ import annotations
+
 """Tests unitarios para DocAnalyzer — extraccion Python AST.
 
 Plan 02: implementacion real de los 10 tests definidos en las especificaciones.
 """
-from __future__ import annotations
 
 import textwrap
 from pathlib import Path

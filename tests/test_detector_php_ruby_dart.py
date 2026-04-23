@@ -1,4 +1,3 @@
-"""Tests de detectores PHP, Ruby y Dart."""
 from __future__ import annotations
 
 import json

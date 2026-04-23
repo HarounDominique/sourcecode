@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Serializer de sourcecode — JSON canonico, YAML y modo compact.
 
 Patrones criticos:
@@ -5,7 +7,6 @@ Patrones criticos:
   - ruamel.yaml con representer para null canonico (no ~)
   - compact_view() proyecta solo los campos necesarios (~500 tokens)
 """
-from __future__ import annotations
 
 import json
 import sys

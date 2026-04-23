@@ -1,4 +1,3 @@
-"""Detector de proyectos Ruby."""
 from __future__ import annotations
 
 from sourcecode.detectors.base import (

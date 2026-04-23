@@ -1,4 +1,3 @@
-"""Helpers ligeros de parseo para manifests."""
 from __future__ import annotations
 
 import json

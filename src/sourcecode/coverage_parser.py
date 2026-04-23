@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Parser de artefactos de cobertura pre-existentes.
 
 Lee coverage.xml (Cobertura), .coverage (SQLite de coverage.py >= 5.0),
@@ -5,7 +7,6 @@ lcov.info (LCOV) y jacoco.xml (JaCoCo) sin ejecutar tests ni toolchains.
 
 Solo stdlib: sqlite3, xml.etree.ElementTree, pathlib.
 """
-from __future__ import annotations
 
 import sqlite3
 import xml.etree.ElementTree as ET

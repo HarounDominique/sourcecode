@@ -1,4 +1,3 @@
-"""CLI de sourcecode — interfaz de linea de comandos principal."""
 from __future__ import annotations
 
 import json

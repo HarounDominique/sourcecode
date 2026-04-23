@@ -1,4 +1,3 @@
-"""Tests del analizador de dependencias para Node.js y Python."""
 from __future__ import annotations
 
 import json

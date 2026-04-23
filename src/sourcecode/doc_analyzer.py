@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Extraccion estatica de documentacion de modulos Python y JS/TS.
 
 Sigue el mismo patron que DependencyAnalyzer y GraphAnalyzer:
@@ -6,7 +7,6 @@ Sigue el mismo patron que DependencyAnalyzer y GraphAnalyzer:
 
 Plan 02 implementa los parsers Python-AST y JS/TS-regex.
 """
-from __future__ import annotations
 
 import ast
 import re

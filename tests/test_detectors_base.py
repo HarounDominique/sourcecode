@@ -1,4 +1,3 @@
-"""Tests del contrato base y orquestador de detectores."""
 from __future__ import annotations
 
 import json

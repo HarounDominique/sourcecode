@@ -1,4 +1,3 @@
-"""Resumen arquitectonico estatico y compacto para consumo LLM."""
 from __future__ import annotations
 
 import ast

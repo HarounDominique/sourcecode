@@ -1,4 +1,3 @@
-"""Analisis offline de dependencias directas y transitivas."""
 from __future__ import annotations
 
 import re

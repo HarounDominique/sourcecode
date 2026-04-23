@@ -1,4 +1,3 @@
-"""Detector de proyectos C / C++ y build systems asociados."""
 from __future__ import annotations
 
 from sourcecode.detectors.base import (

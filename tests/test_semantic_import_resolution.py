@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 """Tests de import resolution avanzada para SemanticAnalyzer — SEM-IR-01..06.
 
 Plan 12-02: reexports via __init__.py, star imports, namespace packages,
 attribute calls, y limite de chain de reexport.
 """
-from __future__ import annotations
 
 import textwrap
 from pathlib import Path

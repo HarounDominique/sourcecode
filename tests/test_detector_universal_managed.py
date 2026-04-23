@@ -1,4 +1,3 @@
-"""Tests de detectores universales managed."""
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 """Tests unitarios para MetricsAnalyzer — MQT-01..04, MQT-09, MQT-10 y MQT-13.
 
 Wave 0: Tests MQT-01..04 y MQT-13 escritos en 10-01.
 Wave 3 (10-03): MQT-09 y MQT-10 activados; tests de integracion agregados.
 """
-from __future__ import annotations
 
 import textwrap
 

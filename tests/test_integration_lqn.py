@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 """Tests de integracion para LQN-01..06 — LLM Output Quality.
 
 Cada test invoca el CLI sobre el propio directorio del proyecto via CliRunner
 y verifica el contrato de los requisitos LQN.
 """
-from __future__ import annotations
 
 import json
 from pathlib import Path

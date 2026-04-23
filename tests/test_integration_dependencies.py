@@ -1,4 +1,3 @@
-"""Tests end-to-end de dependencias via CLI."""
 from __future__ import annotations
 
 import json

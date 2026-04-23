@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Redactor de secretos para sourcecode.
 
 Aplica patrones regex sobre los valores de texto del output JSON/YAML.
@@ -8,7 +10,6 @@ metadatos) — no sobre el contenido de ficheros. En Fase 1 el output no incluye
 contenido de ficheros, por lo que la redaccion es principalmente una red de
 seguridad. En Fases 2+ cuando se lean manifiestos, la redaccion sera mas critica.
 """
-from __future__ import annotations
 
 import re
 from typing import Any

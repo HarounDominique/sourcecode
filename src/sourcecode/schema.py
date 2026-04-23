@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Schema de output v1.0 para sourcecode.
 
 Contrato publico estable — los detectores de Fase 2 escriben en SourceMap.stacks.
@@ -7,7 +9,6 @@ Convencion del arbol de ficheros (D-01, D-02):
   - None = fichero
   - dict = directorio (vacio o con hijos)
 """
-from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone

@@ -1,4 +1,3 @@
-"""Tests del analizador de grafo para Go y JVM."""
 from __future__ import annotations
 
 from pathlib import Path

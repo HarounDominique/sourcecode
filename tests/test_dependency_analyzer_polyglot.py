@@ -1,4 +1,3 @@
-"""Tests del analizador de dependencias para ecosistemas adicionales."""
 from __future__ import annotations
 
 import json

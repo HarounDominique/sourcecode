@@ -1,4 +1,3 @@
-"""Tests end-to-end de fullstack y monorepo."""
 from __future__ import annotations
 
 import json

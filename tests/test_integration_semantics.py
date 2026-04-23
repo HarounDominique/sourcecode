@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Tests de integracion E2E para SemanticAnalyzer y el flag --semantics.
 
 SEM-ACC-01: test_python_project_produces_call_graph
@@ -6,7 +8,6 @@ SEM-ACC-03: test_semantics_self_analysis
 SEM-ACC-04: test_large_project_hits_max_files
 SEM-ACC-05: test_semantics_flag_no_affect_base
 """
-from __future__ import annotations
 
 import json
 from pathlib import Path

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Analisis de metricas de calidad de codigo: LOC, simbolos y complejidad.
 
 Sigue el mismo patron que DocAnalyzer y GraphAnalyzer:
@@ -9,7 +11,6 @@ Python: adicionalmente ast.parse para simbolos exactos y complejidad McCabe.
 JS/TS, Go, Rust, Java: regex para simbolos aproximados (availability="inferred").
 Otros: solo LOC (availability="unavailable" para simbolos y complejidad).
 """
-from __future__ import annotations
 
 import ast
 import re

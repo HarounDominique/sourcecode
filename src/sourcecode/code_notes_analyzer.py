@@ -1,4 +1,3 @@
-"""Analizador de notas de código (TODO/FIXME/HACK/etc.) y ADRs para --code-notes."""
 from __future__ import annotations
 
 import re

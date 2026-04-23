@@ -1,4 +1,3 @@
-"""Tests del schema de dependencias."""
 from __future__ import annotations
 
 import json
