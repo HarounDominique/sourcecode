@@ -207,7 +207,21 @@ def main(
 
     # 1. Escanear el directorio (SCAN-01 a SCAN-05)
     redactor = SecretRedactor(enabled=not no_redact)
-    scanner = FileScanner(target, max_depth=depth)
+
+    # Detectar manifests antes del scan para ajustar depth.
+    # find_manifests() solo mira profundidad 0-1, no necesita el arbol.
+    _pre_scanner = FileScanner(target, max_depth=1)
+    manifests = _pre_scanner.find_manifests()
+
+    # Maven usa src/main/java/<groupId>/<artifactId>/<module>/ (profundidad 7+).
+    # Con depth=4 los ficheros .java son invisibles y todos los analizadores fallan.
+    # Necesitamos al menos 8: src(1)+main(2)+java(3)+com(4)+co(5)+app(6)+module(7)+file.
+    _java_manifest_names = {"pom.xml", "build.gradle", "build.gradle.kts"}
+    _is_java = any(Path(m).name in _java_manifest_names for m in manifests)
+    _java_min_depth = 8
+    effective_depth = max(depth, _java_min_depth) if _is_java and depth < _java_min_depth else depth
+
+    scanner = FileScanner(target, max_depth=effective_depth)
     raw_tree = scanner.scan_tree()
 
     # 2. Filtrar del arbol las entradas de .env y *.secret (SEC-02, todos los niveles)
@@ -244,7 +258,6 @@ def main(
         return pruned
 
     file_tree = filter_sensitive_files(raw_tree)
-    manifests = scanner.find_manifests()
     detector = ProjectDetector(build_default_detectors())
     workspace_analysis = WorkspaceAnalyzer().analyze(target, manifests)
     dependency_analyzer = DependencyAnalyzer() if dependencies else None

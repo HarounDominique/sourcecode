@@ -12,6 +12,7 @@ _TOOLING_PREFIXES = (".claude/", ".vscode/", "bin/")
 _PYTHON_EXTENSIONS = {".py"}
 _NODE_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 _GO_EXTENSIONS = {".go"}
+_JAVA_EXTENSIONS = {".java", ".kt", ".scala"}
 
 
 class ArchitectureSummarizer:
@@ -58,6 +59,8 @@ class ArchitectureSummarizer:
             lines.extend(self._summarize_node_entry(entry_point.path, content))
         elif suffix in _GO_EXTENSIONS:
             lines.extend(self._summarize_go_entry(entry_point.path, content))
+        elif suffix in _JAVA_EXTENSIONS:
+            lines.extend(self._summarize_java_entry(entry_point.path, content, sm.stacks))
         else:
             lines.append("Orquesta modulos internos no detallados por el analisis estatico disponible.")
 
@@ -120,6 +123,21 @@ class ArchitectureSummarizer:
             if formatted:
                 lines.append(f"Orquesta modulos internos: {formatted}.")
         lines.append("Produce la salida principal del entry point JavaScript/TypeScript detectado.")
+        return lines
+
+    def _summarize_java_entry(self, path: str, content: str, stacks: list[StackDetection]) -> list[str]:
+        lines: list[str] = []
+        frameworks = [f.name for stack in stacks for f in stack.frameworks]
+        if frameworks:
+            lines.append(f"Frameworks detectados: {', '.join(frameworks)}.")
+        annotations = re.findall(r"@(SpringBootApplication|QuarkusMain|MicronautApplication|Application)\b", content)
+        if annotations:
+            lines.append(f"Anotacion de arranque: @{annotations[0]}.")
+        # Detect Spring Boot profile hints
+        if "@SpringBootApplication" in content:
+            lines.append("Arranca el contexto de Spring con auto-configuracion y component scan.")
+        elif not lines:
+            lines.append("Orquesta el arranque de la aplicacion JVM.")
         return lines
 
     def _summarize_go_entry(self, path: str, content: str) -> list[str]:
@@ -192,6 +210,16 @@ class ArchitectureSummarizer:
                         path=path,
                         stack=stack_name,
                         kind="binary",
+                        source="convention",
+                        confidence="medium",
+                    )
+                )
+            elif path.endswith("Application.java") or path.endswith("Main.java"):
+                candidates.append(
+                    EntryPoint(
+                        path=path,
+                        stack="java",
+                        kind="application",
                         source="convention",
                         confidence="medium",
                     )

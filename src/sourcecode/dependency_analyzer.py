@@ -33,6 +33,7 @@ class DependencyAnalyzer:
             self._analyze_rust,
             self._analyze_go,
             self._analyze_dotnet,
+            self._analyze_java,
         ):
             handler_records, handler_limitations = handler(root)
             records.extend(replace(record, workspace=workspace) for record in handler_records)
@@ -919,6 +920,50 @@ class DependencyAnalyzer:
             if key not in matched:
                 result.append(resolved)
         return self._dedupe(result)
+
+    def _analyze_java(self, root: Path) -> tuple[list[DependencyRecord], list[str]]:
+        pom = root / "pom.xml"
+        if not pom.exists():
+            return [], []
+        try:
+            tree = ET.parse(pom)
+        except (ET.ParseError, OSError):
+            return [], ["java: error al parsear pom.xml"]
+
+        root_elem = tree.getroot()
+        ns_match = re.match(r"\{[^}]+\}", root_elem.tag)
+        ns = ns_match.group(0) if ns_match else ""
+
+        records: list[DependencyRecord] = []
+        deps_elem = root_elem.find(f"{ns}dependencies")
+        if deps_elem is None:
+            return [], ["java: pom.xml sin bloque <dependencies>"]
+
+        for dep in deps_elem.findall(f"{ns}dependency"):
+            group_id = (dep.findtext(f"{ns}groupId") or "").strip()
+            artifact_id = (dep.findtext(f"{ns}artifactId") or "").strip()
+            if not group_id or not artifact_id:
+                continue
+            version_raw = (dep.findtext(f"{ns}version") or "").strip() or None
+            # Versiones interpoladas con propiedades Maven (${...}) no son resolvibles estáticamente
+            declared = version_raw if version_raw and not version_raw.startswith("${") else None
+            scope_text = (dep.findtext(f"{ns}scope") or "compile").strip().lower()
+            scope = "dev" if scope_text == "test" else "direct"
+            records.append(
+                DependencyRecord(
+                    name=f"{group_id}:{artifact_id}",
+                    ecosystem="java",
+                    scope=scope,
+                    declared_version=declared,
+                    source="manifest",
+                    manifest_path="pom.xml",
+                )
+            )
+
+        limitations: list[str] = []
+        if not records:
+            limitations.append("java: pom.xml sin dependencias parseables (puede usar BOM o propiedades)")
+        return records, limitations
 
     def _load_yaml_file(self, path: Path) -> Optional[dict[str, Any]]:
         if not path.exists():
