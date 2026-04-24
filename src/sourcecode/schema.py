@@ -96,6 +96,7 @@ class DependencySummary:
     ecosystems: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
+    dependencies: list["DependencyRecord"] = field(default_factory=list)
 
 
 @dataclass

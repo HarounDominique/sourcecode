@@ -74,6 +74,7 @@ def compact_view(sm: SourceMap) -> dict[str, Any]:
     dep_summary_dict: Any = None
     if sm.dependency_summary is not None and sm.dependency_summary.requested:
         dep_summary_dict = asdict(sm.dependency_summary)
+        dep_summary_dict.pop("dependencies", None)
 
     env_summary_dict: Any = None
     if sm.env_summary is not None and sm.env_summary.requested:

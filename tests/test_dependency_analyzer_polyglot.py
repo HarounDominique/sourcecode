@@ -139,3 +139,79 @@ require github.com/gin-gonic/gin v1.10.0
     assert json_dep.resolved_version == "13.0.3"
     assert transitive_dotnet.scope == "transitive"
     assert "dotnet" in dotnet_summary.ecosystems
+
+
+def test_java_pom_dependencies_listed_in_summary(tmp_path: Path) -> None:
+    (tmp_path / "pom.xml").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>demo</artifactId>
+  <version>1.0.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+      <version>3.2.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <version>3.2.0</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.15.0</version>
+    </dependency>
+  </dependencies>
+</project>"""
+    )
+
+    records, summary = DependencyAnalyzer().analyze(tmp_path)
+
+    assert summary.total_count == 3
+    assert len(summary.dependencies) == 3
+    assert summary.dependencies == records
+
+    names = {r.name for r in summary.dependencies}
+    assert "org.springframework.boot:spring-boot-starter-web" in names
+    assert "org.springframework.boot:spring-boot-starter-test" in names
+    assert "com.fasterxml.jackson.core:jackson-databind" in names
+
+    web = next(r for r in summary.dependencies if "starter-web" in r.name)
+    assert web.declared_version == "3.2.0"
+    assert web.scope == "direct"
+    assert web.ecosystem == "java"
+
+    test_dep = next(r for r in summary.dependencies if "starter-test" in r.name)
+    assert test_dep.scope == "dev"
+
+
+def test_java_dependency_summary_excluded_from_compact_view(tmp_path: Path) -> None:
+    import json
+    from typer.testing import CliRunner
+    from sourcecode.cli import app
+
+    (tmp_path / "pom.xml").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId><artifactId>demo</artifactId><version>1.0.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+      <version>3.2.0</version>
+    </dependency>
+  </dependencies>
+</project>"""
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--compact", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert "dependencies" not in data["dependency_summary"]

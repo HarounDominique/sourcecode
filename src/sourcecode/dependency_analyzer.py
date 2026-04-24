@@ -47,6 +47,7 @@ class DependencyAnalyzer:
         ecosystems: set[str] = set()
         sources: set[str] = set()
         limitations: list[str] = []
+        all_dependencies: list[DependencyRecord] = []
         for summary in summaries:
             result.total_count += summary.total_count
             result.direct_count += summary.direct_count
@@ -56,9 +57,11 @@ class DependencyAnalyzer:
             for limitation in summary.limitations:
                 if limitation not in limitations:
                     limitations.append(limitation)
+            all_dependencies.extend(summary.dependencies)
         result.ecosystems = sorted(ecosystems)
         result.sources = sorted(sources)
         result.limitations = limitations
+        result.dependencies = all_dependencies
         return result
 
     def _build_summary(
@@ -80,6 +83,7 @@ class DependencyAnalyzer:
             ecosystems=ecosystems,
             sources=sources,
             limitations=unique_limitations,
+            dependencies=list(records),
         )
 
     def _dedupe(self, records: Iterable[DependencyRecord]) -> list[DependencyRecord]:
