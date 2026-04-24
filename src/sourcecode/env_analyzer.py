@@ -25,6 +25,12 @@ _ENV_EXAMPLE_NAMES = {
     "example.env", "sample.env",
 }
 
+# Spring Boot application.properties / application.yml and their profile variants
+_SPRING_CONF_BASE = {"application.properties", "application.yml", "application.yaml"}
+_SPRING_CONF_PROFILE_RE = re.compile(r'^application-[a-z0-9_-]+\.(properties|ya?ml)$', re.IGNORECASE)
+# Matches ${ENV_VAR} or ${ENV_VAR:default} where ENV_VAR is UPPER_SNAKE_CASE
+_SPRING_ENV_REF_RE = re.compile(r'\$\{([A-Z][A-Z0-9_]*)(?::[^}]*)?\}')
+
 # (pattern_id, compiled_regex)
 # Grupos de captura: group(1)=key, group(2)=default si existe
 _PATTERNS: list[tuple[str, re.Pattern]] = [
@@ -54,6 +60,9 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
     )),
     ("java_getenv", re.compile(
         r"""System\.getenv\(\s*["']([A-Z][A-Z0-9_]*)["']\s*\)"""
+    )),
+    ("java_spring_value", re.compile(
+        r"""@Value\(\s*["']\$\{([A-Z][A-Z0-9_]*)(?::[^}]*)?\}["']\s*\)"""
     )),
     ("php_getenv", re.compile(
         r"""getenv\(\s*["']([A-Z][A-Z0-9_]*)["']\s*\)"""
@@ -188,6 +197,23 @@ def _parse_env_example(
     return results
 
 
+def _parse_spring_config(
+    path: Path,
+    rel_path: str,
+    findings: dict,
+) -> None:
+    """Parse application.properties / application.yml looking for ${ENV_VAR} refs."""
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+
+    for m in _SPRING_ENV_REF_RE.finditer(content):
+        key = m.group(1)
+        line_num = content.count("\n", 0, m.start()) + 1
+        findings[key].append((f"{rel_path}:{line_num}", None))
+
+
 class EnvAnalyzer:
     """Extrae el mapa de variables de entorno del proyecto."""
 
@@ -298,10 +324,15 @@ class EnvAnalyzer:
                 self._walk(root, entry, findings, example_entries, example_files_found, limitations)
             elif entry.is_file():
                 rel = entry.relative_to(root).as_posix()
+                name_lower = name.lower()
                 # .env.example and similar
                 if name in _ENV_EXAMPLE_NAMES:
                     example_files_found.append(rel)
                     example_entries.extend(_parse_env_example(entry, rel))
+                    continue
+                # Spring Boot application.properties / application.yml (incl. profiles)
+                if name_lower in _SPRING_CONF_BASE or _SPRING_CONF_PROFILE_RE.match(name_lower):
+                    _parse_spring_config(entry, rel, findings)
                     continue
                 # Source code files
                 suffix = entry.suffix.lower()

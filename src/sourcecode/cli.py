@@ -260,6 +260,14 @@ def main(
     file_tree = filter_sensitive_files(raw_tree)
     detector = ProjectDetector(build_default_detectors())
     workspace_analysis = WorkspaceAnalyzer().analyze(target, manifests)
+
+    # --compact implicitly enables lightweight analysis passes so that
+    # dependency_summary, env_summary and code_notes_summary are never null.
+    if compact:
+        dependencies = True
+        env_map = True
+        code_notes = True
+
     dependency_analyzer = DependencyAnalyzer() if dependencies else None
     graph_analyzer = GraphAnalyzer() if graph_modules else None
     parsed_graph_edges = (

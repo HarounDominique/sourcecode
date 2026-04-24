@@ -184,18 +184,20 @@ def test_lqn06_compact_with_dependencies() -> None:
 
 
 # ---------------------------------------------------------------------------
-# LQN-06c: compact without --dependencies -> dependency_summary is None
+# LQN-06c: compact auto-enables dependency analysis -> dependency_summary populated
 # ---------------------------------------------------------------------------
 
 
-def test_lqn06_compact_no_dep_summary_without_flag() -> None:
-    """LQN-06c: sourcecode . --compact (no --dependencies) -> dependency_summary is None."""
+def test_lqn06_compact_auto_populates_dep_summary() -> None:
+    """LQN-06c: sourcecode . --compact auto-enables dependency analysis so dependency_summary is populated."""
     compact = _invoke_json("--compact")
 
     dep_sum = compact.get("dependency_summary")
-    assert dep_sum is None, (
-        f"LQN-06c: compact without --dependencies should have dependency_summary=None, "
-        f"got {dep_sum!r}"
+    assert dep_sum is not None, (
+        "LQN-06c: --compact must auto-enable dependency analysis; dependency_summary should be populated"
+    )
+    assert dep_sum["requested"] is True, (
+        f"LQN-06c: dependency_summary.requested must be True when --compact is used, got {dep_sum['requested']}"
     )
 
 
