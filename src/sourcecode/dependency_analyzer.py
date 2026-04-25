@@ -34,6 +34,7 @@ class DependencyAnalyzer:
             self._analyze_go,
             self._analyze_dotnet,
             self._analyze_java,
+            self._analyze_gradle,
         ):
             handler_records, handler_limitations = handler(root)
             records.extend(replace(record, workspace=workspace) for record in handler_records)
@@ -925,6 +926,47 @@ class DependencyAnalyzer:
                 result.append(resolved)
         return self._dedupe(result)
 
+    def _parse_maven_properties(self, root_elem: ET.Element, ns: str) -> dict[str, str]:
+        properties: dict[str, str] = {}
+        props_elem = root_elem.find(f"{ns}properties")
+        if props_elem is not None:
+            for prop in props_elem:
+                tag = prop.tag.replace(ns, "") if ns else prop.tag
+                if prop.text:
+                    properties[tag] = prop.text.strip()
+        return properties
+
+    def _resolve_maven_version(self, version_raw: Optional[str], properties: dict[str, str]) -> Optional[str]:
+        if not version_raw:
+            return None
+        if not version_raw.startswith("${"):
+            return version_raw
+        prop_name = version_raw[2:-1] if version_raw.endswith("}") else None
+        if prop_name and prop_name in properties:
+            return properties[prop_name]
+        return None
+
+    def _parse_dependency_management(
+        self, root_elem: ET.Element, ns: str, properties: dict[str, str]
+    ) -> dict[str, str]:
+        dm_versions: dict[str, str] = {}
+        dm_elem = root_elem.find(f"{ns}dependencyManagement")
+        if dm_elem is None:
+            return dm_versions
+        deps_elem = dm_elem.find(f"{ns}dependencies")
+        if deps_elem is None:
+            return dm_versions
+        for dep in deps_elem.findall(f"{ns}dependency"):
+            group_id = (dep.findtext(f"{ns}groupId") or "").strip()
+            artifact_id = (dep.findtext(f"{ns}artifactId") or "").strip()
+            if not group_id or not artifact_id:
+                continue
+            version_raw = (dep.findtext(f"{ns}version") or "").strip() or None
+            resolved = self._resolve_maven_version(version_raw, properties)
+            if resolved:
+                dm_versions[f"{group_id}:{artifact_id}"] = resolved
+        return dm_versions
+
     def _analyze_java(self, root: Path) -> tuple[list[DependencyRecord], list[str]]:
         pom = root / "pom.xml"
         if not pom.exists():
@@ -938,6 +980,9 @@ class DependencyAnalyzer:
         ns_match = re.match(r"\{[^}]+\}", root_elem.tag)
         ns = ns_match.group(0) if ns_match else ""
 
+        properties = self._parse_maven_properties(root_elem, ns)
+        dm_versions = self._parse_dependency_management(root_elem, ns, properties)
+
         records: list[DependencyRecord] = []
         deps_elem = root_elem.find(f"{ns}dependencies")
         if deps_elem is None:
@@ -949,8 +994,9 @@ class DependencyAnalyzer:
             if not group_id or not artifact_id:
                 continue
             version_raw = (dep.findtext(f"{ns}version") or "").strip() or None
-            # Versiones interpoladas con propiedades Maven (${...}) no son resolvibles estáticamente
-            declared = version_raw if version_raw and not version_raw.startswith("${") else None
+            declared = self._resolve_maven_version(version_raw, properties)
+            if declared is None:
+                declared = dm_versions.get(f"{group_id}:{artifact_id}")
             scope_text = (dep.findtext(f"{ns}scope") or "compile").strip().lower()
             scope = "dev" if scope_text == "test" else "direct"
             records.append(
@@ -968,6 +1014,115 @@ class DependencyAnalyzer:
         if not records:
             limitations.append("java: pom.xml sin dependencias parseables (puede usar BOM o propiedades)")
         return records, limitations
+
+    def _analyze_gradle(self, root: Path) -> tuple[list[DependencyRecord], list[str]]:
+        for filename in ("build.gradle", "build.gradle.kts"):
+            gradle_file = root / filename
+            if gradle_file.exists():
+                try:
+                    content = gradle_file.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    return [], [f"gradle: error al leer {filename}"]
+                props = self._parse_gradle_properties(root, content)
+                records = self._parse_gradle_dependencies(content, props, filename)
+                return records, ["gradle: sin lockfile compatible; dependencias transitivas no disponibles"]
+        return [], []
+
+    def _parse_gradle_properties(self, root: Path, content: str) -> dict[str, str]:
+        props: dict[str, str] = {}
+        # gradle.properties file (key=value format)
+        gp = root / "gradle.properties"
+        if gp.exists():
+            try:
+                for line in gp.read_text(encoding="utf-8", errors="replace").splitlines():
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith("#") and "=" in stripped:
+                        k, _, v = stripped.partition("=")
+                        props[k.strip()] = v.strip()
+            except OSError:
+                pass
+        # Variables declared in the build file itself.
+        # Match: val/var/def x = "v", or bare x = "v" anywhere (ext blocks, top-level).
+        # Negative lookbehind (?<![.\w]) prevents matching mid-expression (e.g. obj.field = "v").
+        for m in re.finditer(r"""(?:(?:val|var|def)\s+)?(?<![.\w])(\w+)\s*=\s*["']([^"']+)["']""", content):
+            props.setdefault(m.group(1), m.group(2))
+        return props
+
+    def _resolve_gradle_version(self, version_raw: Optional[str], props: dict[str, str]) -> Optional[str]:
+        if not version_raw:
+            return None
+        # ${varName} — Groovy string interpolation
+        m = re.fullmatch(r"\$\{(\w+)\}", version_raw)
+        if m:
+            return props.get(m.group(1))
+        # $varName — Kotlin string interpolation
+        m = re.fullmatch(r"\$(\w+)", version_raw)
+        if m:
+            return props.get(m.group(1))
+        return version_raw
+
+    def _parse_gradle_dependencies(
+        self, content: str, props: dict[str, str], manifest_path: str
+    ) -> list[DependencyRecord]:
+        _DIRECT = frozenset({
+            "implementation", "api", "compileOnly", "runtimeOnly", "compile", "provided",
+            "compileClasspath", "runtimeClasspath",
+        })
+        _DEV = frozenset({
+            "testImplementation", "testRuntimeOnly", "testCompileOnly", "testApi",
+            "testCompile", "androidTestImplementation", "annotationProcessor", "kapt",
+            "debugImplementation", "releaseImplementation",
+        })
+        all_scopes = _DIRECT | _DEV
+        records: list[DependencyRecord] = []
+
+        # String notation: scope("group:artifact") or scope("group:artifact:version")
+        str_pat = re.compile(
+            r"""(\w+)\s*\(?\s*["']([A-Za-z][\w.\-]*:[A-Za-z][\w.\-]*)(?::([^"'\s)]+))?["']"""
+        )
+        for m in str_pat.finditer(content):
+            scope_kw = m.group(1)
+            if scope_kw not in all_scopes:
+                continue
+            parts = m.group(2).split(":")
+            if len(parts) < 2:
+                continue
+            group_id, artifact_id = parts[0].strip(), parts[1].strip()
+            if not group_id or not artifact_id:
+                continue
+            version = self._resolve_gradle_version(m.group(3), props)
+            records.append(DependencyRecord(
+                name=f"{group_id}:{artifact_id}",
+                ecosystem="java",
+                scope="dev" if scope_kw in _DEV else "direct",
+                declared_version=version,
+                source="manifest",
+                manifest_path=manifest_path,
+            ))
+
+        # Map notation: scope(group: "g", name: "a", version: "v")  — Groovy uses ':', Kotlin uses '='
+        map_pat = re.compile(
+            r"""(\w+)\s*\(?\s*group\s*[=:]\s*["']([^"']+)["']\s*,\s*name\s*[=:]\s*["']([^"']+)["']"""
+            r"""(?:\s*,\s*version\s*[=:]\s*["']([^"']+)["'])?"""
+        )
+        for m in map_pat.finditer(content):
+            scope_kw = m.group(1)
+            if scope_kw not in all_scopes:
+                continue
+            group_id, artifact_id = m.group(2).strip(), m.group(3).strip()
+            if not group_id or not artifact_id:
+                continue
+            version = self._resolve_gradle_version(m.group(4), props)
+            records.append(DependencyRecord(
+                name=f"{group_id}:{artifact_id}",
+                ecosystem="java",
+                scope="dev" if scope_kw in _DEV else "direct",
+                declared_version=version,
+                source="manifest",
+                manifest_path=manifest_path,
+            ))
+
+        return self._dedupe(records)
 
     def _load_yaml_file(self, path: Path) -> Optional[dict[str, Any]]:
         if not path.exists():

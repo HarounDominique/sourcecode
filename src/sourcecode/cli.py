@@ -75,6 +75,11 @@ def main(
         "--graph-edges",
         help="Tipos de arista para `--graph-modules` separados por comas: imports,calls,contains,extends",
     ),
+    no_tree: bool = typer.Option(
+        False,
+        "--no-tree",
+        help="Suprimir file_tree y file_paths del output (ideal con --dependencies en proyectos grandes)",
+    ),
     no_redact: bool = typer.Option(
         False,
         "--no-redact",
@@ -151,8 +156,17 @@ def main(
         "--code-notes",
         help="Extraer anotaciones TODO/FIXME/HACK/NOTE/DEPRECATED/WARNING/BUG/XXX/OPTIMIZE con ubicacion y simbolo envolvente, y detectar ADRs en docs/decisions/, docs/adr/ y similares",
     ),
+    agent: bool = typer.Option(
+        False,
+        "--agent",
+        help="Modo agente: selecciona automaticamente --compact --dependencies --env-map --code-notes y activa --no-tree en proyectos Java/Gradle o grandes",
+    ),
 ) -> None:
     """Genera un mapa de contexto estructurado del proyecto en formato JSON o YAML."""
+    # When a subcommand (e.g. prepare-context) is invoked, skip the main analysis.
+    if ctx.invoked_subcommand is not None:
+        return
+
     # Validar formato
     if format not in FORMAT_CHOICES:
         typer.echo(
@@ -220,6 +234,16 @@ def main(
     _is_java = any(Path(m).name in _java_manifest_names for m in manifests)
     _java_min_depth = 8
     effective_depth = max(depth, _java_min_depth) if _is_java and depth < _java_min_depth else depth
+
+    # --agent: auto-select flags based on project characteristics
+    if agent:
+        compact = True
+        if _is_java:
+            no_tree = True
+        _agent_flags = ["--compact", "--dependencies", "--env-map", "--code-notes"]
+        if no_tree:
+            _agent_flags.append("--no-tree")
+        typer.echo(f"[agent] {' '.join(_agent_flags)}", err=True)
 
     scanner = FileScanner(target, max_depth=effective_depth)
     raw_tree = scanner.scan_tree()
@@ -594,7 +618,7 @@ def main(
 
     # 4. Serializar (con o sin modo compact)
     if compact:
-        data = compact_view(sm)
+        data = compact_view(sm, no_tree=no_tree)
         # Aplicar redaccion sobre el dict del compact view
         if not no_redact:
             data = redact_dict(data)
@@ -602,6 +626,9 @@ def main(
     else:
         # Redactar sobre el dict serializado (SEC-01, SEC-03)
         raw_dict = asdict(sm)
+        if no_tree:
+            raw_dict.pop("file_tree", None)
+            raw_dict.pop("file_paths", None)
         if not no_redact:
             raw_dict = redact_dict(raw_dict)
 
@@ -631,31 +658,103 @@ def main(
 
 @app.command("prepare-context")
 def prepare_context_cmd(
-    task: str = typer.Argument(..., help="Descripción de la tarea"),
-    path: Path = typer.Option(".", "--path", "-p", help="Directorio del proyecto"),
+    task: Optional[str] = typer.Argument(
+        None,
+        help="Task: explain | fix-bug | refactor | generate-tests",
+    ),
+    path: Path = typer.Option(
+        Path("."),
+        "--path", "-p",
+        help="Project directory to analyze (default: current directory)",
+    ),
+    llm_prompt: bool = typer.Option(
+        False,
+        "--llm-prompt",
+        help="Append a ready-to-use LLM prompt to the output",
+    ),
+    task_help: bool = typer.Option(
+        False,
+        "--task-help",
+        help="List available tasks with descriptions and exit",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show what would be analyzed without running it",
+    ),
 ) -> None:
-    """Prepara contexto mínimo optimizado para que un LLM modifique el código."""
-    from dataclasses import asdict
+    """Prepare task-aware context optimized for LLM reasoning.
 
-    from sourcecode.prepare_context import ContextBuilder
+    \b
+    Note: PATH must be provided before the subcommand (default: '.'):
+      sourcecode . prepare-context explain
+      sourcecode . prepare-context fix-bug --path /my/project
+      sourcecode . prepare-context generate-tests --llm-prompt
+      sourcecode . prepare-context --task-help
+    """
+    from sourcecode.prepare_context import TASKS, TaskContextBuilder
+
+    if task_help:
+        typer.echo("Available tasks:\n")
+        for name, spec in TASKS.items():
+            typer.echo(f"  {name:<20} {spec.description}")
+            typer.echo(f"  {'':20} Output: {spec.output_hint}\n")
+        raise typer.Exit()
+
+    if task is None:
+        typer.echo(
+            f"Error: task is required. Available: {', '.join(TASKS)}\n"
+            "Use --task-help for descriptions.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if task not in TASKS:
+        typer.echo(
+            f"Error: unknown task '{task}'. Available: {', '.join(TASKS)}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     target = path.resolve()
-
     if not target.exists() or not target.is_dir():
         typer.echo(f"Error: '{target}' no es un directorio válido.", err=True)
         raise typer.Exit(code=1)
 
-    builder = ContextBuilder(target)
-    result = builder.prepare(task)
+    if dry_run:
+        spec = TASKS[task]
+        typer.echo(f"task:        {task}")
+        typer.echo(f"goal:        {spec.goal}")
+        typer.echo(f"path:        {target}")
+        typer.echo(f"analyzers:   dependencies={'yes' if spec.enable_dependencies else 'no'}"
+                   f", code_notes={'yes' if spec.enable_code_notes else 'no'}")
+        typer.echo(f"output:      {spec.output_hint}")
+        raise typer.Exit()
 
-    out = {
-        "task": result.task,
-        "entry_points": result.entry_points,
-        "relevant_files": [asdict(f) for f in result.relevant_files],
-        "call_flow": result.call_flow,
-        "snippets": [asdict(s) for s in result.snippets],
-        "tests": result.tests,
-        "notes": result.notes,
+    from dataclasses import asdict
+
+    builder = TaskContextBuilder(target)
+    output = builder.build(task)
+
+    out: dict[str, Any] = {
+        "task": output.task,
+        "goal": output.goal,
+        "project_summary": output.project_summary,
+        "architecture_summary": output.architecture_summary,
+        "relevant_files": [asdict(f) for f in output.relevant_files],
+        "key_dependencies": output.key_dependencies,
     }
+    if output.suspected_areas:
+        out["suspected_areas"] = output.suspected_areas
+    if output.improvement_opportunities:
+        out["improvement_opportunities"] = output.improvement_opportunities
+    if output.test_gaps:
+        out["test_gaps"] = output.test_gaps
+    if output.code_notes_summary:
+        out["code_notes_summary"] = output.code_notes_summary
+    if output.limitations:
+        out["limitations"] = output.limitations
+    if llm_prompt:
+        out["llm_prompt"] = builder.render_prompt(output)
 
     typer.echo(json.dumps(out, indent=2, ensure_ascii=False))

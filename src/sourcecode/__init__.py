@@ -1,3 +1,3 @@
 """sourcecode — Genera mapas de contexto estructurado para agentes IA."""
 
-__version__ = "0.19.0"
+__version__ = "0.21.0"

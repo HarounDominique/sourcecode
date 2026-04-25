@@ -54,27 +54,31 @@ def to_yaml(sm: SourceMap) -> str:
     return stream.getvalue()
 
 
-def compact_view(sm: SourceMap) -> dict[str, Any]:
+def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
     """Proyeccion compacta del SourceMap (~500-700 tokens).
 
     Incluye: schema_version, project_type, stacks, entry_points,
     project_summary (siempre), architecture_summary (siempre),
-    dependency_summary (cuando requested=True),
-    file_tree_depth1 (backward compat).
+    dependency_summary + key_dependencies (cuando requested=True),
+    file_tree_depth1 (omitido si no_tree=True).
 
     Excluye: dependencies (lista larga), docs, module_graph.
     """
-    depth1: dict[str, Any] = {}
-    for name, value in sm.file_tree.items():
-        if isinstance(value, dict):
-            depth1[name] = {}
-        else:
-            depth1[name] = None
+    depth1: dict[str, Any] | None = None
+    if not no_tree:
+        depth1 = {}
+        for name, value in sm.file_tree.items():
+            if isinstance(value, dict):
+                depth1[name] = {}
+            else:
+                depth1[name] = None
 
     dep_summary_dict: Any = None
+    key_deps: Any = None
     if sm.dependency_summary is not None and sm.dependency_summary.requested:
         dep_summary_dict = asdict(sm.dependency_summary)
         dep_summary_dict.pop("dependencies", None)
+        key_deps = [asdict(d) for d in sm.key_dependencies]
 
     env_summary_dict: Any = None
     if sm.env_summary is not None and sm.env_summary.requested:
@@ -84,18 +88,21 @@ def compact_view(sm: SourceMap) -> dict[str, Any]:
     if sm.code_notes_summary is not None and sm.code_notes_summary.requested:
         code_notes_summary_dict = asdict(sm.code_notes_summary)
 
-    return {
+    result: dict[str, Any] = {
         "schema_version": sm.metadata.schema_version,
         "project_type": sm.project_type,
         "project_summary": sm.project_summary,
         "architecture_summary": sm.architecture_summary,
         "stacks": [asdict(stack) for stack in sm.stacks],
         "entry_points": [asdict(entry_point) for entry_point in sm.entry_points],
-        "file_tree_depth1": depth1,
         "dependency_summary": dep_summary_dict,
+        "key_dependencies": key_deps,
         "env_summary": env_summary_dict,
         "code_notes_summary": code_notes_summary_dict,
     }
+    if not no_tree:
+        result["file_tree_depth1"] = depth1
+    return result
 
 
 def normalize_source_map(sm: SourceMap) -> SourceMap:

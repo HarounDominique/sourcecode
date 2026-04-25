@@ -70,12 +70,14 @@ class SemanticAnalyzer:
 
     def __init__(
         self,
+        root: Optional[Path] = None,
         *,
         max_files: int = _MAX_FILES,
         max_file_size: int = _MAX_FILE_SIZE,
         max_calls: int = _MAX_CALLS,
         max_symbols: int = _MAX_SYMBOLS,
     ) -> None:
+        self.root = root
         self.max_files = max_files
         self.max_file_size = max_file_size
         self.max_calls = max_calls

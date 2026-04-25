@@ -65,7 +65,7 @@ sourcecode --version
 
 ## What It Detects
 
-- Stacks: Node.js, Python, Go, Rust, Java, PHP, Ruby, and Dart.
+- Stacks: Node.js, Python, Go, Rust, Java (Maven `pom.xml` and Gradle `build.gradle`/`build.gradle.kts`), PHP, Ruby, and Dart.
 - Frameworks associated with each stack when enough signals are present.
 - `project_type`: `webapp`, `api`, `library`, `cli`, `fullstack`, `monorepo`, or `unknown`.
 - Relevant `entry_points`, such as `main.py`, `cmd/api/main.go`, or `app/page.tsx`.
@@ -95,6 +95,8 @@ sourcecode --version
 | `--env-map` | off | Map all environment variables referenced in source code: key name, required/optional status, inferred type (`string`, `int`, `bool`, `url`, `path`, `enum`), functional category (`database`, `auth`, `cache`, `storage`, `service`, `observability`, `feature_flag`, `server`, `general`), default value when present, and source file locations. Supplements with descriptions from `.env.example`, `.env.sample`, and similar reference files. |
 | `--code-notes` | off | Extract inline code annotations — `TODO`, `FIXME`, `HACK`, `NOTE`, `DEPRECATED`, `WARNING`, `XXX`, `BUG`, `OPTIMIZE` — with file path, line number, annotation text, and the nearest enclosing function or class. Also detects Architecture Decision Records (ADRs) in `docs/decisions/`, `docs/adr/`, `adr/`, and similar directories, extracting title, status, and summary. |
 | `--depth INTEGER` | `4` | Maximum file tree depth. Range: 1–20. |
+| `--no-tree` | off | Suppress `file_tree`, `file_paths` (and `file_tree_depth1` in `--compact`) from the output. Ideal with `--dependencies` on large projects to get dependency data without a multi-thousand-line file tree. |
+| `--agent` | off | Agent mode: auto-selects `--compact --dependencies --env-map --code-notes` and adds `--no-tree` automatically for Java/Gradle projects or large repositories. Prints selected flags to stderr. Can be combined with other flags (e.g. `--agent --git-context`). |
 | `--no-redact` | off | Disable secret redaction (enabled by default). |
 | `--version` | — | Show version and exit. |
 
@@ -107,8 +109,8 @@ The full schema (`SourceMap`) includes the following fields:
 | Field | Type | Description |
 |-------|------|-------------|
 | `metadata` | object | Schema version, timestamp, `sourcecode` version, and analyzed path. |
-| `file_tree` | object | Repository tree where `null` represents a file and `{}` represents a directory. |
-| `file_paths` | array | Flat list of all project paths derived from `file_tree`, with forward-slash separators. Always present; respects `--depth`. |
+| `file_tree` | object | Repository tree where `null` represents a file and `{}` represents a directory. Suppressed when `--no-tree` is active. |
+| `file_paths` | array | Flat list of all project paths derived from `file_tree`, with forward-slash separators. Respects `--depth`. Suppressed when `--no-tree` is active. |
 | `project_summary` | string\|null | Deterministic natural-language description of the project. Includes: manifest/README description when available, detected architecture pattern (`layered`, `mvc`, `hexagonal`, `fullstack`), business domain names inferred from directory structure, entry points (when no domains are detected), and dependency count. Present when stacks are detected. |
 | `architecture_summary` | string\|null | Static summary of the main execution flow, orchestrated modules, and output produced by the project. Present when enough structural evidence is available. |
 | `stacks` | array | Stack detections with confidence, frameworks, manifests, `primary`, `root`, `workspace`, and `signals`. |
@@ -207,7 +209,7 @@ ADR detection looks for Markdown files in `docs/decisions/`, `docs/adr/`, `adr/`
 
 ## Compact Mode
 
-`--compact` returns a reduced JSON view optimized for LLM prompts (~500-700 tokens). It excludes the full `dependencies` list, `docs`, and `module_graph`, while retaining the fields most useful for project orientation. When optional flags are also active, their summaries are included: `dependency_summary` (with `--dependencies`), `env_summary` (with `--env-map`), and `code_notes_summary` (with `--code-notes`).
+`--compact` returns a reduced JSON view optimized for LLM prompts. It excludes the full `dependencies` list, `docs`, and `module_graph`, while retaining the fields most useful for project orientation. When optional flags are also active, their summaries are included: `dependency_summary` + `key_dependencies` (with `--dependencies`), `env_summary` (with `--env-map`), and `code_notes_summary` (with `--code-notes`). Adding `--no-tree` further removes `file_tree_depth1`, bringing the output to ~500-800 tokens depending on how many flags are active.
 
 Real output from a Python FastAPI project:
 
@@ -250,7 +252,7 @@ Real output from a Python FastAPI project:
 }
 ```
 
-When `--compact --dependencies` is used, `dependency_summary` is populated instead of `null`.
+When `--compact --dependencies` is used, `dependency_summary` is populated and `key_dependencies` lists the top-15 direct dependencies with resolved versions. Add `--no-tree` to drop `file_tree_depth1` for the smallest possible context footprint.
 
 ## Docs Mode
 
@@ -428,15 +430,27 @@ In a monorepo, each stack includes its own `root` and `workspace`, and one of th
 
 Different modes optimize for different tradeoffs between context size and depth of information.
 
-**`--compact` — minimal context (~500-700 tokens)**
+**`--agent` — zero-config mode for AI pipelines**
+
+Best for: running `sourcecode` from inside an agent without knowing the project in advance. Auto-selects the right flag combination based on detected stack and project size.
+
+```bash
+sourcecode --agent .
+sourcecode --agent --git-context .   # add git context on top of auto-selected flags
+```
+
+On a Java/Gradle project the output is: `--compact --dependencies --env-map --code-notes --no-tree` (~800 tokens). On a Node/Python project: same without `--no-tree` (~900 tokens including depth-1 tree). Selected flags are always printed to stderr so the agent can log them.
+
+**`--compact` — minimal context**
 
 Best for: initial orientation, deciding what to explore next, fast handoffs between agents.
 
-Includes: `project_summary` (instant project description), `architecture_summary` (execution-oriented static summary), `stacks`, `entry_points`, `file_tree_depth1`, and `dependency_summary` when `--dependencies` was also requested.
+Includes: `project_summary`, `architecture_summary`, `stacks`, `entry_points`, `file_tree_depth1`, and — when the respective flags are active — `dependency_summary` + `key_dependencies`, `env_summary`, `code_notes_summary`.
 
 ```bash
 sourcecode --compact .
-sourcecode --compact --dependencies .
+sourcecode --compact --dependencies .           # + key dependencies with versions
+sourcecode --compact --dependencies --no-tree . # smallest footprint: no file tree
 ```
 
 **Full output — deep analysis**
@@ -605,6 +619,75 @@ Combine flags for a comprehensive project handoff:
 ```bash
 sourcecode --compact --env-map --code-notes --git-context .
 ```
+
+## `prepare-context` — Task-aware context for LLMs
+
+`prepare-context` is a subcommand that builds a focused, task-specific context optimized for LLM reasoning. Instead of a full project dump, it returns only the data an LLM needs for a specific goal.
+
+> **Note:** Because `sourcecode` has a positional `PATH` argument, you must provide it explicitly before the subcommand:
+> ```bash
+> sourcecode . prepare-context <task>         # current directory
+> sourcecode /my/project prepare-context <task>
+> ```
+
+### Available tasks
+
+| Task | Goal | Output |
+|------|------|--------|
+| `explain` | Onboard an LLM to the project | `project_summary`, `architecture_summary`, `relevant_files`, `key_dependencies` |
+| `fix-bug` | Identify likely bug locations | `relevant_files` (ranked by risk), `suspected_areas`, `code_notes_summary` |
+| `refactor` | Surface improvement opportunities | `relevant_files`, `improvement_opportunities`, `architecture_summary` |
+| `generate-tests` | Find untested areas | `test_gaps`, `relevant_files` (source without tests), `key_dependencies` |
+
+### Usage
+
+```bash
+# List tasks with descriptions
+sourcecode . prepare-context --task-help
+
+# Explain the project
+sourcecode . prepare-context explain
+
+# Find bug areas, with a ready-to-paste LLM prompt
+sourcecode . prepare-context fix-bug --llm-prompt
+
+# Find untested files in a specific project
+sourcecode . prepare-context generate-tests --path /my/project
+
+# Preview what will be analyzed (no analysis run)
+sourcecode . prepare-context refactor --dry-run
+```
+
+### Output format
+
+```json
+{
+  "task": "fix-bug",
+  "goal": "Identify the most likely files and areas where a bug may be located.",
+  "project_summary": "CLI en Python (Typer). Entry points: src/cli.py. 4 dependencias.",
+  "architecture_summary": null,
+  "relevant_files": [
+    { "path": "src/handler.py", "role": "source", "score": 2.0, "reason": "matches 'handler'" },
+    { "path": "src/cli.py",     "role": "entrypoint", "score": 3.0, "reason": "entry point" }
+  ],
+  "suspected_areas": ["src/handler.py (2 annotations)", "src/parser.py (1 annotation)"],
+  "code_notes_summary": { "total": 5, "by_kind": { "FIXME": 3, "BUG": 2 }, "top_files": ["src/handler.py"] }
+}
+```
+
+### `--llm-prompt`
+
+Add `--llm-prompt` to include a ready-to-use prompt that you can paste directly into any LLM:
+
+```bash
+sourcecode . prepare-context explain --llm-prompt | jq -r '.llm_prompt'
+```
+
+The prompt is task-specific and includes the project context, relevant files, and concrete instructions for the LLM.
+
+### Task auto-selection with `--agent`
+
+For zero-config usage, `--agent` on the main command automatically selects the right flags for the project type. For task-aware context, use `prepare-context` explicitly with the task that matches your goal.
 
 ## Development
 
