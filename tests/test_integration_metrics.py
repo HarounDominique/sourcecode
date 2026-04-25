@@ -55,18 +55,18 @@ def test_base_command_unchanged_without_flag():
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
 
-    assert data["file_metrics"] == [], (
-        f"file_metrics debe ser lista vacia sin --full-metrics, got {len(data['file_metrics'])} items"
+    assert "file_metrics" not in data, (
+        f"file_metrics must be absent from output without --full-metrics"
     )
-    assert data["metrics_summary"] is None, (
-        "metrics_summary debe ser null sin --full-metrics"
+    assert "metrics_summary" not in data, (
+        "metrics_summary must be absent from output without --full-metrics"
     )
 
-    # Campos existentes siguen presentes (backward compat)
+    # Identity layer fields always present
     assert "stacks" in data
-    assert "file_tree" in data
-    assert "file_paths" in data
     assert "project_summary" in data
+    assert "file_tree" not in data   # deep-dive: requires --tree
+    assert "file_paths" not in data  # deep-dive: requires --tree
 
 
 def test_full_metrics_availability_labels():

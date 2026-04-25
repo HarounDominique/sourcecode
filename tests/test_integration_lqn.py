@@ -33,8 +33,8 @@ def _invoke_json(*args: str) -> dict:
 
 
 def test_lqn01_file_paths() -> None:
-    """LQN-01: sourcecode . -> file_paths non-empty, all with '/' separator, no backslashes."""
-    output = _invoke_json()
+    """LQN-01: sourcecode . --tree -> file_paths non-empty, all with '/' separator, no backslashes."""
+    output = _invoke_json("--tree")
 
     assert "file_paths" in output, "file_paths key missing from output"
     fps = output["file_paths"]
@@ -221,12 +221,10 @@ def test_architecture_flag_produces_analysis() -> None:
 
 
 def test_no_architecture_flag_omits_key() -> None:
-    """ARCH: sourcecode . (sin --architecture) -> architecture present but not requested."""
+    """ARCH: sourcecode . (sin --architecture) -> architecture absent from output."""
     output = _invoke_json()
 
-    # Normalization fills None → empty typed struct; requested=False signals not run.
-    arch = output.get("architecture")
-    assert arch is not None, "architecture must not be null after normalization"
-    assert arch["requested"] is False, (
-        "architecture.requested must be False when --architecture flag is not passed"
+    # standard_view omits unrequested deep-dive fields entirely
+    assert "architecture" not in output, (
+        "architecture must be absent from output when --architecture flag is not passed"
     )

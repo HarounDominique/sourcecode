@@ -174,29 +174,44 @@ class ProjectSummarizer:
             return None
         return " ".join(lines).strip()
 
+    _TYPE_LABELS: dict[str, str] = {
+        "cli": "CLI",
+        "api": "API",
+        "webapp": "Aplicación web",
+        "library": "Librería",
+        "monorepo": "Monorepo",
+        "fullstack": "Proyecto fullstack",
+    }
+
     def _merge_description_with_structure(self, description: str, sm: SourceMap) -> str:
-        parts = [description.rstrip(".")]
+        project_type = sm.project_type or ""
+        type_label = self._TYPE_LABELS.get(project_type, "")
 
-        arch_pattern = self._detect_architecture_pattern(sm.file_paths)
-        domains = self._extract_business_domains(sm.file_paths)
+        desc = description.rstrip(".")
+        # Prepend type label when description doesn't already open with it
+        if type_label and not desc.upper().startswith(type_label.upper()):
+            lead = f"{type_label}: {desc}" if desc else type_label
+        else:
+            lead = desc
 
+        parts = [lead]
+
+        # Stack with frameworks — keep brief, skip internal module listings
         non_tooling_stacks = self._filter_non_tooling_stacks(sm)
         if non_tooling_stacks:
             primary = self._select_summary_primary_stack(non_tooling_stacks)
             frameworks = [fw.name for fw in primary.frameworks[:2]]
-            stack_label = primary.stack.capitalize()
+            arch_pattern = self._detect_architecture_pattern(sm.file_paths)
             arch_str = f" con arquitectura {arch_pattern}" if arch_pattern else ""
             if frameworks:
-                parts.append(f"Stack: {stack_label} ({', '.join(frameworks)}){arch_str}")
+                parts.append(f"Stack: {primary.stack.capitalize()} ({', '.join(frameworks)}){arch_str}")
             else:
-                parts.append(f"Stack: {stack_label}{arch_str}")
+                parts.append(f"Stack: {primary.stack.capitalize()}{arch_str}")
 
+        # Business domains only — skip entry_points (too technical for product summary)
+        domains = self._extract_business_domains(sm.file_paths)
         if domains:
             parts.append(f"Dominios: {', '.join(domains)}")
-        else:
-            entry_points = [ep.path for ep in sm.entry_points if not self._is_tooling_path(ep.path)][:2]
-            if entry_points:
-                parts.append(f"Entry points: {', '.join(entry_points)}")
 
         return ". ".join(parts) + "."
 

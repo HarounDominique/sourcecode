@@ -187,5 +187,4 @@ description = "CLI principal para analizar proyectos"
     )
     result = ProjectSummarizer(tmp_path).generate(sm)
     assert "CLI principal para analizar proyectos" in result
-    assert "src/main.py" in result
-    assert ".claude/hooks/main.py" not in result
+    assert ".claude/hooks/main.py" not in result  # tooling paths must not contaminate summary

@@ -30,10 +30,17 @@ def test_full_json_output(tmp_project: Path):
     assert result.exit_code == 0, f"Error: {result.output}"
     data = json.loads(result.output)
     assert data["metadata"]["schema_version"] == "1.0"
-    assert isinstance(data["file_tree"], dict)
-    assert len(data["file_tree"]) > 0
+    assert "file_tree" not in data  # tree is deep-dive, not included by default
     assert data["stacks"][0]["stack"] == "python"
     assert data["project_type"] == "cli"
+
+
+def test_full_json_output_with_tree(tmp_project: Path):
+    result = runner.invoke(app, ["--tree", str(tmp_project)])
+    assert result.exit_code == 0, f"Error: {result.output}"
+    data = json.loads(result.output)
+    assert isinstance(data["file_tree"], dict)
+    assert len(data["file_tree"]) > 0
 
 
 def test_full_yaml_output(tmp_project: Path):
@@ -46,7 +53,7 @@ def test_full_yaml_output(tmp_project: Path):
     yaml = YAML()
     data = yaml.load(StringIO(result.output))
     assert data["metadata"]["schema_version"] == "1.0"
-    assert isinstance(data["file_tree"], dict)
+    assert "file_tree" not in data  # tree is deep-dive, not included by default
 
 
 def test_compact_output(tmp_project: Path):
@@ -70,7 +77,7 @@ def test_output_file(tmp_project: Path, tmp_path: Path):
 
 
 def test_env_excluded_from_tree(project_with_env: Path):
-    result = runner.invoke(app, [str(project_with_env)])
+    result = runner.invoke(app, ["--tree", str(project_with_env)])
     assert result.exit_code == 0
     data = json.loads(result.output)
     # .env no debe aparecer en el file_tree (SEC-02)
@@ -78,7 +85,7 @@ def test_env_excluded_from_tree(project_with_env: Path):
 
 
 def test_gitignored_files_absent(project_with_env: Path):
-    result = runner.invoke(app, [str(project_with_env)])
+    result = runner.invoke(app, ["--tree", str(project_with_env)])
     assert result.exit_code == 0
     data = json.loads(result.output)
     # debug.log esta en .gitignore, no debe aparecer

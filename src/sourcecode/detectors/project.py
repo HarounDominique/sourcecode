@@ -7,6 +7,7 @@ from typing import Any
 from sourcecode.classifier import TypeClassifier
 from sourcecode.detectors.base import AbstractDetector, DetectionContext
 from sourcecode.detectors.tooling import collect_tooling_signals, infer_package_manager
+from sourcecode.scanner import classify_manifest
 from sourcecode.schema import EntryPoint, FrameworkDetection, StackDetection
 
 _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
@@ -30,7 +31,15 @@ class ProjectDetector:
         manifests: Sequence[str],
     ) -> tuple[list[StackDetection], list[EntryPoint], str | None]:
         manifest_names = [Path(manifest).name for manifest in manifests]
-        context = DetectionContext(root=root, file_tree=file_tree, manifests=manifest_names)
+        manifest_types = {
+            Path(m).name: classify_manifest(m, root) for m in manifests
+        }
+        context = DetectionContext(
+            root=root,
+            file_tree=file_tree,
+            manifests=manifest_names,
+            manifest_types=manifest_types,
+        )
         merged_stacks: dict[str, StackDetection] = {}
         merged_entry_points: dict[str, EntryPoint] = {}
 

@@ -28,7 +28,7 @@ def test_nextjs_fixture_schema() -> None:
         "Next.js",
         "React",
     }
-    assert "app" in data["file_tree"]
+    assert "file_tree" not in data  # tree is deep-dive; absent by default
 
 
 def test_fastapi_fixture_schema() -> None:

@@ -12,6 +12,77 @@ from ruamel.yaml import YAML
 from sourcecode.detectors.parsers import load_json_file, load_toml_file, read_text_lines
 from sourcecode.schema import DependencyRecord, DependencySummary
 
+# ── Role inference ────────────────────────────────────────────────────────────
+
+_PY_TESTTOOLS: frozenset[str] = frozenset({
+    "pytest", "unittest2", "hypothesis", "nose", "nose2", "coverage", "tox",
+    "factory-boy", "faker", "responses", "moto", "freezegun", "httpretty",
+    "respx", "pytest-cov", "pytest-mock", "pytest-asyncio", "pytest-xdist",
+})
+_PY_DEVTOOLS: frozenset[str] = frozenset({
+    "mypy", "ruff", "flake8", "black", "pylint", "bandit", "isort",
+    "pre-commit", "sphinx", "mkdocs", "pyright", "pyflakes", "autopep8",
+    "pycodestyle", "pydocstyle", "vulture",
+})
+_PY_SERIALIZATION: frozenset[str] = frozenset({
+    "ruamel.yaml", "pyyaml", "orjson", "msgpack", "ujson", "simplejson",
+    "cbor2", "tomli", "tomllib", "toml",
+})
+_PY_PARSING: frozenset[str] = frozenset({
+    "pathspec", "gitpython", "lxml", "beautifulsoup4", "html5lib",
+    "regex", "pyparsing",
+})
+
+_NODE_TESTTOOLS: frozenset[str] = frozenset({
+    "jest", "@jest/globals", "mocha", "jasmine", "chai", "karma",
+    "cypress", "playwright", "@playwright/test", "vitest", "@vitest/ui",
+    "sinon", "nock", "supertest",
+})
+_NODE_DEVTOOLS: frozenset[str] = frozenset({
+    "eslint", "prettier", "typescript", "@types/node", "webpack", "rollup",
+    "parcel", "@babel/core", "husky", "lint-staged", "nodemon", "ts-node", "tsx",
+})
+
+_DEV_SCOPES: frozenset[str] = frozenset({"dev", "optional"})
+
+_ROLE_PRIORITY: dict[str, int] = {
+    "runtime": 0,
+    "parsing": 1,
+    "serialization": 2,
+    "testtool": 3,
+    "devtool": 4,
+}
+
+
+def _infer_role(name: str, ecosystem: str, scope: str) -> str:
+    """Infer dependency role: runtime | parsing | serialization | devtool | testtool."""
+    n = name.lower()
+    is_dev = scope in _DEV_SCOPES or scope.startswith(("optional:", "group:"))
+
+    if ecosystem == "python":
+        if n in _PY_TESTTOOLS or n.startswith("pytest-"):
+            return "testtool"
+        if n in _PY_DEVTOOLS:
+            return "devtool"
+        if is_dev:
+            return "devtool"
+        if n in _PY_SERIALIZATION:
+            return "serialization"
+        if n in _PY_PARSING:
+            return "parsing"
+        return "runtime"
+
+    if ecosystem == "nodejs":
+        if n in _NODE_TESTTOOLS or n.startswith("@testing-library/"):
+            return "testtool"
+        if n in _NODE_DEVTOOLS:
+            return "devtool"
+        if is_dev:
+            return "devtool"
+        return "runtime"
+
+    return "devtool" if is_dev else "runtime"
+
 
 class DependencyAnalyzer:
     """Resuelve dependencias desde manifests y lockfiles sin ejecutar toolchains."""
@@ -41,6 +112,10 @@ class DependencyAnalyzer:
             limitations.extend(handler_limitations)
 
         deduped = self._dedupe(records)
+        deduped = [
+            replace(r, role=_infer_role(r.name, r.ecosystem, r.scope))
+            for r in deduped
+        ]
         return deduped, self._build_summary(deduped, limitations)
 
     def merge_summaries(self, summaries: Iterable[DependencySummary]) -> DependencySummary:

@@ -78,7 +78,12 @@ def main(
     no_tree: bool = typer.Option(
         False,
         "--no-tree",
-        help="Suprimir file_tree y file_paths del output (ideal con --dependencies en proyectos grandes)",
+        help="Suprimir file_tree y file_paths del output (ahora deprecado: el arbol ya no se incluye por defecto)",
+    ),
+    tree: bool = typer.Option(
+        False,
+        "--tree",
+        help="Incluir file_tree completo y file_paths en el output (capa deep-dive)",
     ),
     no_redact: bool = typer.Option(
         False,
@@ -114,7 +119,7 @@ def main(
     full_metrics: bool = typer.Option(
         False,
         "--full-metrics",
-        help="Incluir metricas de calidad: LOC, simbolos, complejidad, tests y cobertura por fichero",
+        help="Auditoria tecnica: LOC, simbolos, complejidad ciclomatica y cobertura por fichero. No incluido en --agent (uso: CI, code review, no context principal para agentes IA)",
     ),
     semantics: bool = typer.Option(
         False,
@@ -159,7 +164,7 @@ def main(
     agent: bool = typer.Option(
         False,
         "--agent",
-        help="Modo agente: selecciona automaticamente --compact --dependencies --env-map --code-notes y activa --no-tree en proyectos Java/Gradle o grandes",
+        help="Modo agente: output estructurado y sin ruido para consumo por IA. Incluye identidad, entrypoints, arquitectura, dependencias clave, señales operacionales y gaps. Sin arbol de ficheros ni secciones vacias.",
     ),
 ) -> None:
     """Genera un mapa de contexto estructurado del proyecto en formato JSON o YAML."""
@@ -216,7 +221,7 @@ def main(
         SourceMap,
         StackDetection,
     )
-    from sourcecode.serializer import compact_view, normalize_source_map, validate_cross_analyzer_consistency, validate_source_map, write_output
+    from sourcecode.serializer import agent_view, compact_view, normalize_source_map, standard_view, validate_cross_analyzer_consistency, validate_source_map, write_output
     from sourcecode.workspace import WorkspaceAnalyzer
 
     # 1. Escanear el directorio (SCAN-01 a SCAN-05)
@@ -235,15 +240,13 @@ def main(
     _java_min_depth = 8
     effective_depth = max(depth, _java_min_depth) if _is_java and depth < _java_min_depth else depth
 
-    # --agent: auto-select flags based on project characteristics
+    # --agent: enable signal analyzers; output via agent_view (not compact)
     if agent:
-        compact = True
-        if _is_java:
-            no_tree = True
-        _agent_flags = ["--compact", "--dependencies", "--env-map", "--code-notes"]
-        if no_tree:
-            _agent_flags.append("--no-tree")
-        typer.echo(f"[agent] {' '.join(_agent_flags)}", err=True)
+        dependencies = True
+        env_map = True
+        code_notes = True
+        no_tree = True  # agents never need the raw file tree
+        typer.echo("[agent] dependencies env-map code-notes (no-tree)", err=True)
 
     scanner = FileScanner(target, max_depth=effective_depth)
     raw_tree = scanner.scan_tree()
@@ -562,16 +565,20 @@ def main(
         p.replace("\\", "/") for p in flatten_file_tree(sm.file_tree)
     ]
 
-    # LQN-05: top-15 dependencias directas de manifest/lockfile
+    # LQN-05: top-15 dependencias directas de manifest/lockfile, ordenadas por rol
     if dependency_analyzer is not None:
+        from sourcecode.dependency_analyzer import _ROLE_PRIORITY
+
         primary_ecosystem = sm.stacks[0].stack if sm.stacks else ""
         direct_deps = [
             d for d in sm.dependencies
             if d.scope != "transitive" and d.source in {"manifest", "lockfile"}
         ]
 
-        def _dep_sort_key(d: Any) -> tuple[int, str]:
-            return (0 if d.ecosystem == primary_ecosystem else 1, d.name.lower())
+        def _dep_sort_key(d: Any) -> tuple[int, int, str]:
+            role_order = _ROLE_PRIORITY.get(d.role or "runtime", 5)
+            eco_order = 0 if d.ecosystem == primary_ecosystem else 1
+            return (role_order, eco_order, d.name.lower())
 
         sm.key_dependencies = sorted(direct_deps, key=_dep_sort_key)[:15]
 
@@ -616,24 +623,23 @@ def main(
     for _finding in validate_cross_analyzer_consistency(sm, strict=False):
         typer.echo(f"[consistency] {_finding}", err=True)
 
-    # 4. Serializar (con o sin modo compact)
-    if compact:
+    # 4. Serializar
+    if agent:
+        data = agent_view(sm)
+        if not no_redact:
+            data = redact_dict(data)
+        content = json.dumps(data, indent=2, ensure_ascii=False)
+    elif compact:
         data = compact_view(sm, no_tree=no_tree)
-        # Aplicar redaccion sobre el dict del compact view
         if not no_redact:
             data = redact_dict(data)
         content = json.dumps(data, indent=2, ensure_ascii=False)
     else:
-        # Redactar sobre el dict serializado (SEC-01, SEC-03)
-        raw_dict = asdict(sm)
-        if no_tree:
-            raw_dict.pop("file_tree", None)
-            raw_dict.pop("file_paths", None)
+        raw_dict = standard_view(sm, include_tree=tree and not no_tree)
         if not no_redact:
             raw_dict = redact_dict(raw_dict)
 
         if format == "yaml":
-            # Para YAML, serializar el dict directamente con ruamel.yaml
             from io import StringIO
 
             from ruamel.yaml import YAML

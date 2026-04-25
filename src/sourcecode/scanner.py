@@ -48,6 +48,57 @@ MANIFEST_NAMES: frozenset[str] = frozenset({
 })
 
 
+# Manifest types: application | library | tooling | workspace | config | auxiliary
+_APPLICATION_MANIFESTS: frozenset[str] = frozenset({
+    "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile",
+    "package.json", "go.mod", "Cargo.toml", "pom.xml", "build.gradle",
+    "build.gradle.kts", "composer.json", "Gemfile", "pubspec.yaml",
+})
+
+_CONFIG_MANIFESTS: frozenset[str] = frozenset({
+    ".npmrc", ".yarnrc", ".yarnrc.yml", "renovate.json", ".renovaterc",
+    "dependabot.yml",
+})
+
+
+def classify_manifest(manifest_path: str, root: Path) -> str:
+    """Classify a manifest as application | workspace | auxiliary | config | tooling.
+
+    Rules (in priority order):
+    1. In a hidden directory (.claude/, .vscode/, etc.) → auxiliary
+    2. In a known editor/agent config dir → auxiliary
+    3. At root level with a known manifest name → application
+    4. One level deep in a non-hidden dir → workspace
+    5. Otherwise → auxiliary
+    """
+    try:
+        rel = Path(manifest_path).resolve().relative_to(root.resolve())
+    except ValueError:
+        rel = Path(manifest_path)
+
+    parts = rel.parts
+    if not parts:
+        return "auxiliary"
+
+    # Any hidden directory in the path → auxiliary tooling
+    if any(p.startswith(".") for p in parts[:-1]):
+        return "auxiliary"
+
+    name = parts[-1]
+
+    if len(parts) == 1:
+        if name in _CONFIG_MANIFESTS:
+            return "config"
+        if name in _APPLICATION_MANIFESTS:
+            return "application"
+        return "application"  # unknown root manifest → treat as application
+
+    if len(parts) == 2:
+        return "workspace"  # depth-1 sub-package
+
+    return "auxiliary"
+
+
 class FileScanner:
     """Escanea un directorio de proyecto y produce un arbol de ficheros filtrado.
 
@@ -172,10 +223,15 @@ class FileScanner:
             candidate = self.root / name
             if candidate.exists() and not candidate.is_symlink():
                 manifests.append(str(candidate))
-        # Profundidad 1: primer nivel
+        # Profundidad 1: primer nivel (excluir directorios ocultos — son tooling, no proyecto)
         try:
             for child in self.root.iterdir():
-                if child.is_dir() and not child.is_symlink() and child.name not in self._excludes:
+                if (
+                    child.is_dir()
+                    and not child.is_symlink()
+                    and child.name not in self._excludes
+                    and not child.name.startswith(".")
+                ):
                     for name in MANIFEST_NAMES:
                         candidate = child / name
                         if candidate.exists() and not candidate.is_symlink():

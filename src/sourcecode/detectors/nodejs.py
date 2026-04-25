@@ -28,7 +28,12 @@ class NodejsDetector(AbstractDetector):
     priority = 20
 
     def can_detect(self, context: DetectionContext) -> bool:
-        return "package.json" in context.manifests
+        if "package.json" not in context.manifests:
+            return False
+        if not path_exists_in_tree(context.file_tree, "package.json"):
+            return False
+        manifest_type = context.manifest_types.get("package.json", "application")
+        return manifest_type not in {"auxiliary", "config"}
 
     def detect(self, context: DetectionContext) -> tuple[list[StackDetection], list[EntryPoint]]:
         package_json = load_json_file(context.root / "package.json")

@@ -12,7 +12,7 @@ from sourcecode.detectors.base import (
 )
 from sourcecode.detectors.parsers import load_toml_file, read_text_lines, unique_strings
 from sourcecode.schema import FrameworkDetection
-from sourcecode.tree_utils import path_exists_in_tree
+from sourcecode.tree_utils import find_files_by_name, path_exists_in_tree
 
 _FRAMEWORK_MAP = {
     "fastapi": "FastAPI",
@@ -146,34 +146,83 @@ class PythonDetector(AbstractDetector):
         entry_points: list[EntryPoint] = []
         declared = set()
         for path in unique_strings(declared_candidates):
-            if path_exists_in_tree(context.file_tree, path):
-                declared.add(path)
-                kind = "cli" if path.endswith(("__main__.py", "main.py", "cli.py")) else "app"
+            actual = path
+            if not path_exists_in_tree(context.file_tree, path):
+                src_path = f"src/{path}"
+                if path_exists_in_tree(context.file_tree, src_path):
+                    actual = src_path
+                else:
+                    continue
+            declared.add(actual)
+            kind = "cli" if actual.endswith(("__main__.py", "main.py", "cli.py")) else "app"
+            entry_points.append(
+                EntryPoint(
+                    path=actual,
+                    stack="python",
+                    kind=kind,
+                    source="pyproject.toml",
+                    confidence="high",
+                )
+            )
+
+        _CONVENTION_NAMES = {"cli.py", "__main__.py", "main.py", "app.py", "manage.py"}
+        seen_paths = set(declared)
+        for fname in _CONVENTION_NAMES:
+            for path in find_files_by_name(context.file_tree, fname):
+                if path in seen_paths or self._is_tooling_path(path):
+                    continue
+                seen_paths.add(path)
+                kind = "cli" if fname in ("cli.py", "__main__.py", "main.py") else "app"
                 entry_points.append(
                     EntryPoint(
                         path=path,
                         stack="python",
                         kind=kind,
-                        source="pyproject.toml",
-                        confidence="high",
+                        source="convention",
+                        confidence="medium",
                     )
                 )
 
-        convention_candidates = ["cli.py", "__main__.py", "main.py", "app.py", "manage.py", "src/main.py"]
-        for path in unique_strings(convention_candidates):
-            if path in declared or not path_exists_in_tree(context.file_tree, path):
+        # code signal: scan Python files for if __name__ == "__main__" guard
+        for py_path in self._find_main_guard_files(context):
+            if py_path in seen_paths:
                 continue
-            kind = "cli" if path.endswith(("__main__.py", "main.py", "cli.py")) else "app"
+            seen_paths.add(py_path)
             entry_points.append(
                 EntryPoint(
-                    path=path,
+                    path=py_path,
                     stack="python",
-                    kind=kind,
-                    source="convention",
-                    confidence="medium",
+                    kind="script",
+                    source="code_signal",
+                    confidence="low",
                 )
             )
+
         return entry_points
+
+    _MAIN_GUARD_RE = re.compile(r"^if __name__\s*==\s*['\"]__main__['\"]", re.MULTILINE)
+
+    def _find_main_guard_files(self, context: DetectionContext) -> list[str]:
+        from sourcecode.tree_utils import flatten_file_tree
+        results: list[str] = []
+        for path in flatten_file_tree(context.file_tree):
+            if not path.endswith(".py") or self._is_tooling_path(path):
+                continue
+            try:
+                content = (context.root / path).read_text(encoding="utf-8", errors="replace")
+                if self._MAIN_GUARD_RE.search(content):
+                    results.append(path)
+            except OSError:
+                continue
+        return results
+
+    def _is_tooling_path(self, path: str) -> bool:
+        parts = path.split("/")
+        return any(
+            part.startswith(".")
+            or part in {"tests", "test", "__pycache__", "node_modules", "venv", ".venv"}
+            for part in parts[:-1]
+        )
 
     def _detect_package_manager(
         self, context: DetectionContext, *, pyproject: dict[str, Any] | None

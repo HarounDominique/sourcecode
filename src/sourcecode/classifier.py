@@ -128,7 +128,9 @@ class TypeClassifier:
         has_api = False
         for stack in stacks:
             frameworks = {framework.name for framework in stack.frameworks}
-            if frameworks & _WEB_FRAMEWORKS or stack.stack == "nodejs":
+            if frameworks & _WEB_FRAMEWORKS:
+                has_web = True
+            elif stack.stack == "nodejs" and stack.detection_method != "heuristic":
                 has_web = True
             if frameworks & _API_FRAMEWORKS or stack.stack in _API_STACKS:
                 has_api = True

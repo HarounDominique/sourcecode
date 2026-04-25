@@ -43,6 +43,8 @@ class HeuristicDetector(AbstractDetector):
         paths = flatten_file_tree(context.file_tree)
         counts: Counter[str] = Counter()
         for path in paths:
+            if path.startswith("."):
+                continue
             for extension, stack in _EXTENSION_MAP.items():
                 if path.endswith(extension):
                     counts[stack] += 1

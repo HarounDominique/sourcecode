@@ -34,9 +34,9 @@ def main(dependencies: bool = False) -> None:
     result = ArchitectureSummarizer(tmp_path).generate(sm)
 
     assert result is not None
-    assert "src/sourcecode/cli.py" in result
-    assert "DependencyAnalyzer (--dependencies)" in result
     assert "SourceMap" in result
+    assert "dependencias" in result  # DependencyAnalyzer → human-readable label
+    assert "Opcionalmente" in result
 
 
 def test_fallback_entry_point_detects_src_cli_py(tmp_path: Path) -> None:

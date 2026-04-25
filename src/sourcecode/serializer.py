@@ -345,6 +345,193 @@ def validate_cross_analyzer_consistency(
     return findings
 
 
+def agent_view(sm: SourceMap) -> dict[str, Any]:
+    """Opinionated output for AI agents — structured, noise-free, gap-aware.
+
+    Output order:
+        project   → what it is and what stack it uses
+        entry_points → where execution starts
+        architecture → how it's structured
+        key_dependencies → what runtime dependencies matter (when analyzed)
+        signals   → compact operational signals (env, notes, tests)
+        gaps      → what's uncertain or missing
+
+    Never includes: file_tree, file_paths, schema internals, empty sections,
+    null fields, raw dependency lists, or low-signal metadata.
+    """
+    # ── 1. Identity ──────────────────────────────────────────────────────────
+    primary = next((s for s in sm.stacks if s.primary), sm.stacks[0] if sm.stacks else None)
+
+    project: dict[str, Any] = {
+        "type": sm.project_type,
+        "summary": sm.project_summary,
+    }
+    if primary:
+        project["primary_stack"] = primary.stack
+        if primary.frameworks:
+            project["frameworks"] = [f.name for f in primary.frameworks]
+        if primary.package_manager:
+            project["package_manager"] = primary.package_manager
+        if primary.root and primary.root != ".":
+            project["root"] = primary.root
+
+    secondary = [s for s in sm.stacks if not s.primary and s.stack != (primary.stack if primary else "")]
+    if secondary:
+        project["secondary_stacks"] = sorted({s.stack for s in secondary})
+
+    result: dict[str, Any] = {"project": project}
+
+    # ── 2. Entry points ───────────────────────────────────────────────────────
+    if sm.entry_points:
+        result["entry_points"] = [
+            {k: v for k, v in asdict(ep).items() if v is not None and v != ""}
+            for ep in sm.entry_points
+        ]
+
+    # ── 3. Architecture ───────────────────────────────────────────────────────
+    if sm.architecture_summary:
+        result["architecture"] = sm.architecture_summary
+
+    # ── 4. Key dependencies (role-sorted, already computed) ───────────────────
+    if sm.dependency_summary and sm.dependency_summary.requested and sm.key_dependencies:
+        _skip = {"parent", "manifest_path", "workspace", "source", "ecosystem"}
+        result["key_dependencies"] = [
+            {k: v for k, v in asdict(d).items() if v is not None and k not in _skip}
+            for d in sm.key_dependencies
+        ]
+
+    # ── 5. Signals — compact operational context ─────────────────────────────
+    signals: dict[str, Any] = {}
+
+    if sm.env_summary and sm.env_summary.requested and sm.env_summary.total > 0:
+        signals["env_vars"] = {
+            "total": sm.env_summary.total,
+            "required": sm.env_summary.required_count,
+        }
+        if sm.env_summary.categories:
+            signals["env_vars"]["categories"] = sm.env_summary.categories
+
+    if sm.code_notes_summary and sm.code_notes_summary.requested and sm.code_notes_summary.total > 0:
+        by_kind = {k: v for k, v in sm.code_notes_summary.by_kind.items() if v > 0}
+        if by_kind:
+            signals["code_notes"] = {"total": sm.code_notes_summary.total, "by_kind": by_kind}
+        if sm.code_notes_summary.adr_count > 0:
+            signals["adrs"] = sm.code_notes_summary.adr_count
+
+    has_tests = any(
+        "/test" in p or "/tests" in p or "/spec" in p or p.startswith("test")
+        for p in sm.file_paths
+    )
+    if has_tests:
+        signals["has_tests"] = True
+
+    if signals:
+        result["signals"] = signals
+
+    # ── 6. Gaps — what's uncertain or missing ────────────────────────────────
+    gaps: list[str] = []
+
+    if not sm.entry_points:
+        gaps.append("No entry point detected — project structure may be non-standard")
+
+    if primary and primary.confidence == "low":
+        gaps.append(f"Low-confidence stack detection for '{primary.stack}' — no manifest found")
+
+    heuristic_stacks = [s for s in sm.stacks if s.detection_method == "heuristic"]
+    if heuristic_stacks:
+        gaps.append(
+            f"Heuristic-only detection (no manifest): {', '.join(s.stack for s in heuristic_stacks)}"
+        )
+
+    if sm.dependency_summary and sm.dependency_summary.requested:
+        for limitation in sm.dependency_summary.limitations[:3]:
+            gaps.append(limitation)
+    elif not sm.dependency_summary or not sm.dependency_summary.requested:
+        gaps.append("Dependencies not analyzed — add --dependencies for full context")
+
+    if gaps:
+        result["gaps"] = gaps
+
+    return result
+
+
+def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any]:
+    """Default output — three signal layers.
+
+    Layer A (always):
+        metadata, project_type, project_summary, architecture_summary,
+        stacks, entry_points.
+
+    Layer B (when the corresponding flag was passed):
+        dependency_summary + key_dependencies, env_summary + env_map,
+        code_notes_summary + code_notes, git_context.
+
+    Layer C (only when the flag was explicitly passed, checked via *.requested):
+        module_graph, docs, semantic_*, file_metrics, architecture inference.
+
+    file_tree / file_paths only when include_tree=True.
+    Full dependencies list is never included — use key_dependencies instead.
+    Empty unrequested analyzer fields are omitted entirely.
+    """
+    result: dict[str, Any] = {
+        "metadata": asdict(sm.metadata),
+        "project_type": sm.project_type,
+        "project_summary": sm.project_summary,
+        "architecture_summary": sm.architecture_summary,
+        "stacks": [asdict(s) for s in sm.stacks],
+        "entry_points": [asdict(ep) for ep in sm.entry_points],
+    }
+
+    # Layer B — signals (only when the corresponding analyzer ran)
+    if sm.dependency_summary is not None and sm.dependency_summary.requested:
+        dep_dict = asdict(sm.dependency_summary)
+        dep_dict.pop("dependencies", None)  # avoid duplication with key_dependencies
+        result["dependency_summary"] = dep_dict
+        result["key_dependencies"] = [asdict(d) for d in sm.key_dependencies]
+
+    if sm.env_summary is not None and sm.env_summary.requested:
+        result["env_summary"] = asdict(sm.env_summary)
+        result["env_map"] = [asdict(e) for e in sm.env_map]
+
+    if sm.code_notes_summary is not None and sm.code_notes_summary.requested:
+        result["code_notes_summary"] = asdict(sm.code_notes_summary)
+        if sm.code_notes:
+            result["code_notes"] = [asdict(n) for n in sm.code_notes]
+        if sm.code_adrs:
+            result["code_adrs"] = [asdict(a) for a in sm.code_adrs]
+
+    if sm.git_context is not None and sm.git_context.requested:
+        result["git_context"] = asdict(sm.git_context)
+
+    # Layer C — deep-dive (flag must have been explicitly passed)
+    if sm.module_graph is not None and sm.module_graph.summary.requested:
+        result["module_graph"] = asdict(sm.module_graph)
+        result["module_graph_summary"] = asdict(sm.module_graph.summary)
+
+    if sm.doc_summary is not None and sm.doc_summary.requested:
+        result["doc_summary"] = asdict(sm.doc_summary)
+        result["docs"] = [asdict(d) for d in sm.docs]
+
+    if sm.semantic_summary is not None and sm.semantic_summary.requested:
+        result["semantic_summary"] = asdict(sm.semantic_summary)
+        result["semantic_calls"] = [asdict(c) for c in sm.semantic_calls]
+        result["semantic_symbols"] = [asdict(s) for s in sm.semantic_symbols]
+        result["semantic_links"] = [asdict(lnk) for lnk in sm.semantic_links]
+
+    if sm.metrics_summary is not None and sm.metrics_summary.requested:
+        result["metrics_summary"] = asdict(sm.metrics_summary)
+        result["file_metrics"] = [asdict(m) for m in sm.file_metrics]
+
+    if sm.architecture is not None and sm.architecture.requested:
+        result["architecture"] = asdict(sm.architecture)
+
+    if include_tree:
+        result["file_tree"] = sm.file_tree
+        result["file_paths"] = sm.file_paths
+
+    return result
+
+
 def write_output(content: str, output: Optional[Path]) -> None:
     """Escribe el contenido a stdout o a un fichero.
 

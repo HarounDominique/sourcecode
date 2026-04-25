@@ -15,6 +15,8 @@ class DetectionContext:
     root: Path
     file_tree: dict[str, Any]
     manifests: list[str] = field(default_factory=list)
+    manifest_types: dict[str, str] = field(default_factory=dict)
+    # manifest_types: {filename → "application"|"workspace"|"auxiliary"|"config"}
 
 
 class AbstractDetector(ABC):

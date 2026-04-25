@@ -101,8 +101,8 @@ def test_cli_without_docs_flag_docs_disabled(tmp_path: Path) -> None:
     code, data = _run(["--format", "json"], tmp_path)
 
     assert code == 0
-    assert data["docs"] == []
-    assert data["doc_summary"] is None
+    assert "docs" not in data
+    assert "doc_summary" not in data
 
 
 def test_cli_docs_source_values_valid(tmp_path: Path) -> None:

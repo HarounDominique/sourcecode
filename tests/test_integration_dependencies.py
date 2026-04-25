@@ -30,18 +30,18 @@ def test_cli_dependencies_flag_enables_dependency_block(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert data["dependency_summary"]["requested"] is True
-    assert any(dep["name"] == "next" for dep in data["dependencies"])
+    assert any(dep["name"] == "next" for dep in data["key_dependencies"])
 
 
 def test_cli_without_dependencies_flag_keeps_block_disabled(tmp_path: Path) -> None:
-    (tmp_path / "requirements.txt").write_text("typer==0.21.0\n")
+    (tmp_path / "requirements.txt").write_text("typer==0.22.0\n")
 
     result = runner.invoke(app, [str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert data["dependencies"] == []
-    assert data["dependency_summary"] is None
+    assert "dependencies" not in data
+    assert "dependency_summary" not in data
 
 
 def test_cli_dependencies_preserve_workspace_context_in_monorepo(tmp_path: Path) -> None:
@@ -85,6 +85,6 @@ version = "0.115.2"
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    workspaces = {dep["workspace"] for dep in data["dependencies"] if dep["workspace"]}
+    workspaces = {dep["workspace"] for dep in data["key_dependencies"] if dep["workspace"]}
     assert {"apps/web", "packages/api"} <= workspaces
     assert data["dependency_summary"]["requested"] is True

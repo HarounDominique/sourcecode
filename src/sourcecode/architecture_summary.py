@@ -14,6 +14,20 @@ _NODE_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 _GO_EXTENSIONS = {".go"}
 _JAVA_EXTENSIONS = {".java", ".kt", ".scala"}
 
+_CORE_DETECTION_MODULES = {"scanner", "detectors", "classifier", "workspace"}
+
+_OPTIONAL_LABEL_MAP: dict[str, str] = {
+    "DependencyAnalyzer": "dependencias",
+    "GraphAnalyzer": "grafo de módulos",
+    "DocAnalyzer": "docs y docstrings",
+    "MetricsAnalyzer": "métricas de calidad",
+    "SemanticAnalyzer": "semántica y call graph",
+    "ArchitectureAnalyzer": "inferencia arquitectónica",
+    "GitAnalyzer": "contexto git",
+    "EnvAnalyzer": "variables de entorno",
+    "CodeNotesAnalyzer": "anotaciones de código",
+}
+
 
 class ArchitectureSummarizer:
     """Construye un resumen arquitectonico estatico de 3-5 lineas."""
@@ -51,18 +65,25 @@ class ArchitectureSummarizer:
         if content is None:
             return f"Entry point principal: {entry_point.path}. Arquitectura no inferida con suficiente evidencia estatica."
 
-        lines = [self._describe_entry_point(entry_point, sm.project_type)]
         suffix = Path(entry_point.path).suffix
         if suffix in _PYTHON_EXTENSIONS:
-            lines.extend(self._summarize_python_entry(entry_point.path, content))
+            lang_lines = self._summarize_python_entry(entry_point.path, content)
         elif suffix in _NODE_EXTENSIONS:
-            lines.extend(self._summarize_node_entry(entry_point.path, content))
+            lang_lines = self._summarize_node_entry(entry_point.path, content)
         elif suffix in _GO_EXTENSIONS:
-            lines.extend(self._summarize_go_entry(entry_point.path, content))
+            lang_lines = self._summarize_go_entry(entry_point.path, content)
         elif suffix in _JAVA_EXTENSIONS:
-            lines.extend(self._summarize_java_entry(entry_point.path, content, sm.stacks))
+            lang_lines = self._summarize_java_entry(entry_point.path, content, sm.stacks)
         else:
-            lines.append("Orquesta modulos internos no detallados por el analisis estatico disponible.")
+            lang_lines = []
+
+        if lang_lines:
+            # Product-level description available — no need for internal "Entry point: ..." header
+            lines = lang_lines
+        else:
+            lines = [self._describe_entry_point(entry_point, sm.project_type)]
+            if not lang_lines:
+                lines.append("Orquesta modulos internos no detallados por el analisis estatico disponible.")
 
         unique_lines: list[str] = []
         seen: set[str] = set()
@@ -78,11 +99,11 @@ class ArchitectureSummarizer:
         try:
             tree = ast.parse(content)
         except SyntaxError:
-            return ["Orquesta modulos Python, pero el entry point no pudo parsearse por completo."]
+            return []
 
         package_prefix = self._python_package_prefix(path)
         imported_modules: list[str] = []
-        optional_analyzers: list[str] = []
+        optional_class_names: list[str] = []
         uses_serializer = False
         uses_redactor = False
 
@@ -90,29 +111,57 @@ class ArchitectureSummarizer:
             if isinstance(node, ast.ImportFrom) and isinstance(node.module, str):
                 if package_prefix and node.module.startswith(package_prefix):
                     imported_modules.append(node.module.rsplit(".", 1)[-1])
-                if node.module == "sourcecode.serializer":
+                if node.module.endswith(".serializer") or "serializer" in node.module:
                     uses_serializer = True
-                if node.module == "sourcecode.redactor":
+                if node.module.endswith(".redactor") or "redactor" in node.module:
                     uses_redactor = True
             elif isinstance(node, ast.Assign):
-                optional = self._extract_optional_analyzer(node)
-                if optional:
-                    optional_analyzers.append(optional)
+                cls_name = self._extract_optional_analyzer_class_name(node)
+                if cls_name:
+                    optional_class_names.append(cls_name)
 
+        module_set = set(imported_modules)
         lines: list[str] = []
-        core_modules = self._format_module_list(imported_modules)
-        if core_modules:
-            lines.append(f"Orquesta modulos internos: {core_modules}.")
-        if optional_analyzers:
-            lines.append(f"Activa analisis opcionales: {', '.join(optional_analyzers)}.")
+
+        # Detection line — infer from core modules present
+        has_core = bool(module_set & _CORE_DETECTION_MODULES)
+        if has_core:
+            lines.append("Analiza el árbol del repositorio y detecta stack, entrypoints y tipo de proyecto.")
+        elif module_set:
+            lines.append("Analiza el proyecto y produce información estructurada.")
+
+        # Output line
         if uses_serializer:
-            output_line = "Produce un SourceMap serializado en JSON/YAML y una vista compacta."
+            out = "Produce un SourceMap serializable en JSON/YAML"
             if uses_redactor:
-                output_line = "Produce un SourceMap serializado en JSON/YAML y una vista compacta con redaccion de secretos."
-            lines.append(output_line)
-        elif not lines:
-            lines.append("Orquesta modulos Python internos sin un patron de salida claramente inferible.")
+                out += " con redacción de secretos"
+            lines.append(out + ".")
+
+        # Optional capabilities line
+        opt_labels = [
+            _OPTIONAL_LABEL_MAP[cls]
+            for cls in optional_class_names
+            if cls in _OPTIONAL_LABEL_MAP
+        ]
+        if opt_labels:
+            if len(opt_labels) > 1:
+                joined = ", ".join(opt_labels[:-1]) + " y " + opt_labels[-1]
+            else:
+                joined = opt_labels[0]
+            lines.append(f"Opcionalmente añade {joined}.")
+
         return lines
+
+    def _extract_optional_analyzer_class_name(self, node: ast.Assign) -> str | None:
+        value = node.value
+        if not isinstance(value, ast.IfExp):
+            return None
+        if not isinstance(value.body, ast.Call):
+            return None
+        if not isinstance(value.body.func, ast.Name):
+            return None
+        cls_name = value.body.func.id
+        return cls_name if cls_name.endswith("Analyzer") else None
 
     def _summarize_node_entry(self, path: str, content: str) -> list[str]:
         imports = re.findall(r"""from\s+['"](\.?\.?/[^'"]+)['"]|require\(['"](\.?\.?/[^'"]+)['"]\)""", content)

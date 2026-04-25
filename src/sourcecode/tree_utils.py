@@ -14,6 +14,20 @@ def flatten_file_tree(file_tree: dict[str, Any], prefix: str = "") -> list[str]:
     return paths
 
 
+def find_files_by_name(
+    file_tree: dict[str, Any], filename: str, prefix: str = ""
+) -> list[str]:
+    """Return all paths in the tree whose filename matches `filename`."""
+    paths: list[str] = []
+    for key, value in file_tree.items():
+        current = f"{prefix}/{key}" if prefix else key
+        if isinstance(value, dict):
+            paths.extend(find_files_by_name(value, filename, current))
+        elif key == filename:
+            paths.append(current)
+    return paths
+
+
 def path_exists_in_tree(file_tree: dict[str, Any], target: str) -> bool:
     """Comprueba si un path relativo existe en el file_tree."""
     normalized = target.strip("/").split("/")

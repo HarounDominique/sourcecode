@@ -83,6 +83,7 @@ class DependencyRecord:
     parent: Optional[str] = None
     manifest_path: Optional[str] = None
     workspace: Optional[str] = None
+    role: Optional[str] = None  # runtime | parsing | serialization | devtool | testtool
 
 
 @dataclass
