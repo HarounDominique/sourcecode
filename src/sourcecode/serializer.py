@@ -55,30 +55,27 @@ def to_yaml(sm: SourceMap) -> str:
 
 
 def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
-    """Proyeccion compacta del SourceMap (~500-700 tokens).
+    """Context package ready for prompt or handoff (~600-800 tokens).
 
-    Incluye: schema_version, project_type, stacks, entry_points,
-    project_summary (siempre), architecture_summary (siempre),
-    dependency_summary + key_dependencies (cuando requested=True),
-    file_tree_depth1 (omitido si no_tree=True).
+    Answers: what it is, where it enters, what depends on what,
+    what signals matter, and what uncertainty exists.
 
-    Excluye: dependencies (lista larga), docs, module_graph.
+    Includes: project_type, project_summary, architecture_summary,
+    stacks, entry_points, dependency_summary + key_dependencies (when analyzed),
+    env_summary (when analyzed), code_notes_summary (when analyzed),
+    confidence_summary, anomalies, analysis_gaps.
+
+    Excludes: file_tree, raw dependency lists, docs, module_graph.
+    Empty sections are explained when relevant.
     """
-    depth1: dict[str, Any] | None = None
-    if not no_tree:
-        depth1 = {}
-        for name, value in sm.file_tree.items():
-            if isinstance(value, dict):
-                depth1[name] = {}
-            else:
-                depth1[name] = None
-
     dep_summary_dict: Any = None
     key_deps: Any = None
     if sm.dependency_summary is not None and sm.dependency_summary.requested:
         dep_summary_dict = asdict(sm.dependency_summary)
         dep_summary_dict.pop("dependencies", None)
         key_deps = [asdict(d) for d in sm.key_dependencies]
+    elif sm.dependency_summary is None or not sm.dependency_summary.requested:
+        dep_summary_dict = None  # "not analyzed" — agent should add --dependencies
 
     env_summary_dict: Any = None
     if sm.env_summary is not None and sm.env_summary.requested:
@@ -88,21 +85,47 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
     if sm.code_notes_summary is not None and sm.code_notes_summary.requested:
         code_notes_summary_dict = asdict(sm.code_notes_summary)
 
+    # Entry points: strip None fields for compactness
+    entry_points_compact = [
+        {k: v for k, v in asdict(ep).items() if v is not None and v != ""}
+        for ep in sm.entry_points
+    ]
+    if not entry_points_compact:
+        entry_points_compact = None  # type: ignore[assignment]  # signal: not detected
+
+    # Confidence summary
+    conf_dict: Any = None
+    anomalies: Any = None
+    if sm.confidence_summary is not None:
+        conf_dict = asdict(sm.confidence_summary)
+        if sm.confidence_summary.anomalies:
+            anomalies = sm.confidence_summary.anomalies
+
+    # Analysis gaps
+    gaps_list: Any = None
+    if sm.analysis_gaps:
+        gaps_list = [asdict(g) for g in sm.analysis_gaps]
+
     result: dict[str, Any] = {
         "schema_version": sm.metadata.schema_version,
         "project_type": sm.project_type,
         "project_summary": sm.project_summary,
         "architecture_summary": sm.architecture_summary,
         "stacks": [asdict(stack) for stack in sm.stacks],
-        "entry_points": [asdict(entry_point) for entry_point in sm.entry_points],
+        "entry_points": entry_points_compact,
         "dependency_summary": dep_summary_dict,
         "key_dependencies": key_deps,
         "env_summary": env_summary_dict,
         "code_notes_summary": code_notes_summary_dict,
+        "confidence_summary": conf_dict,
+        "anomalies": anomalies,
+        "analysis_gaps": gaps_list,
     }
-    if not no_tree:
-        result["file_tree_depth1"] = depth1
-    return result
+    # Strip keys that are fully None and not informative
+    return {k: v for k, v in result.items() if v is not None or k in (
+        "project_type", "project_summary", "architecture_summary",
+        "dependency_summary", "confidence_summary",
+    )}
 
 
 def normalize_source_map(sm: SourceMap) -> SourceMap:
@@ -349,15 +372,16 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
     """Opinionated output for AI agents — structured, noise-free, gap-aware.
 
     Output order:
-        project   → what it is and what stack it uses
-        entry_points → where execution starts
-        architecture → how it's structured
-        key_dependencies → what runtime dependencies matter (when analyzed)
-        signals   → compact operational signals (env, notes, tests)
-        gaps      → what's uncertain or missing
+        1. project          → identity: type, summary, primary stack, frameworks
+        2. entry_points     → where execution starts (with reason/evidence)
+        3. architecture     → how it's structured (flow description)
+        4. key_dependencies → runtime dependencies that matter (when analyzed)
+        5. signals          → compact operational context (env, notes, tests)
+        6. confidence_summary → detection quality and hard/soft signals
+        7. analysis_gaps    → what's uncertain or missing
 
     Never includes: file_tree, file_paths, schema internals, empty sections,
-    null fields, raw dependency lists, or low-signal metadata.
+    null fields, raw dependency lists, metrics, docs, or low-signal metadata.
     """
     # ── 1. Identity ──────────────────────────────────────────────────────────
     primary = next((s for s in sm.stacks if s.primary), sm.stacks[0] if sm.stacks else None)
@@ -381,10 +405,11 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
 
     result: dict[str, Any] = {"project": project}
 
-    # ── 2. Entry points ───────────────────────────────────────────────────────
+    # ── 2. Entry points (with reason/evidence when available) ─────────────────
     if sm.entry_points:
+        _ep_skip = {"workspace"}
         result["entry_points"] = [
-            {k: v for k, v in asdict(ep).items() if v is not None and v != ""}
+            {k: v for k, v in asdict(ep).items() if v is not None and v != "" and k not in _ep_skip}
             for ep in sm.entry_points
         ]
 
@@ -394,9 +419,9 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
 
     # ── 4. Key dependencies (role-sorted, already computed) ───────────────────
     if sm.dependency_summary and sm.dependency_summary.requested and sm.key_dependencies:
-        _skip = {"parent", "manifest_path", "workspace", "source", "ecosystem"}
+        _dep_skip = {"parent", "manifest_path", "workspace", "source", "ecosystem"}
         result["key_dependencies"] = [
-            {k: v for k, v in asdict(d).items() if v is not None and k not in _skip}
+            {k: v for k, v in asdict(d).items() if v is not None and k not in _dep_skip}
             for d in sm.key_dependencies
         ]
 
@@ -428,29 +453,59 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
     if signals:
         result["signals"] = signals
 
-    # ── 6. Gaps — what's uncertain or missing ────────────────────────────────
-    gaps: list[str] = []
+    # ── 6. Confidence summary ─────────────────────────────────────────────────
+    if sm.confidence_summary is not None:
+        cs = sm.confidence_summary
+        conf: dict[str, Any] = {
+            "overall": cs.overall,
+            "stack": cs.stack_confidence,
+            "entry_points": cs.entry_point_confidence,
+        }
+        if cs.hard_signals:
+            conf["hard_signals"] = cs.hard_signals
+        if cs.soft_signals:
+            conf["soft_signals"] = cs.soft_signals
+        if cs.ignored_signals:
+            conf["ignored_signals"] = cs.ignored_signals
+        if cs.anomalies:
+            conf["anomalies"] = cs.anomalies
+        result["confidence_summary"] = conf
 
-    if not sm.entry_points:
-        gaps.append("No entry point detected — project structure may be non-standard")
+    # ── 7. Analysis gaps ──────────────────────────────────────────────────────
+    analysis_gaps: list[dict[str, Any]] = []
 
-    if primary and primary.confidence == "low":
-        gaps.append(f"Low-confidence stack detection for '{primary.stack}' — no manifest found")
+    if sm.analysis_gaps:
+        analysis_gaps = [asdict(g) for g in sm.analysis_gaps]
+    else:
+        # Fallback gap derivation when confidence_analyzer was not run
+        if not sm.entry_points:
+            analysis_gaps.append({
+                "area": "entry_points",
+                "reason": "No entry point detected — project structure may be non-standard",
+                "impact": "high",
+            })
+        if primary and primary.confidence == "low":
+            analysis_gaps.append({
+                "area": "stack",
+                "reason": f"Low-confidence detection for '{primary.stack}' — no manifest found",
+                "impact": "medium",
+            })
+        heuristic_stacks = [s for s in sm.stacks if s.detection_method == "heuristic"]
+        if heuristic_stacks:
+            analysis_gaps.append({
+                "area": "stack",
+                "reason": f"Heuristic-only detection (no manifest): {', '.join(s.stack for s in heuristic_stacks)}",
+                "impact": "medium",
+            })
+        if not sm.dependency_summary or not sm.dependency_summary.requested:
+            analysis_gaps.append({
+                "area": "dependencies",
+                "reason": "Dependencies not analyzed — add --dependencies for full context",
+                "impact": "medium",
+            })
 
-    heuristic_stacks = [s for s in sm.stacks if s.detection_method == "heuristic"]
-    if heuristic_stacks:
-        gaps.append(
-            f"Heuristic-only detection (no manifest): {', '.join(s.stack for s in heuristic_stacks)}"
-        )
-
-    if sm.dependency_summary and sm.dependency_summary.requested:
-        for limitation in sm.dependency_summary.limitations[:3]:
-            gaps.append(limitation)
-    elif not sm.dependency_summary or not sm.dependency_summary.requested:
-        gaps.append("Dependencies not analyzed — add --dependencies for full context")
-
-    if gaps:
-        result["gaps"] = gaps
+    if analysis_gaps:
+        result["analysis_gaps"] = analysis_gaps
 
     return result
 

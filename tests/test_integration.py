@@ -63,8 +63,11 @@ def test_compact_output(tmp_project: Path):
     assert "schema_version" in data
     assert data["stacks"][0]["stack"] == "python"
     assert data["project_type"] == "cli"
-    assert "file_tree_depth1" in data
-    assert "file_tree" not in data  # compact no incluye el arbol completo
+    # v0.23.0: file_tree_depth1 removed from compact — noise reduction
+    assert "file_tree_depth1" not in data
+    assert "file_tree" not in data
+    # compact now includes confidence and gaps
+    assert "confidence_summary" in data or "analysis_gaps" in data
 
 
 def test_output_file(tmp_project: Path, tmp_path: Path):

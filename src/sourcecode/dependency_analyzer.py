@@ -32,6 +32,22 @@ _PY_PARSING: frozenset[str] = frozenset({
     "pathspec", "gitpython", "lxml", "beautifulsoup4", "html5lib",
     "regex", "pyparsing",
 })
+_PY_BUILDTOOLS: frozenset[str] = frozenset({
+    "setuptools", "hatchling", "flit-core", "flit", "wheel", "build", "twine",
+    "hatch", "poetry-core", "maturin", "cython",
+})
+_PY_OBSERVABILITY: frozenset[str] = frozenset({
+    "sentry-sdk", "datadog", "prometheus-client", "opentelemetry-api",
+    "opentelemetry-sdk", "structlog", "loguru", "elastic-apm", "ddtrace",
+    "opentelemetry-instrumentation",
+})
+_PY_INFRA: frozenset[str] = frozenset({
+    "boto3", "botocore", "azure-storage-blob", "azure-identity",
+    "google-cloud-storage", "google-cloud-bigquery", "kubernetes",
+    "paramiko", "fabric", "celery", "dramatiq", "redis", "aioredis",
+    "psycopg2", "psycopg2-binary", "asyncpg", "sqlalchemy", "motor",
+    "pymongo", "aiomysql", "mysql-connector-python",
+})
 
 _NODE_TESTTOOLS: frozenset[str] = frozenset({
     "jest", "@jest/globals", "mocha", "jasmine", "chai", "karma",
@@ -39,8 +55,22 @@ _NODE_TESTTOOLS: frozenset[str] = frozenset({
     "sinon", "nock", "supertest",
 })
 _NODE_DEVTOOLS: frozenset[str] = frozenset({
-    "eslint", "prettier", "typescript", "@types/node", "webpack", "rollup",
-    "parcel", "@babel/core", "husky", "lint-staged", "nodemon", "ts-node", "tsx",
+    "eslint", "prettier", "typescript", "@types/node", "husky",
+    "lint-staged", "nodemon", "ts-node", "tsx",
+})
+_NODE_BUILDTOOLS: frozenset[str] = frozenset({
+    "webpack", "webpack-cli", "rollup", "parcel", "@babel/core", "@babel/preset-env",
+    "esbuild", "@swc/core", "vite", "turbopack", "postcss", "autoprefixer",
+    "tailwindcss", "sass", "less",
+})
+_NODE_OBSERVABILITY: frozenset[str] = frozenset({
+    "@sentry/node", "dd-trace", "pino", "winston", "morgan",
+    "@opentelemetry/sdk-node", "pino-http",
+})
+_NODE_INFRA: frozenset[str] = frozenset({
+    "aws-sdk", "@aws-sdk/client-s3", "azure-storage", "firebase-admin",
+    "bull", "bullmq", "amqplib", "kafkajs", "ioredis", "pg", "mysql2",
+    "mongoose", "prisma", "@prisma/client", "typeorm", "sequelize",
 })
 
 _DEV_SCOPES: frozenset[str] = frozenset({"dev", "optional"})
@@ -49,13 +79,17 @@ _ROLE_PRIORITY: dict[str, int] = {
     "runtime": 0,
     "parsing": 1,
     "serialization": 2,
-    "testtool": 3,
-    "devtool": 4,
+    "observability": 3,
+    "infra": 4,
+    "buildtool": 5,
+    "testtool": 6,
+    "devtool": 7,
+    "unknown": 8,
 }
 
 
 def _infer_role(name: str, ecosystem: str, scope: str) -> str:
-    """Infer dependency role: runtime | parsing | serialization | devtool | testtool."""
+    """Infer dependency role: runtime | parsing | serialization | buildtool | observability | infra | devtool | testtool | unknown."""
     n = name.lower()
     is_dev = scope in _DEV_SCOPES or scope.startswith(("optional:", "group:"))
 
@@ -64,8 +98,14 @@ def _infer_role(name: str, ecosystem: str, scope: str) -> str:
             return "testtool"
         if n in _PY_DEVTOOLS:
             return "devtool"
+        if n in _PY_BUILDTOOLS:
+            return "buildtool"
         if is_dev:
             return "devtool"
+        if n in _PY_OBSERVABILITY:
+            return "observability"
+        if n in _PY_INFRA:
+            return "infra"
         if n in _PY_SERIALIZATION:
             return "serialization"
         if n in _PY_PARSING:
@@ -77,8 +117,14 @@ def _infer_role(name: str, ecosystem: str, scope: str) -> str:
             return "testtool"
         if n in _NODE_DEVTOOLS:
             return "devtool"
+        if n in _NODE_BUILDTOOLS:
+            return "buildtool"
         if is_dev:
             return "devtool"
+        if n in _NODE_OBSERVABILITY:
+            return "observability"
+        if n in _NODE_INFRA:
+            return "infra"
         return "runtime"
 
     return "devtool" if is_dev else "runtime"

@@ -623,6 +623,12 @@ def main(
     for _finding in validate_cross_analyzer_consistency(sm, strict=False):
         typer.echo(f"[consistency] {_finding}", err=True)
 
+    # Build confidence summary + analysis gaps (always runs, lightweight)
+    from sourcecode.confidence_analyzer import ConfidenceAnalyzer
+    from dataclasses import replace as _replace
+    _conf_summary, _analysis_gaps = ConfidenceAnalyzer().analyze(sm)
+    sm = _replace(sm, confidence_summary=_conf_summary, analysis_gaps=_analysis_gaps)
+
     # 4. Serializar
     if agent:
         data = agent_view(sm)
@@ -666,12 +672,17 @@ def main(
 def prepare_context_cmd(
     task: Optional[str] = typer.Argument(
         None,
-        help="Task: explain | fix-bug | refactor | generate-tests",
+        help="Task: explain | fix-bug | refactor | generate-tests | onboard | review-pr | delta",
     ),
     path: Path = typer.Option(
         Path("."),
         "--path", "-p",
         help="Project directory to analyze (default: current directory)",
+    ),
+    since: Optional[str] = typer.Option(
+        None,
+        "--since",
+        help="Git ref for delta task: show files changed since this ref (e.g. HEAD~3, main)",
     ),
     llm_prompt: bool = typer.Option(
         False,
@@ -689,13 +700,24 @@ def prepare_context_cmd(
         help="Show what would be analyzed without running it",
     ),
 ) -> None:
-    """Prepare task-aware context optimized for LLM reasoning.
+    """Compile task-aware context for AI coding agents.
 
     \b
-    Note: PATH must be provided before the subcommand (default: '.'):
+    Tasks:
+      explain        Project overview: structure, entry points, dependencies
+      fix-bug        Risk-ranked files, suspected areas, code annotations
+      refactor       Structural issues, improvement opportunities
+      generate-tests Untested source files, test gap analysis
+      onboard        Full project context for a new agent or developer
+      review-pr      PR review context: changed files + architecture
+      delta          Incremental context: git-changed files only
+
+    \b
+    Examples:
       sourcecode . prepare-context explain
       sourcecode . prepare-context fix-bug --path /my/project
-      sourcecode . prepare-context generate-tests --llm-prompt
+      sourcecode . prepare-context delta --since main
+      sourcecode . prepare-context onboard --llm-prompt
       sourcecode . prepare-context --task-help
     """
     from sourcecode.prepare_context import TASKS, TaskContextBuilder
@@ -734,22 +756,28 @@ def prepare_context_cmd(
         typer.echo(f"path:        {target}")
         typer.echo(f"analyzers:   dependencies={'yes' if spec.enable_dependencies else 'no'}"
                    f", code_notes={'yes' if spec.enable_code_notes else 'no'}")
+        if since:
+            typer.echo(f"since:       {since}")
         typer.echo(f"output:      {spec.output_hint}")
         raise typer.Exit()
 
     from dataclasses import asdict
 
     builder = TaskContextBuilder(target)
-    output = builder.build(task)
+    output = builder.build(task, since=since)
 
     out: dict[str, Any] = {
         "task": output.task,
         "goal": output.goal,
         "project_summary": output.project_summary,
         "architecture_summary": output.architecture_summary,
+        "confidence": output.confidence,
         "relevant_files": [asdict(f) for f in output.relevant_files],
+        "why_these_files": output.why_these_files,
         "key_dependencies": output.key_dependencies,
     }
+    if output.gaps:
+        out["gaps"] = output.gaps
     if output.suspected_areas:
         out["suspected_areas"] = output.suspected_areas
     if output.improvement_opportunities:
@@ -758,6 +786,10 @@ def prepare_context_cmd(
         out["test_gaps"] = output.test_gaps
     if output.code_notes_summary:
         out["code_notes_summary"] = output.code_notes_summary
+    if output.changed_files:
+        out["changed_files"] = output.changed_files
+    if output.affected_entry_points:
+        out["affected_entry_points"] = output.affected_entry_points
     if output.limitations:
         out["limitations"] = output.limitations
     if llm_prompt:

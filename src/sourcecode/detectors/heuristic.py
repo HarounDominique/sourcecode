@@ -66,6 +66,14 @@ class HeuristicDetector(AbstractDetector):
             if filename in _ENTRYPOINT_NAMES:
                 stack, kind = _ENTRYPOINT_NAMES[filename]
                 entry_points.append(
-                    EntryPoint(path=path, stack=stack, kind=kind, source="heuristic")
+                    EntryPoint(
+                        path=path,
+                        stack=stack,
+                        kind=kind,
+                        source="heuristic",
+                        confidence="low",
+                        reason="entry_file_pattern",
+                        evidence=f"conventional filename: {filename}",
+                    )
                 )
         return stacks, entry_points

@@ -162,6 +162,8 @@ class PythonDetector(AbstractDetector):
                     kind=kind,
                     source="pyproject.toml",
                     confidence="high",
+                    reason="console_script",
+                    evidence="declared in [project.scripts]",
                 )
             )
 
@@ -180,6 +182,8 @@ class PythonDetector(AbstractDetector):
                         kind=kind,
                         source="convention",
                         confidence="medium",
+                        reason="entry_file_pattern",
+                        evidence=f"conventional filename: {fname}",
                     )
                 )
 
@@ -195,6 +199,8 @@ class PythonDetector(AbstractDetector):
                     kind="script",
                     source="code_signal",
                     confidence="low",
+                    reason="main_guard",
+                    evidence="if __name__ == '__main__' guard detected",
                 )
             )
 

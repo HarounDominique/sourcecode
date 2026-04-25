@@ -50,6 +50,8 @@ def test_entry_point_serializes_with_expected_fields() -> None:
         "kind": "script",
         "source": "heuristic",
         "confidence": "high",
+        "reason": None,
+        "evidence": None,
     }
 
 

@@ -1,8 +1,19 @@
-"""prepare_context.py — Task-aware context optimizer for LLM reasoning."""
+"""prepare_context.py — Task-aware context compiler for AI coding agents.
+
+Each task produces a focused context bundle:
+  - goal: what the agent should accomplish
+  - project_summary: value-oriented product description
+  - architecture_summary: flow description (entry → processing → output)
+  - relevant_files: ranked by relevance with why_these_files rationale
+  - key_dependencies: runtime-first, role-tagged
+  - confidence: detection quality indicator
+  - gaps: what's uncertain or not analyzed
+  - llm_prompt: ready-to-use prompt (optional, --llm-prompt)
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -105,6 +116,77 @@ untested or undertested areas of this codebase.
 4. Each test must have a clear name that describes exactly what it verifies.
 """
 
+_ONBOARD_PROMPT = """\
+You are an expert software engineer onboarding to a new codebase. \
+Your task is to understand and explain this project thoroughly.
+
+## Project
+
+{project_summary}
+
+{architecture_section}
+
+## Entry Points
+
+{relevant_files_section}
+
+{dependencies_section}
+
+## Instructions
+
+1. Describe what this project does and the problem it solves.
+2. Walk through the main execution flow from entry point to output.
+3. Identify the 3-5 most important files to understand first.
+4. Note any non-obvious conventions, constraints, or design decisions.
+5. List what you would need to know to safely modify this codebase.
+"""
+
+_REVIEW_PR_PROMPT = """\
+You are an expert code reviewer. Your task is to review the changes \
+in this pull request within the context of the full project.
+
+## Project Context
+
+{project_summary}
+
+{architecture_section}
+
+## Changed Files
+
+{relevant_files_section}
+
+{suspected_areas_section}
+
+## Instructions
+
+1. Review the changed files for correctness, security, and maintainability.
+2. Check that changes are consistent with the project's architecture.
+3. Identify any missing tests, edge cases, or error handling.
+4. Flag any breaking changes to public APIs or contracts.
+5. Suggest concrete improvements with specific file and line references.
+"""
+
+_DELTA_PROMPT = """\
+You are an expert software engineer reviewing incremental changes to a codebase.
+
+## Project Context
+
+{project_summary}
+
+## Changed Files
+
+{relevant_files_section}
+
+{suspected_areas_section}
+
+## Instructions
+
+1. Analyze the changed files and their relationship to the project architecture.
+2. Identify which entry points and components are affected.
+3. Assess the risk and impact of these changes.
+4. Flag any consistency issues with the rest of the codebase.
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Task registry
@@ -170,6 +252,41 @@ TASKS: dict[str, TaskSpec] = {
         prompt_template=_GENERATE_TESTS_PROMPT,
         output_hint="test_gaps, relevant_files (source without tests), key_dependencies",
     ),
+    "onboard": TaskSpec(
+        name="onboard",
+        goal="Build complete project understanding for a new agent or developer joining the codebase.",
+        description="Full structural context: entry points, architecture, key files, dependencies.",
+        ranking_boosts=["main", "cli", "app", "core", "index", "schema", "config", "readme"],
+        ranking_penalties=[".min.", "__pycache__"],
+        enable_code_notes=False,
+        enable_dependencies=True,
+        prompt_template=_ONBOARD_PROMPT,
+        output_hint="project_summary, architecture_summary, relevant_files, key_dependencies, confidence, gaps",
+    ),
+    "review-pr": TaskSpec(
+        name="review-pr",
+        goal="Review pull request changes in the context of the full project architecture.",
+        description="Surface changed files, potential regressions, and architectural consistency.",
+        ranking_boosts=["handler", "service", "middleware", "router", "controller",
+                        "api", "schema", "model", "validator"],
+        ranking_penalties=[".min.", "__pycache__"],
+        enable_code_notes=True,
+        enable_dependencies=False,
+        prompt_template=_REVIEW_PR_PROMPT,
+        output_hint="relevant_files, suspected_areas, architecture_summary, code_notes_summary",
+    ),
+    "delta": TaskSpec(
+        name="delta",
+        goal="Produce incremental context for changed files — avoids re-reading the full repo.",
+        description="Git-aware context: changed files, affected entry points, dependency impact.",
+        ranking_boosts=["handler", "service", "middleware", "router", "controller",
+                        "api", "schema", "model"],
+        ranking_penalties=[".min.", "__pycache__"],
+        enable_code_notes=True,
+        enable_dependencies=False,
+        prompt_template=_DELTA_PROMPT,
+        output_hint="changed_files, affected_entry_points, dependency_impact, architecture_summary",
+    ),
 }
 
 
@@ -183,6 +300,7 @@ class RelevantFile:
     role: str    # entrypoint | source | test
     score: float
     reason: str
+    why: str = ""  # why this file matters for the specific task
 
 
 @dataclass
@@ -198,6 +316,11 @@ class TaskOutput:
     key_dependencies: list[dict[str, Any]]
     code_notes_summary: Optional[dict[str, Any]]
     limitations: list[str]
+    confidence: str = "medium"       # overall detection confidence
+    gaps: list[str] = field(default_factory=list)  # analysis gaps
+    why_these_files: dict[str, str] = field(default_factory=dict)  # path → why relevant
+    changed_files: list[str] = field(default_factory=list)         # delta task only
+    affected_entry_points: list[str] = field(default_factory=list) # delta task only
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -218,7 +341,7 @@ class TaskContextBuilder:
     def __init__(self, root: Path) -> None:
         self.root = root
 
-    def build(self, task_name: str) -> TaskOutput:
+    def build(self, task_name: str, *, since: Optional[str] = None) -> TaskOutput:
         if task_name not in TASKS:
             raise ValueError(
                 f"Unknown task '{task_name}'. Available: {', '.join(TASKS)}"
@@ -334,6 +457,42 @@ class TaskContextBuilder:
             untested.sort(key=lambda p: (len(p.split("/")), p))
             test_gaps = untested[:15]
 
+        # ── 8. Confidence + gaps ──────────────────────────────────────────────
+        from sourcecode.confidence_analyzer import ConfidenceAnalyzer
+        from dataclasses import asdict as _asdict
+
+        sm_for_conf = SourceMap(
+            metadata=AnalysisMetadata(analyzed_path=str(self.root)),
+            file_tree=file_tree,
+            stacks=stacks,
+            project_type=project_type,
+            entry_points=entry_points,
+        )
+        sm_for_conf.file_paths = all_paths
+        if spec.enable_dependencies and key_dependencies:
+            from sourcecode.schema import DependencySummary
+            sm_for_conf.dependency_summary = DependencySummary(
+                requested=True,
+                total_count=len(key_dependencies),
+            )
+
+        conf_summary, analysis_gaps = ConfidenceAnalyzer().analyze(sm_for_conf)
+        confidence = conf_summary.overall
+        gaps = [g.reason for g in analysis_gaps]
+
+        # ── 9. why_these_files ────────────────────────────────────────────────
+        why_these_files: dict[str, str] = {
+            rf.path: rf.reason for rf in relevant_files
+        }
+
+        # ── 10. Delta: git changed files ──────────────────────────────────────
+        changed_files: list[str] = []
+        affected_entry_points: list[str] = []
+        if task_name == "delta":
+            changed_files = self._get_git_changed_files(since=since)
+            ep_set = {ep.path for ep in entry_points}
+            affected_entry_points = [f for f in changed_files if f in ep_set]
+
         return TaskOutput(
             task=task_name,
             goal=spec.goal,
@@ -346,6 +505,11 @@ class TaskContextBuilder:
             key_dependencies=key_dependencies,
             code_notes_summary=code_notes_summary,
             limitations=limitations,
+            confidence=confidence,
+            gaps=gaps,
+            why_these_files=why_these_files,
+            changed_files=changed_files,
+            affected_entry_points=affected_entry_points,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
@@ -398,16 +562,21 @@ class TaskContextBuilder:
             "\n".join(f"- `{p}`" for p in output.test_gaps),
         )
 
-        return spec.prompt_template.format(
-            project_summary=project_summary,
-            architecture_section=architecture_section,
-            relevant_files_section=relevant_files_section,
-            dependencies_section=dependencies_section,
-            suspected_areas_section=suspected_areas_section,
-            code_notes_section=code_notes_section,
-            improvement_opportunities_section=improvement_opportunities_section,
-            test_gaps_section=test_gaps_section,
-        ).strip()
+        format_kwargs: dict[str, str] = {
+            "project_summary": project_summary,
+            "architecture_section": architecture_section,
+            "relevant_files_section": relevant_files_section,
+            "dependencies_section": dependencies_section,
+            "suspected_areas_section": suspected_areas_section,
+            "code_notes_section": code_notes_section,
+            "improvement_opportunities_section": improvement_opportunities_section,
+            "test_gaps_section": test_gaps_section,
+        }
+        # Only pass keys that the template actually uses
+        import re as _re
+        used_keys = set(_re.findall(r"\{(\w+)\}", spec.prompt_template))
+        filtered_kwargs = {k: v for k, v in format_kwargs.items() if k in used_keys}
+        return spec.prompt_template.format(**filtered_kwargs).strip()
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -484,3 +653,37 @@ class TaskContextBuilder:
 
     def _is_source(self, path: str) -> bool:
         return Path(path).suffix.lower() in _SOURCE_EXTENSIONS
+
+    def _get_git_changed_files(self, since: Optional[str] = None) -> list[str]:
+        """Get files changed since a git ref (default: HEAD~1) relative to root."""
+        import subprocess
+        ref = since or "HEAD~1"
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", ref, "HEAD"],
+                cwd=str(self.root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return [
+                    line.strip() for line in result.stdout.splitlines()
+                    if line.strip()
+                ]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        # Fallback: uncommitted changes
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only"],
+                cwd=str(self.root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        return []

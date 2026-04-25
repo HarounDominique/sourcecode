@@ -68,6 +68,8 @@ class EntryPoint:
     kind: str = "entry"
     source: str = "manifest"
     confidence: Literal["high", "medium", "low"] = "high"
+    reason: Optional[str] = None   # console_script | entry_file_pattern | main_guard | typer_app | heuristic | convention
+    evidence: Optional[str] = None  # brief evidence string
 
 
 @dataclass
@@ -83,7 +85,7 @@ class DependencyRecord:
     parent: Optional[str] = None
     manifest_path: Optional[str] = None
     workspace: Optional[str] = None
-    role: Optional[str] = None  # runtime | parsing | serialization | devtool | testtool
+    role: Optional[str] = None  # runtime | parsing | serialization | buildtool | observability | infra | devtool | testtool | unknown
 
 
 @dataclass
@@ -409,6 +411,30 @@ class CodeNotesSummary:
     limitations: list[str] = field(default_factory=list)
 
 
+# --- Confidence & Explainability ---
+
+@dataclass
+class ConfidenceSummary:
+    """Resumen de confianza y calidad del analisis."""
+
+    overall: Literal["high", "medium", "low"] = "medium"
+    stack_confidence: Literal["high", "medium", "low"] = "medium"
+    entry_point_confidence: Literal["high", "medium", "low"] = "medium"
+    hard_signals: list[str] = field(default_factory=list)   # manifest, lockfile, real entrypoint
+    soft_signals: list[str] = field(default_factory=list)   # heuristic, extension-based
+    ignored_signals: list[str] = field(default_factory=list)  # tooling dirs, aux manifests
+    anomalies: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AnalysisGap:
+    """Gap o incertidumbre detectada en el analisis."""
+
+    area: str   # entry_points | dependencies | stack | architecture | env
+    reason: str
+    impact: Literal["high", "medium", "low"] = "medium"
+
+
 # --- Git Context ---
 
 @dataclass
@@ -501,3 +527,6 @@ class SourceMap:
     code_notes: list[CodeNote] = field(default_factory=list)
     code_adrs: list[AdrRecord] = field(default_factory=list)
     code_notes_summary: Optional[CodeNotesSummary] = None
+    # Confidence & Explainability (v0.23.0)
+    confidence_summary: Optional[ConfidenceSummary] = None
+    analysis_gaps: list[AnalysisGap] = field(default_factory=list)

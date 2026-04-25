@@ -62,7 +62,8 @@ def test_compact_has_schema_version():
     assert result["schema_version"] == "1.0"
 
 
-def test_compact_has_depth1_tree():
+def test_compact_has_no_file_tree():
+    """v0.23.0: compact_view no longer includes file_tree_depth1 — noise reduction."""
     sm = SourceMap(
         file_tree={
             "src": {"main.py": None, "utils": {"helpers.py": None}},
@@ -71,13 +72,11 @@ def test_compact_has_depth1_tree():
         }
     )
     result = compact_view(sm)
-    assert "file_tree_depth1" in result
-    # Solo el primer nivel: src={}, pyproject.toml=None, tests={}
-    assert "src" in result["file_tree_depth1"]
-    assert "pyproject.toml" in result["file_tree_depth1"]
-    # Los hijos de src NO deben aparecer en depth1
-    depth1_src = result["file_tree_depth1"]["src"]
-    assert depth1_src == {} or not isinstance(depth1_src, dict) or "main.py" not in depth1_src
+    assert "file_tree_depth1" not in result
+    assert "file_tree" not in result
+    # compact must still include project_type and stacks
+    assert "project_type" in result
+    assert "stacks" in result
 
 
 def test_compact_size():
@@ -171,11 +170,14 @@ def test_c7_compact_dependency_summary_none_when_not_requested():
     assert result["dependency_summary"] is None
 
 
-def test_c8_compact_has_file_tree_depth1_backward_compat():
-    """C8: compact_view still includes 'file_tree_depth1' (backward compat)."""
+def test_c8_compact_has_no_file_tree_depth1():
+    """C8 (v0.23.0): compact_view no longer includes file_tree_depth1 — removed for noise reduction."""
     sm = SourceMap()
     result = compact_view(sm)
-    assert "file_tree_depth1" in result
+    assert "file_tree_depth1" not in result
+    # compact must have core context fields
+    assert "project_type" in result
+    assert "project_summary" in result
 
 
 def test_c9_compact_does_not_include_dependencies():
