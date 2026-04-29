@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Optional, cast
 
@@ -10,9 +11,52 @@ from sourcecode import __version__
 
 app = typer.Typer(
     name="sourcecode",
-    help="Genera un mapa de contexto estructurado del proyecto para agentes IA.",
+    help="Deterministic codebase context for AI coding agents.",
     add_completion=False,
 )
+
+telemetry_app = typer.Typer(help="Manage anonymous telemetry (opt-in).")
+app.add_typer(telemetry_app, name="telemetry")
+
+
+def _maybe_ask_consent() -> None:
+    """Show first-run consent prompt once, on interactive TTYs only."""
+    try:
+        from sourcecode.telemetry.config import has_been_asked, mark_asked, set_enabled
+        from sourcecode.telemetry.consent import ask_for_consent
+        if not has_been_asked():
+            enabled = ask_for_consent()
+            set_enabled(enabled)
+            if enabled:
+                typer.echo("Telemetry enabled. Thank you. Disable: sourcecode telemetry disable", err=True)
+            else:
+                typer.echo("Telemetry disabled. Enable anytime: sourcecode telemetry enable", err=True)
+    except Exception:
+        pass
+
+
+def _active_flags(
+    dependencies: bool, graph_modules: bool, docs: bool, full_metrics: bool,
+    semantics: bool, architecture: bool, git_context: bool, env_map: bool,
+    code_notes: bool, agent: bool, compact: bool, tree: bool, no_redact: bool,
+    fmt: str,
+) -> list[str]:
+    flags: list[str] = []
+    if agent: flags.append("--agent")
+    if compact: flags.append("--compact")
+    if dependencies: flags.append("--dependencies")
+    if graph_modules: flags.append("--graph-modules")
+    if docs: flags.append("--docs")
+    if full_metrics: flags.append("--full-metrics")
+    if semantics: flags.append("--semantics")
+    if architecture: flags.append("--architecture")
+    if git_context: flags.append("--git-context")
+    if env_map: flags.append("--env-map")
+    if code_notes: flags.append("--code-notes")
+    if tree: flags.append("--tree")
+    if no_redact: flags.append("--no-redact")
+    if fmt != "json": flags.append("--format")
+    return flags
 
 FORMAT_CHOICES = ["json", "yaml"]
 GRAPH_DETAIL_CHOICES = ["high", "medium", "full"]
@@ -167,10 +211,16 @@ def main(
         help="Modo agente: output estructurado y sin ruido para consumo por IA. Incluye identidad, entrypoints, arquitectura, dependencias clave, señales operacionales y gaps. Sin arbol de ficheros ni secciones vacias.",
     ),
 ) -> None:
-    """Genera un mapa de contexto estructurado del proyecto en formato JSON o YAML."""
-    # When a subcommand (e.g. prepare-context) is invoked, skip the main analysis.
+    """Generate structured codebase context for AI coding agents."""
+    # First-run consent (skip for telemetry subcommand itself)
+    if ctx.invoked_subcommand != "telemetry":
+        _maybe_ask_consent()
+
+    # When a subcommand is invoked, skip the main analysis.
     if ctx.invoked_subcommand is not None:
         return
+
+    _t0 = time.monotonic()
 
     # Validar formato
     if format not in FORMAT_CHOICES:
@@ -672,7 +722,26 @@ def main(
         else:
             content = json.dumps(raw_dict, indent=2, ensure_ascii=False)
 
-    # 5. Escribir output (CLI-04)
+    # 5. Telemetry (fire-and-forget, never blocks)
+    try:
+        from sourcecode import telemetry as _tel
+        _tel.record(
+            "execution_completed",
+            cmd="analyze",
+            flags=_active_flags(
+                dependencies, graph_modules, docs, full_metrics,
+                semantics, architecture, git_context, env_map,
+                code_notes, agent, compact, tree, no_redact, format,
+            ),
+            output_fmt=format,
+            file_count=len(sm.file_paths),
+            duration_s=time.monotonic() - _t0,
+            success=True,
+        )
+    except Exception:
+        pass
+
+    # 6. Escribir output (CLI-04)
     write_output(content, output=output)
 
 
@@ -804,3 +873,42 @@ def prepare_context_cmd(
         out["llm_prompt"] = builder.render_prompt(output)
 
     typer.echo(json.dumps(out, indent=2, ensure_ascii=False))
+
+
+# ── Telemetry commands ────────────────────────────────────────────────────────
+
+@telemetry_app.command("status")
+def telemetry_status() -> None:
+    """Show current telemetry setting."""
+    from sourcecode.telemetry.config import config_file_path, has_been_asked, is_enabled
+    enabled = is_enabled()
+    asked = has_been_asked()
+    status = "enabled" if enabled else "disabled"
+    typer.echo(f"Telemetry: {status}")
+    if not asked:
+        typer.echo("  (consent not yet shown — will prompt on next run)")
+    typer.echo(f"  Config: {config_file_path()}")
+    typer.echo("  Disable permanently: sourcecode telemetry disable")
+    typer.echo("  Or set env var:      SOURCECODE_TELEMETRY=0")
+
+
+@telemetry_app.command("enable")
+def telemetry_enable() -> None:
+    """Opt in to anonymous telemetry."""
+    from sourcecode.telemetry.config import set_enabled
+    from sourcecode import telemetry as _tel
+    set_enabled(True)
+    typer.echo("Telemetry enabled. Thank you — this helps improve sourcecode.")
+    typer.echo("What is collected: version, OS, commands, flags, duration, repo size range, errors.")
+    typer.echo("What is never collected: source code, paths, secrets, or any output content.")
+    typer.echo("Disable at any time: sourcecode telemetry disable")
+    _tel.record("telemetry_enabled", cmd="telemetry")
+
+
+@telemetry_app.command("disable")
+def telemetry_disable() -> None:
+    """Opt out of anonymous telemetry."""
+    from sourcecode.telemetry.config import set_enabled
+    set_enabled(False)
+    typer.echo("Telemetry disabled. No data will be collected or sent.")
+    typer.echo("Re-enable at any time: sourcecode telemetry enable")
