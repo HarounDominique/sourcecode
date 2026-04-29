@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Optional
 
+from sourcecode.detectors.parsers import load_json_file, load_toml_file
 from sourcecode.schema import EntryPoint, GraphEdge, GraphNode, ModuleGraph, ModuleGraphSummary
 from sourcecode.tree_utils import flatten_file_tree
 
@@ -184,6 +185,33 @@ class GraphAnalyzer:
             for edge in dn_edges:
                 self._append_edge(edges, edge_keys, edge)
             limitations.extend(dn_lims)
+
+        # Rust workspace crate graph
+        if (root / "Cargo.toml").is_file():
+            rw_nodes, rw_edges, rw_lims = self._analyze_rust_workspace(root, workspace)
+            for node in rw_nodes:
+                self._append_node(nodes, node_ids, node)
+            for edge in rw_edges:
+                self._append_edge(edges, edge_keys, edge)
+            limitations.extend(rw_lims)
+
+        # Go workspace module graph
+        if (root / "go.work").is_file():
+            gw_nodes, gw_edges, gw_lims = self._analyze_go_workspace(root, workspace)
+            for node in gw_nodes:
+                self._append_node(nodes, node_ids, node)
+            for edge in gw_edges:
+                self._append_edge(edges, edge_keys, edge)
+            limitations.extend(gw_lims)
+
+        # Node monorepo workspace graph (only for confirmed workspaces)
+        if self._is_node_workspace(root, file_tree):
+            nw_nodes, nw_edges, nw_lims = self._analyze_node_workspace(root, file_tree, workspace)
+            for node in nw_nodes:
+                self._append_node(nodes, node_ids, node)
+            for edge in nw_edges:
+                self._append_edge(edges, edge_keys, edge)
+            limitations.extend(nw_lims)
 
         for relative_path in source_files:
             absolute_path = root / relative_path
@@ -532,6 +560,9 @@ class GraphAnalyzer:
             max_nodes_applied=budget,
             edge_kinds=sorted(edge_kinds),
             limitations=self._unique(limitations),
+            hubs=self._find_hubs(nodes, edges),
+            orphans=self._find_orphans(nodes, edges),
+            cycle_count=self._count_import_cycles(nodes, edges),
         )
 
     def _derive_main_flows(
@@ -1161,6 +1192,300 @@ class GraphAnalyzer:
             return
         edge_keys.add(key)
         edges.append(edge)
+
+    # ── workspace graph methods ───────────────────────────────────────────────
+
+    def _is_node_workspace(self, root: Path, file_tree: dict[str, Any]) -> bool:
+        for marker in ("turbo.json", "nx.json", "pnpm-workspace.yaml"):
+            if (root / marker).is_file():
+                return True
+        pkg = load_json_file(root / "package.json")
+        return isinstance(pkg, dict) and isinstance(pkg.get("workspaces"), (list, dict))
+
+    def _analyze_node_workspace(
+        self,
+        root: Path,
+        file_tree: dict[str, Any],
+        workspace: str | None,
+    ) -> tuple[list[GraphNode], list[GraphEdge], list[str]]:
+        _SKIP = {"node_modules/", ".venv/", "dist/", "build/", ".git/", ".turbo/"}
+        pkg_paths = [
+            p for p in flatten_file_tree(file_tree)
+            if p != "package.json"
+            and p.endswith("/package.json")
+            and not any(s in p for s in _SKIP)
+            and (root / p).is_file()
+        ]
+        if not pkg_paths:
+            return [], [], []
+
+        name_to_dir: dict[str, str] = {}
+        pkg_data: list[tuple[str, dict[str, Any]]] = []
+        for rel_path in pkg_paths:
+            data = load_json_file(root / rel_path)
+            if not isinstance(data, dict):
+                continue
+            pkg_dir = str(PurePosixPath(rel_path).parent)
+            name = data.get("name", "")
+            if isinstance(name, str) and name:
+                name_to_dir[name] = pkg_dir
+                pkg_data.append((pkg_dir, data))
+
+        if not name_to_dir:
+            return [], [], []
+
+        nodes: list[GraphNode] = []
+        edges: list[GraphEdge] = []
+        dir_to_id: dict[str, str] = {}
+        for pkg_dir, data in pkg_data:
+            pkg_name = str(data.get("name", pkg_dir.split("/")[-1]))
+            node_id = f"module:{pkg_dir}"
+            dir_to_id[pkg_dir] = node_id
+            nodes.append(GraphNode(
+                id=node_id, kind="module", language="nodejs",
+                path=pkg_dir, display_name=pkg_name, workspace=workspace,
+            ))
+
+        for pkg_dir, data in pkg_data:
+            source_id = dir_to_id.get(pkg_dir)
+            if not source_id:
+                continue
+            all_deps: set[str] = set()
+            for field in ("dependencies", "devDependencies", "peerDependencies"):
+                raw = data.get(field, {})
+                if isinstance(raw, dict):
+                    all_deps.update(str(k) for k in raw)
+            for dep in all_deps:
+                target_dir = name_to_dir.get(dep)
+                if target_dir and target_dir != pkg_dir:
+                    edges.append(GraphEdge(
+                        source=source_id,
+                        target=dir_to_id.get(target_dir, f"module:{target_dir}"),
+                        kind="imports", confidence="high", method="heuristic",
+                    ))
+        return nodes, edges, []
+
+    def _analyze_rust_workspace(
+        self,
+        root: Path,
+        workspace: str | None,
+    ) -> tuple[list[GraphNode], list[GraphEdge], list[str]]:
+        cargo = load_toml_file(root / "Cargo.toml")
+        if not cargo:
+            return [], [], []
+        ws = cargo.get("workspace", {})
+        if not isinstance(ws, dict):
+            return [], [], []
+        members_raw = ws.get("members", [])
+        if not isinstance(members_raw, list) or not members_raw:
+            return [], [], []
+
+        member_dirs = self._expand_cargo_members(root, [str(m) for m in members_raw])
+        if not member_dirs:
+            return [], [], []
+
+        nodes: list[GraphNode] = []
+        edges: list[GraphEdge] = []
+        limitations: list[str] = []
+        name_to_dir: dict[str, str] = {}
+        member_data: list[tuple[str, dict[str, Any]]] = []
+
+        for member_dir in member_dirs:
+            mc = load_toml_file(root / member_dir / "Cargo.toml")
+            if not mc:
+                limitations.append(f"rust_workspace_missing:{member_dir}")
+                continue
+            pkg = mc.get("package", {})
+            name = str(pkg.get("name", member_dir.split("/")[-1])) if isinstance(pkg, dict) else member_dir.split("/")[-1]
+            name_to_dir[name] = member_dir
+            member_data.append((member_dir, mc))
+
+        for member_dir, mc in member_data:
+            pkg = mc.get("package", {})
+            name = str(pkg.get("name", member_dir.split("/")[-1])) if isinstance(pkg, dict) else member_dir.split("/")[-1]
+            is_bin = (root / member_dir / "src" / "main.rs").is_file()
+            nodes.append(GraphNode(
+                id=f"module:{member_dir}", kind="module", language="rust",
+                path=member_dir,
+                display_name=f"{name} ({'bin' if is_bin else 'lib'})",
+                workspace=workspace,
+            ))
+
+        for member_dir, mc in member_data:
+            source_id = f"module:{member_dir}"
+            deps = mc.get("dependencies", {})
+            if isinstance(deps, dict):
+                for dep_name in deps:
+                    target_dir = name_to_dir.get(str(dep_name))
+                    if target_dir and target_dir != member_dir:
+                        edges.append(GraphEdge(
+                            source=source_id, target=f"module:{target_dir}",
+                            kind="imports", confidence="high", method="heuristic",
+                        ))
+        return nodes, edges, limitations
+
+    def _expand_cargo_members(self, root: Path, members: list[str]) -> list[str]:
+        result: list[str] = []
+        for member in members:
+            if "*" in member or "?" in member:
+                for expanded in root.glob(member):
+                    if expanded.is_dir():
+                        result.append(str(expanded.relative_to(root)).replace("\\", "/"))
+            else:
+                cleaned = member.replace("\\", "/")
+                if (root / cleaned).is_dir():
+                    result.append(cleaned)
+        return result
+
+    def _analyze_go_workspace(
+        self,
+        root: Path,
+        workspace: str | None,
+    ) -> tuple[list[GraphNode], list[GraphEdge], list[str]]:
+        use_paths = self._parse_go_work_uses(root / "go.work")
+        if not use_paths:
+            return [], [], []
+
+        nodes: list[GraphNode] = []
+        edges: list[GraphEdge] = []
+        mod_name_to_dir: dict[str, str] = {}
+        dir_list: list[str] = []
+
+        for raw_path in use_paths:
+            mod_dir = raw_path.lstrip("./").replace("\\", "/") or "."
+            go_mod = root / (mod_dir if mod_dir != "." else "") / "go.mod"
+            if not go_mod.is_file():
+                go_mod = root / "go.mod" if mod_dir == "." else root / mod_dir / "go.mod"
+            mod_name = self._read_go_module_name(go_mod)
+            display = mod_name.split("/")[-1] if mod_name else (mod_dir.split("/")[-1] or "root")
+            if mod_name:
+                mod_name_to_dir[mod_name] = mod_dir
+            dir_list.append(mod_dir)
+            nodes.append(GraphNode(
+                id=f"module:{mod_dir}", kind="module", language="go",
+                path=mod_dir, display_name=display, workspace=workspace,
+            ))
+
+        for mod_dir in dir_list:
+            go_mod_path = root / "go.mod" if mod_dir == "." else root / mod_dir / "go.mod"
+            if not go_mod_path.is_file():
+                continue
+            try:
+                content = go_mod_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            source_id = f"module:{mod_dir}"
+            for other_name, other_dir in mod_name_to_dir.items():
+                if other_dir != mod_dir and other_name in content:
+                    edges.append(GraphEdge(
+                        source=source_id, target=f"module:{other_dir}",
+                        kind="imports", confidence="medium", method="heuristic",
+                    ))
+        return nodes, edges, []
+
+    def _parse_go_work_uses(self, go_work: Path) -> list[str]:
+        try:
+            content = go_work.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+        uses: list[str] = []
+        in_block = False
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("use ("):
+                in_block = True
+            elif in_block:
+                if stripped == ")":
+                    in_block = False
+                elif stripped and not stripped.startswith("//"):
+                    uses.append(stripped)
+            elif stripped.startswith("use ") and not stripped.startswith("use ("):
+                path = stripped[4:].strip()
+                if path and not path.startswith("//"):
+                    uses.append(path)
+        return uses
+
+    def _read_go_module_name(self, go_mod: Path) -> str:
+        try:
+            for line in go_mod.read_text(encoding="utf-8", errors="replace").splitlines():
+                s = line.strip()
+                if s.startswith("module "):
+                    return s[7:].strip()
+        except OSError:
+            pass
+        return ""
+
+    # ── graph analytics ───────────────────────────────────────────────────────
+
+    def _find_hubs(self, nodes: list[GraphNode], edges: list[GraphEdge]) -> list[str]:
+        module_ids = {n.id for n in nodes if n.kind == "module"}
+        incoming: Counter[str] = Counter(
+            e.target for e in edges if e.kind == "imports" and e.target in module_ids
+        )
+        return [nid for nid, _ in incoming.most_common(5) if incoming[nid] >= 2]
+
+    def _find_orphans(self, nodes: list[GraphNode], edges: list[GraphEdge]) -> list[str]:
+        module_ids = {n.id for n in nodes if n.kind == "module"}
+        connected: set[str] = set()
+        for e in edges:
+            if e.kind == "imports":
+                connected.add(e.source)
+                connected.add(e.target)
+        return sorted(module_ids - connected)[:10]
+
+    def _count_import_cycles(self, nodes: list[GraphNode], edges: list[GraphEdge]) -> int:
+        """Count strongly connected components of size >= 2 via Kosaraju's algorithm."""
+        module_ids = {n.id for n in nodes if n.kind == "module"}
+        if not module_ids:
+            return 0
+        adj: dict[str, list[str]] = {nid: [] for nid in module_ids}
+        radj: dict[str, list[str]] = {nid: [] for nid in module_ids}
+        for e in edges:
+            if e.kind == "imports" and e.source in adj and e.target in adj:
+                adj[e.source].append(e.target)
+                radj[e.target].append(e.source)
+
+        visited: set[str] = set()
+        order: list[str] = []
+
+        def dfs1(start: str) -> None:
+            stack: list[tuple[str, bool]] = [(start, False)]
+            while stack:
+                v, done = stack.pop()
+                if done:
+                    order.append(v)
+                    continue
+                if v in visited:
+                    continue
+                visited.add(v)
+                stack.append((v, True))
+                for nb in adj[v]:
+                    if nb not in visited:
+                        stack.append((nb, False))
+
+        for nid in module_ids:
+            if nid not in visited:
+                dfs1(nid)
+
+        visited2: set[str] = set()
+        cycle_count = 0
+        for nid in reversed(order):
+            if nid in visited2:
+                continue
+            comp: list[str] = []
+            stack2 = [nid]
+            while stack2:
+                v = stack2.pop()
+                if v in visited2:
+                    continue
+                visited2.add(v)
+                comp.append(v)
+                for nb in radj[v]:
+                    if nb not in visited2:
+                        stack2.append(nb)
+            if len(comp) >= 2:
+                cycle_count += 1
+        return cycle_count
 
     def _analyze_dotnet_projects(
         self,

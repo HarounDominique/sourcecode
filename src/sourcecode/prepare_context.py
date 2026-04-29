@@ -381,6 +381,9 @@ class TaskContextBuilder:
         project_summary = ProjectSummarizer(self.root).generate(sm)
         architecture_summary = ArchitectureSummarizer(self.root).generate(sm)
 
+        from sourcecode.context_summarizer import ContextSummarizer
+        sm.context_summary = ContextSummarizer(self.root).generate(sm)
+
         # ── 4. Dependencies ────────────────────────────────────────────────
         key_dependencies: list[dict[str, Any]] = []
         limitations: list[str] = []

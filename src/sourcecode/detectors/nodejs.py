@@ -20,6 +20,22 @@ _FRAMEWORK_MAP = {
     "vue": "Vue",
     "svelte": "Svelte",
     "@nestjs/core": "NestJS",
+    "fastify": "Fastify",
+    "hono": "Hono",
+    "@remix-run/node": "Remix",
+    "@remix-run/react": "Remix",
+    "astro": "Astro",
+    "nuxt": "Nuxt",
+    "@nuxt/kit": "Nuxt",
+    "gatsby": "Gatsby",
+    "@angular/core": "Angular",
+    "solid-js": "SolidJS",
+    "@trpc/server": "tRPC",
+    "graphql": "GraphQL",
+    "@apollo/server": "Apollo",
+    "apollo-server": "Apollo",
+    "koa": "Koa",
+    "elysia": "Elysia",
 }
 
 
@@ -40,14 +56,22 @@ class NodejsDetector(AbstractDetector):
         if package_json is None:
             return [], []
 
+        from sourcecode.detectors.hybrid import merge_framework_detections, scan_for_frameworks
+
         dependency_names = self._collect_dependency_names(package_json)
-        frameworks = [
-            FrameworkDetection(name=label, source="package.json")
-            for package_name, label in _FRAMEWORK_MAP.items()
-            if package_name in dependency_names
-        ]
+        seen_fw: set[str] = set()
+        manifest_frameworks = []
+        for pkg_name, label in _FRAMEWORK_MAP.items():
+            if pkg_name in dependency_names and label not in seen_fw:
+                seen_fw.add(label)
+                manifest_frameworks.append(FrameworkDetection(name=label, source="package.json"))
+
         package_manager = self._detect_package_manager(context)
         entry_points = self._collect_entry_points(context, package_json)
+        priority = [ep.path for ep in entry_points]
+        import_frameworks = scan_for_frameworks(context.root, context.file_tree, "nodejs", priority_paths=priority)
+        frameworks = merge_framework_detections(manifest_frameworks, import_frameworks)
+        signals = self._detect_monorepo_signals(context, package_json)
 
         stack = StackDetection(
             stack="nodejs",
@@ -56,8 +80,23 @@ class NodejsDetector(AbstractDetector):
             frameworks=frameworks,
             package_manager=package_manager,
             manifests=["package.json"],
+            signals=signals,
         )
         return [stack], entry_points
+
+    def _detect_monorepo_signals(
+        self, context: DetectionContext, package_json: dict[str, Any]
+    ) -> list[str]:
+        signals: list[str] = []
+        if path_exists_in_tree(context.file_tree, "turbo.json"):
+            signals.append("monorepo:turbo")
+        elif path_exists_in_tree(context.file_tree, "nx.json"):
+            signals.append("monorepo:nx")
+        elif path_exists_in_tree(context.file_tree, "pnpm-workspace.yaml"):
+            signals.append("monorepo:pnpm")
+        elif isinstance(package_json.get("workspaces"), (list, dict)):
+            signals.append("monorepo:npm-workspaces")
+        return signals
 
     def _collect_dependency_names(self, package_json: dict[str, Any]) -> set[str]:
         names: set[str] = set()

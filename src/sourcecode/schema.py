@@ -41,6 +41,8 @@ class FrameworkDetection:
 
     name: str
     source: str = "manifest"
+    confidence: Literal["high", "medium", "low"] = "high"
+    detected_via: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -144,6 +146,9 @@ class ModuleGraphSummary:
     max_nodes_applied: Optional[int] = None
     edge_kinds: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
+    hubs: list[str] = field(default_factory=list)
+    orphans: list[str] = field(default_factory=list)
+    cycle_count: int = 0
 
 
 @dataclass
@@ -411,6 +416,21 @@ class CodeNotesSummary:
     limitations: list[str] = field(default_factory=list)
 
 
+# --- Context Summary for AI agents ---
+
+@dataclass
+class ContextSummary:
+    """Compact, high-signal context for AI agents. Generated from all available analysis."""
+
+    requested: bool = True
+    runtime_shape: str = ""                          # "REST API (FastAPI + PostgreSQL)"
+    dominant_pattern: Optional[str] = None           # "Clean Architecture", "MVC", etc.
+    critical_modules: list[str] = field(default_factory=list)   # hub paths + entry paths
+    layer_map: dict[str, list[str]] = field(default_factory=dict)  # {"domain": ["src/domain/"]}
+    edit_hints: list[str] = field(default_factory=list)  # "auth → src/auth/, tests/"
+    coupling_notes: list[str] = field(default_factory=list)  # "2 import cycles", "hub: schema.py"
+
+
 # --- Confidence & Explainability ---
 
 @dataclass
@@ -527,6 +547,8 @@ class SourceMap:
     code_notes: list[CodeNote] = field(default_factory=list)
     code_adrs: list[AdrRecord] = field(default_factory=list)
     code_notes_summary: Optional[CodeNotesSummary] = None
-    # Confidence & Explainability (v0.24.0)
+    # Confidence & Explainability (v0.25.0)
     confidence_summary: Optional[ConfidenceSummary] = None
     analysis_gaps: list[AnalysisGap] = field(default_factory=list)
+    # AI context summary (v0.25.0)
+    context_summary: Optional[ContextSummary] = None

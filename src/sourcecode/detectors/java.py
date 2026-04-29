@@ -57,22 +57,30 @@ class JavaDetector(AbstractDetector):
         except (OSError, ElementTree.ParseError):
             return []
         text = ElementTree.tostring(tree.getroot(), encoding="unicode").lower()
-        frameworks: list[FrameworkDetection] = []
-        if "spring-boot" in text:
-            frameworks.append(FrameworkDetection(name="Spring Boot", source="pom.xml"))
-        if "quarkus" in text:
-            frameworks.append(FrameworkDetection(name="Quarkus", source="pom.xml"))
-        return frameworks
+        return self._detect_jvm_frameworks(text, "pom.xml")
 
     def _frameworks_from_gradle(self, path: Path) -> list[FrameworkDetection]:
         content = "\n".join(read_text_lines(path)).lower()
+        return self._detect_jvm_frameworks(content, "build.gradle")
+
+    def _detect_jvm_frameworks(self, text: str, source: str) -> list[FrameworkDetection]:
         frameworks: list[FrameworkDetection] = []
-        if "com.android.application" in content or "com.android.library" in content:
-            frameworks.append(FrameworkDetection(name="Android", source="build.gradle"))
-        if "spring-boot" in content:
-            frameworks.append(FrameworkDetection(name="Spring Boot", source="build.gradle"))
-        if "quarkus" in content:
-            frameworks.append(FrameworkDetection(name="Quarkus", source="build.gradle"))
+        if "com.android.application" in text or "com.android.library" in text:
+            frameworks.append(FrameworkDetection(name="Android", source=source))
+        if "spring-boot" in text:
+            frameworks.append(FrameworkDetection(name="Spring Boot", source=source))
+        if "spring-webmvc" in text or "spring-web" in text:
+            frameworks.append(FrameworkDetection(name="Spring MVC", source=source))
+        if "spring-webflux" in text:
+            frameworks.append(FrameworkDetection(name="Spring WebFlux", source=source))
+        if "quarkus" in text:
+            frameworks.append(FrameworkDetection(name="Quarkus", source=source))
+        if "micronaut" in text:
+            frameworks.append(FrameworkDetection(name="Micronaut", source=source))
+        if "io.vertx" in text or "vertx" in text:
+            frameworks.append(FrameworkDetection(name="Vert.x", source=source))
+        if "jakarta.ee" in text or "javax.ws.rs" in text:
+            frameworks.append(FrameworkDetection(name="Jakarta EE", source=source))
         return frameworks
 
     def _collect_entry_points(self, context: DetectionContext) -> list[EntryPoint]:

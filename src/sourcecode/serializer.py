@@ -106,11 +106,16 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
     if sm.analysis_gaps:
         gaps_list = [asdict(g) for g in sm.analysis_gaps]
 
+    context_summary_dict: Any = None
+    if sm.context_summary is not None and sm.context_summary.requested:
+        context_summary_dict = asdict(sm.context_summary)
+
     result: dict[str, Any] = {
         "schema_version": sm.metadata.schema_version,
         "project_type": sm.project_type,
         "project_summary": sm.project_summary,
         "architecture_summary": sm.architecture_summary,
+        "context_summary": context_summary_dict,
         "stacks": [asdict(stack) for stack in sm.stacks],
         "entry_points": entry_points_compact,
         "dependency_summary": dep_summary_dict,

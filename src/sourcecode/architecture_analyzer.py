@@ -92,6 +92,21 @@ DOMAIN_ROLES: dict[str, str] = {
 }
 
 LAYER_PATTERNS: dict[str, dict[str, list[str]]] = {
+    "cqrs": {
+        "commands": ["commands", "command"],
+        "queries":  ["queries", "query"],
+    },
+    "clean": {
+        "domain":         ["domain", "domains"],
+        "application":    ["application", "usecases", "usecase"],
+        "infrastructure": ["infrastructure", "infra", "adapters", "persistence"],
+    },
+    "onion": {
+        "domain":      ["domain", "core"],
+        "application": ["application", "usecases"],
+        "ports":       ["ports", "interfaces"],
+        "adapters":    ["adapters", "secondary"],
+    },
     "mvc": {
         "controller": ["controller", "controllers", "routes", "views", "handlers"],
         "model":      ["model", "models", "entity", "entities", "domain"],
@@ -108,10 +123,26 @@ LAYER_PATTERNS: dict[str, dict[str, list[str]]] = {
         "adapter": ["adapter", "adapters"],
         "domain":  ["domain", "core", "model", "models"],
     },
+    "monorepo": {
+        "apps":     ["apps", "applications"],
+        "packages": ["packages", "libs", "modules"],
+    },
     "fullstack": {
         "frontend": ["frontend", "client", "web", "ui", "pages", "components", "app"],
         "backend":  ["backend", "server", "api", "services"],
     },
+}
+
+# Higher value = wins when score ties
+_PATTERN_PRIORITY: dict[str, int] = {
+    "cqrs":       8,
+    "clean":      7,
+    "onion":      6,
+    "hexagonal":  5,
+    "monorepo":   4,
+    "mvc":        3,
+    "layered":    2,
+    "fullstack":  1,
 }
 
 
@@ -245,9 +276,10 @@ class ArchitectureAnalyzer:
             for part in parts[:-1]:
                 dir_names.add(part.lower())
 
-        # 1. Classical keyword-based pattern matching (MVC, layered, hexagonal, fullstack)
+        # 1. Classical keyword-based pattern matching
         best_pattern = ""
         best_score = 0
+        best_priority = -1
         best_matched: dict[str, list[str]] = {}
 
         for pattern_name, layer_keys in LAYER_PATTERNS.items():
@@ -257,8 +289,10 @@ class ArchitectureAnalyzer:
                 if matched_dirs:
                     matched[layer_key] = matched_dirs
             score = len(matched)
-            if score > best_score:
+            priority = _PATTERN_PRIORITY.get(pattern_name, 0)
+            if (score, priority) > (best_score, best_priority):
                 best_score = score
+                best_priority = priority
                 best_pattern = pattern_name
                 best_matched = matched
 
@@ -281,22 +315,60 @@ class ArchitectureAnalyzer:
                 ))
             return best_pattern, layers
 
-        # 2. Functional file-naming heuristic: *_analyzer.py, cli.py, schema.py, …
+        # 2. Microservices structural detection (before file-naming heuristics)
+        microservices_result = self._detect_microservices(source_paths)
+        if microservices_result is not None:
+            return microservices_result
+
+        # 3. Functional file-naming heuristic: *_analyzer.py, cli.py, schema.py, …
         func_result = self._detect_layered_functional(source_paths)
         if func_result is not None:
             return func_result
 
-        # 3. Modular sub-package heuristic: ≥2 distinct named sub-packages
+        # 4. Modular sub-package heuristic: ≥2 distinct named sub-packages
         modular_result = self._detect_modular(source_paths)
         if modular_result is not None:
             return modular_result
 
-        # 4. Fallback: flat (shallow) vs truly unknown (deep but unrecognised)
+        # 5. Fallback: flat (shallow) vs truly unknown (deep but unrecognised)
         max_depth = max(
             (len(p.replace("\\", "/").split("/")) - 1 for p in source_paths),
             default=0,
         )
         return ("flat" if max_depth <= 2 else "unknown"), []
+
+    def _detect_microservices(
+        self, paths: list[str]
+    ) -> Optional[tuple[str, list[ArchitectureLayer]]]:
+        """Detect microservices from multiple sibling service directories or services/* pattern."""
+        # Pattern 1: explicit services/* subdirectories
+        service_subdirs: dict[str, list[str]] = {}
+        for p in paths:
+            parts = p.replace("\\", "/").split("/")
+            if len(parts) >= 3 and parts[0].lower() == "services":
+                service_subdirs.setdefault(parts[1], []).append(p)
+        if len(service_subdirs) >= 3:
+            return "microservices", [
+                ArchitectureLayer(name=k, pattern="microservices", files=v, confidence="medium")
+                for k, v in list(service_subdirs.items())[:8]
+            ]
+
+        # Pattern 2: multiple top-level dirs each containing a canonical entry file
+        _ENTRY_FILES = {"main.go", "main.py", "server.js", "server.ts", "main.ts", "app.py"}
+        entry_dirs: dict[str, list[str]] = {}
+        for p in paths:
+            parts = p.replace("\\", "/").split("/")
+            if len(parts) >= 2 and parts[-1].lower() in _ENTRY_FILES:
+                top = parts[0]
+                if top.lower() not in _SRC_TRANSPARENT and top.lower() not in _TEST_DIRS:
+                    entry_dirs.setdefault(top, []).append(p)
+        if len(entry_dirs) >= 4:
+            return "microservices", [
+                ArchitectureLayer(name=k, pattern="microservices", files=v, confidence="low")
+                for k, v in list(entry_dirs.items())[:8]
+            ]
+
+        return None
 
     def _detect_layered_functional(
         self, paths: list[str]

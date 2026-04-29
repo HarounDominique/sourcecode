@@ -19,6 +19,16 @@ _FRAMEWORK_MAP = {
     "django": "Django",
     "flask": "Flask",
     "typer": "Typer",
+    "click": "Click",
+    "celery": "Celery",
+    "starlette": "Starlette",
+    "tornado": "Tornado",
+    "sanic": "Sanic",
+    "litestar": "Litestar",
+    "sqlalchemy": "SQLAlchemy",
+    "pydantic": "Pydantic",
+    "strawberry-graphql": "Strawberry",
+    "ariadne": "Ariadne",
 }
 
 
@@ -42,13 +52,18 @@ class PythonDetector(AbstractDetector):
         )
 
     def detect(self, context: DetectionContext) -> tuple[list[StackDetection], list[EntryPoint]]:
+        from sourcecode.detectors.hybrid import merge_framework_detections, scan_for_frameworks
+
         dependencies = self._collect_dependencies(context)
-        frameworks = [
+        manifest_frameworks = [
             FrameworkDetection(name=label, source="manifest")
             for package_name, label in _FRAMEWORK_MAP.items()
             if package_name in dependencies
         ]
         entry_points = self._collect_entry_points(context)
+        priority = [ep.path for ep in entry_points]
+        import_frameworks = scan_for_frameworks(context.root, context.file_tree, "python", priority_paths=priority)
+        frameworks = merge_framework_detections(manifest_frameworks, import_frameworks)
 
         manifests = [
             manifest

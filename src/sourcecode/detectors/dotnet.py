@@ -55,9 +55,14 @@ class DotnetDetector(AbstractDetector):
             if project is not None:
                 projects.append(project)
 
-        frameworks = self._collect_frameworks(projects)
+        from sourcecode.detectors.hybrid import merge_framework_detections, scan_for_frameworks
+
+        manifest_frameworks = self._collect_frameworks(projects)
         signals = self._build_signals(projects)
-        entry_points = self._detect_entry_points(context, projects, frameworks)
+        entry_points = self._detect_entry_points(context, projects, manifest_frameworks)
+        priority = [ep.path for ep in entry_points]
+        import_frameworks = scan_for_frameworks(context.root, context.file_tree, "dotnet", priority_paths=priority)
+        frameworks = merge_framework_detections(manifest_frameworks, import_frameworks)
 
         manifests = project_paths + [p for p in all_paths if p.endswith(".sln")]
         stack = StackDetection(

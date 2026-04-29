@@ -49,6 +49,10 @@ class ArchitectureSummarizer:
         if not file_paths:
             return None
 
+        # Rich path: use all available signals (stacks, arch analysis, graph)
+        rich_lines = self._build_rich_lines(sm)
+
+        # Stack-specific entry point analysis (existing logic)
         entry_points = [
             entry for entry in sm.entry_points
             if not self._is_tooling_path(entry.path)
@@ -57,35 +61,32 @@ class ArchitectureSummarizer:
             fallback = self._infer_fallback_entry_points(file_paths, sm.stacks)
             entry_points = fallback[:1]
 
-        if not entry_points:
-            return "Arquitectura no inferida con suficiente evidencia estatica."
+        lang_lines: list[str] = []
+        if entry_points:
+            entry_point = entry_points[0]
+            content = self._read_file(entry_point.path)
+            if content:
+                suffix = Path(entry_point.path).suffix
+                if suffix in _PYTHON_EXTENSIONS:
+                    lang_lines = self._summarize_python_entry(entry_point.path, content)
+                elif suffix in _NODE_EXTENSIONS:
+                    lang_lines = self._summarize_node_entry(entry_point.path, content)
+                elif suffix in _GO_EXTENSIONS:
+                    lang_lines = self._summarize_go_entry(entry_point.path, content)
+                elif suffix in _JAVA_EXTENSIONS:
+                    lang_lines = self._summarize_java_entry(entry_point.path, content, sm.stacks)
+                elif suffix in {".cs", ".fs", ".vb"}:
+                    lang_lines = self._summarize_dotnet_entry(sm.stacks)
 
-        entry_point = entry_points[0]
-        content = self._read_file(entry_point.path)
-        if content is None:
-            return f"Entry point principal: {entry_point.path}. Arquitectura no inferida con suficiente evidencia estatica."
+        # Merge: rich lines first, stack-specific details appended (deduped)
+        lines = rich_lines + [l for l in lang_lines if l not in rich_lines]
 
-        suffix = Path(entry_point.path).suffix
-        if suffix in _PYTHON_EXTENSIONS:
-            lang_lines = self._summarize_python_entry(entry_point.path, content)
-        elif suffix in _NODE_EXTENSIONS:
-            lang_lines = self._summarize_node_entry(entry_point.path, content)
-        elif suffix in _GO_EXTENSIONS:
-            lang_lines = self._summarize_go_entry(entry_point.path, content)
-        elif suffix in _JAVA_EXTENSIONS:
-            lang_lines = self._summarize_java_entry(entry_point.path, content, sm.stacks)
-        elif suffix in {".cs", ".fs", ".vb"}:
-            lang_lines = self._summarize_dotnet_entry(sm.stacks)
-        else:
-            lang_lines = []
-
-        if lang_lines:
-            # Product-level description available — no need for internal "Entry point: ..." header
-            lines = lang_lines
-        else:
+        if not lines and entry_points:
+            entry_point = entry_points[0]
             lines = [self._describe_entry_point(entry_point, sm.project_type)]
-            if not lang_lines:
-                lines.append("Orquesta modulos internos no detallados por el analisis estatico disponible.")
+
+        if not lines:
+            return "Arquitectura no inferida con suficiente evidencia estatica."
 
         unique_lines: list[str] = []
         seen: set[str] = set()
@@ -95,7 +96,82 @@ class ArchitectureSummarizer:
                 continue
             seen.add(line)
             unique_lines.append(line)
-        return "\n".join(unique_lines[:5]) if unique_lines else None
+        return "\n".join(unique_lines[:6]) if unique_lines else None
+
+    def _build_rich_lines(self, sm: SourceMap) -> list[str]:
+        """Generate architect-quality summary lines from stacks, arch analysis, and graph."""
+        if not sm.stacks:
+            return []
+
+        # Compute arch analysis inline if needed
+        arch = sm.architecture
+        if arch is None and sm.file_paths:
+            try:
+                from sourcecode.architecture_analyzer import ArchitectureAnalyzer
+                arch = ArchitectureAnalyzer().analyze(self.root, sm)
+            except Exception:
+                arch = None
+
+        lines: list[str] = []
+
+        # Line 1: project description (type + stack + frameworks)
+        project_line = self._describe_project_type(sm)
+        if project_line:
+            lines.append(project_line)
+
+        # Line 2: architecture pattern + layers
+        if arch and arch.pattern not in (None, "unknown", "flat"):
+            arch_line = self._describe_arch_pattern(arch)
+            if arch_line:
+                lines.append(arch_line)
+
+        # Line 3: coupling notes (if graph analytics present)
+        if sm.module_graph_summary:
+            mgr = sm.module_graph_summary
+            coupling_parts: list[str] = []
+            if mgr.cycle_count > 0:
+                s = "s" if mgr.cycle_count > 1 else ""
+                coupling_parts.append(f"{mgr.cycle_count} import cycle{s}")
+            if mgr.hubs:
+                hub_names = [h.removeprefix("module:").split("/")[-1] for h in mgr.hubs[:2]]
+                coupling_parts.append(f"hub modules: {', '.join(hub_names)}")
+            if coupling_parts:
+                lines.append(f"Coupling: {'; '.join(coupling_parts)}.")
+
+        return lines
+
+    def _describe_project_type(self, sm: SourceMap) -> str:
+        from sourcecode.context_summarizer import _STACK_LABELS, _TYPE_LABELS
+        runtime = _TYPE_LABELS.get(sm.project_type or "", "")
+        primary = next((s for s in sm.stacks if s.primary), sm.stacks[0] if sm.stacks else None)
+        if primary is None:
+            return ""
+        stack_label = _STACK_LABELS.get(primary.stack, primary.stack)
+        fw_names = [f.name for s in sm.stacks for f in s.frameworks[:2]][:3]
+        fw_str = f" using {', '.join(fw_names)}" if fw_names else ""
+        if runtime:
+            return f"{stack_label} {runtime.lower()}{fw_str}."
+        return f"{stack_label} project{fw_str}."
+
+    def _describe_arch_pattern(self, arch: Any) -> str:
+        pattern_labels = {
+            "clean": "Clean Architecture",
+            "onion": "Onion Architecture",
+            "hexagonal": "Hexagonal Architecture",
+            "layered": "Layered Architecture",
+            "mvc": "MVC pattern",
+            "cqrs": "CQRS pattern",
+            "microservices": "Microservices",
+            "monorepo": "Monorepo workspace",
+            "modular": "Modular architecture",
+        }
+        label = pattern_labels.get(arch.pattern, arch.pattern.replace("_", " ").title() if arch.pattern else "")
+        if not label:
+            return ""
+        if arch.layers:
+            layer_names = [l.name for l in arch.layers[:4]]
+            return f"{label} with {', '.join(layer_names)} layers."
+        return f"{label} pattern detected."
 
     def _summarize_python_entry(self, path: str, content: str) -> list[str]:
         try:
