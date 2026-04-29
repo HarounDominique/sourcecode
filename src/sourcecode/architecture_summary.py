@@ -74,6 +74,8 @@ class ArchitectureSummarizer:
             lang_lines = self._summarize_go_entry(entry_point.path, content)
         elif suffix in _JAVA_EXTENSIONS:
             lang_lines = self._summarize_java_entry(entry_point.path, content, sm.stacks)
+        elif suffix in {".cs", ".fs", ".vb"}:
+            lang_lines = self._summarize_dotnet_entry(sm.stacks)
         else:
             lang_lines = []
 
@@ -189,6 +191,44 @@ class ArchitectureSummarizer:
             lines.append("Orquesta el arranque de la aplicacion JVM.")
         return lines
 
+    def _summarize_dotnet_entry(self, stacks: list[StackDetection]) -> list[str]:
+        dotnet_stacks = [s for s in stacks if s.stack == "dotnet"]
+        if not dotnet_stacks:
+            return []
+        lines: list[str] = []
+        signals = [sig for s in dotnet_stacks for sig in s.signals]
+
+        for sig in signals:
+            if "project" in sig and "detected" in sig:
+                lines.append(sig[0].upper() + sig[1:] + ".")
+                break
+
+        for sig in signals:
+            if sig.startswith("project types:"):
+                types = sig.removeprefix("project types:").strip()
+                lines.append(f"Stack: {types}.")
+                break
+
+        for sig in signals:
+            if sig.startswith("target frameworks:"):
+                fws = sig.removeprefix("target frameworks:").strip()
+                lines.append(f"Target: {fws}.")
+                break
+
+        for sig in signals:
+            if sig.startswith("architecture:"):
+                pattern = sig.removeprefix("architecture:").strip()
+                lines.append(f"Patrón detectado: {pattern}.")
+                break
+
+        framework_names = [f.name for s in dotnet_stacks for f in s.frameworks]
+        if framework_names:
+            lines.append(f"Frameworks: {', '.join(framework_names)}.")
+
+        if not lines:
+            lines.append("Solución .NET detectada.")
+        return lines
+
     def _summarize_go_entry(self, path: str, content: str) -> list[str]:
         imports = re.findall(r'"([^"]+)"', content)
         internal = [module for module in imports if not module.startswith(("fmt", "net/", "os", "context"))]
@@ -269,6 +309,16 @@ class ArchitectureSummarizer:
                         path=path,
                         stack="java",
                         kind="application",
+                        source="convention",
+                        confidence="medium",
+                    )
+                )
+            elif path.endswith("Program.cs") or path.endswith("Program.fs"):
+                candidates.append(
+                    EntryPoint(
+                        path=path,
+                        stack="dotnet",
+                        kind="cli",
                         source="convention",
                         confidence="medium",
                     )

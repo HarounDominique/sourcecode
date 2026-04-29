@@ -527,6 +527,6 @@ class SourceMap:
     code_notes: list[CodeNote] = field(default_factory=list)
     code_adrs: list[AdrRecord] = field(default_factory=list)
     code_notes_summary: Optional[CodeNotesSummary] = None
-    # Confidence & Explainability (v0.23.0)
+    # Confidence & Explainability (v0.24.0)
     confidence_summary: Optional[ConfidenceSummary] = None
     analysis_gaps: list[AnalysisGap] = field(default_factory=list)

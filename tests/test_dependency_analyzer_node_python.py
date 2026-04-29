@@ -106,6 +106,6 @@ def test_python_requirements_without_lockfile_keeps_declared_versions(tmp_path: 
     assert summary.direct_count == 2
     typer_dep = next(record for record in records if record.name == "typer")
     rich_dep = next(record for record in records if record.name == "rich")
-    assert typer_dep.declared_version == "==0.22.0"
+    assert typer_dep.declared_version == "==0.24.0"
     assert typer_dep.resolved_version is None
     assert rich_dep.declared_version == ">=13.0"

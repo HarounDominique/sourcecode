@@ -21,6 +21,7 @@ class GraphAnalyzer:
     _NODE_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
     _GO_EXTENSIONS = {".go"}
     _JVM_EXTENSIONS = {".java", ".kt", ".scala"}
+    _DOTNET_PROJECT_EXTENSIONS = {".csproj", ".fsproj", ".vbproj"}
     _SUPPORTED_EXTENSIONS = _PYTHON_EXTENSIONS | _NODE_EXTENSIONS | _GO_EXTENSIONS | _JVM_EXTENSIONS
     _DEFAULT_EDGE_KINDS: dict[GraphDetail, tuple[str, ...]] = {
         "high": ("imports",),
@@ -166,6 +167,23 @@ class GraphAnalyzer:
         }
         go_imports = self._build_go_import_map(root, source_files)
         jvm_types = self._build_jvm_type_map(root, source_files)
+
+        # .NET: project-level graph from .csproj/.fsproj/.vbproj manifests
+        all_tree_paths = [p for p in flatten_file_tree(file_tree)]
+        dotnet_project_paths = [
+            p for p in all_tree_paths
+            if Path(p).suffix.lower() in self._DOTNET_PROJECT_EXTENSIONS
+            and (root / p).is_file()
+        ]
+        if dotnet_project_paths:
+            dn_nodes, dn_edges, dn_lims = self._analyze_dotnet_projects(
+                root, dotnet_project_paths, workspace
+            )
+            for node in dn_nodes:
+                self._append_node(nodes, node_ids, node)
+            for edge in dn_edges:
+                self._append_edge(edges, edge_keys, edge)
+            limitations.extend(dn_lims)
 
         for relative_path in source_files:
             absolute_path = root / relative_path
@@ -1144,6 +1162,62 @@ class GraphAnalyzer:
         edge_keys.add(key)
         edges.append(edge)
 
+    def _analyze_dotnet_projects(
+        self,
+        root: Path,
+        csproj_paths: list[str],
+        workspace: str | None,
+    ) -> tuple[list[GraphNode], list[GraphEdge], list[str]]:
+        from sourcecode.detectors.csproj_parser import parse_csproj
+
+        nodes: list[GraphNode] = []
+        edges: list[GraphEdge] = []
+        limitations: list[str] = []
+
+        projects = []
+        node_id_map: dict[str, str] = {}  # csproj_path → node_id
+
+        for rel_path in csproj_paths:
+            project = parse_csproj(root / rel_path, rel_path)
+            if project is None:
+                limitations.append(f"dotnet_parse_error:{rel_path}")
+                continue
+            projects.append(project)
+            node_path = project.project_dir if project.project_dir else project.name
+            node_id = f"module:{node_path}"
+            node_id_map[project.path] = node_id
+            nodes.append(
+                GraphNode(
+                    id=node_id,
+                    kind="module",
+                    language=project.language,
+                    path=node_path,
+                    display_name=project.name,
+                    workspace=workspace,
+                )
+            )
+
+        for project in projects:
+            source_id = node_id_map.get(project.path)
+            if source_id is None:
+                continue
+            for ref_path in project.project_references:
+                target_id = node_id_map.get(ref_path)
+                if target_id is None:
+                    limitations.append(f"dotnet_unresolved_ref:{project.path}:{ref_path}")
+                    continue
+                edges.append(
+                    GraphEdge(
+                        source=source_id,
+                        target=target_id,
+                        kind="imports",
+                        confidence="high",
+                        method="heuristic",
+                    )
+                )
+
+        return nodes, edges, limitations
+
     def _language_for_suffix(self, suffix: str) -> str:
         if suffix in self._PYTHON_EXTENSIONS:
             return "python"
@@ -1157,6 +1231,12 @@ class GraphAnalyzer:
             return "kotlin"
         if suffix == ".scala":
             return "scala"
+        if suffix == ".cs":
+            return "csharp"
+        if suffix == ".fs":
+            return "fsharp"
+        if suffix == ".vb":
+            return "vbnet"
         return "unknown"
 
     def _node_id(self, kind: str, path: str, symbol: str | None = None) -> str:

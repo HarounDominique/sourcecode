@@ -34,7 +34,7 @@ def test_cli_dependencies_flag_enables_dependency_block(tmp_path: Path) -> None:
 
 
 def test_cli_without_dependencies_flag_keeps_block_disabled(tmp_path: Path) -> None:
-    (tmp_path / "requirements.txt").write_text("typer==0.22.0\n")
+    (tmp_path / "requirements.txt").write_text("typer==0.24.0\n")
 
     result = runner.invoke(app, [str(tmp_path)])
 
