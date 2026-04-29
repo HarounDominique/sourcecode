@@ -24,7 +24,10 @@ src/*.egg-info/
 
 # Environment / secrets
 *.env
+.env.*
 *.secret.json
+*.local.json
+*.local.toml
 
 # OS cruft
 .DS_Store
