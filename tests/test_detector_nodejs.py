@@ -95,5 +95,6 @@ def test_nodejs_detector_uses_bin_as_convention_entry(tmp_path: Path) -> None:
 
     assert stacks[0].stack == "nodejs"
     assert entry_points[0].path == "bin/sourcecode.js"
-    assert entry_points[0].source == "convention"
-    assert entry_points[0].confidence == "medium"
+    assert entry_points[0].source == "package.json#bin"
+    assert entry_points[0].confidence == "high"
+    assert entry_points[0].entrypoint_type == "production"

@@ -359,10 +359,15 @@ class TaskContextBuilder:
 
         # ── 2. Detect stacks + entry points ───────────────────────────────
         from sourcecode.detectors import ProjectDetector, build_default_detectors
+        from sourcecode.workspace import WorkspaceAnalyzer
 
         detector = ProjectDetector(build_default_detectors())
+        workspace_analysis = WorkspaceAnalyzer().analyze(self.root, manifests)
         stacks, entry_points, _ = detector.detect(self.root, file_tree, manifests)
-        stacks, project_type = detector.classify_results(file_tree, stacks, entry_points)
+        stacks, project_type = detector.classify_results(
+            file_tree, stacks, entry_points,
+            project_type_override="monorepo" if workspace_analysis.is_monorepo else None,
+        )
 
         # ── 3. Summarize ───────────────────────────────────────────────────
         from sourcecode.schema import AnalysisMetadata, SourceMap
@@ -377,6 +382,14 @@ class TaskContextBuilder:
             entry_points=entry_points,
         )
         sm.file_paths = all_paths
+
+        # Classify workspace packages for structural context
+        if workspace_analysis.workspaces:
+            from sourcecode.runtime_classifier import RuntimeClassifier
+            sm.monorepo_packages = RuntimeClassifier().classify(
+                self.root,
+                [ws.path for ws in workspace_analysis.workspaces],
+            )
 
         project_summary = ProjectSummarizer(self.root).generate(sm)
         architecture_summary = ArchitectureSummarizer(self.root).generate(sm)
@@ -436,13 +449,31 @@ class TaskContextBuilder:
                     for p, n in sorted(counts2.items(), key=lambda x: -x[1])[:8]
                 ]
 
+        # ── 5b. Git signals for ranking ────────────────────────────────────
+        git_hotspots: dict[str, int] = {}
+        uncommitted_files: set[str] = set()
+        try:
+            from sourcecode.git_analyzer import GitAnalyzer
+            _gc = GitAnalyzer().analyze(self.root, depth=30, days=90)
+            _bad = {"no_git_repo", "git_not_found", "git_timeout"}
+            if _gc and not (_bad & set(_gc.limitations)):
+                git_hotspots = {h.file: h.commit_count for h in _gc.change_hotspots}
+                if _gc.uncommitted_changes:
+                    _uc = _gc.uncommitted_changes
+                    uncommitted_files = set(_uc.staged) | set(_uc.unstaged)
+        except Exception:
+            pass
+
         # ── 6. Rank files ──────────────────────────────────────────────────
         entry_set = {ep.path for ep in entry_points}
         test_set = {p for p in all_paths if self._is_test(p)}
         source_set = {p for p in all_paths if not self._is_test(p) and self._is_source(p)}
 
         relevant_files = self._rank_files(
-            task_name, spec, all_paths, entry_set, test_set
+            task_name, spec, all_paths, entry_set, test_set,
+            monorepo_packages=sm.monorepo_packages if sm.monorepo_packages else None,
+            git_hotspots=git_hotspots,
+            uncommitted_files=uncommitted_files,
         )
 
         # ── 7. Test gaps (generate-tests only) ────────────────────────────
@@ -590,13 +621,31 @@ class TaskContextBuilder:
         all_paths: list[str],
         entry_set: set[str],
         test_set: set[str],
+        monorepo_packages: Optional[list] = None,
+        git_hotspots: Optional[dict[str, int]] = None,
+        uncommitted_files: Optional[set[str]] = None,
     ) -> list[RelevantFile]:
+        from sourcecode.relevance_scorer import RelevanceScorer
+        scorer = RelevanceScorer(monorepo_packages or [])
+
+        # Auxiliary entry points (benchmark, docs, examples) must not get
+        # the production entry boost — they are not runtime signals.
+        runtime_entry_set = {ep for ep in entry_set if not scorer.is_auxiliary(ep)}
+
+        _hotspots = git_hotspots or {}
+        _uncommitted = uncommitted_files or set()
+        _max_churn = max(_hotspots.values(), default=1)
+
         scored: list[tuple[float, RelevantFile]] = []
 
         for path in all_paths:
             if Path(path).suffix.lower() not in _ALL_EXTENSIONS:
                 continue
             if any(pen in path for pen in spec.ranking_penalties):
+                continue
+
+            # Hard filter: tooling/config noise
+            if scorer.is_noise(path):
                 continue
 
             is_test = path in test_set
@@ -606,7 +655,8 @@ class TaskContextBuilder:
             score = 0.0
             reasons: list[str] = []
 
-            if path in entry_set:
+            # Only runtime entry points get the production boost
+            if path in runtime_entry_set:
                 score += 3.0
                 reasons.append("entry point")
 
@@ -625,11 +675,30 @@ class TaskContextBuilder:
                 if not reasons:
                     reasons.append("source file")
 
+            # Operational relevance boost/penalty from package role
+            rel = scorer.score(path)
+            score += (rel - 0.3) * 2.0  # center around 0.3 baseline
+
+            # Suppress auxiliary dirs (benchmarks, docs, examples, demos)
+            if scorer.is_auxiliary(path):
+                score -= 2.0
+
+            # Git churn: frequently changed files are high-signal for active work
+            churn = _hotspots.get(path, 0)
+            if churn > 0:
+                score += (churn / _max_churn) * 1.5
+                reasons.append(f"git churn ({churn})")
+
+            # Uncommitted changes: files actively being edited rank highest
+            if path in _uncommitted:
+                score += 1.0
+                reasons.append("uncommitted changes")
+
             if score <= 0:
                 continue
 
             role = (
-                "entrypoint" if path in entry_set
+                "entrypoint" if path in runtime_entry_set
                 else ("test" if is_test else "source")
             )
             scored.append((score, RelevantFile(

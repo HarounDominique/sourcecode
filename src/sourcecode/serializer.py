@@ -410,17 +410,47 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
 
     result: dict[str, Any] = {"project": project}
 
-    # ── 2. Entry points (with reason/evidence when available) ─────────────────
+    # ── 2. Entry points: production/runtime first, benchmark/example excluded ──
     if sm.entry_points:
         _ep_skip = {"workspace"}
-        result["entry_points"] = [
+        _aux_parts = frozenset({
+            "benchmark", "benchmarks", "bench", "demo", "demos",
+            "example", "examples", "docs", "doc", "fixtures", "fixture",
+        })
+
+        def _ep_priority(ep_dict: dict[str, Any]) -> int:
+            ep_type = ep_dict.get("entrypoint_type")
+            if ep_type in ("benchmark", "example"):
+                return 10
+            path_parts = ep_dict.get("path", "").replace("\\", "/").lower().split("/")
+            if any(p in _aux_parts for p in path_parts):
+                return 5
+            if ep_type == "development":
+                return 3
+            return 0
+
+        all_ep = [
             {k: v for k, v in asdict(ep).items() if v is not None and v != "" and k not in _ep_skip}
             for ep in sm.entry_points
         ]
+        all_ep.sort(key=_ep_priority)
+        operational_ep = [ep for ep in all_ep if _ep_priority(ep) < 5]
+        result["entry_points"] = operational_ep if operational_ep else all_ep
 
     # ── 3. Architecture ───────────────────────────────────────────────────────
     if sm.architecture_summary:
         result["architecture"] = sm.architecture_summary
+
+    # ── 3b. Monorepo package roles (when available) ───────────────────────────
+    if sm.monorepo_packages:
+        _noise_roles = {"benchmark_layer", "tooling_layer", "docs_layer", "test_layer"}
+        operational_pkgs = [
+            {"path": p.path, "role": p.architectural_role, "criticality": p.criticality}
+            for p in sm.monorepo_packages
+            if p.architectural_role not in _noise_roles
+        ]
+        if operational_pkgs:
+            result["runtime_packages"] = operational_pkgs
 
     # ── 4. Key dependencies (role-sorted, already computed) ───────────────────
     if sm.dependency_summary and sm.dependency_summary.requested and sm.key_dependencies:

@@ -72,6 +72,7 @@ class EntryPoint:
     confidence: Literal["high", "medium", "low"] = "high"
     reason: Optional[str] = None   # console_script | entry_file_pattern | main_guard | typer_app | heuristic | convention
     evidence: Optional[str] = None  # brief evidence string
+    entrypoint_type: Optional[Literal["production", "development", "benchmark", "example"]] = None
 
 
 @dataclass
@@ -305,6 +306,36 @@ class SemanticSummary:
     files_skipped: int = 0
     truncated: bool = False
     limitations: list[str] = field(default_factory=list)
+
+
+# --- Runtime Architecture ---
+
+ArchitecturalRole = Literal[
+    "runtime_core",
+    "plugin_host",
+    "plugin_package",
+    "frontend_runtime",
+    "backend_runtime",
+    "composition_layer",
+    "infrastructure_layer",
+    "tooling_layer",
+    "docs_layer",
+    "test_layer",
+    "benchmark_layer",
+    "unknown",
+]
+
+
+@dataclass
+class MonorepoPackageInfo:
+    """Classified workspace package with architectural role and criticality."""
+
+    path: str
+    name: str
+    architectural_role: str  # ArchitecturalRole value
+    criticality: Literal["high", "medium", "low"] = "low"
+    confidence: Literal["high", "medium", "low"] = "low"
+    role_signals: list[str] = field(default_factory=list)
 
 
 # --- Phase 13 Plan 04: Architectural Inference ---
@@ -547,8 +578,10 @@ class SourceMap:
     code_notes: list[CodeNote] = field(default_factory=list)
     code_adrs: list[AdrRecord] = field(default_factory=list)
     code_notes_summary: Optional[CodeNotesSummary] = None
-    # Confidence & Explainability (v0.25.0)
+    # Confidence & Explainability (v0.26.0)
     confidence_summary: Optional[ConfidenceSummary] = None
     analysis_gaps: list[AnalysisGap] = field(default_factory=list)
-    # AI context summary (v0.25.0)
+    # AI context summary (v0.26.0)
     context_summary: Optional[ContextSummary] = None
+    # Runtime architecture (v0.26.0)
+    monorepo_packages: list[MonorepoPackageInfo] = field(default_factory=list)

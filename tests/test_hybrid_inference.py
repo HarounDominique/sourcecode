@@ -156,7 +156,7 @@ def test_merge_adds_new_import_only_framework() -> None:
 
 def test_python_detects_fastapi_without_manifest(tmp_path: Path) -> None:
     """FastAPI detected via imports even when not in requirements.txt."""
-    (tmp_path / "requirements.txt").write_text("httpx==0.25.0\n")
+    (tmp_path / "requirements.txt").write_text("httpx==0.26.0\n")
     (tmp_path / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
     ctx = DetectionContext(
         root=tmp_path,

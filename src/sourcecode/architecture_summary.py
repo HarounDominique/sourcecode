@@ -9,6 +9,12 @@ from sourcecode.schema import EntryPoint, SourceMap, StackDetection
 from sourcecode.tree_utils import flatten_file_tree
 
 _TOOLING_PREFIXES = (".claude/", ".vscode/", "bin/")
+_AUXILIARY_PATH_PARTS: frozenset[str] = frozenset({
+    "benchmark", "benchmarks", "bench", "benches",
+    "demo", "demos", "example", "examples",
+    "docs", "doc", "fixture", "fixtures",
+    "playground", "playgrounds", "sandbox",
+})
 _PYTHON_EXTENSIONS = {".py"}
 _NODE_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 _GO_EXTENSIONS = {".go"}
@@ -52,10 +58,12 @@ class ArchitectureSummarizer:
         # Rich path: use all available signals (stacks, arch analysis, graph)
         rich_lines = self._build_rich_lines(sm)
 
-        # Stack-specific entry point analysis (existing logic)
+        # Stack-specific entry point analysis: exclude tooling + auxiliary paths
         entry_points = [
             entry for entry in sm.entry_points
             if not self._is_tooling_path(entry.path)
+            and not self._is_auxiliary_path(entry.path)
+            and entry.entrypoint_type not in ("benchmark", "example")
         ]
         if not entry_points:
             fallback = self._infer_fallback_entry_points(file_paths, sm.stacks)
@@ -147,7 +155,31 @@ class ArchitectureSummarizer:
         if primary is None:
             return ""
         stack_label = _STACK_LABELS.get(primary.stack, primary.stack)
-        fw_names = [f.name for s in sm.stacks for f in s.frameworks[:2]][:3]
+
+        # For monorepos: only show frameworks from runtime-critical packages,
+        # not every framework found in every workspace (avoids "React project" misclassification)
+        if sm.project_type == "monorepo" and sm.monorepo_packages:
+            runtime_roles = {"runtime_core", "plugin_host", "backend_runtime"}
+            runtime_paths = {p.path for p in sm.monorepo_packages if p.architectural_role in runtime_roles}
+            fw_names = [
+                f.name
+                for s in sm.stacks
+                if not s.workspace or s.workspace in runtime_paths
+                for f in s.frameworks[:2]
+            ]
+            fw_names = list(dict.fromkeys(fw_names))[:3]  # dedup, preserve order
+        else:
+            # Filter out frameworks from auxiliary or tooling stacks (docs/, benchmarks/, etc.)
+            fw_names = [
+                f.name
+                for s in sm.stacks
+                if not self._is_tooling_path(s.root or "")
+                and not self._is_tooling_path(s.workspace or "")
+                and not self._is_auxiliary_path(s.root or "")
+                and not self._is_auxiliary_path(s.workspace or "")
+                for f in s.frameworks[:2]
+            ][:3]
+
         fw_str = f" using {', '.join(fw_names)}" if fw_names else ""
         if runtime:
             return f"{stack_label} {runtime.lower()}{fw_str}."
@@ -442,6 +474,12 @@ class ArchitectureSummarizer:
             return (self.root / relative_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
+
+    def _is_auxiliary_path(self, path: str | None) -> bool:
+        if not path:
+            return False
+        parts = path.replace("\\", "/").strip("/").lower().split("/")
+        return any(p in _AUXILIARY_PATH_PARTS for p in parts)
 
     def _is_tooling_path(self, path: str | None) -> bool:
         if not path:

@@ -555,6 +555,14 @@ def main(
                 semantic_summary=sem_sum,
             )
 
+    # Runtime architecture — classify workspace packages for structural summaries
+    if workspace_analysis.workspaces:
+        from sourcecode.runtime_classifier import RuntimeClassifier
+        sm.monorepo_packages = RuntimeClassifier().classify(
+            target,
+            [ws.path for ws in workspace_analysis.workspaces],
+        )
+
     # Phase 9: LLM Output Quality — poblar campos derivados
     from sourcecode.architecture_summary import ArchitectureSummarizer
     from sourcecode.summarizer import ProjectSummarizer

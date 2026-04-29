@@ -15,6 +15,44 @@ GraphDetail = Literal["high", "medium", "full"]
 GraphImportance = Literal["high", "medium", "low"]
 
 
+# Node.js stdlib modules — omit from graph unless --graph-detail full
+_NODE_STDLIB: frozenset[str] = frozenset({
+    "fs", "fs/promises", "path", "os", "child_process", "process",
+    "net", "http", "https", "http2", "stream", "events", "util",
+    "crypto", "buffer", "url", "querystring", "string_decoder",
+    "readline", "repl", "assert", "dns", "dgram", "vm",
+    "worker_threads", "cluster", "module", "v8", "perf_hooks",
+    "async_hooks", "inspector", "tty", "zlib", "domain",
+    "timers", "timers/promises", "console", "constants",
+    "node:fs", "node:path", "node:os", "node:crypto", "node:buffer",
+    "node:stream", "node:events", "node:util", "node:http", "node:https",
+    "node:child_process", "node:process", "node:worker_threads",
+})
+
+# Python stdlib modules — omit from graph unless --graph-detail full
+_PYTHON_STDLIB: frozenset[str] = frozenset({
+    "os", "sys", "re", "io", "abc", "ast", "copy", "csv",
+    "enum", "functools", "itertools", "json", "logging", "math",
+    "pathlib", "random", "shutil", "string", "subprocess",
+    "threading", "time", "typing", "uuid", "warnings",
+    "collections", "contextlib", "dataclasses", "datetime",
+    "decimal", "difflib", "email", "glob", "hashlib", "hmac",
+    "http", "importlib", "inspect", "operator", "pickle",
+    "platform", "pprint", "queue", "signal", "socket",
+    "sqlite3", "stat", "struct", "tempfile", "textwrap",
+    "traceback", "unicodedata", "unittest", "urllib", "weakref",
+    "xml", "zipfile", "zlib",
+})
+
+# External packages that add noise without structural signal
+_NODE_NOISE_PACKAGES: frozenset[str] = frozenset({
+    "lodash", "moment", "date-fns", "uuid", "chalk", "debug",
+    "yargs", "commander", "dotenv", "cross-env",
+    "eslint", "prettier", "typescript", "ts-node",
+    "@types/node", "@types/react",
+})
+
+
 class GraphAnalyzer:
     """Construye un grafo estructural parcial y seguro del proyecto."""
 
@@ -908,7 +946,14 @@ class GraphAnalyzer:
                         )
                     )
                 else:
-                    limitations.append(f"node_external:{relative_path}:{spec}")
+                    # Silently skip stdlib and noise packages — they add no structural signal
+                    bare = spec.removeprefix("node:")
+                    root_pkg = bare.split("/")[0]
+                    if (spec not in _NODE_STDLIB
+                            and bare not in _NODE_STDLIB
+                            and root_pkg not in _NODE_STDLIB
+                            and root_pkg not in _NODE_NOISE_PACKAGES):
+                        limitations.append(f"node_external:{relative_path}:{spec}")
 
         return nodes, edges, limitations
 
@@ -1121,6 +1166,10 @@ class GraphAnalyzer:
     def _resolve_python_import(
         self, module_name: str, module_map: dict[str, str]
     ) -> Optional[str]:
+        # Skip stdlib modules — they add no structural signal to the project graph
+        root_module = module_name.split(".")[0]
+        if root_module in _PYTHON_STDLIB:
+            return None
         for path, candidate in module_map.items():
             if candidate == module_name:
                 return path

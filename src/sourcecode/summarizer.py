@@ -6,9 +6,10 @@ Sin llamadas a API — solo templates aplicados sobre SourceMap.
 """
 
 from pathlib import Path
+from typing import Any
 
 from sourcecode.detectors.parsers import load_json_file, load_toml_file
-from sourcecode.schema import SourceMap
+from sourcecode.schema import MonorepoPackageInfo, SourceMap
 
 _TOOLING_PREFIXES = (".claude/", ".vscode/", "bin/")
 _SRC_TRANSPARENT = {"src", "lib", "app", "pkg"}
@@ -75,6 +76,11 @@ class ProjectSummarizer:
             return "Proyecto analizado."
 
     def _build_summary(self, sm: SourceMap) -> str:
+        # For monorepos with classified packages, structural inference beats README
+        if sm.project_type == "monorepo" and sm.monorepo_packages:
+            dep_part = self._build_dep_part(sm)
+            return self._build_monorepo_structural_summary(sm, dep_part)
+
         description = self._read_project_description()
         if description:
             return self._merge_description_with_structure(description, sm)
@@ -107,6 +113,9 @@ class ProjectSummarizer:
         dep_part = self._build_dep_part(sm)
 
         if project_type == "monorepo":
+            # Prefer structural inference over README for monorepos
+            if sm.monorepo_packages:
+                return self._build_monorepo_structural_summary(sm, dep_part)
             stacks_desc = ", ".join(sorted({s.stack.capitalize() for s in non_tooling_stacks}))
             n_ws = len({s.workspace for s in non_tooling_stacks if s.workspace})
             ws_part = f" con {n_ws} workspaces" if n_ws > 0 else ""
@@ -265,6 +274,71 @@ class ProjectSummarizer:
 
         sorted_domains = sorted(domain_counts.items(), key=lambda x: x[1], reverse=True)
         return [name for name, _ in sorted_domains[:5]]
+
+    def _build_monorepo_structural_summary(self, sm: SourceMap, dep_part: str) -> str:
+        pkgs = sm.monorepo_packages
+        total = len(pkgs)
+
+        # Group by role
+        by_role: dict[str, list[MonorepoPackageInfo]] = {}
+        for p in pkgs:
+            by_role.setdefault(p.architectural_role, []).append(p)
+
+        runtime_roles = {"runtime_core", "backend_runtime", "plugin_host"}
+        frontend_roles = {"frontend_runtime"}
+        plugin_roles = {"plugin_package"}
+        noise_roles = {"benchmark_layer", "tooling_layer", "docs_layer", "test_layer"}
+
+        runtime_pkgs = [p for r in runtime_roles for p in by_role.get(r, [])]
+        frontend_pkgs = [p for r in frontend_roles for p in by_role.get(r, [])]
+        plugin_pkgs = by_role.get("plugin_package", [])
+        composition_pkgs = by_role.get("composition_layer", [])
+        noise_count = sum(len(by_role.get(r, [])) for r in noise_roles)
+
+        # Detect plugin system
+        has_plugin_system = bool(plugin_pkgs) or bool(by_role.get("plugin_host"))
+
+        # Determine primary language
+        non_tooling = [s for s in sm.stacks if not self._is_tooling_path(s.root) and not self._is_tooling_path(s.workspace)]
+        lang_set = sorted({s.stack.capitalize() for s in non_tooling})
+        lang_desc = "/".join(lang_set[:2]) if lang_set else "TypeScript"
+
+        parts: list[str] = []
+
+        # Headline: type + language + key architecture signal
+        if has_plugin_system:
+            parts.append(f"Plugin-driven {lang_desc} monorepo with {total} packages.")
+        else:
+            ws_label = f"{total} packages" if total > 1 else "monorepo"
+            parts.append(f"{lang_desc} monorepo ({ws_label}).")
+
+        # Runtime core
+        if runtime_pkgs:
+            core_paths = ", ".join(p.path for p in runtime_pkgs[:4])
+            parts.append(f"Runtime core: {core_paths}.")
+
+        # Plugin packages (if plugin system detected)
+        if plugin_pkgs:
+            n_plugins = len(plugin_pkgs)
+            plugin_paths = ", ".join(p.path for p in plugin_pkgs[:3])
+            extra = f" (+ {n_plugins - 3} more)" if n_plugins > 3 else ""
+            parts.append(f"{n_plugins} plugin packages: {plugin_paths}{extra}.")
+
+        # Frontend
+        if frontend_pkgs:
+            fe_paths = ", ".join(p.path for p in frontend_pkgs[:3])
+            parts.append(f"Frontend runtime: {fe_paths}.")
+
+        # Composition/presets
+        if composition_pkgs:
+            comp_paths = ", ".join(p.path for p in composition_pkgs[:2])
+            parts.append(f"Composition layer: {comp_paths}.")
+
+        # Noise info (non-critical)
+        if noise_count > 0:
+            parts.append(f"{noise_count} auxiliary packages (tests/benchmarks/tooling — non-critical).")
+
+        return " ".join(parts) + dep_part
 
     def _build_dep_part(self, sm: SourceMap) -> str:
         if sm.dependency_summary and sm.dependency_summary.total_count > 0:

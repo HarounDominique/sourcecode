@@ -1,4 +1,4 @@
-"""Tests for v0.25.0 signal hierarchy, confidence layer, and agent output quality.
+"""Tests for v0.26.0 signal hierarchy, confidence layer, and agent output quality.
 
 Covers required test cases from spec:
   1. Python CLI with auxiliary Node tooling in hidden dir — project_type stays python/cli

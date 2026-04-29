@@ -63,7 +63,7 @@ def test_compact_has_schema_version():
 
 
 def test_compact_has_no_file_tree():
-    """v0.25.0: compact_view no longer includes file_tree_depth1 — noise reduction."""
+    """v0.26.0: compact_view no longer includes file_tree_depth1 — noise reduction."""
     sm = SourceMap(
         file_tree={
             "src": {"main.py": None, "utils": {"helpers.py": None}},
@@ -171,7 +171,7 @@ def test_c7_compact_dependency_summary_none_when_not_requested():
 
 
 def test_c8_compact_has_no_file_tree_depth1():
-    """C8 (v0.25.0): compact_view no longer includes file_tree_depth1 — removed for noise reduction."""
+    """C8 (v0.26.0): compact_view no longer includes file_tree_depth1 — removed for noise reduction."""
     sm = SourceMap()
     result = compact_view(sm)
     assert "file_tree_depth1" not in result
