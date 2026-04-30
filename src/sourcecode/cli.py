@@ -9,13 +9,131 @@ import typer
 
 from sourcecode import __version__
 
-app = typer.Typer(
-    name="sourcecode",
-    help="Deterministic codebase context for AI coding agents.",
-    add_completion=False,
+_HELP = """\
+Deterministic codebase context for AI coding agents.
+
+[bold]Usage:[/bold]
+  sourcecode                   [dim]# analyze current directory[/dim]
+  sourcecode /path/to/repo     [dim]# analyze specific path[/dim]
+  sourcecode --agent           [dim]# structured output for AI agents[/dim]
+
+[bold]Subcommands:[/bold]
+  prepare-context TASK [PATH]  [dim]# task-specific context[/dim]
+  telemetry status|enable|disable
+  version
+  config
+"""
+
+# Known subcommand names — tokens matching these are routed as subcommands,
+# not consumed as a repository path.
+_SUBCOMMANDS: frozenset[str] = frozenset(
+    {"telemetry", "prepare-context", "version", "config", "analyze"}
 )
 
-telemetry_app = typer.Typer(help="Manage anonymous telemetry (opt-in).")
+# Mutable container holding the path extracted by _preprocess_argv().
+# Default "." means "current directory" when no path is given.
+_detected_path: list[str] = ["."]
+
+
+# Options that take a value token — their next arg must not be treated as a path.
+_OPTIONS_WITH_VALUE: frozenset[str] = frozenset({
+    "--format", "-f",
+    "--output", "-o",
+    "--graph-detail",
+    "--graph-edges",
+    "--max-nodes",
+    "--docs-depth",
+    "--depth",
+    "--git-depth",
+    "--git-days",
+    "--since",
+    "--path", "-p",
+})
+
+
+def _preprocess_args(args: list[str]) -> list[str]:
+    """Extract a repository path token from an args list and store it in _detected_path.
+
+    Returns the modified args list (path token removed).
+    Correctly skips option values (e.g. ``yaml`` in ``--format yaml``).
+    If the first non-flag, non-value positional token is a known subcommand name,
+    args are returned unchanged so Click can dispatch the subcommand.
+    """
+    result = list(args)
+    skip_next = False
+    for i, arg in enumerate(result):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg.startswith("-"):
+            # Does this option consume the next token as its value?
+            flag_name = arg.split("=")[0]
+            if flag_name in _OPTIONS_WITH_VALUE and "=" not in arg:
+                skip_next = True
+            continue
+        if arg in _SUBCOMMANDS:
+            return result  # known subcommand — leave for Click to dispatch
+        # First genuine positional: treat as repository path
+        _detected_path[0] = arg
+        result.pop(i)
+        return result
+    return result
+
+
+def _preprocess_argv() -> None:
+    """Apply _preprocess_args to sys.argv in-place (used by main_entry)."""
+    import sys as _sys
+    modified = _preprocess_args(_sys.argv[1:])
+    _sys.argv = _sys.argv[:1] + modified
+
+
+app = typer.Typer(
+    name="sourcecode",
+    help=_HELP,
+    add_completion=False,
+    rich_markup_mode="rich",
+    no_args_is_help=False,
+)
+
+# ── Hook preprocessing into the Click command layer ───────────────────────────
+# Typer's CliRunner (and app() itself) calls typer.main.get_command(app) to
+# create a Click Group, then calls click_group.main(args=...).
+# We patch get_command so the returned Click Group always preprocesses args —
+# this covers both main_entry() (sys.argv path) and runner.invoke(app, args).
+import typer.main as _typer_main_module  # noqa: E402
+
+_orig_get_command = _typer_main_module.get_command
+
+
+def _get_command_with_preprocessing(typer_instance: Any) -> Any:
+    cmd = _orig_get_command(typer_instance)
+    if typer_instance is not app:
+        return cmd  # only wrap the root app, not telemetry_app etc.
+    _orig_cmd_main = cmd.main
+
+    def _cmd_main(args: Optional[list[str]] = None, **kwargs: Any) -> Any:
+        if args is not None:
+            # CliRunner / programmatic call: preprocess the explicit args list.
+            _detected_path[0] = "."
+            args = _preprocess_args(list(args))
+        # args=None → Click reads sys.argv; _preprocess_argv() in main_entry handled it.
+        return _orig_cmd_main(args=args, **kwargs)
+
+    cmd.main = _cmd_main
+    return cmd
+
+
+_typer_main_module.get_command = _get_command_with_preprocessing
+
+# typer.testing imports get_command as a private alias _get_command at module
+# load time; patch that reference too so CliRunner.invoke uses our version.
+try:
+    import typer.testing as _typer_testing_module
+    _typer_testing_module._get_command = _get_command_with_preprocessing  # type: ignore[attr-defined]
+except Exception:
+    pass
+
+telemetry_app = typer.Typer(help="Manage anonymous telemetry (opt-in).", rich_markup_mode="rich")
 app.add_typer(telemetry_app, name="telemetry")
 
 
@@ -73,7 +191,6 @@ def version_callback(value: bool) -> None:
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
-    path: Path = typer.Argument(Path("."), help="Directorio a analizar (default: directorio actual)"),
     format: str = typer.Option(
         "json",
         "--format",
@@ -211,9 +328,17 @@ def main(
         help="Modo agente: output estructurado y sin ruido para consumo por IA. Incluye identidad, entrypoints, arquitectura, dependencias clave, señales operacionales y gaps. Sin arbol de ficheros ni secciones vacias.",
     ),
 ) -> None:
-    """Generate structured codebase context for AI coding agents."""
-    # First-run consent (skip for telemetry subcommand itself)
-    if ctx.invoked_subcommand != "telemetry":
+    """Analyze a repository and produce structured context for AI coding agents.
+
+    \b
+    Examples:
+      sourcecode                        analyze current directory
+      sourcecode /path/to/repo          analyze specific path
+      sourcecode --agent                agent-optimized output
+      sourcecode --agent --git-context  include git activity signals
+    """
+    # First-run consent (skip for telemetry/version/config subcommands)
+    if ctx.invoked_subcommand not in ("telemetry", "version", "config"):
         _maybe_ask_consent()
 
     # When a subcommand is invoked, skip the main analysis.
@@ -242,13 +367,13 @@ def main(
         )
         raise typer.Exit(code=1)
 
-    # Resolver y validar path
-    target = path.resolve()
+    # Path was extracted from argv by _preprocess_argv() before Click ran.
+    target = Path(_detected_path[0]).resolve()
     if not target.exists():
-        typer.echo(f"Error: el directorio '{target}' no existe.", err=True)
+        typer.echo(f"Error: directory '{target}' does not exist.", err=True)
         raise typer.Exit(code=1)
     if not target.is_dir():
-        typer.echo(f"Error: '{target}' no es un directorio.", err=True)
+        typer.echo(f"Error: '{target}' is not a directory.", err=True)
         raise typer.Exit(code=1)
 
     # --- Importar modulos de logica ---
@@ -751,15 +876,14 @@ def prepare_context_cmd(
         None,
         help="Task: explain | fix-bug | refactor | generate-tests | onboard | review-pr | delta",
     ),
-    path: Path = typer.Option(
+    path: Path = typer.Argument(
         Path("."),
-        "--path", "-p",
-        help="Project directory to analyze (default: current directory)",
+        help="Repository path to analyze (default: current directory)",
     ),
     since: Optional[str] = typer.Option(
         None,
         "--since",
-        help="Git ref for delta task: show files changed since this ref (e.g. HEAD~3, main)",
+        help="Git ref for delta task (e.g. HEAD~3, main)",
     ),
     llm_prompt: bool = typer.Option(
         False,
@@ -777,25 +901,26 @@ def prepare_context_cmd(
         help="Show what would be analyzed without running it",
     ),
 ) -> None:
-    """Compile task-aware context for AI coding agents.
+    """Task-specific context for AI coding agents.
 
     \b
     Tasks:
-      explain        Project overview: structure, entry points, dependencies
-      fix-bug        Risk-ranked files, suspected areas, code annotations
+      explain        Architecture, entry points, key dependencies
+      fix-bug        Risk-ranked files, suspected areas, annotations
       refactor       Structural issues, improvement opportunities
       generate-tests Untested source files, test gap analysis
-      onboard        Full project context for a new agent or developer
-      review-pr      PR review context: changed files + architecture
+      onboard        Full project context for new agents/developers
+      review-pr      Changed files + architectural impact
       delta          Incremental context: git-changed files only
 
     \b
     Examples:
-      sourcecode . prepare-context explain
-      sourcecode . prepare-context fix-bug --path /my/project
-      sourcecode . prepare-context delta --since main
-      sourcecode . prepare-context onboard --llm-prompt
-      sourcecode . prepare-context --task-help
+      sourcecode prepare-context explain
+      sourcecode prepare-context explain /path/to/repo
+      sourcecode prepare-context fix-bug
+      sourcecode prepare-context delta --since main
+      sourcecode prepare-context onboard --llm-prompt
+      sourcecode prepare-context --task-help
     """
     from sourcecode.prepare_context import TASKS, TaskContextBuilder
 
@@ -912,3 +1037,57 @@ def telemetry_disable() -> None:
     set_enabled(False)
     typer.echo("Telemetry disabled. No data will be collected or sent.")
     typer.echo("Re-enable at any time: sourcecode telemetry enable")
+
+
+# ── version ───────────────────────────────────────────────────────────────────
+
+@app.command("version")
+def version_cmd() -> None:
+    """Show version and exit."""
+    typer.echo(f"sourcecode {__version__}")
+
+
+# ── config ────────────────────────────────────────────────────────────────────
+
+@app.command("config")
+def config_cmd() -> None:
+    """Show current configuration."""
+    from sourcecode.telemetry.config import config_file_path, is_enabled
+    typer.echo(f"sourcecode {__version__}")
+    typer.echo(f"Config:    {config_file_path()}")
+    typer.echo(f"Telemetry: {'enabled' if is_enabled() else 'disabled'}")
+    typer.echo("")
+    typer.echo("Manage telemetry:")
+    typer.echo("  sourcecode telemetry enable")
+    typer.echo("  sourcecode telemetry disable")
+    typer.echo("  sourcecode telemetry status")
+
+
+# ── analyze (legacy alias) ────────────────────────────────────────────────────
+
+@app.command("analyze", hidden=True)
+def analyze_cmd(
+    path: Path = typer.Argument(Path("."), help="Repository path to analyze"),
+) -> None:
+    """[deprecated] Use: sourcecode [PATH]"""
+    typer.echo(
+        "Warning: 'analyze' subcommand is deprecated.\n"
+        "Use:  sourcecode .\n"
+        "      sourcecode /path/to/repo",
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main_entry() -> None:
+    """CLI entry point.
+
+    Calls _preprocess_argv() before Typer/Click parses sys.argv so that
+    repository path tokens are extracted before Click's Group callback
+    can consume them as positional arguments (which would prevent subcommand
+    routing for tokens like 'version' or 'config').
+    """
+    _preprocess_argv()
+    app()

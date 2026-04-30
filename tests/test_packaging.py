@@ -41,7 +41,7 @@ def test_pyproject_declares_packaging_contract() -> None:
     assert data["build-system"]["build-backend"] == "hatchling.build"
     assert "hatchling" in data["build-system"]["requires"]
     assert data["project"]["name"] == "sourcecode"
-    assert data["project"]["scripts"]["sourcecode"] == "sourcecode.cli:app"
+    assert data["project"]["scripts"]["sourcecode"] == "sourcecode.cli:main_entry"
     assert data["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"] == [
         "src/sourcecode"
     ]

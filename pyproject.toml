@@ -32,7 +32,7 @@ dependencies = [
 ]
 
 [project.scripts]
-sourcecode = "sourcecode.cli:app"
+sourcecode = "sourcecode.cli:main_entry"
 
 [project.optional-dependencies]
 dev = [
