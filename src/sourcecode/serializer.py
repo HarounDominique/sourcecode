@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from sourcecode.entrypoint_classifier import normalize_entry_point, is_production_entry_point
+from sourcecode.file_classifier import FileClassifier
 from sourcecode.schema import (
     ArchitectureAnalysis,
     ModuleGraph,
@@ -86,6 +87,146 @@ def _entry_point_groups(entry_points: list[Any]) -> dict[str, list[dict[str, Any
     return groups
 
 
+_PRODUCTION_DEP_ROLES = {"runtime", "parsing", "serialization", "observability", "infra"}
+_DEV_DEP_ROLES = {"devtool"}
+_TEST_DEP_ROLES = {"testtool"}
+_BUILD_DEP_ROLES = {"buildtool"}
+
+
+def _dependency_groups(sm: SourceMap) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = {
+        "production_dependencies": [],
+        "dev_tools": [],
+        "test_utilities": [],
+        "build_tooling": [],
+        "noise_dependencies": [],
+        "suspicious_dependencies": [],
+    }
+    if sm.dependency_summary is None or not sm.dependency_summary.requested:
+        return groups
+
+    root = Path(sm.metadata.analyzed_path) if sm.metadata.analyzed_path else Path(".")
+    import_index = _dependency_import_index(root, sm.file_paths)
+
+    for dep in sm.dependency_summary.dependencies:
+        if dep.scope == "transitive":
+            continue
+        item = {
+            k: v for k, v in asdict(dep).items()
+            if v is not None and k not in {"parent"}
+        }
+        role = dep.role or "unknown"
+        scope = dep.scope
+        name_key = _dep_import_key(dep.name)
+
+        if role in _PRODUCTION_DEP_ROLES and scope not in {"dev"}:
+            groups["production_dependencies"].append(item)
+            if dep.source == "manifest" and name_key not in import_index:
+                suspect = dict(item)
+                suspect["reason"] = "declared as production dependency but no static import observed"
+                groups["suspicious_dependencies"].append(suspect)
+        elif role in _TEST_DEP_ROLES:
+            groups["test_utilities"].append(item)
+        elif role in _BUILD_DEP_ROLES:
+            groups["build_tooling"].append(item)
+        elif role in _DEV_DEP_ROLES or scope in {"dev", "optional"}:
+            groups["dev_tools"].append(item)
+        else:
+            groups["noise_dependencies"].append(item)
+
+    for values in groups.values():
+        values.sort(key=lambda d: (d.get("ecosystem", ""), d.get("name", "")))
+    return groups
+
+
+def _dependency_import_index(root: Path, file_paths: list[str]) -> set[str]:
+    import re
+
+    index: set[str] = set()
+    import_re = re.compile(
+        r"(?:from\s+([A-Za-z0-9_@./-]+)\s+import|import\s+([A-Za-z0-9_@./-]+)|"
+        r"require\(['\"]([^'\"]+)['\"]\)|from\s+['\"]([^'\"]+)['\"])",
+        re.MULTILINE,
+    )
+    for path in file_paths[:2000]:
+        if Path(path).suffix.lower() not in {".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs"}:
+            continue
+        try:
+            content = (root / path).read_text(encoding="utf-8", errors="replace")[:20000]
+        except OSError:
+            continue
+        for match in import_re.findall(content):
+            raw = next((part for part in match if part), "")
+            if raw and not raw.startswith("."):
+                index.add(_dep_import_key(raw))
+    return index
+
+
+def _dep_import_key(name: str) -> str:
+    lowered = name.lower()
+    if lowered.startswith("@"):
+        parts = lowered.split("/")
+        return "/".join(parts[:2])
+    return lowered.split("/")[0].replace("_", "-")
+
+
+def _file_relevance(sm: SourceMap, *, limit: int = 15) -> list[dict[str, Any]]:
+    root = Path(sm.metadata.analyzed_path) if sm.metadata.analyzed_path else Path(".")
+    classifier = FileClassifier(root, sm.entry_points, sm.monorepo_packages)
+    items = classifier.classify_paths(sm.file_paths, limit=limit)
+    return [asdict(item) for item in items]
+
+
+def _architecture_context(sm: SourceMap) -> dict[str, Any]:
+    arch = sm.architecture
+    if arch is not None and arch.requested:
+        pattern = arch.pattern if arch.pattern not in (None, "unknown", "flat") else "no confirmed architecture pattern; inferred partial layering"
+        return {
+            "summary": sm.architecture_summary,
+            "pattern": pattern,
+            "confidence": arch.confidence,
+            "method": arch.method,
+            "layers": [
+                {
+                    "name": layer.name,
+                    "confidence": layer.confidence,
+                    "file_count": len(layer.files),
+                }
+                for layer in arch.layers
+            ],
+            "limitations": arch.limitations,
+        }
+    return {
+        "summary": sm.architecture_summary,
+        "pattern": "no confirmed architecture pattern; inferred partial layering",
+        "confidence": "low",
+        "method": "not_requested",
+        "limitations": [
+            "architecture analyzer not requested; summary limited to stack, filesystem and entrypoint evidence"
+        ],
+    }
+
+
+def _section_confidence(sm: SourceMap) -> dict[str, str]:
+    cs = sm.confidence_summary
+    dep_conf = "low"
+    if sm.dependency_summary is not None and sm.dependency_summary.requested:
+        dep_conf = "medium"
+        if sm.dependency_summary.sources and sm.dependency_summary.total_count > 0:
+            dep_conf = "high"
+    arch_conf = "low"
+    if sm.architecture is not None and sm.architecture.requested:
+        arch_conf = sm.architecture.confidence
+    file_conf = "medium" if sm.file_paths else "low"
+    return {
+        "stack": cs.stack_confidence if cs else "low",
+        "entrypoints": cs.entry_point_confidence if cs else "low",
+        "dependencies": dep_conf,
+        "architecture": arch_conf,
+        "file_relevance": file_conf,
+    }
+
+
 def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
     """Context package ready for prompt or handoff (~600-800 tokens).
 
@@ -105,7 +246,10 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
     if sm.dependency_summary is not None and sm.dependency_summary.requested:
         dep_summary_dict = asdict(sm.dependency_summary)
         dep_summary_dict.pop("dependencies", None)
-        key_deps = [asdict(d) for d in sm.key_dependencies]
+        key_deps = [
+            asdict(d) for d in sm.key_dependencies
+            if (d.role or "unknown") in _PRODUCTION_DEP_ROLES and d.scope not in {"dev"}
+        ]
     elif sm.dependency_summary is None or not sm.dependency_summary.requested:
         dep_summary_dict = None  # "not analyzed" — agent should add --dependencies
 
@@ -456,8 +600,12 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
     result["auxiliary_entry_points"] = ep_groups["auxiliary"]
 
     # ── 3. Architecture ───────────────────────────────────────────────────────
-    if sm.architecture_summary:
-        result["architecture"] = sm.architecture_summary
+    result["architecture"] = _architecture_context(sm)
+
+    # ── 3a. File relevance: evidence-backed categories, not keyword matches ──
+    relevant_files = _file_relevance(sm)
+    if relevant_files:
+        result["file_relevance"] = relevant_files
 
     # ── 3b. Monorepo package roles (when available) ───────────────────────────
     if sm.monorepo_packages:
@@ -470,12 +618,24 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
         if operational_pkgs:
             result["runtime_packages"] = operational_pkgs
 
-    # ── 4. Key dependencies (role-sorted, already computed) ───────────────────
-    if sm.dependency_summary and sm.dependency_summary.requested and sm.key_dependencies:
+    # ── 4. Dependencies: separated by operational role ───────────────────────
+    dep_groups = _dependency_groups(sm)
+    if dep_groups["production_dependencies"]:
+        result["production_dependencies"] = dep_groups["production_dependencies"][:15]
+    for dep_key in ("dev_tools", "test_utilities", "build_tooling", "noise_dependencies", "suspicious_dependencies"):
+        if dep_groups[dep_key]:
+            result[dep_key] = dep_groups[dep_key][:15]
+
+    # Backward-compatible compact list, now production-only.
+    production_key_deps = [
+        d for d in sm.key_dependencies
+        if (d.role or "unknown") in _PRODUCTION_DEP_ROLES and d.scope not in {"dev"}
+    ]
+    if sm.dependency_summary and sm.dependency_summary.requested and production_key_deps:
         _dep_skip = {"parent", "manifest_path", "workspace", "source", "ecosystem"}
         result["key_dependencies"] = [
             {k: v for k, v in asdict(d).items() if v is not None and k not in _dep_skip}
-            for d in sm.key_dependencies
+            for d in production_key_deps[:15]
         ]
 
     # ── 5. Signals — compact operational context ─────────────────────────────
@@ -513,6 +673,7 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
             "overall": cs.overall,
             "stack": cs.stack_confidence,
             "entry_points": cs.entry_point_confidence,
+            "sections": _section_confidence(sm),
         }
         if cs.hard_signals:
             conf["hard_signals"] = cs.hard_signals
@@ -599,7 +760,10 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
         dep_dict = asdict(sm.dependency_summary)
         dep_dict.pop("dependencies", None)  # avoid duplication with key_dependencies
         result["dependency_summary"] = dep_dict
-        result["key_dependencies"] = [asdict(d) for d in sm.key_dependencies]
+        result["key_dependencies"] = [
+            asdict(d) for d in sm.key_dependencies
+            if (d.role or "unknown") in _PRODUCTION_DEP_ROLES and d.scope not in {"dev"}
+        ]
 
     if sm.env_summary is not None and sm.env_summary.requested:
         result["env_summary"] = asdict(sm.env_summary)

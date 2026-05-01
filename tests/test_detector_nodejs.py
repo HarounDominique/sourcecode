@@ -72,10 +72,10 @@ def test_nodejs_detector_detects_vite_typescript_entry(tmp_path: Path) -> None:
         manifests=["package.json"],
     )
 
-    assert {framework.name for framework in stacks[0].frameworks} == {"React", "Vite"}
+    assert {framework.name for framework in stacks[0].frameworks} == {"React"}
     assert entry_points[0].path == "src/main.tsx"
     assert entry_points[0].source == "convention"
-    assert entry_points[0].confidence == "medium"
+    assert entry_points[0].confidence == "low"
     assert project_type == "webapp"
 
 

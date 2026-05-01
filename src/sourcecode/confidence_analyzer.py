@@ -135,7 +135,7 @@ class ConfidenceAnalyzer:
         if not normalized_entry_points:
             gaps.append(AnalysisGap(
                 area="entry_points",
-                reason="No entry point detected — project may use non-standard structure or be a library",
+                reason="Critical: no runtime entrypoint detected; system cannot be executed without manual inference",
                 impact="high",
             ))
         elif all(
@@ -145,16 +145,16 @@ class ConfidenceAnalyzer:
             gaps.append(AnalysisGap(
                 area="entry_points",
                 reason=(
-                    "All detected entry points are development or auxiliary — "
-                    "no production entry point found. Verify project has a 'start'/'serve' "
-                    "script or production binary."
+                    "Critical: no production runtime entrypoint detected; detected entries are "
+                    "development or auxiliary only. Add/verify a start/serve script, CLI bin, "
+                    "or server bootstrap before using this context for automation."
                 ),
                 impact="high",
             ))
         elif all(ep.confidence == "low" for ep in normalized_entry_points):
             gaps.append(AnalysisGap(
                 area="entry_points",
-                reason="Entry points inferred from code patterns only, no manifest declaration found",
+                reason="Entry points inferred from code patterns only; no manifest script, CLI bin, or server bootstrap declaration found",
                 impact="medium",
             ))
 

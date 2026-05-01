@@ -58,7 +58,7 @@ class NodejsDetector(AbstractDetector):
 
         from sourcecode.detectors.hybrid import merge_framework_detections, scan_for_frameworks
 
-        dependency_names = self._collect_dependency_names(package_json)
+        dependency_names = self._collect_dependency_names(package_json, runtime_only=True)
         seen_fw: set[str] = set()
         manifest_frameworks = []
         for pkg_name, label in _FRAMEWORK_MAP.items():
@@ -98,9 +98,17 @@ class NodejsDetector(AbstractDetector):
             signals.append("monorepo:npm-workspaces")
         return signals
 
-    def _collect_dependency_names(self, package_json: dict[str, Any]) -> set[str]:
+    def _collect_dependency_names(
+        self,
+        package_json: dict[str, Any],
+        *,
+        runtime_only: bool = False,
+    ) -> set[str]:
         names: set[str] = set()
-        for field in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+        fields = ("dependencies", "peerDependencies", "optionalDependencies")
+        if not runtime_only:
+            fields = fields + ("devDependencies",)
+        for field in fields:
             raw = package_json.get(field, {})
             if isinstance(raw, dict):
                 names.update(str(name) for name in raw)

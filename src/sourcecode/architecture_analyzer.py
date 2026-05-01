@@ -215,18 +215,22 @@ class ArchitectureAnalyzer:
         if pattern not in (None, "unknown", "flat"):
             if all_layers_weak:
                 # Layers came from file-naming heuristic only, not directory structure
-                confidence = "medium"
+                confidence = "low"
                 limitations.append(
-                    "Patron inferido de nombres de archivo — sin estructura de directorios confirmatoria"
+                    "Low confidence inference: pattern inferred from filenames only, without import graph confirmation"
                 )
             else:
-                confidence = "high" if len(strong_domains) >= 3 else "medium"
+                confidence = "medium" if len(strong_domains) >= 3 else "low"
+                if graph is None:
+                    limitations.append(
+                        "Pattern not confirmed by module import graph; run with --graph-modules for structural validation"
+                    )
         elif len(strong_domains) >= 1:
             confidence = "medium"
         else:
             confidence = "low"
 
-        method = "graph+heuristic" if graph is not None else "heuristic"
+        method = "graph+structure" if graph is not None else "filesystem_inference"
 
         return ArchitectureAnalysis(
             requested=True,
@@ -339,7 +343,7 @@ class ArchitectureAnalyzer:
                 best_matched = matched
 
         if best_score >= 2:
-            layer_confidence: Literal["high", "medium", "low"] = "high" if best_score >= 3 else "medium"
+            layer_confidence: Literal["high", "medium", "low"] = "medium" if best_score >= 3 else "low"
             layers: list[ArchitectureLayer] = []
             for layer_key, matched_dirs in best_matched.items():
                 matched_files = [

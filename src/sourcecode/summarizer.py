@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from sourcecode.detectors.parsers import load_json_file, load_toml_file
+from sourcecode.entrypoint_classifier import is_production_entry_point
 from sourcecode.schema import MonorepoPackageInfo, SourceMap
 
 _TOOLING_PREFIXES = (".claude/", ".vscode/", "bin/")
@@ -31,6 +32,8 @@ _ARCH_LAYER_NAMES = {
     "schemas", "types",
     "migrations", "seeds",
     "scripts", "tools",
+    "docs", "doc", "documentation", "examples", "example", "benchmarks",
+    "benchmark", "playground", "playgrounds", "fixtures", "fixture",
 }
 
 _CODE_EXTENSIONS = {
@@ -108,7 +111,6 @@ class ProjectSummarizer:
         frameworks = [f.name for f in primary.frameworks]
         fw_part = f" ({', '.join(frameworks[:3])})" if frameworks else ""
 
-        arch_pattern = self._detect_architecture_pattern(sm.file_paths)
         domains = self._extract_business_domains(sm.file_paths)
         dep_part = self._build_dep_part(sm)
 
@@ -122,13 +124,16 @@ class ProjectSummarizer:
             domains_part = f" Dominios: {', '.join(domains)}." if domains else ""
             return f"Monorepo{ws_part} en {stacks_desc}.{domains_part}{dep_part}"
 
-        arch_suffix = f" con arquitectura {arch_pattern}" if arch_pattern else ""
+        arch_suffix = ""
         base = f"{type_label} en {stack_name}{fw_part}{arch_suffix}."
 
         if domains:
             extra = f" Dominios: {', '.join(domains)}."
         else:
-            ep_paths = [ep.path for ep in sm.entry_points if not self._is_tooling_path(ep.path)][:3]
+            ep_paths = [
+                ep.path for ep in sm.entry_points
+                if not self._is_tooling_path(ep.path) and is_production_entry_point(ep)
+            ][:3]
             extra = f" Entry points: {', '.join(ep_paths)}." if ep_paths else ""
 
         return f"{base}{extra}{dep_part}"
@@ -210,12 +215,10 @@ class ProjectSummarizer:
         if non_tooling_stacks:
             primary = self._select_summary_primary_stack(non_tooling_stacks)
             frameworks = [fw.name for fw in primary.frameworks[:2]]
-            arch_pattern = self._detect_architecture_pattern(sm.file_paths)
-            arch_str = f" con arquitectura {arch_pattern}" if arch_pattern else ""
             if frameworks:
-                parts.append(f"Stack: {primary.stack.capitalize()} ({', '.join(frameworks)}){arch_str}")
+                parts.append(f"Stack: {primary.stack.capitalize()} ({', '.join(frameworks)})")
             else:
-                parts.append(f"Stack: {primary.stack.capitalize()}{arch_str}")
+                parts.append(f"Stack: {primary.stack.capitalize()}")
 
         # Business domains only — skip entry_points (too technical for product summary)
         domains = self._extract_business_domains(sm.file_paths)

@@ -900,6 +900,8 @@ def main(
         direct_deps = [
             d for d in sm.dependencies
             if d.scope != "transitive" and d.source in {"manifest", "lockfile"}
+            and (d.role or "unknown") in {"runtime", "parsing", "serialization", "observability", "infra"}
+            and d.scope not in {"dev"}
         ]
 
         def _dep_sort_key(d: Any) -> tuple[int, int, str]:

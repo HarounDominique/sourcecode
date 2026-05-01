@@ -157,9 +157,10 @@ def test_atlas_cli_structure_detects_layered() -> None:
     assert "processing" in layer_names, "processing layer expected (*_analyzer.py, scanner.py)"
     assert "data" in layer_names, "data layer expected (schema.py, serializer.py)"
 
-    assert analysis.confidence in ("high", "medium"), (
-        f"Confidence should not be low for a recognised pattern, got '{analysis.confidence}'"
+    assert analysis.confidence == "low", (
+        f"Filename-only architecture inference must stay low confidence, got '{analysis.confidence}'"
     )
+    assert any("filename" in item.lower() for item in analysis.limitations)
 
     # detectors sub-package must surface as its own domain, not collapse into 'sourcecode'
     assert "detectors" in domain_names, (

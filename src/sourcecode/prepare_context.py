@@ -410,6 +410,8 @@ class TaskContextBuilder:
             direct = [
                 d for d in dep_records
                 if d.scope != "transitive" and d.source in {"manifest", "lockfile"}
+                and (d.role or "unknown") in {"runtime", "parsing", "serialization", "observability", "infra"}
+                and d.scope not in {"dev"}
             ]
             direct.sort(key=lambda d: (0 if d.ecosystem == primary_eco else 1, d.name.lower()))
             key_dependencies = [asdict(d) for d in direct[:15]]
@@ -626,7 +628,12 @@ class TaskContextBuilder:
         uncommitted_files: Optional[set[str]] = None,
     ) -> list[RelevantFile]:
         from sourcecode.relevance_scorer import RelevanceScorer
+        from sourcecode.file_classifier import FileClassifier
         scorer = RelevanceScorer(monorepo_packages or [])
+        file_classifier = FileClassifier(self.root, [
+            # _rank_files only needs production path evidence; EntryPoint objects
+            # are not available here, so category evidence is best-effort below.
+        ], monorepo_packages or [])
 
         # Auxiliary entry points (benchmark, docs, examples) must not get
         # the production entry boost — they are not runtime signals.
@@ -660,12 +667,10 @@ class TaskContextBuilder:
                 score += 3.0
                 reasons.append("entry point")
 
-            path_lower = path.lower()
-            for keyword in spec.ranking_boosts:
-                if keyword in path_lower:
-                    score += 1.5
-                    reasons.append(f"matches '{keyword}'")
-                    break
+            file_class = file_classifier.classify(path)
+            if file_class is not None:
+                score += file_class.relevance * 2.0
+                reasons.append(f"{file_class.category}: {file_class.reason}")
 
             if is_test:
                 score += 2.0
@@ -673,7 +678,7 @@ class TaskContextBuilder:
             elif self._is_source(path):
                 score += 0.5
                 if not reasons:
-                    reasons.append("source file")
+                    reasons.append("source file with supported extension")
 
             # Operational relevance boost/penalty from package role
             rel = scorer.score(path)

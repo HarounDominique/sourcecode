@@ -64,16 +64,16 @@ def test_python_fastapi_with_deps():
 
 
 # Test 4: project_type="cli" with entry_point
-def test_cli_project_with_entry_point():
-    """SourceMap with project_type='cli', entry_points=[...] -> contains 'CLI' and entry path."""
+def test_cli_project_with_weak_entry_point_does_not_report_runtime():
+    """Convention-only entry points are not reported as confirmed runtime."""
     sm = SourceMap(
         stacks=[StackDetection(stack="python", primary=True)],
         project_type="cli",
-        entry_points=[EntryPoint(path="src/cli.py", stack="python", kind="entry")],
+        entry_points=[EntryPoint(path="src/cli.py", stack="python", kind="entry", source="convention")],
     )
     result = _summarizer().generate(sm)
     assert "CLI" in result or "cli" in result.lower()
-    assert "src/cli.py" in result
+    assert "src/cli.py" not in result
 
 
 # Test 5: project_type="monorepo" with 2 distinct workspaces
