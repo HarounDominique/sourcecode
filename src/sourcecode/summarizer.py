@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-"""Generador deterministico de resumen en lenguaje natural del proyecto.
+"""Deterministic natural-language project summary generator.
 
-Sin llamadas a API — solo templates aplicados sobre SourceMap.
+No API calls — templates applied directly over SourceMap.
 """
 
 from pathlib import Path
@@ -66,17 +66,17 @@ _ARCH_LAYER_PATTERNS: dict[str, dict[str, list[str]]] = {
 
 
 class ProjectSummarizer:
-    """Genera project_summary: string NL deterministica desde SourceMap."""
+    """Generate project_summary: deterministic NL string from SourceMap."""
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = root
 
     def generate(self, sm: SourceMap) -> str:
-        """Retorna descripcion NL del proyecto. Nunca lanza excepcion."""
+        """Return NL description of the project. Never raises."""
         try:
             return self._build_summary(sm)
         except Exception:
-            return "Proyecto analizado."
+            return "Project analyzed."
 
     def _build_summary(self, sm: SourceMap) -> str:
         # For monorepos with classified packages, structural inference beats README
@@ -93,17 +93,17 @@ class ProjectSummarizer:
         all_stacks = primary_stacks if primary_stacks else non_tooling_stacks
 
         if not all_stacks:
-            return "Proyecto sin stack detectado."
+            return "No stack detected."
 
-        project_type = sm.project_type or "Proyecto"
+        project_type = sm.project_type or "unknown"
         type_label = {
-            "webapp": "Aplicacion web",
+            "webapp": "Web application",
             "api": "API",
-            "library": "Libreria",
+            "library": "Library",
             "cli": "CLI",
             "monorepo": "Monorepo",
-            "fullstack": "Proyecto fullstack",
-            "unknown": "Proyecto",
+            "fullstack": "Full-stack project",
+            "unknown": "Project",
         }.get(project_type, project_type.capitalize())
 
         primary = all_stacks[0]
@@ -120,23 +120,39 @@ class ProjectSummarizer:
                 return self._build_monorepo_structural_summary(sm, dep_part)
             stacks_desc = ", ".join(sorted({s.stack.capitalize() for s in non_tooling_stacks}))
             n_ws = len({s.workspace for s in non_tooling_stacks if s.workspace})
-            ws_part = f" con {n_ws} workspaces" if n_ws > 0 else ""
-            domains_part = f" Dominios: {', '.join(domains)}." if domains else ""
-            return f"Monorepo{ws_part} en {stacks_desc}.{domains_part}{dep_part}"
+            ws_part = f" with {n_ws} workspaces" if n_ws > 0 else ""
+            domains_part = f" Domains: {', '.join(domains)}." if domains else ""
+            return f"Monorepo{ws_part} in {stacks_desc}.{domains_part}{dep_part}"
 
-        arch_suffix = ""
-        base = f"{type_label} en {stack_name}{fw_part}{arch_suffix}."
+        # Architecture pattern signal
+        arch_pattern = self._detect_architecture_pattern(sm.file_paths)
+        arch_suffix = f", {arch_pattern}" if arch_pattern else ""
+
+        # Source file count for size signal
+        src_count = sum(
+            1 for p in sm.file_paths if Path(p).suffix.lower() in _CODE_EXTENSIONS
+        )
+        size_hint = f", {src_count} source files" if src_count > 3 else ""
+
+        base = f"{type_label} in {stack_name}{fw_part}{arch_suffix}{size_hint}."
 
         if domains:
-            extra = f" Dominios: {', '.join(domains)}."
+            extra = f" Domains: {', '.join(domains)}."
         else:
             ep_paths = [
                 ep.path for ep in sm.entry_points
                 if not self._is_tooling_path(ep.path) and is_production_entry_point(ep)
             ][:3]
-            extra = f" Entry points: {', '.join(ep_paths)}." if ep_paths else ""
+            extra = f" Entry: {', '.join(ep_paths)}." if ep_paths else ""
 
-        return f"{base}{extra}{dep_part}"
+        # Confidence marker when all stacks are heuristic (no manifest evidence)
+        all_heuristic = all(
+            getattr(s, "detection_method", "heuristic") == "heuristic"
+            for s in all_stacks
+        )
+        conf_hint = " [inference: medium confidence]" if all_heuristic else ""
+
+        return f"{base}{extra}{dep_part}{conf_hint}"
 
     def _read_project_description(self) -> str | None:
         if self.root is None:
@@ -191,10 +207,10 @@ class ProjectSummarizer:
     _TYPE_LABELS: dict[str, str] = {
         "cli": "CLI",
         "api": "API",
-        "webapp": "Aplicación web",
-        "library": "Librería",
+        "webapp": "Web application",
+        "library": "Library",
         "monorepo": "Monorepo",
-        "fullstack": "Proyecto fullstack",
+        "fullstack": "Full-stack project",
     }
 
     def _merge_description_with_structure(self, description: str, sm: SourceMap) -> str:
@@ -223,7 +239,7 @@ class ProjectSummarizer:
         # Business domains only — skip entry_points (too technical for product summary)
         domains = self._extract_business_domains(sm.file_paths)
         if domains:
-            parts.append(f"Dominios: {', '.join(domains)}")
+            parts.append(f"Domains: {', '.join(domains)}")
 
         return ". ".join(parts) + "."
 
@@ -347,10 +363,10 @@ class ProjectSummarizer:
         if sm.dependency_summary and sm.dependency_summary.total_count > 0:
             ds = sm.dependency_summary
             ecosystems = ", ".join(ds.ecosystems[:3])
-            return f" {ds.total_count} dependencias ({ecosystems})."
+            return f" {ds.total_count} dependencies ({ecosystems})."
         if sm.dependency_summary is None:
             return ""
-        return " Sin dependencias detectadas."
+        return " No dependencies detected."
 
     def _filter_non_tooling_stacks(self, sm: SourceMap) -> list:
         filtered = [

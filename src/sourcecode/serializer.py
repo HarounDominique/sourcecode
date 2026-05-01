@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-"""Serializer de sourcecode — JSON canonico, YAML y modo compact.
+"""sourcecode serializer — canonical JSON, YAML, and compact mode.
 
-Patrones criticos:
-  - SIEMPRE pasar por dataclasses.asdict() antes de json.dumps (json no serializa dataclasses)
-  - ruamel.yaml con representer para null canonico (no ~)
-  - compact_view() proyecta solo los campos necesarios (~500 tokens)
+Critical patterns:
+  - Always pass through dataclasses.asdict() before json.dumps (json does not serialize dataclasses)
+  - ruamel.yaml with representer for canonical null (not ~)
+  - compact_view() projects only required fields (~500 tokens)
 """
 
 import json
@@ -26,27 +26,27 @@ from sourcecode.schema import (
 
 
 def to_json(sm: SourceMap | dict[str, Any], indent: int = 2) -> str:
-    """Serializa SourceMap o dict a JSON canonico.
+    """Serialize SourceMap or dict to canonical JSON.
 
-    Acepta un SourceMap (dataclass) o un dict ya preparado (e.g. compact_view()).
-    Usa dataclasses.asdict() para convertir dataclasses a dict antes de json.dumps.
-    ensure_ascii=False para preservar UTF-8 en paths.
+    Accepts a SourceMap (dataclass) or an already-prepared dict (e.g. compact_view()).
+    Uses dataclasses.asdict() to convert dataclasses before json.dumps.
+    ensure_ascii=False to preserve UTF-8 in paths.
     """
     data = asdict(sm) if is_dataclass(sm) and not isinstance(sm, type) else sm
     return json.dumps(data, indent=indent, ensure_ascii=False)
 
 
 def to_yaml(sm: SourceMap) -> str:
-    """Serializa SourceMap a YAML usando ruamel.yaml.
+    """Serialize SourceMap to YAML using ruamel.yaml.
 
-    ruamel.yaml preserva el orden de claves y serializa None como null
-    (no como ~) con la configuracion por defecto del dump de dicts.
+    ruamel.yaml preserves key order and serializes None as null
+    (not as ~) with the default dict dump configuration.
     """
     from ruamel.yaml import YAML
 
     yaml = YAML()
     yaml.default_flow_style = False
-    # Asegurar que None se serializa como 'null' y no como '~'
+    # Ensure None is serialized as 'null', not '~'
     yaml.representer.add_representer(
         type(None),
         lambda dumper, data: dumper.represent_scalar("tag:yaml.org,2002:null", "null"),
@@ -428,14 +428,20 @@ def _rule_dependency_graph(
     if not sm.module_graph.summary.requested:
         return
 
-    # 1a — graph node paths must be in file_tree
-    for node in sm.module_graph.nodes:
-        p = node.path
-        if Path(p).suffix.lower() in _GRAPH_CODE_EXTENSIONS and p not in known_paths:
-            findings.append(
-                f"[dependency_graph] graph node '{node.id}' path '{p}' "
-                f"not found in file_tree"
-            )
+    # 1a — graph node paths must be in file_tree (aggregate)
+    phantom_paths = [
+        node.path
+        for node in sm.module_graph.nodes
+        if Path(node.path).suffix.lower() in _GRAPH_CODE_EXTENSIONS
+        and node.path not in known_paths
+    ]
+    if phantom_paths:
+        sample = ", ".join(phantom_paths[:3])
+        findings.append(
+            f"[dependency_graph] {len(phantom_paths)} graph node(s) reference paths "
+            f"not in file_tree: {sample}"
+            + (f" (+{len(phantom_paths) - 3} more)" if len(phantom_paths) > 3 else "")
+        )
 
     # 1b — dep names should appear in external-facing edge targets
     if sm.dependency_summary is None or not sm.dependency_summary.requested:
@@ -454,16 +460,22 @@ def _rule_dependency_graph(
     if not pkg_targets:
         return  # graph has only internal file edges; dep↔edge check not applicable
 
-    for dep in sm.dependencies:
-        if dep.scope == "transitive":
-            continue
-        name = dep.name.lower().replace("-", "_")
-        if not any(name in t.replace("-", "_") for t in pkg_targets):
-            sample = ", ".join(sorted(pkg_targets)[:3])
-            findings.append(
-                f"[dependency_graph] dependency '{dep.name}' declared in manifest "
-                f"but absent from module_graph external edges (visible: {sample})"
-            )
+    missing_deps = [
+        dep.name
+        for dep in sm.dependencies
+        if dep.scope != "transitive"
+        and not any(
+            dep.name.lower().replace("-", "_") in t.replace("-", "_")
+            for t in pkg_targets
+        )
+    ]
+    if missing_deps:
+        sample = ", ".join(missing_deps[:5])
+        findings.append(
+            f"[dependency_graph] {len(missing_deps)} manifest dep(s) absent from "
+            f"graph external edges: {sample}"
+            + (f" (+{len(missing_deps) - 5} more)" if len(missing_deps) > 5 else "")
+        )
 
 
 def _rule_semantic_file_tree(
@@ -477,18 +489,32 @@ def _rule_semantic_file_tree(
     scanner actually found.  An orphan path means the semantic_analyzer
     resolved a symbol to a file that does not belong to the project.
     """
-    for link in sm.semantic_links:
-        if link.importer_path not in known_paths:
-            findings.append(
-                f"[semantic_file_tree] semantic_link importer "
-                f"'{link.importer_path}' not in file_tree"
-            )
-        if link.source_path is not None and not link.is_external:
-            if link.source_path not in known_paths:
-                findings.append(
-                    f"[semantic_file_tree] semantic_link source "
-                    f"'{link.source_path}' not in file_tree (is_external=False)"
-                )
+    importer_miss_paths = [
+        link.importer_path
+        for link in sm.semantic_links
+        if link.importer_path not in known_paths
+    ]
+    source_miss_paths = [
+        link.source_path
+        for link in sm.semantic_links
+        if link.source_path is not None
+        and not link.is_external
+        and link.source_path not in known_paths
+    ]
+    total = len(importer_miss_paths) + len(source_miss_paths)
+    if total > 0:
+        parts: list[str] = []
+        if importer_miss_paths:
+            sample = ", ".join(dict.fromkeys(importer_miss_paths[:2]))
+            parts.append(f"{len(importer_miss_paths)} importer(s) (e.g. {sample})")
+        if source_miss_paths:
+            sample = ", ".join(dict.fromkeys(source_miss_paths[:2]))
+            parts.append(f"{len(source_miss_paths)} source(s) (e.g. {sample})")
+        findings.append(
+            f"[semantic_file_tree] {total} semantic link path(s) not in file_tree: "
+            + "; ".join(parts)
+            + " — may indicate workspace-relative paths"
+        )
 
 
 def _rule_architecture_graph(
@@ -505,13 +531,21 @@ def _rule_architecture_graph(
     """
     if not sm.architecture.requested:
         return
+    all_phantom: list[str] = []
+    domain_counts: list[str] = []
     for domain in sm.architecture.domains:
-        for path in domain.files:
-            if path not in known_paths:
-                findings.append(
-                    f"[architecture_graph] domain '{domain.name}' "
-                    f"references '{path}' not in file_tree"
-                )
+        phantom_files = [p for p in domain.files if p not in known_paths]
+        if phantom_files:
+            all_phantom.extend(phantom_files[:2])
+            domain_counts.append(f"'{domain.name}': {len(phantom_files)}")
+    if domain_counts:
+        sample = ", ".join(dict.fromkeys(all_phantom[:3]))
+        findings.append(
+            f"[architecture_graph] {len(domain_counts)} domain(s) reference phantom paths "
+            f"(e.g. {sample}): "
+            + ", ".join(domain_counts[:5])
+            + ("..." if len(domain_counts) > 5 else "")
+        )
 
 
 def validate_cross_analyzer_consistency(
@@ -663,6 +697,25 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
     if has_tests:
         signals["has_tests"] = True
 
+    # Semantic hotspots (populated when --semantics was passed)
+    if sm.semantic_summary is not None and sm.semantic_summary.requested:
+        sem = sm.semantic_summary
+        sem_info: dict[str, Any] = {
+            "files_analyzed": sem.files_analyzed,
+            "symbols": sem.symbol_count,
+            "calls": sem.call_count,
+            "links": sem.link_count,
+            "languages": sem.languages,
+        }
+        if sem.coverage_pct is not None:
+            sem_info["coverage_pct"] = sem.coverage_pct
+            sem_info["coverage_confidence"] = sem.coverage_confidence
+        if sem.truncated:
+            sem_info["truncated"] = True
+        if sem.hotspots:
+            sem_info["hotspots"] = sem.hotspots[:10]
+        signals["semantic_graph"] = sem_info
+
     if signals:
         result["signals"] = signals
 
@@ -812,11 +865,11 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
 
 
 def write_output(content: str, output: Optional[Path]) -> None:
-    """Escribe el contenido a stdout o a un fichero.
+    """Write content to stdout or a file.
 
     Args:
-        content: String serializado (JSON o YAML).
-        output: Path del fichero destino. None = stdout.
+        content: Serialized string (JSON or YAML).
+        output: Destination file path. None = stdout.
     """
     if output is None:
         sys.stdout.write(content)

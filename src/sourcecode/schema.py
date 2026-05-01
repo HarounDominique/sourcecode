@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-"""Schema de output v1.0 para sourcecode.
+"""Output schema v1.0 for sourcecode.
 
-Contrato publico estable — los detectores de Fase 2 escriben en SourceMap.stacks.
-Los campos stacks, project_type y entry_points son vacios/null en Fase 1.
+Stable public contract — phase 2 detectors write into SourceMap.stacks.
+Fields stacks, project_type, and entry_points are empty/null in phase 1.
 
-Convencion del arbol de ficheros (D-01, D-02):
-  - None = fichero
-  - dict = directorio (vacio o con hijos)
+File tree convention (D-01, D-02):
+  - None = file
+  - dict = directory (empty or with children)
 """
 
 from dataclasses import dataclass, field
@@ -16,7 +16,7 @@ from typing import Any, Literal, Optional
 
 
 def _now_utc() -> str:
-    """Retorna timestamp ISO 8601 UTC con offset +00:00."""
+    """Return ISO 8601 UTC timestamp with +00:00 offset."""
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -27,7 +27,7 @@ def _sourcecode_version() -> str:
 
 @dataclass
 class AnalysisMetadata:
-    """Metadatos del analisis — siempre presentes en el output."""
+    """Analysis metadata — always present in output."""
 
     schema_version: str = "1.0"
     generated_at: str = field(default_factory=_now_utc)
@@ -38,7 +38,7 @@ class AnalysisMetadata:
 
 @dataclass
 class FrameworkDetection:
-    """Framework detectado dentro de un stack."""
+    """Framework detected within a stack."""
 
     name: str
     source: str = "manifest"
@@ -48,7 +48,7 @@ class FrameworkDetection:
 
 @dataclass
 class StackDetection:
-    """Deteccion de un stack tecnologico."""
+    """Detected technology stack."""
 
     stack: str
     detection_method: Literal["manifest", "lockfile", "heuristic"] = "manifest"
@@ -65,7 +65,7 @@ class StackDetection:
 
 @dataclass
 class EntryPoint:
-    """Punto de entrada detectado del proyecto."""
+    """Detected project entry point."""
 
     path: str
     stack: str
@@ -82,7 +82,7 @@ class EntryPoint:
 
 @dataclass
 class DependencyRecord:
-    """Dependencia detectada del proyecto."""
+    """Detected project dependency."""
 
     name: str
     ecosystem: str
@@ -98,7 +98,7 @@ class DependencyRecord:
 
 @dataclass
 class DependencySummary:
-    """Resumen del analisis de dependencias."""
+    """Dependency analysis summary."""
 
     requested: bool = False
     total_count: int = 0
@@ -112,7 +112,7 @@ class DependencySummary:
 
 @dataclass
 class GraphNode:
-    """Nodo del grafo estructural del codigo."""
+    """Node in the structural module graph."""
 
     id: str
     kind: str
@@ -126,7 +126,7 @@ class GraphNode:
 
 @dataclass
 class GraphEdge:
-    """Arista del grafo estructural del codigo."""
+    """Edge in the structural module graph."""
 
     source: str
     target: str
@@ -137,7 +137,7 @@ class GraphEdge:
 
 @dataclass
 class ModuleGraphSummary:
-    """Resumen del analisis estructural del grafo."""
+    """Structural module graph analysis summary."""
 
     requested: bool = False
     node_count: int = 0
@@ -159,7 +159,7 @@ class ModuleGraphSummary:
 
 @dataclass
 class ModuleGraph:
-    """Grafo de modulos, simbolos y relaciones del proyecto."""
+    """Module, symbol, and relationship graph for the project."""
 
     nodes: list[GraphNode] = field(default_factory=list)
     edges: list[GraphEdge] = field(default_factory=list)
@@ -173,7 +173,7 @@ MetricAvailability = Literal["measured", "inferred", "unavailable"]
 
 @dataclass
 class FileMetrics:
-    """Metricas de calidad de un fichero de codigo fuente."""
+    """Code quality metrics for a single source file."""
 
     path: str
     language: str
@@ -198,7 +198,7 @@ class FileMetrics:
 
 @dataclass
 class CoverageRecord:
-    """Registro de cobertura de codigo de un fichero de cobertura."""
+    """Coverage record extracted from a coverage report file."""
 
     source_file: str
     format: str
@@ -213,7 +213,7 @@ class CoverageRecord:
 
 @dataclass
 class MetricsSummary:
-    """Resumen del analisis de metricas de calidad de codigo."""
+    """Code quality metrics analysis summary."""
 
     requested: bool = False
     file_count: int = 0
@@ -227,7 +227,7 @@ class MetricsSummary:
 
 @dataclass
 class DocRecord:
-    """Registro de documentacion extraida de un simbolo del codigo."""
+    """Documentation record extracted from a code symbol."""
 
     symbol: str
     kind: str
@@ -242,7 +242,7 @@ class DocRecord:
 
 @dataclass
 class DocSummary:
-    """Resumen del analisis de documentacion extraida."""
+    """Extracted documentation analysis summary."""
 
     requested: bool = False
     total_count: int = 0
@@ -311,6 +311,11 @@ class SemanticSummary:
     files_skipped: int = 0
     truncated: bool = False
     limitations: list[str] = field(default_factory=list)
+    # Ranked hotspots by fan-in/fan-out (populated after analysis)
+    hotspots: list[dict] = field(default_factory=list)
+    # Coverage percentage: files_analyzed / total source files in repo
+    coverage_pct: Optional[float] = None
+    coverage_confidence: str = "unknown"
 
 
 # --- Runtime Architecture ---
@@ -347,7 +352,7 @@ class MonorepoPackageInfo:
 
 @dataclass
 class ArchitectureDomain:
-    """Un dominio funcional inferido del codigo."""
+    """Inferred functional domain from code structure."""
 
     name: str
     files: list[str] = field(default_factory=list)
@@ -357,7 +362,7 @@ class ArchitectureDomain:
 
 @dataclass
 class ArchitectureLayer:
-    """Una capa arquitectonica detectada."""
+    """Detected architectural layer."""
 
     name: str
     pattern: str
@@ -367,7 +372,7 @@ class ArchitectureLayer:
 
 @dataclass
 class BoundedContext:
-    """Un contexto acotado aproximado inferido."""
+    """Approximate bounded context inferred from code structure."""
 
     name: str
     modules: list[str] = field(default_factory=list)
@@ -377,7 +382,7 @@ class BoundedContext:
 
 @dataclass
 class ArchitectureAnalysis:
-    """Resultado del analisis arquitectonico completo."""
+    """Complete architectural analysis result."""
 
     requested: bool = False
     pattern: Optional[str] = None
@@ -393,7 +398,7 @@ class ArchitectureAnalysis:
 
 @dataclass
 class EnvVarRecord:
-    """Variable de entorno referenciada en el codigo del proyecto."""
+    """Environment variable referenced in project code."""
 
     key: str
     required: bool = True
@@ -406,7 +411,7 @@ class EnvVarRecord:
 
 @dataclass
 class EnvSummary:
-    """Resumen del analisis de variables de entorno."""
+    """Environment variable analysis summary."""
 
     requested: bool = False
     total: int = 0
@@ -421,33 +426,33 @@ class EnvSummary:
 
 @dataclass
 class CodeNote:
-    """Nota de codigo: TODO, FIXME, HACK, NOTE, DEPRECATED, WARNING, XXX, BUG, OPTIMIZE."""
+    """Inline code annotation: TODO, FIXME, HACK, NOTE, DEPRECATED, WARNING, XXX, BUG, OPTIMIZE."""
 
     kind: str                   # TODO | FIXME | HACK | NOTE | DEPRECATED | WARNING | XXX | BUG | OPTIMIZE
-    path: str                   # ruta relativa al fichero
-    line: int                   # numero de linea (1-based)
-    text: str                   # texto de la nota (truncado a 200 chars)
-    symbol: Optional[str] = None  # funcion o clase envolvente mas cercana
+    path: str                   # relative path to file
+    line: int                   # line number (1-based)
+    text: str                   # annotation text (truncated to 200 chars)
+    symbol: Optional[str] = None  # nearest enclosing function or class
 
 
 @dataclass
 class AdrRecord:
-    """Architecture Decision Record detectado en el repositorio."""
+    """Architecture Decision Record detected in the repository."""
 
     path: str
     title: str
     status: Optional[str] = None    # accepted | proposed | deprecated | superseded
-    summary: Optional[str] = None   # primer parrafo del ADR
+    summary: Optional[str] = None   # first paragraph of the ADR
 
 
 @dataclass
 class CodeNotesSummary:
-    """Resumen del analisis de notas de codigo y ADRs."""
+    """Code annotations and ADR analysis summary."""
 
     requested: bool = False
     total: int = 0
     by_kind: dict[str, int] = field(default_factory=dict)
-    top_files: list[str] = field(default_factory=list)   # ficheros con mas notas
+    top_files: list[str] = field(default_factory=list)   # files with the most notes
     adr_count: int = 0
     limitations: list[str] = field(default_factory=list)
 
@@ -492,7 +497,7 @@ class PipelineTrace:
 
 @dataclass
 class ConfidenceSummary:
-    """Resumen de confianza y calidad del analisis."""
+    """Analysis confidence and quality summary."""
 
     overall: Literal["high", "medium", "low"] = "medium"
     stack_confidence: Literal["high", "medium", "low"] = "medium"
@@ -505,7 +510,7 @@ class ConfidenceSummary:
 
 @dataclass
 class AnalysisGap:
-    """Gap o incertidumbre detectada en el analisis."""
+    """Gap or uncertainty detected in the analysis."""
 
     area: str   # entry_points | dependencies | stack | architecture | env
     reason: str
@@ -516,7 +521,7 @@ class AnalysisGap:
 
 @dataclass
 class CommitRecord:
-    """Un commit reciente del repositorio."""
+    """A recent repository commit."""
 
     hash: str
     message: str
@@ -527,7 +532,7 @@ class CommitRecord:
 
 @dataclass
 class ChangeHotspot:
-    """Fichero con mayor frecuencia de cambios en la ventana de tiempo."""
+    """File with the highest change frequency in the time window."""
 
     file: str
     commit_count: int
@@ -536,7 +541,7 @@ class ChangeHotspot:
 
 @dataclass
 class UncommittedChanges:
-    """Cambios pendientes en el working tree."""
+    """Pending changes in the working tree."""
 
     staged: list[str] = field(default_factory=list)
     unstaged: list[str] = field(default_factory=list)
@@ -545,7 +550,7 @@ class UncommittedChanges:
 
 @dataclass
 class GitContext:
-    """Contexto temporal del repositorio git."""
+    """Git repository temporal context."""
 
     requested: bool = False
     branch: Optional[str] = None
@@ -559,20 +564,20 @@ class GitContext:
 
 @dataclass
 class SourceMap:
-    """Schema completo del output v1.0.
+    """Complete output schema v1.0.
 
-    Campos de deteccion (stacks, project_type, entry_points) son vacios/null
-    en Fase 1 y se rellenan a partir de Fase 2.
+    Detection fields (stacks, project_type, entry_points) are empty/null
+    in phase 1 and populated from phase 2 onwards.
 
-    file_tree sigue la convencion D-01/D-02:
-      - None = fichero
-      - dict = directorio
+    file_tree follows convention D-01/D-02:
+      - None = file
+      - dict = directory
     """
 
     metadata: AnalysisMetadata = field(default_factory=AnalysisMetadata)
     file_tree: dict[str, Any] = field(default_factory=dict)
     stacks: list[StackDetection] = field(default_factory=list)
-    project_type: Optional[str] = None                    # relleno en Fase 3
+    project_type: Optional[str] = None                    # populated in phase 3
     entry_points: list[EntryPoint] = field(default_factory=list)
     dependencies: list[DependencyRecord] = field(default_factory=list)
     dependency_summary: Optional[DependencySummary] = None

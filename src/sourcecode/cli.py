@@ -323,61 +323,79 @@ def main(
         "json",
         "--format",
         "-f",
-        help="Formato de salida: json|yaml",
+        help="Output format: json (default) or yaml. Both carry identical data — yaml is more human-readable, json is preferred for agent pipelines.",
         show_default=True,
     ),
     output: Optional[Path] = typer.Option(
         None,
         "--output",
         "-o",
-        help="Fichero de salida (default: stdout)",
+        help="Write output to a file instead of stdout. Useful for storing analysis snapshots or piping to downstream tools.",
     ),
     compact: bool = typer.Option(
         False,
         "--compact",
-        help="Output reducido (~500-700 tokens): tipo, stacks, entradas, arbol nivel 1 y summaries de flags opcionales activos",
+        help=(
+            "Compact output (~600–800 tokens): project type, stacks, production entry points, "
+            "dependency summary, confidence summary, and analysis gaps. "
+            "Omits file tree, raw dependency lists, docs, and module graph. "
+            "Designed for agent context windows. Automatically enables --dependencies, --env-map, and --code-notes."
+        ),
     ),
     dependencies: bool = typer.Option(
         False,
         "--dependencies",
-        help="Incluir dependencias directas, versiones exactas y transitivas cuando haya lockfiles compatibles",
+        help=(
+            "Analyze direct and transitive dependencies. Reads manifests (pyproject.toml, package.json, go.mod, etc.) "
+            "and lockfiles when available. Adds dependency_summary and key_dependencies to output."
+        ),
     ),
     graph_modules: bool = typer.Option(
         False,
         "--graph-modules",
-        help="Incluir grafo estructural de modulos, imports y relaciones simples del codigo",
+        help=(
+            "Include a structural module graph: nodes (files/symbols) and edges (imports, calls, contains). "
+            "Useful for understanding coupling and call flows. Adds module_graph to output. "
+            "Combine with --graph-detail and --graph-edges to control scope."
+        ),
     ),
     graph_detail: str = typer.Option(
         "high",
         "--graph-detail",
-        help="Nivel de detalle del grafo: high|medium|full",
+        help="Detail level for --graph-modules: high (top modules by importance), medium (filtered by relevance), full (all nodes and edges). Default: high.",
         show_default=True,
     ),
     max_nodes: Optional[int] = typer.Option(
         None,
         "--max-nodes",
-        help="Limite de nodos para `--graph-modules` en modos high/medium",
+        help="Maximum number of nodes in --graph-modules output when using high or medium detail. Prevents oversized graphs in large codebases.",
         min=1,
     ),
     graph_edges: Optional[str] = typer.Option(
         None,
         "--graph-edges",
-        help="Tipos de arista para `--graph-modules` separados por comas: imports,calls,contains,extends",
+        help="Edge types for --graph-modules, comma-separated: imports,calls,contains,extends. Default: all available. Example: --graph-edges imports,calls",
     ),
     no_tree: bool = typer.Option(
         False,
         "--no-tree",
-        help="Suprimir file_tree y file_paths del output (ahora deprecado: el arbol ya no se incluye por defecto)",
+        help="(Deprecated) Previously suppressed file_tree. The file tree is excluded by default — this flag is now a no-op. Use --tree to include the file tree.",
     ),
     tree: bool = typer.Option(
         False,
         "--tree",
-        help="Incluir file_tree completo y file_paths en el output (capa deep-dive)",
+        help=(
+            "Include the full file_tree and flat file_paths list in output (deep-dive layer). "
+            "Adds significant size — use when the agent needs to browse the full file structure."
+        ),
     ),
     no_redact: bool = typer.Option(
         False,
         "--no-redact",
-        help="Desactivar redaccion de secretos (activa por defecto)",
+        help=(
+            "Disable automatic secret redaction. By default, potential secrets (API keys, tokens, passwords) "
+            "are replaced with [REDACTED]. Use with caution — output may contain sensitive values."
+        ),
     ),
     version: Optional[bool] = typer.Option(
         None,
@@ -385,80 +403,109 @@ def main(
         "-v",
         callback=version_callback,
         is_eager=True,
-        help="Mostrar version y salir",
+        help="Show version number and exit.",
     ),
     depth: int = typer.Option(
         4,
         "--depth",
-        help="Profundidad maxima del arbol de ficheros (default: 4)",
+        help=(
+            "Maximum depth for file tree traversal (default: 4, range: 1–20). "
+            "Increase for deeply nested projects — Maven/Java requires at least 8 (src/main/java/...)."
+        ),
         min=1,
         max=20,
     ),
     docs: bool = typer.Option(
         False,
         "--docs",
-        help="Incluir documentacion extraida: docstrings, firmas y comentarios de modulos y simbolos",
+        help="Extract documentation: docstrings, function signatures, and module-level comments. Adds doc_summary and docs to output. Combine with --docs-depth to control coverage.",
     ),
     docs_depth: str = typer.Option(
         "symbols",
         "--docs-depth",
-        help="Profundidad de extraccion de docs: module|symbols|full",
+        help="Documentation extraction depth: module (module-level only), symbols (functions and classes), full (all symbols including private). Default: symbols.",
         show_default=True,
     ),
     full_metrics: bool = typer.Option(
         False,
         "--full-metrics",
-        help="Auditoria tecnica: LOC, simbolos, complejidad ciclomatica y cobertura por fichero. No incluido en --agent (uso: CI, code review, no context principal para agentes IA)",
+        help=(
+            "Technical audit: lines of code, symbol counts, cyclomatic complexity, and test coverage per file. "
+            "Produces file_metrics and metrics_summary. "
+            "Not included in --agent output — designed for CI pipelines and code review tools, not as primary agent context."
+        ),
     ),
     semantics: bool = typer.Option(
         False,
         "--semantics",
-        help="Incluir call graph semantico, linking cross-file de simbolos y resolucion avanzada de imports",
+        help=(
+            "Semantic analysis: cross-file symbol resolution, call graph with confidence levels, and import linking. "
+            "Adds semantic_calls, semantic_symbols, semantic_links, semantic_summary, and hotspots (files ranked by fan-in/fan-out). "
+            "Slower than default analysis — skip for quick scans. "
+            "Confidence degrades on dynamic dispatch, decorators, and generated code."
+        ),
     ),
     architecture: bool = typer.Option(
         False,
         "--architecture",
-        help="Inferencia arquitectonica: dominios funcionales, capas (MVC/layered/hexagonal) y bounded contexts aproximados",
+        help=(
+            "Architectural inference: detect functional layers (MVC/layered/hexagonal), bounded contexts, "
+            "and dominant structural patterns. Adds architecture to output. "
+            "Confidence is low when based on directory names alone — combine with --semantics for higher accuracy."
+        ),
     ),
     git_context: bool = typer.Option(
         False,
         "--git-context",
         "-g",
-        help="Incluir contexto git: commits recientes, ficheros mas activos y cambios pendientes",
+        help="Include git activity: recent commits, change hotspots (most frequently modified files), pending uncommitted changes, and contributors. Adds git_context to output.",
     ),
     git_depth: int = typer.Option(
         20,
         "--git-depth",
-        help="Numero de commits recientes a incluir con --git-context (default: 20)",
+        help="Number of recent commits to include with --git-context (default: 20, max: 100).",
         min=1,
         max=100,
     ),
     git_days: int = typer.Option(
         90,
         "--git-days",
-        help="Ventana temporal en dias para detectar ficheros mas activos con --git-context (default: 90)",
+        help="Time window in days for detecting change hotspots with --git-context (default: 90). Hotspots are files with the most commits in this window.",
         min=1,
         max=3650,
     ),
     env_map: bool = typer.Option(
         False,
         "--env-map",
-        help="Incluir mapa de variables de entorno: claves, tipos, categorias y ficheros que las referencian",
+        help="Map environment variables: keys, types (string/int/bool/url/path), categories (database/auth/service/...), and which files reference them. Adds env_map and env_summary.",
     ),
     code_notes: bool = typer.Option(
         False,
         "--code-notes",
-        help="Extraer anotaciones TODO/FIXME/HACK/NOTE/DEPRECATED/WARNING/BUG/XXX/OPTIMIZE con ubicacion y simbolo envolvente, y detectar ADRs en docs/decisions/, docs/adr/ y similares",
+        help=(
+            "Extract inline annotations: TODO, FIXME, HACK, NOTE, DEPRECATED, WARNING, BUG, XXX, OPTIMIZE — "
+            "with file location and enclosing symbol. "
+            "Also detects Architecture Decision Records (ADRs) in docs/decisions/, docs/adr/, and similar paths."
+        ),
     ),
     agent: bool = typer.Option(
         False,
         "--agent",
-        help="Modo agente: output estructurado y sin ruido para consumo por IA. Incluye identidad, entrypoints, arquitectura, dependencias clave, señales operacionales y gaps. Sin arbol de ficheros ni secciones vacias.",
+        help=(
+            "Agent-optimized output: structured, noise-free JSON for AI consumption. "
+            "Automatically enables --dependencies, --env-map, and --code-notes. Suppresses file tree. "
+            "Output includes: identity, entry points, architecture, runtime dependencies, "
+            "operational signals, confidence summary, and analysis gaps. No empty sections."
+        ),
     ),
     trace_pipeline: bool = typer.Option(
         False,
         "--trace-pipeline",
-        help="Modo trazabilidad: incluye pipeline_trace con candidatos, filtros, descartes y origen de cada dato. Para diagnóstico de contaminación de resultados.",
+        help=(
+            "Diagnostic mode: include pipeline_trace in output showing every candidate, filter decision, "
+            "and data origin across all pipeline stages. "
+            "Use to diagnose unexpected or contaminated results. Not intended for normal agent use."
+        ),
     ),
 ) -> None:
     """Analyze a repository and produce structured context for AI coding agents.
@@ -480,22 +527,22 @@ def main(
 
     _t0 = time.monotonic()
 
-    # Validar formato
+    # Validate format choices
     if format not in FORMAT_CHOICES:
         typer.echo(
-            f"Error: valor invalido '{format}' para --format. Opciones: {', '.join(FORMAT_CHOICES)}",
+            f"Error: invalid value '{format}' for --format. Valid options: {', '.join(FORMAT_CHOICES)}",
             err=True,
         )
         raise typer.Exit(code=1)
     if graph_detail not in GRAPH_DETAIL_CHOICES:
         typer.echo(
-            f"Error: valor invalido '{graph_detail}' para --graph-detail. Opciones: {', '.join(GRAPH_DETAIL_CHOICES)}",
+            f"Error: invalid value '{graph_detail}' for --graph-detail. Valid options: {', '.join(GRAPH_DETAIL_CHOICES)}",
             err=True,
         )
         raise typer.Exit(code=1)
     if docs_depth not in DOCS_DEPTH_CHOICES:
         typer.echo(
-            f"Error: valor invalido '{docs_depth}' para --docs-depth. Opciones: {', '.join(DOCS_DEPTH_CHOICES)}",
+            f"Error: invalid value '{docs_depth}' for --docs-depth. Valid options: {', '.join(DOCS_DEPTH_CHOICES)}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -509,7 +556,7 @@ def main(
         typer.echo(f"Error: '{target}' is not a directory.", err=True)
         raise typer.Exit(code=1)
 
-    # --- Importar modulos de logica ---
+    # --- Import analysis modules ---
     from dataclasses import asdict, replace
 
     from sourcecode.dependency_analyzer import DependencyAnalyzer
@@ -532,17 +579,17 @@ def main(
     from sourcecode.serializer import agent_view, compact_view, normalize_source_map, standard_view, validate_cross_analyzer_consistency, validate_source_map, write_output
     from sourcecode.workspace import WorkspaceAnalyzer
 
-    # 1. Escanear el directorio (SCAN-01 a SCAN-05)
+    # 1. Scan directory (SCAN-01 to SCAN-05)
     redactor = SecretRedactor(enabled=not no_redact)
 
-    # Detectar manifests antes del scan para ajustar depth.
-    # find_manifests() solo mira profundidad 0-1, no necesita el arbol.
+    # Detect manifests before scan to adjust depth.
+    # find_manifests() only looks at depth 0-1, does not need the full tree.
     _pre_scanner = FileScanner(target, max_depth=1)
     manifests = _pre_scanner.find_manifests()
 
-    # Maven usa src/main/java/<groupId>/<artifactId>/<module>/ (profundidad 7+).
-    # Con depth=4 los ficheros .java son invisibles y todos los analizadores fallan.
-    # Necesitamos al menos 8: src(1)+main(2)+java(3)+com(4)+co(5)+app(6)+module(7)+file.
+    # Maven uses src/main/java/<groupId>/<artifactId>/<module>/ (depth 7+).
+    # At depth=4 Java files are invisible and all analyzers fail.
+    # Require at least 8: src(1)+main(2)+java(3)+com(4)+co(5)+app(6)+module(7)+file.
     _java_manifest_names = {"pom.xml", "build.gradle", "build.gradle.kts"}
     _is_java = any(Path(m).name in _java_manifest_names for m in manifests)
     _java_min_depth = 8
@@ -559,12 +606,12 @@ def main(
     scanner = FileScanner(target, max_depth=effective_depth)
     raw_tree = scanner.scan_tree()
 
-    # 2. Filtrar del arbol las entradas de .env y *.secret (SEC-02, todos los niveles)
+    # 2. Filter .env and *.secret entries from file tree (SEC-02, all levels)
     def filter_sensitive_files(tree: dict[str, Any]) -> dict[str, Any]:
         filtered: dict[str, Any] = {}
         for name, value in tree.items():
             if redactor.should_exclude_file(name):
-                continue  # excluir .env, *.secret del arbol
+                continue  # exclude .env, *.secret from tree
             if isinstance(value, dict):
                 filtered[name] = filter_sensitive_files(value)
             else:
@@ -614,8 +661,8 @@ def main(
         invalid_edges = sorted(parsed_graph_edges - GRAPH_EDGE_CHOICES)
         if invalid_edges:
             typer.echo(
-                "Error: valores invalidos para --graph-edges: "
-                f"{', '.join(invalid_edges)}. Opciones: {', '.join(sorted(GRAPH_EDGE_CHOICES))}",
+                f"Error: invalid values for --graph-edges: "
+                f"{', '.join(invalid_edges)}. Valid options: {', '.join(sorted(GRAPH_EDGE_CHOICES))}",
                 err=True,
             )
             raise typer.Exit(code=1)
@@ -804,7 +851,7 @@ def main(
         else None
     )
 
-    # 3. Construir el schema
+    # 3. Build schema
     # Compute analyzer fingerprints: short hashes of each analyzer's key rule
     # constants so that a rule change is always visible in the output, regardless
     # of whether the semver was bumped.
@@ -850,9 +897,29 @@ def main(
                     ),
                     workspace=ws.path,
                 )
-                all_sem_calls.extend(ws_calls)
-                all_sem_symbols.extend(ws_syms)
-                all_sem_links.extend(ws_links)
+                # Prefix paths to repo-root-relative (sm.file_paths uses root-relative)
+                _pfx = ws.path.rstrip("/") + "/"
+                all_sem_calls.extend(
+                    replace(c,
+                        caller_path=_pfx + c.caller_path,
+                        callee_path=_pfx + c.callee_path,
+                    )
+                    for c in ws_calls
+                )
+                all_sem_symbols.extend(
+                    replace(s, path=_pfx + s.path) for s in ws_syms
+                )
+                all_sem_links.extend(
+                    replace(l,
+                        importer_path=_pfx + l.importer_path,
+                        source_path=(
+                            _pfx + l.source_path
+                            if l.source_path is not None and not l.is_external
+                            else l.source_path
+                        ),
+                    )
+                    for l in ws_links
+                )
                 all_sem_summaries.append(ws_sum)
             merged_sem = semantic_analyzer.merge_summaries(all_sem_summaries)
             sm = replace(
@@ -882,17 +949,86 @@ def main(
             [ws.path for ws in workspace_analysis.workspaces],
         )
 
-    # Phase 9: LLM Output Quality — poblar campos derivados
+    # Phase 9: LLM Output Quality — populate derived fields
     from sourcecode.architecture_summary import ArchitectureSummarizer
     from sourcecode.summarizer import ProjectSummarizer
     from sourcecode.tree_utils import flatten_file_tree
 
-    # LQN-01: lista plana de paths del file_tree con separador forward-slash
+    # LQN-01: flat path list from file_tree with forward-slash separator
     sm.file_paths = [
         p.replace("\\", "/") for p in flatten_file_tree(sm.file_tree)
     ]
 
-    # LQN-05: top-15 dependencias directas de manifest/lockfile, ordenadas por rol
+    # Semantic hotspots + coverage (needs sm.file_paths populated above)
+    if semantic_analyzer is not None and sm.semantic_summary is not None:
+        from collections import Counter as _Counter
+        from pathlib import Path as _Path
+
+        _SRC_EXTS = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".kt", ".rs", ".rb"}
+        _fan_in: _Counter[str] = _Counter()
+        _fan_out: _Counter[str] = _Counter()
+        for _call in sm.semantic_calls:
+            if _call.callee_path:
+                _fan_in[_call.callee_path] += 1
+            if _call.caller_path:
+                _fan_out[_call.caller_path] += 1
+
+        _all_call_files = set(_fan_in) | set(_fan_out)
+        _hotspots: list[dict] = []
+        # Filter test paths from hotspots — they dominate fan-in by calling many modules
+        _TEST_MARKERS = {"/test", "/tests", "/spec", "/specs", "_test.", ".test.", ".spec."}
+        for _p in _all_call_files:
+            if any(_m in _p for _m in _TEST_MARKERS) or _p.startswith("test"):
+                continue
+            _in = _fan_in[_p]
+            _out = _fan_out[_p]
+            _score = _in * 2.0 + _out * 1.0
+            if _score < 2:
+                continue
+            if _in > _out * 2:
+                _reason = "high fan-in: many callers depend on this"
+            elif _out > _in * 2:
+                _reason = "high fan-out: orchestrates many modules"
+            else:
+                _reason = "hub: balanced import/call traffic"
+            # Determine method confidence from calls touching this path
+            _method = next(
+                (c.method for c in sm.semantic_calls if c.callee_path == _p or c.caller_path == _p),
+                "heuristic",
+            )
+            _hotspots.append({
+                "path": _p,
+                "importance_score": round(_score, 1),
+                "fan_in": _in,
+                "fan_out": _out,
+                "reason": _reason,
+                "confidence": "medium" if _method == "heuristic" else "high",
+            })
+        _hotspots.sort(key=lambda x: -x["importance_score"])
+
+        _total_src = sum(
+            1 for _fp in sm.file_paths
+            if _Path(_fp).suffix.lower() in _SRC_EXTS
+        )
+        _analyzed = sm.semantic_summary.files_analyzed
+        _cov_pct = round(_analyzed / _total_src * 100, 1) if _total_src > 0 else 0.0
+        _cov_conf = (
+            "high" if _cov_pct >= 80
+            else "medium" if _cov_pct >= 40
+            else "low"
+        )
+
+        sm = replace(
+            sm,
+            semantic_summary=replace(
+                sm.semantic_summary,
+                hotspots=_hotspots[:10],
+                coverage_pct=_cov_pct,
+                coverage_confidence=_cov_conf,
+            ),
+        )
+
+    # LQN-05: top-15 direct dependencies from manifest/lockfile, sorted by role
     if dependency_analyzer is not None:
         from sourcecode.dependency_analyzer import _ROLE_PRIORITY
 
@@ -911,14 +1047,14 @@ def main(
 
         sm.key_dependencies = sorted(direct_deps, key=_dep_sort_key)[:15]
 
-    # LQN-02: resumen NL deterministico
+    # LQN-02: deterministic NL summary
     sm.project_summary = ProjectSummarizer(target).generate(sm)
     sm.architecture_summary = ArchitectureSummarizer(target).generate(sm)
 
     # Phase 13 Plan 04: Architectural Inference (--architecture flag)
     if architecture:
         from sourcecode.architecture_analyzer import ArchitectureAnalyzer
-        arch_graph = module_graph  # None si --graph-modules no fue pasado
+        arch_graph = module_graph  # None if --graph-modules was not passed
         sm.architecture = ArchitectureAnalyzer().analyze(target, sm, arch_graph)
 
     # Git Context (--git-context flag)
@@ -1004,7 +1140,7 @@ def main(
                         ))
         sm = _replace(sm, pipeline_trace=_trace.build_trace())
 
-    # 4. Serializar
+    # 4. Serialize
     if agent:
         data = agent_view(sm)
         if not no_redact:
@@ -1058,7 +1194,7 @@ def main(
     except Exception:
         pass
 
-    # 6. Escribir output (CLI-04)
+    # 6. Write output (CLI-04)
     write_output(content, output=output)
 
 
@@ -1140,7 +1276,7 @@ def prepare_context_cmd(
 
     target = path.resolve()
     if not target.exists() or not target.is_dir():
-        typer.echo(f"Error: '{target}' no es un directorio válido.", err=True)
+        typer.echo(f"Error: '{target}' is not a valid directory.", err=True)
         raise typer.Exit(code=1)
 
     if dry_run:

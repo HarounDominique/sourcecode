@@ -1,3 +1,3 @@
-"""sourcecode — Genera mapas de contexto estructurado para agentes IA."""
+"""sourcecode — Deterministic codebase context maps for AI coding agents."""
 
-__version__ = "0.30.0"
+__version__ = "0.32.0"
