@@ -26,10 +26,26 @@ _EXTENSION_MAP = {
 _ENTRYPOINT_NAMES = {
     "main.py": ("python", "script"),
     "app.py": ("python", "app"),
-    "index.js": ("nodejs", "server"),
+    # index.js excluded: ambiguous (library export vs server); nodejs detector handles it
     "main.go": ("go", "binary"),
     "main.rs": ("rust", "binary"),
 }
+
+_AUXILIARY_DIRS: frozenset[str] = frozenset({
+    "benchmark", "benchmarks", "bench",
+    "example", "examples",
+    "demo", "demos",
+    "playground", "playgrounds",
+    "fixture", "fixtures", "mock", "mocks",
+    "sandbox", "e2e", "docs", "doc", "documentation",
+    "test", "tests", "spec", "specs", "__tests__",
+    "scripts", "script", "tools", "tool", "tooling", "ci",
+})
+
+
+def _is_auxiliary_path(path: str) -> bool:
+    parts = path.replace("\\", "/").split("/")
+    return any(p.lower() in _AUXILIARY_DIRS for p in parts)
 
 
 class HeuristicDetector(AbstractDetector):
@@ -62,6 +78,8 @@ class HeuristicDetector(AbstractDetector):
 
         entry_points: list[EntryPoint] = []
         for path in paths:
+            if _is_auxiliary_path(path):
+                continue
             filename = path.rsplit("/", 1)[-1]
             if filename in _ENTRYPOINT_NAMES:
                 stack, kind = _ENTRYPOINT_NAMES[filename]

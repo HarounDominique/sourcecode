@@ -31,6 +31,14 @@ _SPRING_CONF_PROFILE_RE = re.compile(r'^application-[a-z0-9_-]+\.(properties|ya?
 # Matches ${ENV_VAR} or ${ENV_VAR:default} where ENV_VAR is UPPER_SNAKE_CASE
 _SPRING_ENV_REF_RE = re.compile(r'\$\{([A-Z][A-Z0-9_]*)(?::[^}]*)?\}')
 
+# Patterns where absence of the variable causes a hard runtime error (not just None/null).
+# py_environ_bracket → os.environ["KEY"] raises KeyError
+# java_spring_value   → Spring fails to start if ${KEY} has no default
+_HARD_REQUIRED_PATTERNS: frozenset[str] = frozenset({
+    "py_environ_bracket",
+    "java_spring_value",
+})
+
 # (pattern_id, compiled_regex)
 # Grupos de captura: group(1)=key, group(2)=default si existe
 _PATTERNS: list[tuple[str, re.Pattern]] = [
@@ -132,9 +140,9 @@ def _infer_type_hint(key: str) -> str:
 def _scan_file(
     path: Path,
     rel_path: str,
-    findings: dict[str, list[tuple[str, Optional[str]]]],
+    findings: dict[str, list[tuple[str, Optional[str], bool]]],
 ) -> None:
-    """Escanea un fichero de código y acumula hallazgos en findings[key] = [(file_ref, default)]."""
+    """Escanea un fichero y acumula hallazgos en findings[key] = [(file_ref, default, is_hard)]."""
     try:
         size = path.stat().st_size
         if size > _MAX_FILE_SIZE:
@@ -143,8 +151,8 @@ def _scan_file(
     except OSError:
         return
 
-    lines = content.splitlines()
-    for _pattern_id, regex in _PATTERNS:
+    for pattern_id, regex in _PATTERNS:
+        is_hard = pattern_id in _HARD_REQUIRED_PATTERNS
         for m in regex.finditer(content):
             key = m.group(1)
             if not key:
@@ -158,10 +166,9 @@ def _scan_file(
             except IndexError:
                 pass
 
-            # Compute 1-based line number
             line_num = content.count("\n", 0, m.start()) + 1
             file_ref = f"{rel_path}:{line_num}"
-            findings[key].append((file_ref, default))
+            findings[key].append((file_ref, default, is_hard))
 
 
 def _parse_env_example(
@@ -211,7 +218,8 @@ def _parse_spring_config(
     for m in _SPRING_ENV_REF_RE.finditer(content):
         key = m.group(1)
         line_num = content.count("\n", 0, m.start()) + 1
-        findings[key].append((f"{rel_path}:{line_num}", None))
+        # Spring fails to start if a referenced env var has no default → hard required
+        findings[key].append((f"{rel_path}:{line_num}", None, True))
 
 
 class EnvAnalyzer:
@@ -224,8 +232,8 @@ class EnvAnalyzer:
     ) -> tuple[list, object]:
         from sourcecode.schema import EnvSummary, EnvVarRecord
 
-        # findings[key] = list of (file_ref, default_or_None)
-        findings: dict[str, list[tuple[str, Optional[str]]]] = defaultdict(list)
+        # findings[key] = list of (file_ref, default_or_None, is_hard_required)
+        findings: dict[str, list[tuple[str, Optional[str], bool]]] = defaultdict(list)
         example_entries: list[tuple[str, Optional[str], Optional[str]]] = []
         example_files_found: list[str] = []
         limitations: list[str] = []
@@ -240,12 +248,16 @@ class EnvAnalyzer:
             if len(records) >= _MAX_KEYS:
                 limitations.append(f"key_limit_reached:{_MAX_KEYS}")
                 break
-            defaults = [d for _, d in refs if d is not None]
-            required = len(defaults) == 0
+            defaults = [d for _, d, _ in refs if d is not None]
+            # required only when access pattern causes a hard runtime error if missing:
+            # os.environ["KEY"] (KeyError) or Spring @Value/${KEY} without default.
+            # os.getenv("KEY") / os.environ.get("KEY") return None — not hard required.
+            has_hard_access = any(is_hard for _, _, is_hard in refs)
+            required = has_hard_access and not defaults
             default_val = defaults[0] if defaults else None
             unique_files: list[str] = []
             seen: set[str] = set()
-            for file_ref, _ in refs:
+            for file_ref, _, _ in refs:
                 if file_ref not in seen:
                     seen.add(file_ref)
                     unique_files.append(file_ref)
@@ -271,7 +283,7 @@ class EnvAnalyzer:
                     break
                 records[key] = EnvVarRecord(
                     key=key,
-                    required=example_default is None,
+                    required=False,  # .env.example documents presence; hard required needs a code access pattern
                     default=example_default,
                     type_hint=_infer_type_hint(key),
                     category=_infer_category(key),

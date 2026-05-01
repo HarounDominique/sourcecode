@@ -12,6 +12,10 @@ from sourcecode.schema import (
     SourceMap,
 )
 
+_WORKSPACE_CONFIG_FILES: frozenset[str] = frozenset({
+    "turbo.json", "nx.json", "pnpm-workspace.yaml", "lerna.json", "rush.json",
+})
+
 _TOOLING_PREFIXES = (
     ".claude/",
     ".vscode/",
@@ -34,6 +38,18 @@ _CODE_EXTENSIONS = {
 _GENERIC_NAMES = {"utils", "helpers", "common", "shared", "misc", "core", "root", ""}
 
 _TEST_DIRS: frozenset[str] = frozenset({"tests", "test", "spec", "specs", "__tests__", "e2e"})
+_BENCHMARK_DIRS: frozenset[str] = frozenset({
+    "benchmark", "benchmarks", "bench",
+    "example", "examples",
+    "demo", "demos",
+    "playground", "playgrounds",
+    "fixture", "fixtures",
+    "sandbox",
+})
+_DOCS_DIRS: frozenset[str] = frozenset({"docs", "doc", "documentation", "wiki"})
+_TOOLING_DIRS: frozenset[str] = frozenset({"scripts", "script", "tools", "tool", "ci"})
+# All dirs that are not part of the runtime source architecture
+_NON_SOURCE_DIRS: frozenset[str] = _TEST_DIRS | _BENCHMARK_DIRS | _DOCS_DIRS | _TOOLING_DIRS
 
 # Exact file stems that signal a specific architectural layer
 _LAYER_STEM_EXACT: dict[str, str] = {
@@ -177,15 +193,35 @@ class ArchitectureAnalyzer:
             elif pattern == "unknown":
                 limitations.append("Patron de capas no reconocido: estructura de directorios sin senales claras")
 
+        # Step 3b: monorepo override — workspace config is hard evidence
+        if self._has_workspace_config(sm.file_paths) and pattern not in (
+            "monorepo", "cqrs", "clean", "onion", "hexagonal"
+        ):
+            mono_layers = self._detect_monorepo_packages(filtered)
+            if mono_layers or pattern in (None, "unknown", "flat", "modular", "layered"):
+                pattern = "monorepo"
+                layers = mono_layers
+                limitations.append(
+                    "Workspace config detectado — arquitectura refleja topologia de paquetes"
+                )
+
         # Step 4: bounded context inference
         bounded_contexts = self._infer_bounded_contexts(domains, graph)
 
-        # Overall confidence
+        # Overall confidence — based on domain quality, not raw count
         confidence: Literal["high", "medium", "low"]
+        strong_domains = [d for d in domains if d.confidence in ("high", "medium")]
+        all_layers_weak = layers and all(l.confidence == "low" for l in layers)
         if pattern not in (None, "unknown", "flat"):
-            # A recognised pattern was detected — at least medium confidence
-            confidence = "high" if len(domains) >= 3 else "medium"
-        elif len(domains) >= 1:
+            if all_layers_weak:
+                # Layers came from file-naming heuristic only, not directory structure
+                confidence = "medium"
+                limitations.append(
+                    "Patron inferido de nombres de archivo — sin estructura de directorios confirmatoria"
+                )
+            else:
+                confidence = "high" if len(strong_domains) >= 3 else "medium"
+        elif len(strong_domains) >= 1:
             confidence = "medium"
         else:
             confidence = "low"
@@ -216,6 +252,10 @@ class ArchitectureAnalyzer:
         for p in paths:
             norm = p.replace("\\", "/")
             if self._is_tooling(norm):
+                continue
+            # Exclude non-source dirs at every path segment (benchmarks, docs, tests, scripts…)
+            parts = norm.split("/")
+            if any(part.lower() in _NON_SOURCE_DIRS for part in parts[:-1]):
                 continue
             ext = Path(norm).suffix.lower()
             if ext not in _CODE_EXTENSIONS:
@@ -250,6 +290,8 @@ class ArchitectureAnalyzer:
         for name, files in groups.items():
             if len(files) < 2:
                 continue
+            if name.lower() in _NON_SOURCE_DIRS:
+                continue
             role = DOMAIN_ROLES.get(name, "")
             domain_confidence: Literal["high", "medium", "low"]
             if name in DOMAIN_ROLES:
@@ -262,10 +304,10 @@ class ArchitectureAnalyzer:
         return domains
 
     def _detect_layers(self, paths: list[str]) -> tuple[str, list[ArchitectureLayer]]:
-        # Exclude test paths so test directories don't skew layer scoring
+        # Exclude non-source paths (tests, benchmarks, docs, tooling) from layer scoring
         source_paths = [
             p for p in paths
-            if not any(part.lower() in _TEST_DIRS for part in p.replace("\\", "/").split("/"))
+            if not any(part.lower() in _NON_SOURCE_DIRS for part in p.replace("\\", "/").split("/"))
         ]
         if not source_paths:
             return "unknown", []
@@ -360,7 +402,7 @@ class ArchitectureAnalyzer:
             parts = p.replace("\\", "/").split("/")
             if len(parts) >= 2 and parts[-1].lower() in _ENTRY_FILES:
                 top = parts[0]
-                if top.lower() not in _SRC_TRANSPARENT and top.lower() not in _TEST_DIRS:
+                if top.lower() not in _SRC_TRANSPARENT and top.lower() not in _NON_SOURCE_DIRS:
                     entry_dirs.setdefault(top, []).append(p)
         if len(entry_dirs) >= 4:
             return "microservices", [
@@ -394,7 +436,7 @@ class ArchitectureAnalyzer:
         non_empty = {k: v for k, v in layer_files.items() if v}
         if len(non_empty) >= 2:
             return "layered", [
-                ArchitectureLayer(name=k, pattern="layered", files=v, confidence="medium")
+                ArchitectureLayer(name=k, pattern="layered", files=v, confidence="low")
                 for k, v in non_empty.items()
             ]
         return None
@@ -412,18 +454,41 @@ class ArchitectureAnalyzer:
             parts = p.replace("\\", "/").split("/")
             for part in parts[:-1]:
                 if (part not in _SRC_TRANSPARENT
-                        and part.lower() not in _TEST_DIRS
+                        and part.lower() not in _NON_SOURCE_DIRS
                         and part.lower() not in _GENERIC_NAMES):
                     module_files.setdefault(part, []).append(p)
                     break
 
-        meaningful = {k: v for k, v in module_files.items() if len(v) >= 2}
+        meaningful = {k: v for k, v in module_files.items() if len(v) >= 3}
         if len(meaningful) >= 2:
             return "modular", [
-                ArchitectureLayer(name=k, pattern="modular", files=v, confidence="medium")
+                ArchitectureLayer(name=k, pattern="modular", files=v, confidence="low")
                 for k, v in meaningful.items()
             ]
         return None
+
+    def _has_workspace_config(self, file_paths: list[str]) -> bool:
+        for path in file_paths:
+            parts = path.replace("\\", "/").split("/")
+            if len(parts) == 1 and parts[0] in _WORKSPACE_CONFIG_FILES:
+                return True
+        return False
+
+    def _detect_monorepo_packages(self, paths: list[str]) -> list[ArchitectureLayer]:
+        """Find workspace packages (packages/*, apps/*, libs/*) in a monorepo."""
+        _WORKSPACE_ROOTS = {"packages", "apps", "libs", "applications"}
+        groups: dict[str, list[str]] = {}
+        for p in paths:
+            parts = p.replace("\\", "/").split("/")
+            if len(parts) >= 2 and parts[0].lower() in _WORKSPACE_ROOTS:
+                key = f"{parts[0]}/{parts[1]}"
+                groups.setdefault(key, []).append(p)
+        result = [
+            ArchitectureLayer(name=k, pattern="monorepo", files=v, confidence="medium")
+            for k, v in groups.items()
+            if len(v) >= 2
+        ]
+        return result[:16]
 
     def _infer_bounded_contexts(
         self,

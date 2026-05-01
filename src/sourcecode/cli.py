@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -8,6 +9,146 @@ from typing import Any, Optional, cast
 import typer
 
 from sourcecode import __version__
+
+
+# ---------------------------------------------------------------------------
+# Analyzer fingerprints — short hashes of each analyzer's key rule constants.
+# A change in heuristics, filter lists, or pattern maps changes the hash,
+# making it immediately visible that two runs used different rule versions
+# even if the semver string is the same.
+# ---------------------------------------------------------------------------
+
+def _fingerprint(*objects: object) -> str:
+    raw = json.dumps([repr(o) for o in objects], sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()[:8]
+
+
+def _compute_analyzer_fingerprints() -> dict[str, str]:
+    from sourcecode.detectors.heuristic import (
+        _AUXILIARY_DIRS as _HEUR_AUX,
+        _ENTRYPOINT_NAMES,
+        _EXTENSION_MAP,
+    )
+    from sourcecode.detectors.nodejs import _FRAMEWORK_MAP, NodejsDetector
+    from sourcecode.confidence_analyzer import (
+        _AUXILIARY_DIR_PREFIXES,
+        _HARD_SOURCES,
+        _SOFT_SOURCES,
+    )
+    from sourcecode.architecture_analyzer import (
+        _BENCHMARK_DIRS,
+        _NON_SOURCE_DIRS,
+        LAYER_PATTERNS,
+    )
+
+    return {
+        "heuristic": _fingerprint(_EXTENSION_MAP, _ENTRYPOINT_NAMES, sorted(_HEUR_AUX)),
+        "nodejs": _fingerprint(_FRAMEWORK_MAP, sorted(NodejsDetector._AUXILIARY_DIRS)),
+        "confidence": _fingerprint(sorted(_AUXILIARY_DIR_PREFIXES), sorted(_HARD_SOURCES), sorted(_SOFT_SOURCES)),
+        "architecture": _fingerprint(sorted(_BENCHMARK_DIRS), sorted(_NON_SOURCE_DIRS), list(LAYER_PATTERNS.keys())),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pipeline trace collector
+# ---------------------------------------------------------------------------
+
+class _TraceCollector:
+    """Lightweight collector for pipeline trace events."""
+
+    def __init__(self, enabled: bool = False) -> None:
+        self._enabled = enabled
+        self._events: list[dict[str, Any]] = []
+
+    def emit(
+        self,
+        stage: str,
+        component: str,
+        action: str,
+        target: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        if not self._enabled:
+            return
+        self._events.append({
+            "stage": stage,
+            "component": component,
+            "action": action,
+            **({"target": target} if target else {}),
+            **({"reason": reason} if reason else {}),
+        })
+
+    def build_trace(self) -> "PipelineTrace":
+        from sourcecode.schema import PipelineEvent, PipelineTrace
+        events = [
+            PipelineEvent(
+                stage=e["stage"],
+                component=e["component"],
+                action=e["action"],
+                target=e.get("target"),
+                reason=e.get("reason"),
+            )
+            for e in self._events
+        ]
+        return PipelineTrace(requested=True, events=events)
+
+
+# ---------------------------------------------------------------------------
+# E2E pipeline coherence check
+# ---------------------------------------------------------------------------
+
+def _check_pipeline_coherence(sm: "SourceMap") -> list[str]:  # type: ignore[name-defined]
+    """Verify no contradictory states exist between analyzers.
+
+    Returns a list of human-readable violation strings (empty when clean).
+    These are emitted to stderr as [coherence] warnings — never abort a run.
+    """
+    issues: list[str] = []
+    cs = sm.confidence_summary
+
+    if cs is not None:
+        # overall:high requires at least one manifest-detected stack
+        if cs.overall == "high":
+            manifest_stacks = [s for s in sm.stacks if s.detection_method != "heuristic"]
+            if not manifest_stacks:
+                issues.append(
+                    "[coherence] overall=high but all stacks are heuristic — "
+                    "downgrade not applied; check confidence_analyzer"
+                )
+
+        # overall:high requires at least one production entry point
+        if cs.overall == "high":
+            prod_eps = [
+                ep for ep in sm.entry_points
+                if ep.entrypoint_type in ("production", None)
+            ]
+            if not prod_eps and sm.entry_points:
+                issues.append(
+                    "[coherence] overall=high but no production entry points exist — "
+                    "all detected EPs are auxiliary (benchmark/example/dev)"
+                )
+
+        # entry_point_confidence must not be high when entry_points is empty
+        if cs.entry_point_confidence == "high" and not sm.entry_points:
+            issues.append(
+                "[coherence] entry_point_confidence=high but entry_points is empty"
+            )
+
+    # Contradictory EP classification: EPs with entrypoint_type=benchmark must not
+    # appear in agent_view output (checked post-facto via produced_by + type)
+    benchmark_eps = [
+        ep for ep in sm.entry_points
+        if ep.entrypoint_type in ("benchmark", "example")
+    ]
+    if benchmark_eps and sm.entry_points and all(
+        ep.entrypoint_type in ("benchmark", "example") for ep in sm.entry_points
+    ):
+        issues.append(
+            f"[coherence] all {len(sm.entry_points)} entry point(s) are benchmark/example — "
+            "no production entry detected; analysis_gaps should reflect impact=high"
+        )
+
+    return issues
 
 _HELP = """\
 Deterministic codebase context for AI coding agents.
@@ -326,6 +467,11 @@ def main(
         False,
         "--agent",
         help="Modo agente: output estructurado y sin ruido para consumo por IA. Incluye identidad, entrypoints, arquitectura, dependencias clave, señales operacionales y gaps. Sin arbol de ficheros ni secciones vacias.",
+    ),
+    trace_pipeline: bool = typer.Option(
+        False,
+        "--trace-pipeline",
+        help="Modo trazabilidad: incluye pipeline_trace con candidatos, filtros, descartes y origen de cada dato. Para diagnóstico de contaminación de resultados.",
     ),
 ) -> None:
     """Analyze a repository and produce structured context for AI coding agents.
@@ -672,7 +818,18 @@ def main(
     )
 
     # 3. Construir el schema
-    metadata = AnalysisMetadata(analyzed_path=str(target))
+    # Compute analyzer fingerprints: short hashes of each analyzer's key rule
+    # constants so that a rule change is always visible in the output, regardless
+    # of whether the semver was bumped.
+    try:
+        _fingerprints = _compute_analyzer_fingerprints()
+    except Exception:
+        _fingerprints = {}
+
+    metadata = AnalysisMetadata(
+        analyzed_path=str(target),
+        analyzer_fingerprints=_fingerprints,
+    )
     sm = SourceMap(
         metadata=metadata,
         file_tree=file_tree,
@@ -811,6 +968,51 @@ def main(
     from dataclasses import replace as _replace
     _conf_summary, _analysis_gaps = ConfidenceAnalyzer().analyze(sm)
     sm = _replace(sm, confidence_summary=_conf_summary, analysis_gaps=_analysis_gaps)
+
+    # E2E pipeline coherence check — emits [coherence] warnings to stderr.
+    # Catches contradictory states that can survive individual-analyzer validation.
+    for _issue in _check_pipeline_coherence(sm):
+        typer.echo(_issue, err=True)
+
+    # Build pipeline trace when --trace-pipeline is set.
+    if trace_pipeline:
+        _trace = _TraceCollector(enabled=True)
+        _trace.emit("scan", "scanner", "complete",
+                    reason=f"{len(sm.file_paths)} files, {len(manifests)} manifests")
+        for _s in sm.stacks:
+            _trace.emit("detect", _s.produced_by or "unknown", "emit_stack",
+                        target=_s.stack,
+                        reason=f"method={_s.detection_method} confidence={_s.confidence}")
+        for _ep in sm.entry_points:
+            _trace.emit("detect", _ep.produced_by or "unknown", "emit_ep",
+                        target=_ep.path,
+                        reason=f"type={_ep.entrypoint_type} confidence={_ep.confidence} reason={_ep.reason}")
+        # Record EPs filtered from agent_view (benchmark/example with path-auxiliary parts)
+        _aux_parts = frozenset({
+            "benchmark", "benchmarks", "bench", "demo", "demos",
+            "example", "examples", "docs", "doc", "fixtures", "fixture",
+        })
+        for _ep in sm.entry_points:
+            _ep_type = _ep.entrypoint_type
+            _path_parts = _ep.path.replace("\\", "/").lower().split("/")
+            _filtered = (
+                _ep_type in ("benchmark", "example")
+                or any(p in _aux_parts for p in _path_parts)
+            )
+            if _filtered:
+                _trace.emit("output", "agent_view", "filter_ep",
+                            target=_ep.path,
+                            reason=f"entrypoint_type={_ep_type} (auxiliary)")
+        if sm.confidence_summary is not None:
+            _cs = sm.confidence_summary
+            _trace.emit("confidence", "confidence_analyzer", "computed",
+                        reason=(
+                            f"overall={_cs.overall} "
+                            f"stack={_cs.stack_confidence} "
+                            f"ep={_cs.entry_point_confidence} "
+                            f"anomalies={len(_cs.anomalies)}"
+                        ))
+        sm = _replace(sm, pipeline_trace=_trace.build_trace())
 
     # 4. Serializar
     if agent:

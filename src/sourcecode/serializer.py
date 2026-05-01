@@ -410,7 +410,9 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
 
     result: dict[str, Any] = {"project": project}
 
-    # ── 2. Entry points: production/runtime first, benchmark/example excluded ──
+    # ── 2. Entry points: production/runtime first; benchmark/example always excluded ──
+    # Never fall back to auxiliary-only EPs — when no operational EP exists the
+    # confidence_summary anomaly and analysis_gaps explain the gap instead.
     if sm.entry_points:
         _ep_skip = {"workspace"}
         _aux_parts = frozenset({
@@ -435,7 +437,10 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
         ]
         all_ep.sort(key=_ep_priority)
         operational_ep = [ep for ep in all_ep if _ep_priority(ep) < 5]
-        result["entry_points"] = operational_ep if operational_ep else all_ep
+        if operational_ep:
+            result["entry_points"] = operational_ep
+        # When operational_ep is empty: omit key entirely.
+        # confidence_summary.anomalies + analysis_gaps carry the explanation.
 
     # ── 3. Architecture ───────────────────────────────────────────────────────
     if sm.architecture_summary:
@@ -618,6 +623,9 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
     if include_tree:
         result["file_tree"] = sm.file_tree
         result["file_paths"] = sm.file_paths
+
+    if sm.pipeline_trace is not None and sm.pipeline_trace.requested:
+        result["pipeline_trace"] = asdict(sm.pipeline_trace)
 
     return result
 

@@ -187,17 +187,22 @@ class NodejsDetector(AbstractDetector):
         if isinstance(main, str) and main.strip():
             path = main.strip()
             if path not in seen and path_exists_in_tree(context.file_tree, path):
-                seen.add(path)
-                entry_points.append(EntryPoint(
-                    path=path,
-                    stack="nodejs",
-                    kind="server",
-                    source="package.json",
-                    confidence="high",
-                    entrypoint_type="production",
-                ))
+                if not self._is_auxiliary_path(path):
+                    seen.add(path)
+                    entry_points.append(EntryPoint(
+                        path=path,
+                        stack="nodejs",
+                        kind="module",
+                        source="package.json",
+                        confidence="high",
+                        reason="main",
+                        evidence="declared in package.json main field",
+                        entrypoint_type="production",
+                    ))
 
         # Priority 4: filename conventions (last resort — penalize auxiliary dirs)
+        is_monorepo = bool(self._detect_monorepo_signals(context, package_json))
+        _INDEX_PATHS = {"src/index.js", "src/index.ts", "index.js", "index.ts"}
         for path in [
             "server.js", "server.ts",
             "src/index.js", "src/index.ts",
@@ -206,14 +211,19 @@ class NodejsDetector(AbstractDetector):
         ]:
             if path in seen or not path_exists_in_tree(context.file_tree, path):
                 continue
+            # In monorepos, root/src index files are package exports, not run targets
+            if is_monorepo and path in _INDEX_PATHS:
+                continue
             ep_type = self._path_entrypoint_type(path)
-            kind = "web" if path.startswith(("app/", "pages/")) else "server"
+            is_index = path.split("/")[-1] in ("index.js", "index.ts")
+            kind = "module" if is_index else ("web" if path.startswith(("app/", "pages/")) else "server")
+            confidence = "low"  # convention only — no script or bin declaration
             entry_points.append(EntryPoint(
                 path=path,
                 stack="nodejs",
                 kind=kind,
                 source="convention",
-                confidence="medium",
+                confidence=confidence,
                 reason="convention",
                 entrypoint_type=ep_type,
             ))

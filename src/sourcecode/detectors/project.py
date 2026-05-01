@@ -48,6 +48,12 @@ class ProjectDetector:
                 continue
 
             stacks, entry_points = detector.detect(context)
+            # Stamp provenance: every emitted stack and EP knows which detector produced it
+            for item in stacks:
+                item.produced_by = detector.name
+            for item in entry_points:
+                item.produced_by = detector.name
+
             for stack in stacks:
                 existing = merged_stacks.get(stack.stack)
                 if existing is None:
@@ -103,6 +109,7 @@ class ProjectDetector:
             root=stack.root,
             workspace=stack.workspace,
             signals=list(stack.signals),
+            produced_by=stack.produced_by,
         )
 
     def _merge_stack(self, current: StackDetection, incoming: StackDetection) -> StackDetection:

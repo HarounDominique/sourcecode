@@ -12,6 +12,34 @@ _MAX_CONTRIBUTORS = 20
 
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T")
 
+_RELEASE_COMMIT_RE = re.compile(
+    r"^(?:chore(?:\(release\))?[:\s]|release[:\s]|bump[:\s]|version[:\s]"
+    r"|Merge pull request\s|Bumps?\s\w"
+    r"|v?\d+\.\d+\.\d+)",
+    re.IGNORECASE,
+)
+# Matches version-bump phrases anywhere in the commit subject (multilingual)
+_RELEASE_COMMIT_CONTAINS_RE = re.compile(
+    r"subiendo a v?[\d.]"          # Spanish: "subiendo a v.0.28.0"
+    r"|bumping to v?[\d.]"
+    r"|preparing (?:v|release)[\d. ]"
+    r"|releasing v?[\d.]"
+    r"|cut v?[\d.]"
+    r"|\bv\d+\.\d+\.\d+\b",       # bare version tag in middle of message
+    re.IGNORECASE,
+)
+
+# Files changed by release bots / version bumps — exclude from semantic hotspots
+_HOTSPOT_ADMIN_FILENAMES: frozenset[str] = frozenset({
+    "CHANGELOG.md", "CHANGELOG", "CHANGES.md", "CHANGES", "HISTORY.md",
+    "RELEASE.md", "RELEASES.md", "RELEASE_NOTES.md", "CHANGELOG.rst", "NEWS.md", "NEWS.rst",
+    "VERSION", "VERSION.txt", "version.txt", ".version",
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
+    "Cargo.lock", "poetry.lock", "Pipfile.lock", "composer.lock",
+    "go.sum", "Gemfile.lock",
+})
+_HOTSPOT_ADMIN_SUFFIXES: tuple[str, ...] = (".lock", ".snap", ".min.js", ".min.css")
+
 
 def _run_git(args: list[str], cwd: Path, timeout: int = 15) -> tuple[str, int]:
     result = subprocess.run(
@@ -87,7 +115,7 @@ class GitAnalyzer:
                     "log",
                     f"--since={days} days ago",
                     "--name-only",
-                    "--pretty=format:%aI",
+                    "--pretty=format:__HOTSPOT__|%aI|%s",
                 ],
                 path,
                 timeout=30,
@@ -162,23 +190,45 @@ def _parse_commits(output: str) -> list:
     return commits
 
 
+def _is_hotspot_admin(path: str) -> bool:
+    """True for files that are noisy from release/bot commits, not semantic changes."""
+    filename = path.rsplit("/", 1)[-1]
+    if filename in _HOTSPOT_ADMIN_FILENAMES:
+        return True
+    for suffix in _HOTSPOT_ADMIN_SUFFIXES:
+        if filename.endswith(suffix):
+            return True
+    return False
+
+
 def _parse_hotspots(output: str) -> list:
     from sourcecode.schema import ChangeHotspot
 
     file_counts: Counter = Counter()
     file_last_date: dict[str, str] = {}
     current_date = ""
+    skip_commit = False
 
     for line in output.splitlines():
         line = line.strip()
         if not line:
             continue
-        if _DATE_PATTERN.match(line):
-            current_date = line[:10]
-        else:
-            file_counts[line] += 1
-            if line not in file_last_date and current_date:
-                file_last_date[line] = current_date
+        if line.startswith("__HOTSPOT__|"):
+            parts = line.split("|", 2)
+            current_date = parts[1][:10] if len(parts) > 1 else ""
+            subject = parts[2] if len(parts) > 2 else ""
+            skip_commit = (
+                bool(_RELEASE_COMMIT_RE.match(subject))
+                or bool(_RELEASE_COMMIT_CONTAINS_RE.search(subject))
+            )
+            continue
+        if skip_commit:
+            continue
+        if _is_hotspot_admin(line):
+            continue
+        file_counts[line] += 1
+        if line not in file_last_date and current_date:
+            file_last_date[line] = current_date
 
     return [
         ChangeHotspot(

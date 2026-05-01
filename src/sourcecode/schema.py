@@ -33,6 +33,7 @@ class AnalysisMetadata:
     generated_at: str = field(default_factory=_now_utc)
     sourcecode_version: str = field(default_factory=_sourcecode_version)
     analyzed_path: str = ""
+    analyzer_fingerprints: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -59,6 +60,7 @@ class StackDetection:
     root: Optional[str] = None
     workspace: Optional[str] = None
     signals: list[str] = field(default_factory=list)
+    produced_by: Optional[str] = None  # which detector emitted this
 
 
 @dataclass
@@ -73,6 +75,7 @@ class EntryPoint:
     reason: Optional[str] = None   # console_script | entry_file_pattern | main_guard | typer_app | heuristic | convention
     evidence: Optional[str] = None  # brief evidence string
     entrypoint_type: Optional[Literal["production", "development", "benchmark", "example"]] = None
+    produced_by: Optional[str] = None  # which detector emitted this
 
 
 @dataclass
@@ -462,6 +465,27 @@ class ContextSummary:
     coupling_notes: list[str] = field(default_factory=list)  # "2 import cycles", "hub: schema.py"
 
 
+# --- Pipeline Trace ---
+
+@dataclass
+class PipelineEvent:
+    """Single event in the pipeline trace."""
+
+    stage: str       # "scan" | "detect" | "merge" | "confidence" | "output"
+    component: str   # detector name or analyzer name
+    action: str      # "emit_stack" | "emit_ep" | "filter_ep" | "discard_ep" | "computed"
+    target: Optional[str] = None   # path or stack name
+    reason: Optional[str] = None   # human-readable explanation
+
+
+@dataclass
+class PipelineTrace:
+    """Full trace of what each pipeline stage produced or discarded."""
+
+    requested: bool = False
+    events: list[PipelineEvent] = field(default_factory=list)
+
+
 # --- Confidence & Explainability ---
 
 @dataclass
@@ -585,3 +609,5 @@ class SourceMap:
     context_summary: Optional[ContextSummary] = None
     # Runtime architecture (v0.26.0)
     monorepo_packages: list[MonorepoPackageInfo] = field(default_factory=list)
+    # Pipeline trace (v0.29.0) — populated only when --trace-pipeline is passed
+    pipeline_trace: Optional[PipelineTrace] = None

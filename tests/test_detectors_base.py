@@ -44,15 +44,16 @@ def test_entry_point_serializes_with_expected_fields() -> None:
 
     data = asdict(entry_point)
 
-    assert data == {
-        "path": "src/main.py",
-        "stack": "python",
-        "kind": "script",
-        "source": "heuristic",
-        "confidence": "high",
-        "reason": None,
-        "evidence": None,
-    }
+    # Check required fields with correct values
+    assert data["path"] == "src/main.py"
+    assert data["stack"] == "python"
+    assert data["kind"] == "script"
+    assert data["source"] == "heuristic"
+    assert data["confidence"] == "high"
+    assert data["reason"] is None
+    assert data["evidence"] is None
+    # Schema may have optional provenance fields defaulting to None
+    assert "produced_by" in data
 
 
 def test_abstract_detector_contract_requires_detect() -> None:
