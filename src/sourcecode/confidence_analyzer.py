@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from sourcecode.entrypoint_classifier import is_production_entry_point, normalize_entry_point
 from sourcecode.schema import AnalysisGap, ConfidenceSummary, SourceMap
 
 if TYPE_CHECKING:
@@ -59,8 +60,15 @@ class ConfidenceAnalyzer:
                     hard_signals.append(sig)
 
         # ── Entry point signals ───────────────────────────────────────────────
-        for ep in sm.entry_points:
-            if ep.source in _HARD_SOURCES or ep.reason == "console_script":
+        normalized_entry_points = [normalize_entry_point(ep) for ep in sm.entry_points]
+
+        for ep in normalized_entry_points:
+            if ep.classification != "production":
+                sig = f"entry:{ep.path} ({ep.classification}, {ep.reason or ep.source})"
+                if sig not in ignored_signals:
+                    ignored_signals.append(sig)
+                continue
+            if ep.source in _HARD_SOURCES or ep.reason == "console_script" or ep.runtime_relevance == "high":
                 sig = f"entry:{ep.path} ({ep.reason or ep.source})"
                 if sig not in hard_signals:
                     hard_signals.append(sig)
@@ -95,13 +103,13 @@ class ConfidenceAnalyzer:
             anomalies.append("All stacks detected via heuristic only — no manifest found")
 
         # ── Anomaly: entry points all low-confidence ──────────────────────────
-        if sm.entry_points and all(ep.confidence == "low" for ep in sm.entry_points):
+        if normalized_entry_points and all(ep.confidence == "low" for ep in normalized_entry_points):
             anomalies.append("All entry points are low-confidence (heuristic/code_signal only)")
 
         # ── Anomaly: all production EPs are convention-only (no manifest evidence) ──
         production_eps_check = [
-            ep for ep in sm.entry_points
-            if ep.entrypoint_type in ("production", None)
+            ep for ep in normalized_entry_points
+            if is_production_entry_point(ep)
         ]
         if production_eps_check and all(
             ep.source in ("convention", "heuristic") or ep.reason in ("convention", "entry_file_pattern")
@@ -113,37 +121,37 @@ class ConfidenceAnalyzer:
             )
 
         # ── Anomaly: no production entry points ───────────────────────────────
-        if sm.entry_points:
+        if normalized_entry_points:
             production_eps = [
-                ep for ep in sm.entry_points
-                if ep.entrypoint_type in ("production", None)
+                ep for ep in normalized_entry_points
+                if is_production_entry_point(ep)
             ]
             if not production_eps:
                 anomalies.append(
-                    "No production entry points — all detected entries are dev/benchmark/example"
+                    "No production entry points — all detected entries are development/auxiliary"
                 )
 
         # ── Gaps ──────────────────────────────────────────────────────────────
-        if not sm.entry_points:
+        if not normalized_entry_points:
             gaps.append(AnalysisGap(
                 area="entry_points",
                 reason="No entry point detected — project may use non-standard structure or be a library",
                 impact="high",
             ))
         elif all(
-            ep.entrypoint_type in ("benchmark", "example", "development")
-            for ep in sm.entry_points
+            ep.classification in ("development", "auxiliary")
+            for ep in normalized_entry_points
         ):
             gaps.append(AnalysisGap(
                 area="entry_points",
                 reason=(
-                    "All detected entry points are auxiliary (benchmark/example/dev) — "
+                    "All detected entry points are development or auxiliary — "
                     "no production entry point found. Verify project has a 'start'/'serve' "
                     "script or production binary."
                 ),
                 impact="high",
             ))
-        elif all(ep.confidence == "low" for ep in sm.entry_points):
+        elif all(ep.confidence == "low" for ep in normalized_entry_points):
             gaps.append(AnalysisGap(
                 area="entry_points",
                 reason="Entry points inferred from code patterns only, no manifest declaration found",
@@ -196,11 +204,16 @@ class ConfidenceAnalyzer:
         # Entry points: only consider production EPs for confidence scoring.
         # Benchmark/example/dev-only entries are not evidence of production readiness.
         production_eps = [
-            ep for ep in sm.entry_points
-            if ep.entrypoint_type in ("production", None)
+            ep for ep in normalized_entry_points
+            if is_production_entry_point(ep)
         ]
         ep_conf = _max_confidence([ep.confidence for ep in production_eps] or ["low"])
         overall = _min_confidence([stack_conf, ep_conf])
+
+        if normalized_entry_points and not production_eps:
+            overall = "low"
+        elif production_eps and all(ep.runtime_relevance == "low" for ep in production_eps):
+            overall = _min_confidence([overall, "low"])
 
         # Factor in architecture confidence when available
         arch = sm.architecture

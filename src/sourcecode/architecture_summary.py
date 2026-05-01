@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from sourcecode.entrypoint_classifier import is_production_entry_point
 from sourcecode.schema import EntryPoint, SourceMap, StackDetection
 from sourcecode.tree_utils import flatten_file_tree
 
@@ -63,11 +64,8 @@ class ArchitectureSummarizer:
             entry for entry in sm.entry_points
             if not self._is_tooling_path(entry.path)
             and not self._is_auxiliary_path(entry.path)
-            and entry.entrypoint_type not in ("benchmark", "example")
+            and is_production_entry_point(entry)
         ]
-        if not entry_points:
-            fallback = self._infer_fallback_entry_points(file_paths, sm.stacks)
-            entry_points = fallback[:1]
 
         lang_lines: list[str] = []
         if entry_points:
@@ -280,8 +278,7 @@ class ArchitectureSummarizer:
         if modules:
             formatted = self._format_module_list([self._module_label(module) for module in modules])
             if formatted:
-                lines.append(f"Orquesta modulos internos: {formatted}.")
-        lines.append("Produce la salida principal del entry point JavaScript/TypeScript detectado.")
+                lines.append(f"Imports internos del entry point: {formatted}.")
         return lines
 
     def _summarize_java_entry(self, path: str, content: str, stacks: list[StackDetection]) -> list[str]:
@@ -344,8 +341,7 @@ class ArchitectureSummarizer:
         if internal:
             formatted = self._format_module_list([self._module_label(module) for module in internal])
             if formatted:
-                lines.append(f"Orquesta paquetes internos: {formatted}.")
-        lines.append("Produce la salida principal del binario Go detectado.")
+                lines.append(f"Imports internos del binario Go: {formatted}.")
         return lines
 
     def _describe_entry_point(self, entry_point: EntryPoint, project_type: str | None) -> str:

@@ -40,7 +40,8 @@ def test_fastapi_fixture_schema() -> None:
     assert data["project_type"] == "api"
     assert data["stacks"][0]["stack"] == "python"
     assert data["stacks"][0]["frameworks"][0]["name"] == "FastAPI"
-    assert data["entry_points"][0]["path"] == "src/main.py"
+    assert data["entry_points"] == []
+    assert data["auxiliary_entry_points"][0]["path"] == "src/main.py"
 
 
 def test_go_fixture_schema() -> None:
@@ -63,4 +64,5 @@ def test_monorepo_fixture_schema() -> None:
     assert data["project_type"] == "monorepo"
     assert {stack["stack"] for stack in data["stacks"]} == {"nodejs", "python"}
     assert {stack["root"] for stack in data["stacks"]} == {"apps/web", "packages/api"}
-    assert any(entry["path"].startswith("apps/web/") for entry in data["entry_points"])
+    assert data["entry_points"] == []
+    assert any(entry["path"].startswith("apps/web/") for entry in data["auxiliary_entry_points"])

@@ -44,11 +44,12 @@ def _parse_agent(output: str) -> dict:
 
 @pytest.fixture
 def nocobase_like(tmp_path: Path) -> Path:
-    """Repo whose only scripts are benchmark/example — mimics NocoBase bench setup."""
+    """Repo whose scripts are docs/benchmark/example — mimics NocoBase tooling."""
     (tmp_path / "package.json").write_text(json.dumps({
         "name": "nocobase-like",
         "version": "1.0.0",
         "scripts": {
+            "docs": "rspress dev",
             "benchmark": "node benchmarks/run.js",
             "example": "node examples/demo.js",
         },
@@ -58,6 +59,8 @@ def nocobase_like(tmp_path: Path) -> Path:
     (tmp_path / "benchmarks" / "run.js").write_text("// bench\n")
     (tmp_path / "examples").mkdir()
     (tmp_path / "examples" / "demo.js").write_text("// demo\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "rspress.mjs").write_text("export default {};\n")
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "index.js").write_text("// placeholder\n")
     return tmp_path
@@ -136,14 +139,22 @@ class TestBenchmarkContamination:
         result = runner.invoke(app, ["--agent", str(nocobase_like)])
         assert result.exit_code == 0, result.output
         data = _parse_agent(result.output)
-        # entry_points key must be absent (not present with auxiliary items)
-        # OR if present, must contain only non-auxiliary EPs
-        entry_points = data.get("entry_points", [])
-        for ep in entry_points:
-            ep_type = ep.get("entrypoint_type")
-            assert ep_type not in ("benchmark", "example"), (
-                f"Auxiliary EP in agent output: {ep}"
-            )
+        assert data.get("entry_points") == []
+
+    def test_agent_splits_development_and_auxiliary_eps(self, nocobase_like: Path) -> None:
+        result = runner.invoke(app, ["--agent", str(nocobase_like)])
+        assert result.exit_code == 0, result.output
+        data = _parse_agent(result.output)
+
+        dev_eps = data.get("development_entry_points", [])
+        aux_eps = data.get("auxiliary_entry_points", [])
+
+        assert any(ep.get("path") == "docs/rspress.mjs" for ep in dev_eps), dev_eps
+        assert all(ep.get("classification") == "development" for ep in dev_eps), dev_eps
+        assert all(ep.get("runtime_relevance") == "low" for ep in dev_eps), dev_eps
+        assert any(ep.get("path") == "benchmarks/run.js" for ep in aux_eps), aux_eps
+        assert any(ep.get("path") == "examples/demo.js" for ep in aux_eps), aux_eps
+        assert all(ep.get("classification") == "auxiliary" for ep in aux_eps), aux_eps
 
     def test_production_server_survives_benchmark_coexistence(
         self, production_nodejs: Path

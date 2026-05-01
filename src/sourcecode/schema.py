@@ -75,6 +75,8 @@ class EntryPoint:
     reason: Optional[str] = None   # console_script | entry_file_pattern | main_guard | typer_app | heuristic | convention
     evidence: Optional[str] = None  # brief evidence string
     entrypoint_type: Optional[Literal["production", "development", "benchmark", "example"]] = None
+    classification: Optional[Literal["production", "development", "auxiliary"]] = None
+    runtime_relevance: Optional[Literal["high", "medium", "low"]] = None
     produced_by: Optional[str] = None  # which detector emitted this
 
 

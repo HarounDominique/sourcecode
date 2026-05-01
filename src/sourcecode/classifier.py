@@ -45,8 +45,12 @@ class TypeClassifier:
         primary_stack = self._select_primary_stack(enriched, project_type)
 
         final_stacks: list[StackDetection] = []
+        primary_assigned = False
         for stack in enriched:
-            final_stacks.append(replace(stack, primary=(stack.stack == primary_stack)))
+            is_primary = stack.stack == primary_stack and not primary_assigned
+            if is_primary:
+                primary_assigned = True
+            final_stacks.append(replace(stack, primary=is_primary))
         return final_stacks, project_type
 
     def _enrich_stack(

@@ -27,7 +27,15 @@ def main(dependencies: bool = False) -> None:
         stacks=[StackDetection(stack="python", primary=True)],
         project_type="cli",
         entry_points=[
-            EntryPoint(path="src/sourcecode/cli.py", stack="python", kind="cli", source="convention")
+            EntryPoint(
+                path="src/sourcecode/cli.py",
+                stack="python",
+                kind="cli",
+                source="pyproject.toml",
+                reason="console_script",
+                entrypoint_type="production",
+                runtime_relevance="high",
+            )
         ],
     )
 
@@ -39,7 +47,7 @@ def main(dependencies: bool = False) -> None:
     assert "Opcionalmente" in result
 
 
-def test_fallback_entry_point_detects_src_cli_py(tmp_path: Path) -> None:
+def test_no_fallback_entry_point_invented_from_src_cli_py(tmp_path: Path) -> None:
     package_dir = tmp_path / "src" / "demo"
     package_dir.mkdir(parents=True)
     (package_dir / "cli.py").write_text("print('demo')\n")
@@ -54,7 +62,7 @@ def test_fallback_entry_point_detects_src_cli_py(tmp_path: Path) -> None:
     result = ArchitectureSummarizer(tmp_path).generate(sm)
 
     assert result is not None
-    # New rich summary describes stack + project type; path may not appear directly
+    assert "demo/cli.py" not in result
     assert "Python" in result or "cli" in result.lower()
 
 

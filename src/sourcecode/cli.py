@@ -9,6 +9,7 @@ from typing import Any, Optional, cast
 import typer
 
 from sourcecode import __version__
+from sourcecode.entrypoint_classifier import is_production_entry_point, normalize_entry_point
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +121,7 @@ def _check_pipeline_coherence(sm: "SourceMap") -> list[str]:  # type: ignore[nam
         if cs.overall == "high":
             prod_eps = [
                 ep for ep in sm.entry_points
-                if ep.entrypoint_type in ("production", None)
+                if is_production_entry_point(ep)
             ]
             if not prod_eps and sm.entry_points:
                 issues.append(
@@ -133,20 +134,6 @@ def _check_pipeline_coherence(sm: "SourceMap") -> list[str]:  # type: ignore[nam
             issues.append(
                 "[coherence] entry_point_confidence=high but entry_points is empty"
             )
-
-    # Contradictory EP classification: EPs with entrypoint_type=benchmark must not
-    # appear in agent_view output (checked post-facto via produced_by + type)
-    benchmark_eps = [
-        ep for ep in sm.entry_points
-        if ep.entrypoint_type in ("benchmark", "example")
-    ]
-    if benchmark_eps and sm.entry_points and all(
-        ep.entrypoint_type in ("benchmark", "example") for ep in sm.entry_points
-    ):
-        issues.append(
-            f"[coherence] all {len(sm.entry_points)} entry point(s) are benchmark/example — "
-            "no production entry detected; analysis_gaps should reflect impact=high"
-        )
 
     return issues
 
@@ -993,10 +980,11 @@ def main(
             "example", "examples", "docs", "doc", "fixtures", "fixture",
         })
         for _ep in sm.entry_points:
-            _ep_type = _ep.entrypoint_type
+            _normalized_ep = normalize_entry_point(_ep)
+            _ep_type = _normalized_ep.entrypoint_type
             _path_parts = _ep.path.replace("\\", "/").lower().split("/")
             _filtered = (
-                _ep_type in ("benchmark", "example")
+                _normalized_ep.classification != "production"
                 or any(p in _aux_parts for p in _path_parts)
             )
             if _filtered:

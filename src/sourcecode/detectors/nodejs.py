@@ -125,6 +125,9 @@ class NodejsDetector(AbstractDetector):
         "playground", "playgrounds",
         "fixture", "fixtures",
         "sandbox", "e2e", "docs",
+        "test", "tests", "__tests__", "spec", "specs",
+        "scripts", "script", "tools", "tooling", "ci",
+        ".storybook", "storybook",
     })
 
     def _collect_entry_points(
@@ -144,19 +147,20 @@ class NodejsDetector(AbstractDetector):
                     continue
                 # Extract file path from script command
                 path = self._extract_script_path(script_cmd, context)
+                if path is None:
+                    path = self._infer_tool_script_path(script_name, script_cmd, context)
                 if path and path not in seen and path_exists_in_tree(context.file_tree, path):
                     seen.add(path)
-                    if not self._is_auxiliary_path(path):
-                        entry_points.append(EntryPoint(
-                            path=path,
-                            stack="nodejs",
-                            kind=kind,
-                            source="package.json#scripts",
-                            confidence="high",
-                            reason=f"script:{script_name}",
-                            evidence=f"scripts.{script_name} = {script_cmd!r:.80}",
-                            entrypoint_type=ep_type,
-                        ))
+                    entry_points.append(EntryPoint(
+                        path=path,
+                        stack="nodejs",
+                        kind=kind,
+                        source="package.json#scripts",
+                        confidence="high",
+                        reason=f"script:{script_name}",
+                        evidence=f"scripts.{script_name} = {script_cmd!r:.80}",
+                        entrypoint_type=self._path_entrypoint_type(path, fallback=ep_type),
+                    ))
 
         # Priority 2: package.json bin — CLI production entry points
         bin_field = package_json.get("bin")
@@ -233,7 +237,7 @@ class NodejsDetector(AbstractDetector):
     def _classify_script(self, script_name: str) -> tuple[str | None, str]:
         """Map script name → (entrypoint_type, kind). Returns (None, '') to skip."""
         lower = script_name.lower()
-        if lower in ("start", "serve"):
+        if lower in ("start", "serve", "server"):
             return "production", "server"
         if lower in ("dev", "develop", "watch"):
             return "development", "server"
@@ -243,6 +247,12 @@ class NodejsDetector(AbstractDetector):
             return "benchmark", "script"
         if lower.startswith("example") or lower.startswith("demo"):
             return "example", "script"
+        if lower in {"docs", "doc", "storybook", "playground"} or any(
+            marker in lower for marker in ("rspress", "vite", "storybook", "playground")
+        ):
+            return "development", "server"
+        if lower in {"test", "e2e", "spec", "lint", "format", "typecheck", "build"}:
+            return "development", "script"
         return None, ""
 
     def _extract_script_path(self, cmd: str, context: DetectionContext) -> str | None:
@@ -264,12 +274,36 @@ class NodejsDetector(AbstractDetector):
                 return p
         return None
 
+    def _infer_tool_script_path(
+        self,
+        script_name: str,
+        script_cmd: str,
+        context: DetectionContext,
+    ) -> str | None:
+        text = f"{script_name} {script_cmd}".lower()
+        candidates: list[str] = []
+        if "rspress" in text or "docs" in text or "doc" in text:
+            candidates.extend(["docs/rspress.mjs", "docs/rspress.config.mjs"])
+        if "storybook" in text:
+            candidates.extend([".storybook/main.js", ".storybook/main.ts"])
+        if "vite" in text or "playground" in text:
+            candidates.extend(["playground/vite.config.ts", "vite.config.ts"])
+        for candidate in candidates:
+            if path_exists_in_tree(context.file_tree, candidate):
+                return candidate
+        return None
+
     def _is_auxiliary_path(self, path: str) -> bool:
         norm = path.replace("\\", "/")
         parts = norm.split("/")
         return any(p.lower() in self._AUXILIARY_DIRS for p in parts)
 
-    def _path_entrypoint_type(self, path: str) -> str:
-        if self._is_auxiliary_path(path):
+    def _path_entrypoint_type(self, path: str, *, fallback: str = "production") -> str:
+        parts = {p.lower() for p in path.replace("\\", "/").split("/")}
+        if parts & {"benchmark", "benchmarks", "bench", "benches"}:
+            return "benchmark"
+        if parts & {"example", "examples", "demo", "demos", "fixture", "fixtures"}:
             return "example"
-        return "production"
+        if self._is_auxiliary_path(path):
+            return "development"
+        return fallback

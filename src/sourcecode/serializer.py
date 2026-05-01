@@ -15,6 +15,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Optional
 
+from sourcecode.entrypoint_classifier import normalize_entry_point, is_production_entry_point
 from sourcecode.schema import (
     ArchitectureAnalysis,
     ModuleGraph,
@@ -54,6 +55,37 @@ def to_yaml(sm: SourceMap) -> str:
     return stream.getvalue()
 
 
+def _clean_entry_point(ep: Any) -> dict[str, Any]:
+    normalized = normalize_entry_point(ep)
+    return {
+        k: v
+        for k, v in asdict(normalized).items()
+        if v is not None and v != "" and k != "workspace"
+    }
+
+
+def _entry_point_groups(entry_points: list[Any]) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = {
+        "production": [],
+        "development": [],
+        "auxiliary": [],
+    }
+    for ep in entry_points:
+        normalized = normalize_entry_point(ep)
+        item = _clean_entry_point(normalized)
+        if is_production_entry_point(normalized):
+            groups["production"].append(item)
+        elif normalized.classification == "development":
+            groups["development"].append(item)
+        else:
+            groups["auxiliary"].append(item)
+
+    groups["production"].sort(key=lambda ep: (ep.get("runtime_relevance") != "high", ep.get("path", "")))
+    groups["development"].sort(key=lambda ep: ep.get("path", ""))
+    groups["auxiliary"].sort(key=lambda ep: ep.get("path", ""))
+    return groups
+
+
 def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
     """Context package ready for prompt or handoff (~600-800 tokens).
 
@@ -85,13 +117,12 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
     if sm.code_notes_summary is not None and sm.code_notes_summary.requested:
         code_notes_summary_dict = asdict(sm.code_notes_summary)
 
-    # Entry points: strip None fields for compactness
-    entry_points_compact = [
-        {k: v for k, v in asdict(ep).items() if v is not None and v != ""}
-        for ep in sm.entry_points
-    ]
+    # Entry points: production runtime only. Auxiliary and development entries
+    # are exposed separately so agents do not mix tooling with execution paths.
+    ep_groups = _entry_point_groups(sm.entry_points)
+    entry_points_compact = ep_groups["production"]
     if not entry_points_compact:
-        entry_points_compact = None  # type: ignore[assignment]  # signal: not detected
+        entry_points_compact = []  # truth signal: no production runtime detected
 
     # Confidence summary
     conf_dict: Any = None
@@ -118,6 +149,8 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
         "context_summary": context_summary_dict,
         "stacks": [asdict(stack) for stack in sm.stacks],
         "entry_points": entry_points_compact,
+        "development_entry_points": ep_groups["development"] or None,
+        "auxiliary_entry_points": ep_groups["auxiliary"] or None,
         "dependency_summary": dep_summary_dict,
         "key_dependencies": key_deps,
         "env_summary": env_summary_dict,
@@ -165,6 +198,10 @@ def normalize_source_map(sm: SourceMap) -> SourceMap:
     # guard against any future refactor that could accidentally set it to None
     if sm.dependencies is None:  # type: ignore[comparison-overlap]
         changes["dependencies"] = []
+
+    normalized_eps = [normalize_entry_point(ep) for ep in sm.entry_points]
+    if normalized_eps != sm.entry_points:
+        changes["entry_points"] = normalized_eps
 
     return replace(sm, **changes) if changes else sm
 
@@ -410,37 +447,13 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
 
     result: dict[str, Any] = {"project": project}
 
-    # ── 2. Entry points: production/runtime first; benchmark/example always excluded ──
-    # Never fall back to auxiliary-only EPs — when no operational EP exists the
-    # confidence_summary anomaly and analysis_gaps explain the gap instead.
-    if sm.entry_points:
-        _ep_skip = {"workspace"}
-        _aux_parts = frozenset({
-            "benchmark", "benchmarks", "bench", "demo", "demos",
-            "example", "examples", "docs", "doc", "fixtures", "fixture",
-        })
-
-        def _ep_priority(ep_dict: dict[str, Any]) -> int:
-            ep_type = ep_dict.get("entrypoint_type")
-            if ep_type in ("benchmark", "example"):
-                return 10
-            path_parts = ep_dict.get("path", "").replace("\\", "/").lower().split("/")
-            if any(p in _aux_parts for p in path_parts):
-                return 5
-            if ep_type == "development":
-                return 3
-            return 0
-
-        all_ep = [
-            {k: v for k, v in asdict(ep).items() if v is not None and v != "" and k not in _ep_skip}
-            for ep in sm.entry_points
-        ]
-        all_ep.sort(key=_ep_priority)
-        operational_ep = [ep for ep in all_ep if _ep_priority(ep) < 5]
-        if operational_ep:
-            result["entry_points"] = operational_ep
-        # When operational_ep is empty: omit key entirely.
-        # confidence_summary.anomalies + analysis_gaps carry the explanation.
+    # ── 2. Entry points: production/runtime only in the primary field ─────────
+    # Development and auxiliary entries are explicit side channels. A missing
+    # production runtime is represented as entry_points=[], never by fallback.
+    ep_groups = _entry_point_groups(sm.entry_points)
+    result["entry_points"] = ep_groups["production"]
+    result["development_entry_points"] = ep_groups["development"]
+    result["auxiliary_entry_points"] = ep_groups["auxiliary"]
 
     # ── 3. Architecture ───────────────────────────────────────────────────────
     if sm.architecture_summary:
@@ -568,13 +581,17 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
     Full dependencies list is never included — use key_dependencies instead.
     Empty unrequested analyzer fields are omitted entirely.
     """
+    ep_groups = _entry_point_groups(sm.entry_points)
+
     result: dict[str, Any] = {
         "metadata": asdict(sm.metadata),
         "project_type": sm.project_type,
         "project_summary": sm.project_summary,
         "architecture_summary": sm.architecture_summary,
         "stacks": [asdict(s) for s in sm.stacks],
-        "entry_points": [asdict(ep) for ep in sm.entry_points],
+        "entry_points": ep_groups["production"],
+        "development_entry_points": ep_groups["development"],
+        "auxiliary_entry_points": ep_groups["auxiliary"],
     }
 
     # Layer B — signals (only when the corresponding analyzer ran)

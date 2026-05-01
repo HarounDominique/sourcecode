@@ -107,3 +107,20 @@ def test_classifier_marks_multistack_repo_as_fullstack() -> None:
 
     assert project_type == "fullstack"
     assert sum(1 for stack in stacks if stack.primary) == 1
+
+
+def test_classifier_marks_single_primary_for_duplicate_ecosystem_stacks() -> None:
+    classifier = TypeClassifier()
+    stacks, _ = classifier.enrich(
+        {
+            "package.json": None,
+            "packages": {"app": {"package.json": None}},
+        },
+        [
+            StackDetection(stack="nodejs", manifests=["package.json"], root="."),
+            StackDetection(stack="nodejs", manifests=["package.json"], root="packages/app"),
+        ],
+        [],
+    )
+
+    assert sum(1 for stack in stacks if stack.primary) == 1

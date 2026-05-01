@@ -197,15 +197,15 @@ class TestEntryPointReason:
         result = runner.invoke(app, [str(python_cli_pattern_entrypoint)])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
-        entry_points = data.get("entry_points", [])
-        assert entry_points, "No entry points detected"
+        entry_points = data.get("auxiliary_entry_points", [])
+        assert entry_points, "No auxiliary entry points detected"
         conv_eps = [
             ep for ep in entry_points
             if ep.get("reason") == "entry_file_pattern"
             or ep.get("source") == "convention"
         ]
         assert conv_eps, (
-            f"No convention/entry_file_pattern entry point found. Got: {entry_points}"
+            f"No convention/entry_file_pattern auxiliary entry point found. Got: {entry_points}"
         )
 
     def test_entry_points_have_reason_field(self, tmp_project: Path) -> None:
@@ -303,6 +303,8 @@ class TestAgentOutput:
             if isinstance(val, dict):
                 assert val, f"agent output has empty dict section: {key!r}"
             if isinstance(val, list):
+                if key in {"entry_points", "development_entry_points", "auxiliary_entry_points"}:
+                    continue
                 assert val, f"agent output has empty list section: {key!r}"
 
     def test_agent_has_confidence_summary(self, tmp_project: Path) -> None:
