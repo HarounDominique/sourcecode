@@ -618,3 +618,6 @@ class SourceMap:
     monorepo_packages: list[MonorepoPackageInfo] = field(default_factory=list)
     # Pipeline trace (v0.29.0) — populated only when --trace-pipeline is passed
     pipeline_trace: Optional[PipelineTrace] = None
+    # AST contract mode (v0.33.0) — populated when --mode contract|hybrid
+    file_contracts: list[Any] = field(default_factory=list)   # list[FileContract]
+    contract_summary: Optional[Any] = None                    # ContractSummary

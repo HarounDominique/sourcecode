@@ -176,6 +176,11 @@ _OPTIONS_WITH_VALUE: frozenset[str] = frozenset({
     "--git-days",
     "--since",
     "--path", "-p",
+    "--mode",
+    "--max-symbols",
+    "--dependency-depth",
+    "--rank-by",
+    "--symbol",
 })
 
 
@@ -507,6 +512,60 @@ def main(
             "Use to diagnose unexpected or contaminated results. Not intended for normal agent use."
         ),
     ),
+    mode: str = typer.Option(
+        "contract",
+        "--mode",
+        help=(
+            "Output mode: contract (default) | hybrid | raw. "
+            "contract: per-file semantic contracts — exports, signatures, types, imports. No bodies. "
+            "hybrid: contracts + compact bodies for top-ranked files. "
+            "raw: legacy project-level analysis (stacks, entry points, dependencies). "
+            "contract mode is the recommended default for AI coding agents."
+        ),
+    ),
+    max_symbols: Optional[int] = typer.Option(
+        None,
+        "--max-symbols",
+        help="Limit total exported semantic nodes across all file contracts. Trims lowest-ranked files first.",
+        min=1,
+    ),
+    dependency_depth: int = typer.Option(
+        0,
+        "--dependency-depth",
+        help="Transitive import traversal depth for contract mode (0 = direct only, N = follow N levels).",
+        min=0,
+        max=5,
+    ),
+    entrypoints_only: bool = typer.Option(
+        False,
+        "--entrypoints-only",
+        help="Contract mode: include only files that are entrypoints or have exported symbols.",
+    ),
+    changed_only: bool = typer.Option(
+        False,
+        "--changed-only",
+        help="Contract mode: include only git-modified files (staged, unstaged, untracked).",
+    ),
+    rank_by: str = typer.Option(
+        "relevance",
+        "--rank-by",
+        help="Contract ranking strategy: relevance (default) | centrality | git-churn.",
+    ),
+    emit_graph: bool = typer.Option(
+        False,
+        "--emit-graph",
+        help="Contract mode: include a compact dependency graph (nodes + edges) in output.",
+    ),
+    compress_types: bool = typer.Option(
+        False,
+        "--compress-types",
+        help="Contract mode: abbreviate verbose type signatures (React.FC → FC, Promise<X> stays).",
+    ),
+    symbol: Optional[str] = typer.Option(
+        None,
+        "--symbol",
+        help="Contract mode: extract localized context for a specific symbol name. Returns defining file + all importers.",
+    ),
 ) -> None:
     """Analyze a repository and produce structured context for AI coding agents.
 
@@ -526,6 +585,22 @@ def main(
         return
 
     _t0 = time.monotonic()
+
+    # Validate new flag choices
+    _MODE_CHOICES = ("contract", "hybrid", "raw")
+    if mode not in _MODE_CHOICES:
+        typer.echo(
+            f"Error: invalid value '{mode}' for --mode. Valid options: {', '.join(_MODE_CHOICES)}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    _RANK_CHOICES = ("relevance", "centrality", "git-churn")
+    if rank_by not in _RANK_CHOICES:
+        typer.echo(
+            f"Error: invalid value '{rank_by}' for --rank-by. Valid options: {', '.join(_RANK_CHOICES)}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     # Validate format choices
     if format not in FORMAT_CHOICES:
@@ -555,6 +630,17 @@ def main(
     if not target.is_dir():
         typer.echo(f"Error: '{target}' is not a directory.", err=True)
         raise typer.Exit(code=1)
+
+    # Legacy flags imply raw mode unless --mode was explicitly overridden.
+    # These flags produce standard_view-only output sections not in contract_view.
+    # Preserves backward compat: callers using any legacy flag get their previous format.
+    # New callers opt into contract mode via --mode contract (or bare invocation).
+    _legacy_flags_active = (
+        compact or agent or tree or format == "yaml" or trace_pipeline
+        or docs or semantics or graph_modules or full_metrics or architecture
+    )
+    if mode == "contract" and _legacy_flags_active:
+        mode = "raw"
 
     # --- Import analysis modules ---
     from dataclasses import asdict, replace
@@ -1140,8 +1226,36 @@ def main(
                         ))
         sm = _replace(sm, pipeline_trace=_trace.build_trace())
 
+    # Contract pipeline — runs for mode=contract|hybrid (skip for raw)
+    if mode in ("contract", "hybrid"):
+        from sourcecode.contract_pipeline import ContractPipeline
+        _cp = ContractPipeline()
+        _contracts, _contract_summary = _cp.run(
+            target,
+            sm.file_paths,
+            entry_points=sm.entry_points,
+            monorepo_packages=sm.monorepo_packages,
+            mode=mode,
+            rank_by=rank_by,  # type: ignore[arg-type]
+            max_symbols=max_symbols,
+            dependency_depth=dependency_depth,
+            entrypoints_only=entrypoints_only,
+            changed_only=changed_only,
+            symbol=symbol,
+            compress_types=compress_types,
+        )
+        sm = _replace(sm, file_contracts=_contracts, contract_summary=_contract_summary)
+        if agent:
+            typer.echo(f"[contract] {len(_contracts)} files extracted ({_contract_summary.method_breakdown})", err=True)
+
     # 4. Serialize
-    if agent:
+    if mode in ("contract", "hybrid"):
+        from sourcecode.serializer import contract_view as _contract_view
+        data = _contract_view(sm, emit_graph=emit_graph)
+        if not no_redact:
+            data = redact_dict(data)
+        content = json.dumps(data, indent=2, ensure_ascii=False)
+    elif agent:
         data = agent_view(sm)
         if not no_redact:
             data = redact_dict(data)
