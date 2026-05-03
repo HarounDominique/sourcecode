@@ -104,6 +104,18 @@ _LOW_RUNTIME_STEMS: frozenset[str] = frozenset({
     "gruntfile", "gulpfile", "webpack.config", "vite.config",
     "rollup.config", "babel.config", "jest.config", "vitest.config",
     "tsconfig", "jsconfig", ".eslintrc", ".prettierrc", ".editorconfig",
+    # doc-site tooling
+    "rspress", "rspress.config", "docusaurus.config", "docusaurus",
+    "vuepress.config", "vuepress", "nextra.config",
+    "astro.config", "gatsby.config", "gatsby-config",
+    # build/workspace orchestration
+    "turbo", "turbo.config", "nx", "nx.config", "lerna",
+    "esbuild.config", "swc.config", "postcss.config",
+    "tailwind.config", "tailwind",
+    # storybook
+    "main.storybook", "preview.storybook",
+    # playwright / cypress / e2e
+    "playwright.config", "cypress.config",
 })
 
 _HIGH_VALUE_SUFFIXES: frozenset[str] = frozenset({
@@ -169,15 +181,16 @@ class RelevanceScorer:
         if (any(m in f"/{norm}/" for m in _TEST_DIR_MARKERS)
                 or any(fname.startswith(p.strip(".")) or p in fname
                        for p in _TEST_FILE_PATTERNS)):
-            base -= 0.25
+            base -= 0.30
 
-        # Config/tooling filename penalty
+        # Config/tooling filename penalty — stronger than before
         if stem.lower() in _LOW_RUNTIME_STEMS:
-            base -= 0.2
+            base -= 0.30
 
-        # Auxiliary dir penalty
+        # Auxiliary dir penalty (docs, examples, demos, fixtures, scripts…)
+        # Aggressive: these almost never belong in top-ranked agent context
         if self._is_auxiliary(norm):
-            base -= 0.2
+            base -= 0.40
 
         return max(0.0, min(1.0, base))
 

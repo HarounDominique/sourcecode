@@ -373,7 +373,8 @@ def _ts_types(root: Any, src: bytes) -> list[TypeDefinition]:
                 continue
             name = _text(name_n, src)
             fields: list[TypeField] = []
-            body_n = _find_child(node, "object_type")
+            # "interface_body" in tree-sitter-typescript >= 0.21; "object_type" in older builds
+            body_n = _find_child(node, "interface_body", "object_type")
             if body_n:
                 for prop in _walk(body_n):
                     if prop.type in ("property_signature", "method_signature"):
@@ -385,7 +386,7 @@ def _ts_types(root: Any, src: bytes) -> list[TypeDefinition]:
                             required = not any(c.type == "?" for c in prop.children)
                             fields.append(TypeField(name=prop_name, type=type_text, required=required))
             extends: list[str] = []
-            heritage_n = _find_child(node, "extends_type_clause", "class_heritage")
+            heritage_n = _find_child(node, "extends_type_clause", "extends_clause", "class_heritage")
             if heritage_n:
                 for ext_n in _walk(heritage_n):
                     if ext_n.type == "type_identifier":
@@ -429,6 +430,25 @@ def _ts_hooks(root: Any, src: bytes) -> list[str]:
     return sorted(used)
 
 
+def _merge_imports(imports: list[ImportRecord]) -> list[ImportRecord]:
+    """Merge multiple ImportRecords with the same source into one.
+
+    Tree-sitter correctly captures `import { A }` and `import type { B }` from
+    the same module as two separate statements.  Merging them produces a compact,
+    predictable contract where each source appears exactly once.
+    """
+    merged: dict[str, ImportRecord] = {}
+    for imp in imports:
+        if imp.source in merged:
+            existing = merged[imp.source]
+            combined_symbols = sorted(set(existing.symbols) | set(imp.symbols))
+            kind = existing.kind if existing.kind != "side_effect" else imp.kind
+            merged[imp.source] = ImportRecord(source=imp.source, symbols=combined_symbols, kind=kind)
+        else:
+            merged[imp.source] = imp
+    return list(merged.values())
+
+
 def _extract_ts_js_tree_sitter(path: str, source: str, lang_obj: Any, language: str) -> FileContract:
     try:
         parser = _get_parser(lang_obj)
@@ -436,7 +456,7 @@ def _extract_ts_js_tree_sitter(path: str, source: str, lang_obj: Any, language: 
         tree = parser.parse(src_bytes)
         root = tree.root_node
 
-        imports = _ts_imports(root, src_bytes)
+        imports = _merge_imports(_ts_imports(root, src_bytes))
         exports = _ts_exports(root, src_bytes)
         exported_names = {e.name for e in exports}
         functions = _ts_functions(root, src_bytes, exported_names)

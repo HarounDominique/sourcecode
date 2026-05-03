@@ -25,6 +25,23 @@ from sourcecode.schema import EntryPoint, MonorepoPackageInfo
 _MAX_FILES = 500      # hard cap on files extracted per run
 _SRC_EXTENSIONS: frozenset[str] = frozenset(_LANGUAGE_MAP.keys())
 
+# Role-based score adjustments applied after contract extraction.
+# Runtime roles get a boost; config/util are neutral or penalized.
+_ROLE_SCORE: dict[str, float] = {
+    "entrypoint": 0.15,
+    "service":    0.10,
+    "route":      0.10,
+    "api":        0.08,
+    "middleware": 0.06,
+    "store":      0.05,
+    "model":      0.05,
+    "hook":       0.05,
+    "component":  0.03,
+    "util":       0.00,
+    "config":    -0.10,
+    "unknown":    0.00,
+}
+
 RankStrategy = Literal["relevance", "centrality", "git-churn"]
 
 
@@ -206,9 +223,9 @@ class ContractPipeline:
         if changed_only:
             src_paths = [p for p in src_paths if p in changed_files]
 
-        # Apply max_files cap
-        if len(src_paths) > self.max_files:
-            # Pre-rank by static relevance to pick best candidates
+        # Apply max_files cap — bypass when symbol search to ensure defining files are found.
+        # A symbol query over a large repo needs all files; result set is small after filtering.
+        if symbol is None and len(src_paths) > self.max_files:
             src_paths = sorted(
                 src_paths,
                 key=lambda p: (p in entry_paths, scorer.score(p)),
@@ -255,23 +272,9 @@ class ContractPipeline:
         # 7. Rank
         contracts = self._rank(contracts, rank_by)
 
-        # 8. Symbol filter — keep files that export or use the symbol
+        # 8. Symbol filter — keep files that define or import the symbol
         if symbol:
-            symbol_contracts = [
-                c for c in contracts
-                if any(e.name == symbol for e in c.exports)
-                or any(f.name == symbol for f in c.functions)
-                or symbol in {t.name for t in c.types}
-            ]
-            # Also pull in direct importers (fan_in sourcing)
-            importer_paths = {
-                c.path for c in contracts
-                for imp in c.imports
-                if symbol in imp.symbols
-            }
-            importer_contracts = [c for c in contracts if c.path in importer_paths]
-            symbol_contracts = list({c.path: c for c in symbol_contracts + importer_contracts}.values())
-            contracts = sorted(symbol_contracts, key=lambda c: -c.relevance_score)
+            contracts = _filter_by_symbol(contracts, symbol)
 
         # 9. Entrypoints-only filter
         if entrypoints_only and not symbol:
@@ -322,6 +325,9 @@ class ContractPipeline:
         # Churn
         churn_score = min(churn.get(c.path, 0) / 20.0, 0.1)
         base += churn_score
+
+        # Role-based boost: runtime roles score higher than auxiliary
+        base += _ROLE_SCORE.get(c.role, 0.0)
 
         return min(1.0, base)
 
@@ -383,6 +389,48 @@ def _limit_symbols(contracts: list[FileContract], max_symbols: int) -> list[File
             result.append(trimmed)
             total = max_symbols
     return result
+
+
+# ---------------------------------------------------------------------------
+# Symbol-aware filter
+# ---------------------------------------------------------------------------
+
+def _filter_by_symbol(contracts: list[FileContract], symbol: str) -> list[FileContract]:
+    """Return contracts that define or import *symbol*.
+
+    Matching strategy:
+    1. Exact match on export/function/type names.
+    2. Case-insensitive fallback when exact match yields nothing.
+    3. Importer contracts: files that name the symbol in their imports.
+
+    Defining contracts are ranked first; importers follow.
+    """
+    def _defines(c: FileContract, sym: str, case: bool) -> bool:
+        cmp = (lambda a, b: a.lower() == b.lower()) if case else (lambda a, b: a == b)
+        return (
+            any(cmp(e.name, sym) for e in c.exports)
+            or any(cmp(f.name, sym) for f in c.functions)
+            or any(cmp(t.name, sym) for t in c.types)
+        )
+
+    def _imports(c: FileContract, sym: str, case: bool) -> bool:
+        if case:
+            sym_l = sym.lower()
+            return any(sym_l == s.lower() for imp in c.imports for s in imp.symbols)
+        return any(sym in imp.symbols for imp in c.imports)
+
+    # Exact match first
+    defining = [c for c in contracts if _defines(c, symbol, case=False)]
+    if not defining:
+        defining = [c for c in contracts if _defines(c, symbol, case=True)]
+
+    importer_paths = {c.path for c in contracts if _imports(c, symbol, case=len(defining) == 0)}
+    # Exclude files already in defining set
+    defining_paths = {c.path for c in defining}
+    importers = [c for c in contracts if c.path in importer_paths and c.path not in defining_paths]
+
+    merged = list({c.path: c for c in defining + importers}.values())
+    return sorted(merged, key=lambda c: (c.path not in defining_paths, -c.relevance_score))
 
 
 # ---------------------------------------------------------------------------

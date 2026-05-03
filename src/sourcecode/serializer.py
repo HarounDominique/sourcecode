@@ -964,7 +964,9 @@ def _contract_view_minimal(
     # Compact summary
     if sm.contract_summary is not None:
         cs = sm.contract_summary
-        degraded = bool(cs.method_breakdown.get("heuristic", 0))
+        # degraded only when tree-sitter is actually unavailable — not when individual
+        # files fall back due to parse errors or size limits.
+        degraded = any("tree_sitter_unavailable" in lim for lim in cs.limitations)
         summary: dict[str, Any] = {
             "files": cs.extracted_files,
             "total": cs.total_files,
