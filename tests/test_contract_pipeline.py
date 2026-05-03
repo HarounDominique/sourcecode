@@ -159,9 +159,11 @@ def test_cli_contract_mode_default(tmp_path: Path) -> None:
     result = runner.invoke(app, [str(tmp_path)])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert data["mode"] == "contract"
-    assert "file_contracts" in data
-    assert "metadata" in data
+    # Default contract mode renders as minimal
+    assert data["mode"] == "minimal"
+    assert "contracts" in data
+    assert "project" in data
+    assert "schema_version" in data
 
 
 def test_cli_contract_mode_explicit(tmp_path: Path) -> None:
@@ -171,8 +173,9 @@ def test_cli_contract_mode_explicit(tmp_path: Path) -> None:
     result = runner.invoke(app, ["--mode", "contract", str(tmp_path)])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert data["mode"] == "contract"
-    assert isinstance(data["file_contracts"], list)
+    # --mode contract is an alias for minimal
+    assert data["mode"] == "minimal"
+    assert isinstance(data["contracts"], list)
 
 
 def test_cli_raw_mode_preserves_standard_output(tmp_path: Path) -> None:
@@ -195,7 +198,8 @@ def test_cli_max_symbols_flag(tmp_path: Path) -> None:
             f"def func{i}a(): pass\ndef func{i}b(): pass\n"
         )
 
-    result = runner.invoke(app, ["--mode", "contract", "--max-symbols", "5", str(tmp_path)])
+    # Use --mode standard to get file_contracts with full per-symbol detail
+    result = runner.invoke(app, ["--mode", "standard", "--max-symbols", "5", str(tmp_path)])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     contracts = data.get("file_contracts", [])
@@ -216,7 +220,7 @@ def test_cli_symbol_flag(tmp_path: Path) -> None:
     result = runner.invoke(app, ["--mode", "contract", "--symbol", "verify_token", str(tmp_path)])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    paths = {c["path"] for c in data.get("file_contracts", [])}
+    paths = {c["path"] for c in data.get("contracts", [])}
     assert "auth.py" in paths
     assert "unrelated.py" not in paths
 
@@ -233,21 +237,20 @@ def test_cli_emit_graph_flag(tmp_path: Path) -> None:
     assert "edges" in data["dependency_graph"]
 
 
-def test_cli_contract_mode_includes_backward_compat_fields(tmp_path: Path) -> None:
+def test_cli_standard_mode_includes_detail_fields(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text('[project]\nname="test"\n')
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("def main(): pass\n")
 
-    result = runner.invoke(app, [str(tmp_path)])
+    result = runner.invoke(app, ["--mode", "standard", str(tmp_path)])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    # Backward compat: these fields must exist in contract view
-    assert "metadata" in data
-    assert data["metadata"]["schema_version"] == "1.0"
+    # Standard mode preserves full detail fields
+    assert data["mode"] == "standard"
+    assert "schema_version" in data
     assert "stacks" in data
-    assert "project_type" in data
-    assert "project_summary" in data
     assert "entry_points" in data
+    assert "file_contracts" in data
 
 
 def test_cli_invalid_mode_exits_nonzero(tmp_path: Path) -> None:

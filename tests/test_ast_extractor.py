@@ -74,8 +74,10 @@ def test_python_extracts_imports(tmp_path: Path) -> None:
     c = extractor.extract(tmp_path / "app.py")
     assert c is not None
     sources = {i.source for i in c.imports}
-    assert "pathlib" in sources
-    assert "json" in sources
+    # stdlib imports (pathlib, json) are filtered — they add noise without signal
+    assert "pathlib" not in sources
+    assert "json" not in sources
+    # non-stdlib imports are kept
     assert "sourcecode.schema" in sources
     sc_imp = next(i for i in c.imports if i.source == "sourcecode.schema")
     assert "SourceMap" in sc_imp.symbols

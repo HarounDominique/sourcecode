@@ -16,7 +16,7 @@ def load_fixture(name: str) -> Path:
 
 
 def test_nextjs_fixture_schema() -> None:
-    result = runner.invoke(app, [str(load_fixture("nextjs_app"))])
+    result = runner.invoke(app, ["--mode", "raw", str(load_fixture("nextjs_app"))])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -32,7 +32,7 @@ def test_nextjs_fixture_schema() -> None:
 
 
 def test_fastapi_fixture_schema() -> None:
-    result = runner.invoke(app, [str(load_fixture("fastapi_app"))])
+    result = runner.invoke(app, ["--mode", "raw", str(load_fixture("fastapi_app"))])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -45,7 +45,7 @@ def test_fastapi_fixture_schema() -> None:
 
 
 def test_go_fixture_schema() -> None:
-    result = runner.invoke(app, [str(load_fixture("go_service"))])
+    result = runner.invoke(app, ["--mode", "raw", str(load_fixture("go_service"))])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -56,7 +56,7 @@ def test_go_fixture_schema() -> None:
 
 
 def test_monorepo_fixture_schema() -> None:
-    result = runner.invoke(app, [str(load_fixture("pnpm_monorepo"))])
+    result = runner.invoke(app, ["--mode", "raw", str(load_fixture("pnpm_monorepo"))])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)

@@ -868,109 +868,75 @@ def contract_view(
     sm: SourceMap,
     *,
     emit_graph: bool = False,
+    depth: str = "minimal",
 ) -> dict[str, Any]:
-    """Contract-mode output: project context + per-file semantic contracts.
+    """Contract-mode output: project header + per-file semantic contracts.
 
-    Emits:
-      - Project identity (stacks, entry_points, summary)
-      - Per-file FileContracts ranked by relevance
-      - Optional dependency graph (--emit-graph)
-      - ContractSummary
+    depth="minimal" (default): compact header, filtered imports, no ranking
+      metadata, no per-file method/limitations. Smallest token footprint.
+    depth="standard": full per-file detail — imports, relevance scores,
+      fan metrics, extraction method. Current v0.33 behavior.
+    depth="deep": standard + optional analysis sections (deps, env, git).
 
-    Never includes: raw file contents, function bodies, implementation logic,
-    comments, formatting, or low-signal metadata.
+    Never includes: file bodies, function implementations, comments, or
+    low-signal metadata regardless of depth.
     """
-    from dataclasses import asdict as _asdict
+    contracts = sm.file_contracts or []
 
-    # ── Project context (compact) ────────────────────────────────────────────
+    if depth == "minimal":
+        return _contract_view_minimal(sm, contracts, emit_graph=emit_graph)
+    if depth in ("standard", "deep"):
+        return _contract_view_standard(sm, contracts, emit_graph=emit_graph,
+                                       include_optional=(depth == "deep"))
+    return _contract_view_minimal(sm, contracts, emit_graph=emit_graph)
+
+
+# ---------------------------------------------------------------------------
+# Minimal contract renderer — smallest token footprint
+# ---------------------------------------------------------------------------
+
+def _contract_view_minimal(
+    sm: SourceMap,
+    contracts: list[Any],
+    *,
+    emit_graph: bool = False,
+) -> dict[str, Any]:
+    """Minimal contract: project header + stripped per-file contracts."""
     primary = next((s for s in sm.stacks if s.primary), sm.stacks[0] if sm.stacks else None)
-    project: dict[str, Any] = {
-        "type": sm.project_type,
-        "summary": sm.project_summary,
-    }
+
+    # Entry point paths only (production)
+    ep_paths = sorted({
+        ep.path.replace("\\", "/")
+        for ep in sm.entry_points
+        if is_production_entry_point(ep)
+    })
+
+    project: dict[str, Any] = {"type": sm.project_type}
     if primary:
-        project["primary_stack"] = primary.stack
+        project["stack"] = primary.stack
         if primary.frameworks:
             project["frameworks"] = [f.name for f in primary.frameworks]
-        if primary.package_manager:
-            project["package_manager"] = primary.package_manager
-
-    ep_groups = _entry_point_groups(sm.entry_points)
+    if ep_paths:
+        project["entry_points"] = ep_paths
+    if sm.project_summary:
+        project["summary"] = sm.project_summary
 
     result: dict[str, Any] = {
-        # Keep metadata and top-level fields for backward compat with callers
-        # that inspect schema_version, stacks, project_type, project_summary.
-        "metadata": asdict(sm.metadata),
         "schema_version": sm.metadata.schema_version,
-        "mode": "contract",
-        "project_type": sm.project_type,
-        "project_summary": sm.project_summary,
-        "architecture_summary": sm.architecture_summary,
+        "mode": "minimal",
         "project": project,
-        "stacks": [asdict(s) for s in sm.stacks],
-        "entry_points": ep_groups["production"],
     }
-    result["development_entry_points"] = ep_groups["development"]
-    result["auxiliary_entry_points"] = ep_groups["auxiliary"]
 
-    if sm.confidence_summary is not None:
-        result["confidence"] = {
-            "overall": sm.confidence_summary.overall,
-            "stack": sm.confidence_summary.stack_confidence,
-        }
-
-    # ── File contracts ───────────────────────────────────────────────────────
-    contracts = sm.file_contracts  # list[FileContract]
+    # Per-file contracts
     if contracts:
         serialized: list[dict[str, Any]] = []
         for c in contracts:
-            item: dict[str, Any] = {
-                "path": c.path,
-                "language": c.language,
-                "role": c.role,
-                "relevance_score": round(c.relevance_score, 3),
-            }
-            if c.fan_in or c.fan_out:
-                item["fan_in"] = c.fan_in
-                item["fan_out"] = c.fan_out
-            if c.is_entrypoint:
-                item["is_entrypoint"] = True
-            if c.is_changed:
-                item["is_changed"] = True
-            if c.exports:
-                item["exports"] = [
-                    {k: v for k, v in _asdict(e).items() if v is not None and v is not False and v != "unknown"}
-                    for e in c.exports
-                ]
-            if c.imports:
-                item["imports"] = [
-                    {k: v for k, v in _asdict(i).items() if v is not None and v != [] and k != "kind" or v not in ("named", "side_effect")}
-                    for i in c.imports
-                ]
-            if c.functions:
-                item["functions"] = [
-                    {k: v for k, v in _asdict(f).items() if v is not None and v is not False and v != []}
-                    for f in c.functions
-                ]
-            if c.types:
-                item["types"] = [
-                    {k: v for k, v in _asdict(t).items() if v is not None and v != [] and v != "unknown"}
-                    for t in c.types
-                ]
-            if c.hooks_used:
-                item["hooks_used"] = c.hooks_used
-            if c.dependencies:
-                item["dependencies"] = c.dependencies
-            if c.limitations:
-                item["limitations"] = c.limitations
-            item["method"] = c.extraction_method
+            item = _serialize_contract_minimal(c)
             serialized.append(item)
-        result["file_contracts"] = serialized
+        result["contracts"] = serialized
 
-    # ── Optional analysis sections (pass-through when analyzers ran) ─────────
-    # Include summary-level data from optional analyzers so that callers using
-    # --dependencies, --env-map, --code-notes alongside --mode contract
-    # still receive the expected keys in the output.
+    # Optional analysis sections — included when the analyzer explicitly ran
+    # (user passed --dependencies, --env-map, --code-notes, --git-context)
     if sm.dependency_summary is not None and sm.dependency_summary.requested:
         dep_dict = asdict(sm.dependency_summary)
         dep_dict.pop("dependencies", None)
@@ -990,12 +956,281 @@ def contract_view(
     if sm.git_context is not None and sm.git_context.requested:
         result["git_context"] = asdict(sm.git_context)
 
-    # ── Dependency graph ─────────────────────────────────────────────────────
+    # Optional graph (--emit-graph)
     if emit_graph and contracts:
         from sourcecode.contract_pipeline import build_dependency_graph
         result["dependency_graph"] = build_dependency_graph(contracts)
 
-    # ── Contract summary ─────────────────────────────────────────────────────
+    # Compact summary
+    if sm.contract_summary is not None:
+        cs = sm.contract_summary
+        degraded = bool(cs.method_breakdown.get("heuristic", 0))
+        summary: dict[str, Any] = {
+            "files": cs.extracted_files,
+            "total": cs.total_files,
+        }
+        if cs.method_breakdown:
+            summary["methods"] = cs.method_breakdown
+        if degraded:
+            summary["degraded"] = True
+            summary["degraded_hint"] = "install sourcecode[ast] for full TS/JS extraction"
+        result["summary"] = summary
+
+    return result
+
+
+def _split_params(param_str: str) -> list[str]:
+    """Split parameter string at top-level commas."""
+    params: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in param_str:
+        if ch in "([{":
+            depth += 1
+            current.append(ch)
+        elif ch in ")]}":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            p = "".join(current).strip()
+            if p:
+                params.append(p)
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        p = "".join(current).strip()
+        if p:
+            params.append(p)
+    return params
+
+
+def _strip_param_default(param: str) -> str:
+    """Remove '= <default>' from a single parameter, keeping type annotation."""
+    depth = 0
+    for i, ch in enumerate(param):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "=" and depth == 0:
+            return param[:i].rstrip()
+    return param
+
+
+def _compress_sig(name: str, sig: str, max_len: int = 100) -> str:
+    """Compress a function signature — strip defaults, preserve type annotations."""
+    paren_start = sig.find("(")
+    if paren_start < 0:
+        full = f"{name}{sig}"
+        return full[:max_len - 3] + "..." if len(full) > max_len else full
+
+    # Find matching close paren
+    depth = 0
+    paren_end = -1
+    for i, ch in enumerate(sig[paren_start:], paren_start):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                paren_end = i
+                break
+
+    if paren_end >= 0:
+        param_str = sig[paren_start + 1:paren_end]
+        ret_str = sig[paren_end + 1:]
+        clean_params = [_strip_param_default(p) for p in _split_params(param_str)]
+        full = f"{name}({', '.join(clean_params)}){ret_str}"
+    else:
+        # Truncated signature (e.g. 2000-char cap hit) — best-effort strip of visible params
+        visible = sig[paren_start + 1:]
+        partial = _split_params(visible)
+        clean_params = [_strip_param_default(p) for p in partial]
+        full = f"{name}({', '.join(clean_params)}"
+
+    if len(full) > max_len:
+        full = full[:max_len - 3] + "..."
+    return full
+
+
+def _serialize_contract_minimal(c: Any) -> dict[str, Any]:
+    """Serialize one FileContract to minimal format."""
+    item: dict[str, Any] = {"path": c.path, "role": c.role}
+
+    if c.is_changed:
+        item["changed"] = True
+
+    # Exports: flat string for functions/unknown, {name,k} for others
+    # When all exports are same non-function kind, group them
+    if c.exports:
+        exs: list[Any] = []
+        kinds = {e.kind for e in c.exports}
+        if len(kinds) == 1 and "function" not in kinds and "unknown" not in kinds:
+            # All same non-function kind — compact: {"k": "class", "names": [...]}
+            only_kind = next(iter(kinds))
+            exs = [{"k": only_kind, "names": sorted(e.name for e in c.exports)}]
+        else:
+            for e in sorted(c.exports, key=lambda e: e.name):
+                if e.kind in ("function", "unknown"):
+                    exs.append(e.name)
+                else:
+                    exs.append({"name": e.name, "k": e.kind})
+        item["exports"] = exs
+
+    # External deps (non-stdlib already filtered in extractor)
+    if c.dependencies:
+        item["deps"] = sorted(c.dependencies)
+
+    # Exported function signatures — compressed
+    exported_names = {e.name for e in c.exports}
+    if c.functions:
+        fns = []
+        for f in sorted(c.functions, key=lambda f: f.name):
+            if not (f.exported or f.name in exported_names):
+                continue
+            fns.append(_compress_sig(f.name, f.signature))
+        if fns:
+            item["fn"] = fns
+
+    # Types: skip if fully covered by exports (avoids duplication in model files)
+    if c.types:
+        export_names_set = {e.name for e in c.exports}
+        non_redundant = [t for t in c.types if t.name not in export_names_set]
+        if non_redundant:
+            item["types"] = [
+                {"name": t.name, "k": t.kind} if t.kind not in ("interface", "class") else t.name
+                for t in sorted(non_redundant, key=lambda t: t.name)
+            ]
+
+    # Hooks (TSX/JSX — usually short list)
+    if c.hooks_used:
+        item["hooks"] = c.hooks_used
+
+    return item
+
+
+# ---------------------------------------------------------------------------
+# Standard contract renderer — full per-file detail (v0.33 behavior)
+# ---------------------------------------------------------------------------
+
+def _contract_view_standard(
+    sm: SourceMap,
+    contracts: list[Any],
+    *,
+    emit_graph: bool = False,
+    include_optional: bool = False,
+) -> dict[str, Any]:
+    """Standard contract: full per-file detail — mirrors v0.33 output."""
+    from dataclasses import asdict as _asdict
+
+    primary = next((s for s in sm.stacks if s.primary), sm.stacks[0] if sm.stacks else None)
+    project: dict[str, Any] = {"type": sm.project_type}
+    if sm.project_summary:
+        project["summary"] = sm.project_summary
+    if primary:
+        project["primary_stack"] = primary.stack
+        if primary.frameworks:
+            project["frameworks"] = [f.name for f in primary.frameworks]
+        if primary.package_manager:
+            project["package_manager"] = primary.package_manager
+
+    ep_groups = _entry_point_groups(sm.entry_points)
+
+    result: dict[str, Any] = {
+        "schema_version": sm.metadata.schema_version,
+        "mode": "standard",
+        "project": project,
+        "stacks": [
+            {"stack": s.stack, "primary": s.primary,
+             "frameworks": [f.name for f in (s.frameworks or [])],
+             "package_manager": s.package_manager}
+            for s in sm.stacks
+        ],
+        "entry_points": ep_groups["production"],
+    }
+    if ep_groups["development"]:
+        result["development_entry_points"] = ep_groups["development"]
+
+    if sm.confidence_summary is not None:
+        result["confidence"] = {
+            "overall": sm.confidence_summary.overall,
+            "stack": sm.confidence_summary.stack_confidence,
+        }
+
+    # Per-file contracts (full detail)
+    if contracts:
+        serialized: list[dict[str, Any]] = []
+        for c in contracts:
+            item: dict[str, Any] = {
+                "path": c.path,
+                "language": c.language,
+                "role": c.role,
+                "relevance_score": round(c.relevance_score, 3),
+            }
+            if c.fan_in or c.fan_out:
+                item["fan_in"] = c.fan_in
+                item["fan_out"] = c.fan_out
+            if c.is_entrypoint:
+                item["is_entrypoint"] = True
+            if c.is_changed:
+                item["is_changed"] = True
+            if c.exports:
+                item["exports"] = [
+                    {k: v for k, v in _asdict(e).items()
+                     if v is not None and v is not False and v != "unknown"}
+                    for e in c.exports
+                ]
+            if c.imports:
+                item["imports"] = [
+                    {"source": i.source, "symbols": i.symbols}
+                    if i.symbols else {"source": i.source}
+                    for i in c.imports
+                ]
+            if c.functions:
+                item["functions"] = [
+                    {k: v for k, v in _asdict(f).items()
+                     if v is not None and v is not False and v != []}
+                    for f in c.functions
+                ]
+            if c.types:
+                item["types"] = [
+                    {k: v for k, v in _asdict(t).items()
+                     if v is not None and v != [] and v != "unknown"}
+                    for t in c.types
+                ]
+            if c.hooks_used:
+                item["hooks_used"] = c.hooks_used
+            if c.dependencies:
+                item["dependencies"] = c.dependencies
+            if c.limitations:
+                item["limitations"] = c.limitations
+            item["method"] = c.extraction_method
+            serialized.append(item)
+        result["file_contracts"] = serialized
+
+    # Optional analysis sections (deep mode or when analyzers ran)
+    if include_optional:
+        if sm.dependency_summary is not None and sm.dependency_summary.requested:
+            dep_dict = asdict(sm.dependency_summary)
+            dep_dict.pop("dependencies", None)
+            result["dependency_summary"] = dep_dict
+            result["key_dependencies"] = [
+                {k: v for k, v in asdict(d).items() if v is not None and k != "parent"}
+                for d in sm.key_dependencies
+                if (d.role or "unknown") in _PRODUCTION_DEP_ROLES and d.scope not in {"dev"}
+            ]
+        if sm.env_summary is not None and sm.env_summary.requested:
+            result["env_summary"] = asdict(sm.env_summary)
+        if sm.code_notes_summary is not None and sm.code_notes_summary.requested:
+            result["code_notes_summary"] = asdict(sm.code_notes_summary)
+        if sm.git_context is not None and sm.git_context.requested:
+            result["git_context"] = asdict(sm.git_context)
+
+    if emit_graph and contracts:
+        from sourcecode.contract_pipeline import build_dependency_graph
+        result["dependency_graph"] = build_dependency_graph(contracts)
+
     if sm.contract_summary is not None:
         cs = sm.contract_summary
         result["contract_summary"] = {

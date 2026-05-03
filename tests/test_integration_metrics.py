@@ -51,7 +51,7 @@ def test_full_metrics_flag_produces_file_metrics():
 
 def test_base_command_unchanged_without_flag():
     """MQT-12: sin --full-metrics, file_metrics=[] y metrics_summary=null (backward compat)."""
-    result = runner.invoke(app, [str(PROJECT_ROOT)])
+    result = runner.invoke(app, ["--mode", "raw", str(PROJECT_ROOT)])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
 
@@ -62,7 +62,7 @@ def test_base_command_unchanged_without_flag():
         "metrics_summary must be absent from output without --full-metrics"
     )
 
-    # Identity layer fields always present
+    # Identity layer fields always present in raw mode
     assert "stacks" in data
     assert "project_summary" in data
     assert "file_tree" not in data   # deep-dive: requires --tree

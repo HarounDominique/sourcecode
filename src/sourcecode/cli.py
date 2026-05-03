@@ -516,11 +516,13 @@ def main(
         "contract",
         "--mode",
         help=(
-            "Output mode: contract (default) | hybrid | raw. "
-            "contract: per-file semantic contracts — exports, signatures, types, imports. No bodies. "
+            "Output mode: contract|minimal (default) | standard | deep | hybrid | raw. "
+            "contract/minimal: minimal per-file contracts — exports, signatures, deps. Smallest output. "
+            "standard: full per-file detail with imports, relevance scores, extraction method. "
+            "deep: standard + optional analysis sections (deps, env, git). "
             "hybrid: contracts + compact bodies for top-ranked files. "
             "raw: legacy project-level analysis (stacks, entry points, dependencies). "
-            "contract mode is the recommended default for AI coding agents."
+            "contract/minimal is the recommended default for AI coding agents."
         ),
     ),
     max_symbols: Optional[int] = typer.Option(
@@ -587,7 +589,7 @@ def main(
     _t0 = time.monotonic()
 
     # Validate new flag choices
-    _MODE_CHOICES = ("contract", "hybrid", "raw")
+    _MODE_CHOICES = ("contract", "minimal", "standard", "deep", "hybrid", "raw")
     if mode not in _MODE_CHOICES:
         typer.echo(
             f"Error: invalid value '{mode}' for --mode. Valid options: {', '.join(_MODE_CHOICES)}",
@@ -631,6 +633,13 @@ def main(
         typer.echo(f"Error: '{target}' is not a directory.", err=True)
         raise typer.Exit(code=1)
 
+    # Normalize mode aliases
+    _CONTRACT_MODES = frozenset({"contract", "minimal", "standard", "deep", "hybrid"})
+    if mode == "minimal":
+        mode = "contract"   # minimal is the canonical default contract rendering
+    elif mode not in _CONTRACT_MODES and mode != "raw":
+        mode = "contract"   # unknown → safe default
+
     # Legacy flags imply raw mode unless --mode was explicitly overridden.
     # These flags produce standard_view-only output sections not in contract_view.
     # Preserves backward compat: callers using any legacy flag get their previous format.
@@ -639,8 +648,16 @@ def main(
         compact or agent or tree or format == "yaml" or trace_pipeline
         or docs or semantics or graph_modules or full_metrics or architecture
     )
-    if mode == "contract" and _legacy_flags_active:
+    if mode in ("contract", "standard", "deep") and _legacy_flags_active:
         mode = "raw"
+
+    # Map mode to contract_view depth
+    _CONTRACT_DEPTH = {
+        "contract": "minimal",
+        "standard": "standard",
+        "deep": "deep",
+        "hybrid": "minimal",  # hybrid adds bodies via pipeline, minimal header
+    }
 
     # --- Import analysis modules ---
     from dataclasses import asdict, replace
@@ -1226,8 +1243,9 @@ def main(
                         ))
         sm = _replace(sm, pipeline_trace=_trace.build_trace())
 
-    # Contract pipeline — runs for mode=contract|hybrid (skip for raw)
-    if mode in ("contract", "hybrid"):
+    # Contract pipeline — runs for mode=contract|standard|deep|hybrid (skip for raw)
+    _is_contract_mode = mode in ("contract", "standard", "deep", "hybrid")
+    if _is_contract_mode:
         from sourcecode.contract_pipeline import ContractPipeline
         _cp = ContractPipeline()
         _contracts, _contract_summary = _cp.run(
@@ -1249,9 +1267,10 @@ def main(
             typer.echo(f"[contract] {len(_contracts)} files extracted ({_contract_summary.method_breakdown})", err=True)
 
     # 4. Serialize
-    if mode in ("contract", "hybrid"):
+    if _is_contract_mode:
         from sourcecode.serializer import contract_view as _contract_view
-        data = _contract_view(sm, emit_graph=emit_graph)
+        _depth = _CONTRACT_DEPTH.get(mode, "minimal")
+        data = _contract_view(sm, emit_graph=emit_graph, depth=_depth)
         if not no_redact:
             data = redact_dict(data)
         content = json.dumps(data, indent=2, ensure_ascii=False)

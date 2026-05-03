@@ -13,6 +13,7 @@ Install tree-sitter for best TS/JS results:
 
 import ast
 import re
+import sys
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
@@ -30,6 +31,45 @@ from sourcecode.contract_model import (
 # ---------------------------------------------------------------------------
 
 _MAX_FILE_SIZE = 200_000  # bytes — skip files larger than this
+
+# Python stdlib module names — used to filter noise from import lists.
+# sys.stdlib_module_names is available in Python 3.10+; fall back to a
+# curated set for 3.9 compatibility.
+if hasattr(sys, "stdlib_module_names"):
+    _PY_STDLIB: frozenset[str] = sys.stdlib_module_names  # type: ignore[attr-defined]
+else:
+    _PY_STDLIB: frozenset[str] = frozenset({  # type: ignore[no-redef]
+        "__future__", "_thread", "abc", "aifc", "argparse", "array", "ast",
+        "asynchat", "asyncio", "asyncore", "atexit", "audioop", "base64",
+        "bdb", "binascii", "binhex", "bisect", "builtins", "bz2", "calendar",
+        "cgi", "cgitb", "chunk", "cmath", "cmd", "code", "codecs", "codeop",
+        "collections", "colorsys", "compileall", "concurrent", "configparser",
+        "contextlib", "contextvars", "copy", "copyreg", "cProfile", "csv",
+        "ctypes", "curses", "dataclasses", "datetime", "dbm", "decimal",
+        "difflib", "dis", "doctest", "email", "encodings", "enum", "errno",
+        "faulthandler", "fcntl", "filecmp", "fileinput", "fnmatch", "fractions",
+        "ftplib", "functools", "gc", "getopt", "getpass", "gettext", "glob",
+        "grp", "gzip", "hashlib", "heapq", "hmac", "html", "http", "idlelib",
+        "imaplib", "importlib", "inspect", "io", "ipaddress", "itertools",
+        "json", "keyword", "lib2to3", "linecache", "locale", "logging", "lzma",
+        "mailbox", "marshal", "math", "mimetypes", "mmap", "modulefinder",
+        "multiprocessing", "netrc", "nntplib", "numbers", "operator", "optparse",
+        "os", "pathlib", "pdb", "pickle", "pickletools", "pipes", "pkgutil",
+        "platform", "plistlib", "poplib", "posix", "posixpath", "pprint",
+        "profile", "pstats", "pty", "pwd", "py_compile", "pyclbr", "pydoc",
+        "queue", "quopri", "random", "re", "readline", "reprlib", "resource",
+        "rlcompleter", "runpy", "sched", "secrets", "select", "selectors",
+        "shelve", "shlex", "shutil", "signal", "site", "smtpd", "smtplib",
+        "sndhdr", "socket", "socketserver", "sqlite3", "ssl", "stat",
+        "statistics", "string", "stringprep", "struct", "subprocess", "sunau",
+        "symtable", "sys", "sysconfig", "syslog", "tabnanny", "tarfile",
+        "tempfile", "termios", "test", "textwrap", "threading", "time",
+        "timeit", "tkinter", "token", "tokenize", "tomllib", "trace",
+        "traceback", "tracemalloc", "tty", "types", "typing", "unicodedata",
+        "unittest", "urllib", "uuid", "venv", "warnings", "wave", "weakref",
+        "webbrowser", "wsgiref", "xml", "xmlrpc", "zipapp", "zipfile",
+        "zipimport", "zlib", "zoneinfo",
+    })
 
 _LANGUAGE_MAP: dict[str, str] = {
     ".py": "python",
@@ -729,9 +769,10 @@ def _py_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
             sig += f" -> {ast.unparse(node.returns)}"
         except Exception:
             pass
-    # Truncate runaway signatures (e.g. typer.Option() defaults)
-    if len(sig) > 300:
-        sig = sig[:297] + "..."
+    # Keep full signature — serializer applies per-mode compression.
+    # Hard cap at 2000 to prevent pathological cases.
+    if len(sig) > 2000:
+        sig = sig[:1997] + "..."
     return sig
 
 
@@ -839,6 +880,10 @@ def _extract_python(path: str, source: str) -> FileContract:
             exported = bool(all_names) and name in all_names or not all_names
             if exported or name in all_names:
                 exports.append(ExportRecord(name=name, kind="class"))
+
+    # Filter stdlib from imports — they add noise without signal for agents
+    _stdlib_roots = {m.split(".")[0] for m in _PY_STDLIB}
+    imports = [i for i in imports if i.source.split(".")[0] not in _stdlib_roots]
 
     deps = sorted({
         imp.source.split(".")[0]

@@ -82,7 +82,29 @@ _AUXILIARY_DIR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?:^|/)scripts?(?:/|$)"),
     re.compile(r"(?:^|/)tools?(?:/|$)"),
     re.compile(r"(?:^|/)ci(?:/|$)"),
+    re.compile(r"(?:^|/)migrations?(?:/|$)"),
+    re.compile(r"(?:^|/)generated?(?:/|$)"),
+    re.compile(r"(?:^|/)storybook(?:/|$)"),
+    re.compile(r"(?:^|/)stories(?:/|$)"),
 ]
+
+# Test file patterns — scored low, excluded from default contract output
+_TEST_FILE_PATTERNS: tuple[str, ...] = (
+    "_test.", ".test.", ".spec.", "test_", "conftest", "_spec.",
+)
+_TEST_DIR_MARKERS: frozenset[str] = frozenset({
+    "/test/", "/tests/", "/spec/", "/specs/", "/__tests__/", "/__mocks__/",
+})
+
+# Config/tooling filenames that are low runtime-relevance
+_LOW_RUNTIME_STEMS: frozenset[str] = frozenset({
+    "setup", "setup.cfg", "pyproject", "package", "package-lock",
+    "yarn.lock", "pnpm-lock", "composer", "gemfile", "podfile",
+    "dockerfile", "docker-compose", "makefile", "rakefile",
+    "gruntfile", "gulpfile", "webpack.config", "vite.config",
+    "rollup.config", "babel.config", "jest.config", "vitest.config",
+    "tsconfig", "jsconfig", ".eslintrc", ".prettierrc", ".editorconfig",
+})
 
 _HIGH_VALUE_SUFFIXES: frozenset[str] = frozenset({
     ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs",
@@ -114,7 +136,7 @@ class RelevanceScorer:
 
         base = 0.3
 
-        # Package role boost
+        # Package role boost — runtime code scores high, tooling/docs low
         role = self._package_role(norm)
         role_boost = {
             "runtime_core": 0.4,
@@ -124,10 +146,10 @@ class RelevanceScorer:
             "composition_layer": 0.2,
             "plugin_package": 0.15,
             "infrastructure_layer": 0.15,
-            "tooling_layer": -0.1,
-            "docs_layer": -0.15,
-            "test_layer": 0.05,
-            "benchmark_layer": -0.2,
+            "tooling_layer": -0.15,
+            "docs_layer": -0.25,
+            "test_layer": -0.1,
+            "benchmark_layer": -0.25,
         }.get(role, 0.0)
         base += role_boost
 
@@ -141,7 +163,19 @@ class RelevanceScorer:
         if stem in _ENTRYPOINT_STEMS:
             base += 0.15
 
-        # Penalize auxiliary dirs
+        # Test file penalty — tests are useful for coverage but not for
+        # understanding architecture or editing production code
+        fname = Path(norm).name.lower()
+        if (any(m in f"/{norm}/" for m in _TEST_DIR_MARKERS)
+                or any(fname.startswith(p.strip(".")) or p in fname
+                       for p in _TEST_FILE_PATTERNS)):
+            base -= 0.25
+
+        # Config/tooling filename penalty
+        if stem.lower() in _LOW_RUNTIME_STEMS:
+            base -= 0.2
+
+        # Auxiliary dir penalty
         if self._is_auxiliary(norm):
             base -= 0.2
 

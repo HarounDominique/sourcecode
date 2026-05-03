@@ -22,7 +22,7 @@ def test_cli_detects_dotnet_console_project(tmp_path: Path) -> None:
     )
     (tmp_path / "Program.cs").write_text("Console.WriteLine(\"hi\");")
 
-    result = runner.invoke(app, [str(tmp_path)])
+    result = runner.invoke(app, ["--mode", "raw", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -35,7 +35,7 @@ def test_cli_detects_terraform_and_tooling_signals(tmp_path: Path) -> None:
     (tmp_path / "main.tf").write_text('provider "aws" { region = "eu-west-1" }')
     (tmp_path / "Dockerfile").write_text("FROM alpine:3.20")
 
-    result = runner.invoke(app, [str(tmp_path)])
+    result = runner.invoke(app, ["--mode", "raw", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -50,7 +50,7 @@ def test_cli_detects_cpp_project_from_cmake(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.cpp").write_text("int main() { return 0; }")
 
-    result = runner.invoke(app, [str(tmp_path)])
+    result = runner.invoke(app, ["--mode", "raw", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)

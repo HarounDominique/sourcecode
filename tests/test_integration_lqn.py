@@ -55,11 +55,12 @@ def test_lqn01_file_paths() -> None:
 
 
 def test_lqn02_project_summary() -> None:
-    """LQN-02: sourcecode . -> project_summary is non-None string with len > 10."""
+    """LQN-02: sourcecode . -> project.summary is non-None string with len > 10."""
     output = _invoke_json()
 
-    assert "project_summary" in output, "project_summary key missing from output"
-    ps = output["project_summary"]
+    # Default mode is minimal — summary is nested under project{}
+    ps = output.get("project", {}).get("summary") or output.get("project_summary")
+    assert ps is not None, "project.summary key missing from output"
     assert isinstance(ps, str), f"LQN-02: project_summary must be str, got {type(ps)}"
     assert len(ps) > 10, f"LQN-02: project_summary too short ({len(ps)} chars): {ps!r}"
     assert "codebase context" in ps.lower() or "contexto" in ps.lower(), (

@@ -228,7 +228,7 @@ class TestConfidenceDegradation:
 
 class TestProvenance:
     def test_entry_points_have_produced_by(self, production_nodejs: Path) -> None:
-        result = runner.invoke(app, [str(production_nodejs)])
+        result = runner.invoke(app, ["--mode", "raw", str(production_nodejs)])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         entry_points = data.get("entry_points", [])
@@ -239,7 +239,7 @@ class TestProvenance:
             )
 
     def test_stacks_have_produced_by(self, production_nodejs: Path) -> None:
-        result = runner.invoke(app, [str(production_nodejs)])
+        result = runner.invoke(app, ["--mode", "raw", str(production_nodejs)])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         stacks = data.get("stacks", [])
@@ -250,7 +250,7 @@ class TestProvenance:
             )
 
     def test_nodejs_detector_produced_by_value(self, production_nodejs: Path) -> None:
-        result = runner.invoke(app, [str(production_nodejs)])
+        result = runner.invoke(app, ["--mode", "raw", str(production_nodejs)])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         stacks = data.get("stacks", [])
@@ -267,7 +267,7 @@ class TestProvenance:
 
 class TestAnalyzerFingerprints:
     def test_metadata_has_analyzer_fingerprints(self, production_nodejs: Path) -> None:
-        result = runner.invoke(app, [str(production_nodejs)])
+        result = runner.invoke(app, ["--mode", "raw", str(production_nodejs)])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         meta = data.get("metadata", {})
@@ -278,7 +278,7 @@ class TestAnalyzerFingerprints:
         assert isinstance(fps, dict) and fps, "analyzer_fingerprints must be non-empty dict"
 
     def test_fingerprints_include_key_analyzers(self, production_nodejs: Path) -> None:
-        result = runner.invoke(app, [str(production_nodejs)])
+        result = runner.invoke(app, ["--mode", "raw", str(production_nodejs)])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         fps = data["metadata"]["analyzer_fingerprints"]
@@ -287,7 +287,7 @@ class TestAnalyzerFingerprints:
         assert "confidence" in fps, "confidence fingerprint missing"
 
     def test_fingerprints_are_8char_hex(self, production_nodejs: Path) -> None:
-        result = runner.invoke(app, [str(production_nodejs)])
+        result = runner.invoke(app, ["--mode", "raw", str(production_nodejs)])
         assert result.exit_code == 0, result.output
         fps = result.output
         data = json.loads(fps)
@@ -348,7 +348,7 @@ class TestTracePipeline:
     def test_trace_pipeline_without_flag_absent(
         self, production_nodejs: Path
     ) -> None:
-        result = runner.invoke(app, [str(production_nodejs)])
+        result = runner.invoke(app, ["--mode", "raw", str(production_nodejs)])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert "pipeline_trace" not in data, (

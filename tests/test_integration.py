@@ -29,10 +29,12 @@ def test_full_json_output(tmp_project: Path):
     result = runner.invoke(app, [str(tmp_project)])
     assert result.exit_code == 0, f"Error: {result.output}"
     data = json.loads(result.output)
-    assert data["metadata"]["schema_version"] == "1.0"
-    assert "file_tree" not in data  # tree is deep-dive, not included by default
-    assert data["stacks"][0]["stack"] == "python"
-    assert data["project_type"] == "cli"
+    # Default mode is minimal contract — compact header + per-file contracts
+    assert data["schema_version"] == "1.0"
+    assert data["mode"] == "minimal"
+    assert "file_tree" not in data
+    assert data["project"]["type"] == "cli"
+    assert "contracts" in data
 
 
 def test_full_json_output_with_tree(tmp_project: Path):
@@ -76,7 +78,7 @@ def test_output_file(tmp_project: Path, tmp_path: Path):
     assert result.exit_code == 0
     assert out.exists()
     data = json.loads(out.read_text())
-    assert data["metadata"]["schema_version"] == "1.0"
+    assert data["schema_version"] == "1.0"
 
 
 def test_env_excluded_from_tree(project_with_env: Path):
@@ -101,8 +103,8 @@ def test_nonexistent_path():
 
 
 def test_metadata_analyzed_path(tmp_project: Path):
-    result = runner.invoke(app, [str(tmp_project)])
+    result = runner.invoke(app, ["--mode", "raw", str(tmp_project)])
     assert result.exit_code == 0
     data = json.loads(result.output)
-    # analyzed_path debe ser el path resuelto del directorio analizado
+    # analyzed_path is in metadata — use raw mode which preserves full metadata
     assert str(tmp_project.resolve()) in data["metadata"]["analyzed_path"]

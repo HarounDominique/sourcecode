@@ -18,7 +18,7 @@ def test_cli_detects_nextjs_stack(tmp_path: Path) -> None:
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "page.tsx").write_text("export default function Page() {}")
 
-    result = runner.invoke(app, [str(tmp_path)])
+    result = runner.invoke(app, ["--mode", "raw", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -39,7 +39,7 @@ dependencies = ["fastapi>=0.115", "uvicorn>=0.30"]
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("app = None")
 
-    result = runner.invoke(app, [str(tmp_path)])
+    result = runner.invoke(app, ["--mode", "raw", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -52,7 +52,7 @@ def test_cli_uses_heuristic_for_python_without_manifest(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("print('hi')")
 
-    result = runner.invoke(app, [str(tmp_path)])
+    result = runner.invoke(app, ["--mode", "raw", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -70,7 +70,7 @@ def test_cli_detects_go_entry_point(tmp_path: Path) -> None:
     (tmp_path / "cmd" / "api").mkdir()
     (tmp_path / "cmd" / "api" / "main.go").write_text("package main")
 
-    result = runner.invoke(app, [str(tmp_path)])
+    result = runner.invoke(app, ["--mode", "raw", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)

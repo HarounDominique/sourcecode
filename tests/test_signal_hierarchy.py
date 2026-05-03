@@ -133,7 +133,7 @@ class TestSignalHierarchy:
         self, python_cli_with_node_tooling: Path
     ) -> None:
         """Python CLI project stays python even when .claude/ has package.json."""
-        result = runner.invoke(app, [str(python_cli_with_node_tooling)])
+        result = runner.invoke(app, ["--mode", "raw", str(python_cli_with_node_tooling)])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert data["project_type"] in ("cli", "python", "library"), (
@@ -146,7 +146,7 @@ class TestSignalHierarchy:
         self, python_cli_with_node_tooling: Path
     ) -> None:
         """Primary stack must be python, not nodejs, when .claude/package.json exists."""
-        result = runner.invoke(app, [str(python_cli_with_node_tooling)])
+        result = runner.invoke(app, ["--mode", "raw", str(python_cli_with_node_tooling)])
         assert result.exit_code == 0
         data = json.loads(result.output)
         primary = next((s for s in data["stacks"] if s.get("primary")), None)
@@ -159,7 +159,7 @@ class TestSignalHierarchy:
         self, python_project_aux_manifest: Path
     ) -> None:
         """Manifest buried in tests/fixtures/ must not win over root pyproject.toml."""
-        result = runner.invoke(app, [str(python_project_aux_manifest)])
+        result = runner.invoke(app, ["--mode", "raw", str(python_project_aux_manifest)])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         stacks = {s["stack"] for s in data["stacks"]}
@@ -178,7 +178,7 @@ class TestEntryPointReason:
     def test_pyproject_scripts_gets_console_script_reason(
         self, python_pyproject_entrypoint: Path
     ) -> None:
-        result = runner.invoke(app, [str(python_pyproject_entrypoint)])
+        result = runner.invoke(app, ["--mode", "raw", str(python_pyproject_entrypoint)])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         entry_points = data.get("entry_points", [])
@@ -194,7 +194,7 @@ class TestEntryPointReason:
     def test_cli_filename_pattern_gets_entry_file_pattern_reason(
         self, python_cli_pattern_entrypoint: Path
     ) -> None:
-        result = runner.invoke(app, [str(python_cli_pattern_entrypoint)])
+        result = runner.invoke(app, ["--mode", "raw", str(python_cli_pattern_entrypoint)])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         entry_points = data.get("auxiliary_entry_points", [])
@@ -209,7 +209,7 @@ class TestEntryPointReason:
         )
 
     def test_entry_points_have_reason_field(self, tmp_project: Path) -> None:
-        result = runner.invoke(app, [str(tmp_project)])
+        result = runner.invoke(app, ["--mode", "raw", str(tmp_project)])
         assert result.exit_code == 0
         data = json.loads(result.output)
         for ep in data.get("entry_points", []):

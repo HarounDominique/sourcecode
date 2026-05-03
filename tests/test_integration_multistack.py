@@ -26,7 +26,7 @@ dependencies = ["fastapi>=0.115"]
     )
     (tmp_path / "backend" / "main.py").write_text("app = None")
 
-    result = runner.invoke(app, [str(tmp_path)])
+    result = runner.invoke(app, ["--mode", "raw", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -56,7 +56,7 @@ dependencies = ["fastapi>=0.115"]
     )
     (tmp_path / "packages" / "api" / "main.py").write_text("app = None")
 
-    result = runner.invoke(app, [str(tmp_path)])
+    result = runner.invoke(app, ["--mode", "raw", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
