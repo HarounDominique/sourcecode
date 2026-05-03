@@ -923,7 +923,7 @@ def _contract_view_minimal(
 
     result: dict[str, Any] = {
         "schema_version": sm.metadata.schema_version,
-        "mode": "minimal",
+        "mode": "contract",
         "project": project,
     }
 
@@ -949,9 +949,28 @@ def _contract_view_minimal(
 
     if sm.env_summary is not None and sm.env_summary.requested:
         result["env_summary"] = asdict(sm.env_summary)
+        if sm.env_map:
+            # Include top-20 env entries sorted by required first, then name.
+            # Agents read the summary count but need the actual keys to act on them.
+            _sorted_env = sorted(sm.env_map, key=lambda e: (not getattr(e, "required", False), getattr(e, "name", "")))
+            result["env_map"] = [
+                {k: v for k, v in asdict(e).items() if v is not None and v != ""}
+                for e in _sorted_env[:20]
+            ]
 
     if sm.code_notes_summary is not None and sm.code_notes_summary.requested:
         result["code_notes_summary"] = asdict(sm.code_notes_summary)
+        if sm.code_notes:
+            # Include top-20 notes by severity: BUG > FIXME > DEPRECATED > TODO > others.
+            _SEVERITY_ORDER = {"BUG": 0, "FIXME": 1, "DEPRECATED": 2, "TODO": 3, "HACK": 4, "WARNING": 5}
+            _sorted_notes = sorted(
+                sm.code_notes,
+                key=lambda n: (_SEVERITY_ORDER.get(getattr(n, "kind", "").upper(), 9), getattr(n, "path", "")),
+            )
+            result["code_notes"] = [
+                {k: v for k, v in asdict(n).items() if v is not None and v != ""}
+                for n in _sorted_notes[:20]
+            ]
 
     if sm.git_context is not None and sm.git_context.requested:
         result["git_context"] = asdict(sm.git_context)

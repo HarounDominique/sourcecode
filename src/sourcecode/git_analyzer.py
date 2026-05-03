@@ -198,6 +198,13 @@ def _is_hotspot_admin(path: str) -> bool:
     for suffix in _HOTSPOT_ADMIN_SUFFIXES:
         if filename.endswith(suffix):
             return True
+    # Localized changelogs: CHANGELOG.zh-CN.md, CHANGES.en-US.md, etc.
+    _lower = filename.lower()
+    if _lower.startswith("changelog.") or _lower.startswith("changes."):
+        return True
+    # lerna.json and root-level package.json are modified by version bumps, not dev work
+    if filename in ("lerna.json",):
+        return True
     return False
 
 

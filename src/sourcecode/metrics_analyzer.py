@@ -219,6 +219,16 @@ class MetricsAnalyzer:
             if fm.language != "unknown":
                 languages.add(fm.language)
 
+        # Emit explicit limitation when JS/TS files are present but complexity is unavailable.
+        # This prevents agents from assuming null complexity means "no functions found".
+        _js_ts_count = sum(1 for r in records if r.language in ("javascript", "typescript") and r.complexity_availability == "unavailable")
+        if _js_ts_count > 0:
+            limitations.append(
+                f"cyclomatic_complexity_unavailable: {_js_ts_count} JS/TS file(s) — "
+                "complexity requires tree-sitter (pip install 'sourcecode[ast]'). "
+                "null complexity fields are expected, not an error."
+            )
+
         summary = MetricsSummary(
             requested=True,
             file_count=len(records),

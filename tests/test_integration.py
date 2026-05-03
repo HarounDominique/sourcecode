@@ -31,7 +31,7 @@ def test_full_json_output(tmp_project: Path):
     data = json.loads(result.output)
     # Default mode is minimal contract — compact header + per-file contracts
     assert data["schema_version"] == "1.0"
-    assert data["mode"] == "minimal"
+    assert data["mode"] == "contract"
     assert "file_tree" not in data
     assert data["project"]["type"] == "cli"
     assert "contracts" in data

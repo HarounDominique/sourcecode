@@ -384,7 +384,8 @@ def main(
     no_tree: bool = typer.Option(
         False,
         "--no-tree",
-        help="(Deprecated) Previously suppressed file_tree. The file tree is excluded by default — this flag is now a no-op. Use --tree to include the file tree.",
+        hidden=True,
+        help="(Removed) No-op. File tree is excluded by default. Use --tree to include it.",
     ),
     tree: bool = typer.Option(
         False,
@@ -516,13 +517,13 @@ def main(
         "contract",
         "--mode",
         help=(
-            "Output mode: contract|minimal (default) | standard | deep | hybrid | raw. "
-            "contract/minimal: minimal per-file contracts — exports, signatures, deps. Smallest output. "
+            "Output mode: contract (default) | standard | raw. "
+            "contract: minimal per-file contracts — exports, signatures, deps. "
+            "Smallest output, recommended for AI agents. "
+            "minimal is accepted as an alias for contract. "
             "standard: full per-file detail with imports, relevance scores, extraction method. "
-            "deep: standard + optional analysis sections (deps, env, git). "
-            "hybrid: contracts + compact bodies for top-ranked files. "
-            "raw: legacy project-level analysis (stacks, entry points, dependencies). "
-            "contract/minimal is the recommended default for AI coding agents."
+            "raw: project-level analysis only (stacks, entry points, dependency summary). "
+            "No per-file contracts."
         ),
     ),
     max_symbols: Optional[int] = typer.Option(
@@ -534,7 +535,8 @@ def main(
     dependency_depth: int = typer.Option(
         0,
         "--dependency-depth",
-        help="Transitive import traversal depth for contract mode (0 = direct only, N = follow N levels).",
+        hidden=True,
+        help="(Removed) Transitive resolution is not implemented. Pass 0 or omit.",
         min=0,
         max=5,
     ),
@@ -561,7 +563,8 @@ def main(
     compress_types: bool = typer.Option(
         False,
         "--compress-types",
-        help="Contract mode: abbreviate verbose type signatures (React.FC → FC, Promise<X> stays).",
+        hidden=True,
+        help="(Removed) No observable effect when type signatures are not extracted. Omit.",
     ),
     symbol: Optional[str] = typer.Option(
         None,
@@ -589,8 +592,20 @@ def main(
     _t0 = time.monotonic()
 
     # Validate new flag choices
-    _MODE_CHOICES = ("contract", "minimal", "standard", "deep", "hybrid", "raw")
-    if mode not in _MODE_CHOICES:
+    _MODE_CHOICES = ("contract", "minimal", "standard", "raw")
+    _DEPRECATED_MODES: dict[str, str] = {
+        "hybrid": "contract",
+        "deep": "standard",
+    }
+    if mode in _DEPRECATED_MODES:
+        fallback = _DEPRECATED_MODES[mode]
+        typer.echo(
+            f"[deprecated] --mode {mode} is removed: produced identical output to --mode {fallback}. "
+            f"Using --mode {fallback}.",
+            err=True,
+        )
+        mode = fallback
+    elif mode not in _MODE_CHOICES:
         typer.echo(
             f"Error: invalid value '{mode}' for --mode. Valid options: {', '.join(_MODE_CHOICES)}",
             err=True,
@@ -603,6 +618,22 @@ def main(
             err=True,
         )
         raise typer.Exit(code=1)
+
+    if dependency_depth > 0:
+        typer.echo(
+            f"[warning] --dependency-depth {dependency_depth} has no effect: "
+            "transitive import resolution is not implemented for npm/yarn/pip projects. "
+            "Using depth=0 (direct dependencies only).",
+            err=True,
+        )
+        dependency_depth = 0
+
+    if compress_types:
+        typer.echo(
+            "[deprecated] --compress-types is removed: type signatures are rarely extracted "
+            "at default depth. Flag ignored.",
+            err=True,
+        )
 
     # Validate format choices
     if format not in FORMAT_CHOICES:
@@ -634,9 +665,9 @@ def main(
         raise typer.Exit(code=1)
 
     # Normalize mode aliases
-    _CONTRACT_MODES = frozenset({"contract", "minimal", "standard", "deep", "hybrid"})
+    _CONTRACT_MODES = frozenset({"contract", "minimal", "standard"})
     if mode == "minimal":
-        mode = "contract"   # minimal is the canonical default contract rendering
+        mode = "contract"   # minimal is a documented alias for contract
     elif mode not in _CONTRACT_MODES and mode != "raw":
         mode = "contract"   # unknown → safe default
 
@@ -648,15 +679,13 @@ def main(
         compact or agent or tree or format == "yaml" or trace_pipeline
         or docs or semantics or graph_modules or full_metrics or architecture
     )
-    if mode in ("contract", "standard", "deep") and _legacy_flags_active:
+    if mode in ("contract", "standard") and _legacy_flags_active:
         mode = "raw"
 
     # Map mode to contract_view depth
     _CONTRACT_DEPTH = {
         "contract": "minimal",
         "standard": "standard",
-        "deep": "deep",
-        "hybrid": "minimal",  # hybrid adds bodies via pipeline, minimal header
     }
 
     # --- Import analysis modules ---
@@ -745,6 +774,19 @@ def main(
     file_tree = filter_sensitive_files(raw_tree)
     detector = ProjectDetector(build_default_detectors())
     workspace_analysis = WorkspaceAnalyzer().analyze(target, manifests)
+
+    # Warn when scanning a monorepo at default depth — typical package sources
+    # (packages/*/src/) live at depth 5+, so default depth=4 silently misses them.
+    # Only emit to TTY to avoid contaminating piped/CI output; agents read analysis_gaps.
+    import sys as _sys
+    if workspace_analysis.is_monorepo and depth <= 4 and effective_depth <= 4:
+        if _sys.stderr.isatty():
+            typer.echo(
+                f"[warning] monorepo detected with --depth {depth}. "
+                "Source files in packages/*/src/ (depth 5+) may be invisible. "
+                "Use --depth 6 or higher for full coverage.",
+                err=True,
+            )
 
     # --compact implicitly enables lightweight analysis passes so that
     # dependency_summary, env_summary and code_notes_summary are never null.
@@ -1244,7 +1286,7 @@ def main(
         sm = _replace(sm, pipeline_trace=_trace.build_trace())
 
     # Contract pipeline — runs for mode=contract|standard|deep|hybrid (skip for raw)
-    _is_contract_mode = mode in ("contract", "standard", "deep", "hybrid")
+    _is_contract_mode = mode in ("contract", "standard")
     if _is_contract_mode:
         from sourcecode.contract_pipeline import ContractPipeline
         _cp = ContractPipeline()
@@ -1263,6 +1305,13 @@ def main(
             compress_types=compress_types,
         )
         sm = _replace(sm, file_contracts=_contracts, contract_summary=_contract_summary)
+        if symbol is not None and len(_contracts) == 0:
+            typer.echo(
+                f"[warning] --symbol '{symbol}' matched 0 files. "
+                "The symbol may not exist at the current --depth, or the name may differ in case. "
+                "Try --depth 8 or verify the symbol name.",
+                err=True,
+            )
         if agent:
             typer.echo(f"[contract] {len(_contracts)} files extracted ({_contract_summary.method_breakdown})", err=True)
 

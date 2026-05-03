@@ -160,7 +160,7 @@ def test_cli_contract_mode_default(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     # Default contract mode renders as minimal
-    assert data["mode"] == "minimal"
+    assert data["mode"] == "contract"
     assert "contracts" in data
     assert "project" in data
     assert "schema_version" in data
@@ -174,7 +174,7 @@ def test_cli_contract_mode_explicit(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     # --mode contract is an alias for minimal
-    assert data["mode"] == "minimal"
+    assert data["mode"] == "contract"
     assert isinstance(data["contracts"], list)
 
 
