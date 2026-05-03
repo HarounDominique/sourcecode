@@ -220,6 +220,29 @@ def _preprocess_argv() -> None:
     _sys.argv = _sys.argv[:1] + modified
 
 
+def _copy_to_clipboard(content: str) -> bool:
+    """Copy text to system clipboard. Returns True on success, False otherwise (never raises)."""
+    import subprocess
+    import sys as _sys
+    try:
+        if _sys.platform == "darwin":
+            subprocess.run(["pbcopy"], input=content.encode("utf-8"), check=True, timeout=10)
+            return True
+        elif _sys.platform == "win32":
+            subprocess.run(["clip"], input=content.encode("utf-16"), check=True, timeout=10)
+            return True
+        else:
+            for cmd in (["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]):
+                try:
+                    subprocess.run(cmd, input=content.encode("utf-8"), check=True, timeout=10)
+                    return True
+                except (FileNotFoundError, subprocess.CalledProcessError):
+                    continue
+            return False
+    except Exception:
+        return False
+
+
 app = typer.Typer(
     name="sourcecode",
     help=_HELP,
@@ -570,6 +593,12 @@ def main(
         None,
         "--symbol",
         help="Contract mode: extract localized context for a specific symbol name. Returns defining file + all importers.",
+    ),
+    copy: bool = typer.Option(
+        False,
+        "--copy",
+        "-c",
+        help="Copy output to system clipboard after a successful run. No-op when --output is used or clipboard is unavailable.",
     ),
 ) -> None:
     """Analyze a repository and produce structured context for AI coding agents.
@@ -1386,6 +1415,13 @@ def main(
     # 6. Write output (CLI-04)
     write_output(content, output=output)
 
+    # 7. Clipboard copy (--copy / -c)
+    if copy and output is None:
+        _trimmed = content.strip()
+        if _trimmed and _trimmed not in ("{}", "[]", "null"):
+            if _copy_to_clipboard(content):
+                typer.echo("✓ copied to clipboard", err=True)
+
 
 @app.command("prepare-context")
 def prepare_context_cmd(
@@ -1416,6 +1452,12 @@ def prepare_context_cmd(
         False,
         "--dry-run",
         help="Show what would be analyzed without running it",
+    ),
+    copy: bool = typer.Option(
+        False,
+        "--copy",
+        "-c",
+        help="Copy output to system clipboard after a successful run. No-op when clipboard is unavailable.",
     ),
 ) -> None:
     """Task-specific context for AI coding agents.
@@ -1514,7 +1556,14 @@ def prepare_context_cmd(
     if llm_prompt:
         out["llm_prompt"] = builder.render_prompt(output)
 
-    typer.echo(json.dumps(out, indent=2, ensure_ascii=False))
+    _pc_content = json.dumps(out, indent=2, ensure_ascii=False)
+    typer.echo(_pc_content)
+
+    if copy:
+        _trimmed = _pc_content.strip()
+        if _trimmed and _trimmed not in ("{}", "[]", "null"):
+            if _copy_to_clipboard(_pc_content):
+                typer.echo("✓ copied to clipboard", err=True)
 
 
 # ── Telemetry commands ────────────────────────────────────────────────────────
