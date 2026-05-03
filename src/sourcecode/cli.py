@@ -714,6 +714,13 @@ def main(
     # 1. Scan directory (SCAN-01 to SCAN-05)
     redactor = SecretRedactor(enabled=not no_redact)
 
+    # Classify repository topology before scanning.  This is a shallow
+    # filesystem read (depth 0-1 only) and completes in milliseconds.
+    # The topology drives per-directory depth budgets in AdaptiveScanner.
+    from sourcecode.adaptive_scanner import AdaptiveScanner
+    from sourcecode.repo_classifier import RepoClassifier
+    _topology = RepoClassifier().classify(target)
+
     # Detect manifests before scan to adjust depth.
     # find_manifests() only looks at depth 0-1, does not need the full tree.
     _pre_scanner = FileScanner(target, max_depth=1)
@@ -735,7 +742,7 @@ def main(
         no_tree = True  # agents never need the raw file tree
         typer.echo("[agent] dependencies env-map code-notes (no-tree)", err=True)
 
-    scanner = FileScanner(target, max_depth=effective_depth)
+    scanner = AdaptiveScanner(target, topology=_topology, base_depth=effective_depth)
     raw_tree = scanner.scan_tree()
 
     # 2. Filter .env and *.secret entries from file tree (SEC-02, all levels)
@@ -775,16 +782,14 @@ def main(
     detector = ProjectDetector(build_default_detectors())
     workspace_analysis = WorkspaceAnalyzer().analyze(target, manifests)
 
-    # Warn when scanning a monorepo at default depth — typical package sources
-    # (packages/*/src/) live at depth 5+, so default depth=4 silently misses them.
-    # Only emit to TTY to avoid contaminating piped/CI output; agents read analysis_gaps.
+    # Adaptive traversal handles monorepo source root discovery automatically.
+    # Emit a diagnostic when topology confidence is low so users know why.
     import sys as _sys
-    if workspace_analysis.is_monorepo and depth <= 4 and effective_depth <= 4:
+    if _topology.workspace_type == "monorepo" and _topology.confidence < 0.5:
         if _sys.stderr.isatty():
             typer.echo(
-                f"[warning] monorepo detected with --depth {depth}. "
-                "Source files in packages/*/src/ (depth 5+) may be invisible. "
-                "Use --depth 6 or higher for full coverage.",
+                "[traversal] monorepo detected but source root confidence is low "
+                f"({_topology.confidence:.0%}). Use --depth 8 or higher if files are missing.",
                 err=True,
             )
 
@@ -896,7 +901,8 @@ def main(
         workspace_root = target / workspace.path
         if not workspace_root.exists() or not workspace_root.is_dir():
             continue
-        workspace_scanner = FileScanner(workspace_root, max_depth=depth)
+        _ws_topology = RepoClassifier().classify(workspace_root)
+        workspace_scanner = AdaptiveScanner(workspace_root, topology=_ws_topology, base_depth=depth)
         workspace_tree = filter_sensitive_files(workspace_scanner.scan_tree())
         workspace_manifests = workspace_scanner.find_manifests()
         workspace_stacks, workspace_entry_points, _ = detector.detect(
@@ -1008,6 +1014,7 @@ def main(
     metadata = AnalysisMetadata(
         analyzed_path=str(target),
         analyzer_fingerprints=_fingerprints,
+        traversal_topology=_topology.as_dict(),
     )
     sm = SourceMap(
         metadata=metadata,
@@ -1037,7 +1044,7 @@ def main(
                     target / ws.path,
                     (
                         filter_sensitive_files(
-                            FileScanner(target / ws.path, max_depth=depth).scan_tree()
+                            AdaptiveScanner(target / ws.path, base_depth=depth).scan_tree()
                         )
                     ),
                     workspace=ws.path,

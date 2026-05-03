@@ -927,6 +927,9 @@ def _contract_view_minimal(
         "project": project,
     }
 
+    if sm.metadata.traversal_topology:
+        result["traversal"] = sm.metadata.traversal_topology
+
     # Per-file contracts
     if contracts:
         serialized: list[dict[str, Any]] = []
@@ -1170,6 +1173,8 @@ def _contract_view_standard(
         ],
         "entry_points": ep_groups["production"],
     }
+    if sm.metadata.traversal_topology:
+        result["traversal"] = sm.metadata.traversal_topology
     if ep_groups["development"]:
         result["development_entry_points"] = ep_groups["development"]
 

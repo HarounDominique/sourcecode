@@ -34,6 +34,7 @@ class AnalysisMetadata:
     sourcecode_version: str = field(default_factory=_sourcecode_version)
     analyzed_path: str = ""
     analyzer_fingerprints: dict[str, str] = field(default_factory=dict)
+    traversal_topology: Optional[dict[str, Any]] = None
 
 
 @dataclass
