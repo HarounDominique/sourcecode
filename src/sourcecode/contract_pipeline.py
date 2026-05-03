@@ -8,6 +8,8 @@ Produces a list of FileContracts ranked by semantic importance,
 with fan-in/fan-out computed from the import graph.
 """
 
+import os
+import re
 import subprocess
 from collections import Counter
 from pathlib import Path
@@ -275,6 +277,16 @@ class ContractPipeline:
         # 8. Symbol filter — keep files that define or import the symbol
         if symbol:
             contracts = _filter_by_symbol(contracts, symbol)
+            # When shallow scan missed the defining file (deep monorepo), fall back
+            # to a grep-based filesystem search over the full directory tree.
+            if not contracts:
+                contracts = self._symbol_deep_scan(
+                    root, symbol,
+                    known_paths=set(src_paths),
+                    entry_paths=entry_paths,
+                    changed_files=changed_files,
+                    scorer=scorer,
+                )
 
         # 9. Entrypoints-only filter
         if entrypoints_only and not symbol:
@@ -340,6 +352,38 @@ class ContractPipeline:
         # Default: relevance
         return sorted(contracts, key=lambda c: (-c.is_entrypoint, -c.relevance_score))
 
+    def _symbol_deep_scan(
+        self,
+        root: Path,
+        symbol: str,
+        known_paths: set[str],
+        entry_paths: set[str],
+        changed_files: set[str],
+        scorer: RelevanceScorer,
+    ) -> list[FileContract]:
+        """Grep-based fallback when the shallow scan missed the defining files.
+
+        Searches the full directory tree for source files containing *symbol*,
+        extracts contracts for candidates not already processed, then re-applies
+        the symbol filter. Fan-in/fan-out are not computed for these contracts.
+        """
+        candidates = _find_symbol_files(root, symbol, known_paths, scorer)
+        if not candidates:
+            return []
+
+        extra: list[FileContract] = []
+        for rel_path in candidates[:300]:  # cap to prevent excessive extraction
+            abs_path = root / rel_path
+            contract = self._extractor.extract(abs_path, root)
+            if contract is None:
+                continue
+            contract.is_entrypoint = rel_path in entry_paths
+            contract.is_changed = rel_path in changed_files
+            contract.relevance_score = scorer.score(rel_path)
+            extra.append(contract)
+
+        return _filter_by_symbol(extra, symbol)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -354,7 +398,6 @@ def _compress_contract_types(c: FileContract) -> None:
         (r"React\.ReactNode", "ReactNode"),
         (r"React\.ReactElement", "ReactElement"),
     ]
-    import re
     for fn in c.functions:
         for pattern, repl in _replacements:
             fn.signature = re.sub(pattern, repl, fn.signature)
@@ -396,41 +439,155 @@ def _limit_symbols(contracts: list[FileContract], max_symbols: int) -> list[File
 # ---------------------------------------------------------------------------
 
 def _filter_by_symbol(contracts: list[FileContract], symbol: str) -> list[FileContract]:
-    """Return contracts that define or import *symbol*.
+    """Return contracts that define, import, or structurally reference *symbol*.
 
-    Matching strategy:
-    1. Exact match on export/function/type names.
-    2. Case-insensitive fallback when exact match yields nothing.
-    3. Importer contracts: files that name the symbol in their imports.
+    Four tiers applied in order:
+    1. Exact name match — export/function/type names.
+    2. Case-insensitive name match when tier 1 yields nothing.
+    3. Import symbol match — name appears in import symbol list.
+    4. Type-reference match — symbol in extends clauses, field types, or
+       function signatures (word-boundary). Only used when tiers 1-3 fail.
 
-    Defining contracts are ranked first; importers follow.
+    Defining contracts are ranked first; importers and references follow.
     """
-    def _defines(c: FileContract, sym: str, case: bool) -> bool:
+    sym_l = symbol.lower()
+    word_re = re.compile(
+        r"(?<![A-Za-z0-9_])" + re.escape(symbol) + r"(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    )
+
+    def _defines(c: FileContract, case: bool) -> bool:
         cmp = (lambda a, b: a.lower() == b.lower()) if case else (lambda a, b: a == b)
         return (
-            any(cmp(e.name, sym) for e in c.exports)
-            or any(cmp(f.name, sym) for f in c.functions)
-            or any(cmp(t.name, sym) for t in c.types)
+            any(cmp(e.name, symbol) for e in c.exports)
+            or any(cmp(f.name, symbol) for f in c.functions)
+            or any(cmp(t.name, symbol) for t in c.types)
         )
 
-    def _imports(c: FileContract, sym: str, case: bool) -> bool:
+    def _imports_sym(c: FileContract, case: bool) -> bool:
         if case:
-            sym_l = sym.lower()
             return any(sym_l == s.lower() for imp in c.imports for s in imp.symbols)
-        return any(sym in imp.symbols for imp in c.imports)
+        return any(symbol in imp.symbols for imp in c.imports)
 
-    # Exact match first
-    defining = [c for c in contracts if _defines(c, symbol, case=False)]
+    def _references_type(c: FileContract) -> bool:
+        """Tier 4: symbol appears in extends clauses, field types, or signatures."""
+        for t in c.types:
+            if any(sym_l in ext.lower() for ext in t.extends):
+                return True
+            for field in t.fields:
+                if sym_l in field.type.lower():
+                    return True
+        for f in c.functions:
+            if word_re.search(f.signature):
+                return True
+        return False
+
+    # Tier 1: exact name match
+    defining = [c for c in contracts if _defines(c, case=False)]
+    # Tier 2: case-insensitive name match
     if not defining:
-        defining = [c for c in contracts if _defines(c, symbol, case=True)]
+        defining = [c for c in contracts if _defines(c, case=True)]
 
-    importer_paths = {c.path for c in contracts if _imports(c, symbol, case=len(defining) == 0)}
-    # Exclude files already in defining set
     defining_paths = {c.path for c in defining}
+
+    # Tier 3: import matching (case-insensitive when no definers found)
+    ci_imports = len(defining) == 0
+    importer_paths = {c.path for c in contracts if _imports_sym(c, case=ci_imports)}
     importers = [c for c in contracts if c.path in importer_paths and c.path not in defining_paths]
 
-    merged = list({c.path: c for c in defining + importers}.values())
-    return sorted(merged, key=lambda c: (c.path not in defining_paths, -c.relevance_score))
+    # Tier 4: type-reference matching (only when tiers 1-3 yield nothing)
+    references: list[FileContract] = []
+    if not defining and not importers:
+        ref_paths = {c.path for c in contracts if _references_type(c)}
+        references = [c for c in contracts if c.path in ref_paths]
+
+    # Merge in priority order: defining > importers > type-references
+    seen: set[str] = set()
+    merged: list[FileContract] = []
+    for c in defining + importers + references:
+        if c.path not in seen:
+            seen.add(c.path)
+            merged.append(c)
+
+    return sorted(merged, key=lambda c: (
+        c.path not in defining_paths,
+        c.path not in importer_paths,
+        -c.relevance_score,
+    ))
+
+
+# ---------------------------------------------------------------------------
+# Deep symbol scan — grep-based fallback for shallow-scanned repos
+# ---------------------------------------------------------------------------
+
+_DEEP_SCAN_NOISE_DIRS: frozenset[str] = frozenset({
+    "node_modules", ".git", "dist", "build", "__pycache__",
+    ".venv", "venv", "target", ".next", ".nuxt", ".turbo", "coverage",
+    ".nyc_output", ".mypy_cache", ".pytest_cache",
+})
+
+
+def _find_symbol_files(
+    root: Path,
+    symbol: str,
+    known_paths: set[str],
+    scorer: RelevanceScorer,
+) -> list[str]:
+    """Find source files outside *known_paths* that contain *symbol* as text.
+
+    Uses subprocess grep when available (fast); falls back to os.walk + read.
+    Returns repo-relative paths, noise-filtered.
+    """
+    found: list[str] = []
+
+    # Try grep (fast, available on Linux/Mac)
+    try:
+        result = subprocess.run(
+            [
+                "grep", "-rl",
+                "--include=*.ts", "--include=*.tsx",
+                "--include=*.js", "--include=*.jsx",
+                "--include=*.py",
+                symbol, ".",
+            ],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("./"):
+                line = line[2:]
+            line = line.replace("\\", "/")
+            if line and line not in known_paths and not scorer.is_noise(line):
+                found.append(line)
+        return found
+    except Exception:
+        pass
+
+    # Python fallback — os.walk + text search
+    for dirpath, dirnames, filenames in os.walk(str(root)):
+        dirnames[:] = sorted(d for d in dirnames if d not in _DEEP_SCAN_NOISE_DIRS)
+        for fname in filenames:
+            if Path(fname).suffix.lower() not in _SRC_EXTENSIONS:
+                continue
+            full = os.path.join(dirpath, fname)
+            try:
+                rel = Path(full).relative_to(root)
+                rel_str = str(rel).replace("\\", "/")
+            except ValueError:
+                continue
+            if rel_str in known_paths or scorer.is_noise(rel_str):
+                continue
+            try:
+                content = Path(full).read_text(encoding="utf-8", errors="replace")
+                if symbol in content:
+                    found.append(rel_str)
+            except OSError:
+                pass
+
+    return found
 
 
 # ---------------------------------------------------------------------------

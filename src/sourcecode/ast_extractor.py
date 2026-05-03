@@ -296,11 +296,20 @@ def _ts_exports(root: Any, src: bytes) -> list[ExportRecord]:
                 handled = True
 
         if not handled and is_default:
-            # export default <expression>
+            # export default <expression> — preserve local binding name when available
             for child in node.children:
                 if child.type not in ("export", "default", ";") and not child.type.startswith("comment"):
-                    name_n = _find_child(child, "identifier", "type_identifier")
-                    name = _text(name_n, src) if name_n else "default"
+                    if child.type in ("identifier", "type_identifier"):
+                        # export default app  →  name="app"
+                        name = _text(child, src)
+                    elif child.type == "call_expression":
+                        # export default defineConfig({})  →  name="defineConfig"
+                        fn_n = _find_child(child, "identifier")
+                        name = _text(fn_n, src) if fn_n else "default"
+                    else:
+                        # object/array/other expression — look one level deep
+                        name_n = _find_child(child, "identifier", "type_identifier")
+                        name = _text(name_n, src) if name_n else "default"
                     records.append(ExportRecord(name=name, kind="default"))
                     break
 
@@ -692,7 +701,7 @@ def _heuristic_ts_types(source: str) -> list[TypeDefinition]:
     return types
 
 
-def _extract_ts_js_heuristic(path: str, source: str, language: str) -> FileContract:
+def _extract_ts_js_heuristic(path: str, source: str, language: str, *, ts_installed: bool = False) -> FileContract:
     imports = _heuristic_ts_imports(source)
     exports = _heuristic_ts_exports(source)
     exported_names = {e.name for e in exports}
@@ -711,6 +720,12 @@ def _extract_ts_js_heuristic(path: str, source: str, language: str) -> FileContr
         if not imp.source.startswith(".") and not imp.source.startswith("/")
     })
 
+    # Distinguish "tree-sitter absent" from "language parser not loaded"
+    if ts_installed:
+        lim = f"ts_lang_missing: tree-sitter parser for {language!r} not loaded; install sourcecode[ast]"
+    else:
+        lim = "tree_sitter_unavailable: install sourcecode[ast] for full TS/JS extraction"
+
     return FileContract(
         path=path,
         language=language,
@@ -721,7 +736,7 @@ def _extract_ts_js_heuristic(path: str, source: str, language: str) -> FileContr
         hooks_used=hooks_used,
         dependencies=deps,
         extraction_method="heuristic",
-        limitations=["tree_sitter_unavailable: install sourcecode[ast] for full TS/JS extraction"],
+        limitations=[lim],
     )
 
 
@@ -1039,7 +1054,7 @@ class AstExtractor:
                 if lang_obj is not None:
                     contract = _extract_ts_js_tree_sitter(rel_path, source, lang_obj, language)
                 else:
-                    contract = _extract_ts_js_heuristic(rel_path, source, language)
+                    contract = _extract_ts_js_heuristic(rel_path, source, language, ts_installed=True)
             else:
                 contract = _extract_ts_js_heuristic(rel_path, source, language)
 
