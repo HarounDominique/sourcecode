@@ -17,6 +17,7 @@ from typing import Any, Literal, Optional
 
 from sourcecode.ast_extractor import AstExtractor, _LANGUAGE_MAP
 from sourcecode.contract_model import ContractSummary, FileContract
+from sourcecode.ranking_engine import RankingEngine
 from sourcecode.relevance_scorer import RelevanceScorer
 from sourcecode.schema import EntryPoint, MonorepoPackageInfo
 
@@ -27,22 +28,6 @@ from sourcecode.schema import EntryPoint, MonorepoPackageInfo
 _MAX_FILES = 500      # hard cap on files extracted per run
 _SRC_EXTENSIONS: frozenset[str] = frozenset(_LANGUAGE_MAP.keys())
 
-# Role-based score adjustments applied after contract extraction.
-# Runtime roles get a boost; config/util are neutral or penalized.
-_ROLE_SCORE: dict[str, float] = {
-    "entrypoint": 0.15,
-    "service":    0.10,
-    "route":      0.10,
-    "api":        0.08,
-    "middleware": 0.06,
-    "store":      0.05,
-    "model":      0.05,
-    "hook":       0.05,
-    "component":  0.03,
-    "util":       0.00,
-    "config":    -0.10,
-    "unknown":    0.00,
-}
 
 RankStrategy = Literal["relevance", "centrality", "git-churn"]
 
@@ -194,6 +179,7 @@ class ContractPipeline:
         """
         entry_paths = {ep.path.replace("\\", "/") for ep in (entry_points or [])}
         scorer = RelevanceScorer(monorepo_packages)
+        engine = RankingEngine(monorepo_packages)
 
         # 1. Changed files (for --changed-only and ranking)
         changed_files: set[str] = set()
@@ -267,9 +253,24 @@ class ContractPipeline:
         if rank_by == "git-churn":
             churn = _get_git_churn(root, [c.path for c in contracts])
 
-        # 6. Compute relevance scores
+        # 6. Compute relevance scores via unified ranking engine
+        max_fan_in = max((c.fan_in for c in contracts), default=1) if contracts else 1
+        max_churn_val = max(churn.values(), default=1) if churn else 1
         for c in contracts:
-            c.relevance_score = self._score(c, scorer, churn)
+            fs = engine.score(
+                c.path,
+                fan_in=c.fan_in,
+                fan_out=c.fan_out,
+                max_fan_in=max_fan_in,
+                git_churn=churn.get(c.path, 0),
+                max_churn=max_churn_val,
+                is_entrypoint=c.is_entrypoint,
+                is_changed=c.is_changed,
+                export_count=len(c.exports),
+                task="default",
+            )
+            c.relevance_score = fs.display_score
+            c.ranking_reasons = fs.reasons
 
         # 7. Rank
         contracts = self._rank(contracts, rank_by)
@@ -285,7 +286,7 @@ class ContractPipeline:
                     known_paths=set(src_paths),
                     entry_paths=entry_paths,
                     changed_files=changed_files,
-                    scorer=scorer,
+                    engine=engine,
                 )
 
         # 9. Entrypoints-only filter
@@ -312,45 +313,13 @@ class ContractPipeline:
         )
         return contracts, summary
 
-    def _score(
-        self,
-        c: FileContract,
-        scorer: RelevanceScorer,
-        churn: dict[str, int],
-    ) -> float:
-        base = scorer.score(c.path)
-
-        if c.is_entrypoint:
-            base += 0.3
-        if c.is_changed:
-            base += 0.2
-
-        # Fan-in is the strongest signal: many callers = critical contract
-        fi_score = min(c.fan_in / 10.0, 0.3)
-        fo_score = min(c.fan_out / 15.0, 0.15)
-        base += fi_score + fo_score
-
-        # Exported API value
-        export_count = len(c.exports)
-        base += min(export_count / 20.0, 0.1)
-
-        # Churn
-        churn_score = min(churn.get(c.path, 0) / 20.0, 0.1)
-        base += churn_score
-
-        # Role-based boost: runtime roles score higher than auxiliary
-        base += _ROLE_SCORE.get(c.role, 0.0)
-
-        return min(1.0, base)
-
     def _rank(self, contracts: list[FileContract], rank_by: RankStrategy) -> list[FileContract]:
         if rank_by == "centrality":
-            # Approximate centrality: fan_in + fan_out
-            return sorted(contracts, key=lambda c: -(c.fan_in + c.fan_out))
+            return sorted(contracts, key=lambda c: (-(c.fan_in + c.fan_out), c.path))
         if rank_by == "git-churn":
-            return sorted(contracts, key=lambda c: (-c.is_changed, -c.relevance_score))
-        # Default: relevance
-        return sorted(contracts, key=lambda c: (-c.is_entrypoint, -c.relevance_score))
+            return sorted(contracts, key=lambda c: (-c.is_changed, -c.relevance_score, c.path))
+        # Default: relevance — path breaks ties deterministically
+        return sorted(contracts, key=lambda c: (-c.is_entrypoint, -c.relevance_score, c.path))
 
     def _symbol_deep_scan(
         self,
@@ -359,7 +328,7 @@ class ContractPipeline:
         known_paths: set[str],
         entry_paths: set[str],
         changed_files: set[str],
-        scorer: RelevanceScorer,
+        engine: RankingEngine,
     ) -> list[FileContract]:
         """Grep-based fallback when the shallow scan missed the defining files.
 
@@ -367,7 +336,7 @@ class ContractPipeline:
         extracts contracts for candidates not already processed, then re-applies
         the symbol filter. Fan-in/fan-out are not computed for these contracts.
         """
-        candidates = _find_symbol_files(root, symbol, known_paths, scorer)
+        candidates = _find_symbol_files(root, symbol, known_paths, engine)
         if not candidates:
             return []
 
@@ -379,7 +348,9 @@ class ContractPipeline:
                 continue
             contract.is_entrypoint = rel_path in entry_paths
             contract.is_changed = rel_path in changed_files
-            contract.relevance_score = scorer.score(rel_path)
+            fs = engine.score(rel_path, is_entrypoint=contract.is_entrypoint, is_changed=contract.is_changed)
+            contract.relevance_score = fs.display_score
+            contract.ranking_reasons = fs.reasons
             extra.append(contract)
 
         return _filter_by_symbol(extra, symbol)
@@ -531,7 +502,7 @@ def _find_symbol_files(
     root: Path,
     symbol: str,
     known_paths: set[str],
-    scorer: RelevanceScorer,
+    engine: RankingEngine,
 ) -> list[str]:
     """Find source files outside *known_paths* that contain *symbol* as text.
 
@@ -560,7 +531,7 @@ def _find_symbol_files(
             if line.startswith("./"):
                 line = line[2:]
             line = line.replace("\\", "/")
-            if line and line not in known_paths and not scorer.is_noise(line):
+            if line and line not in known_paths and not engine.is_noise(line):
                 found.append(line)
         return found
     except Exception:
@@ -578,7 +549,7 @@ def _find_symbol_files(
                 rel_str = str(rel).replace("\\", "/")
             except ValueError:
                 continue
-            if rel_str in known_paths or scorer.is_noise(rel_str):
+            if rel_str in known_paths or engine.is_noise(rel_str):
                 continue
             try:
                 content = Path(full).read_text(encoding="utf-8", errors="replace")

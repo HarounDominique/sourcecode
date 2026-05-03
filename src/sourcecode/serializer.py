@@ -171,40 +171,109 @@ def _dep_import_key(name: str) -> str:
 
 
 def _file_relevance(sm: SourceMap, *, limit: int = 15) -> list[dict[str, Any]]:
+    from sourcecode.ranking_engine import RankingEngine
+
     root = Path(sm.metadata.analyzed_path) if sm.metadata.analyzed_path else Path(".")
     classifier = FileClassifier(root, sm.entry_points, sm.monorepo_packages)
-    items = classifier.classify_paths(sm.file_paths, limit=limit)
-    return [asdict(item) for item in items]
+    engine = RankingEngine(sm.monorepo_packages)
+
+    # Incorporate git hotspots when --git-context was passed
+    git_churn: dict[str, int] = {}
+    gc = sm.git_context
+    if (gc and gc.requested and gc.change_hotspots
+            and not any(lim in gc.limitations
+                        for lim in ("no_git_repo", "git_not_found", "git_timeout"))):
+        git_churn = {h.file: h.commit_count for h in gc.change_hotspots}
+    max_churn = max(git_churn.values(), default=1)
+
+    entry_paths = {ep.path for ep in sm.entry_points}
+    scored: list[tuple[float, dict[str, Any]]] = []
+
+    for path in sm.file_paths:
+        file_class = classifier.classify(path)
+        fs = engine.score(
+            path,
+            git_churn=git_churn.get(path, 0),
+            max_churn=max_churn,
+            is_entrypoint=path in entry_paths,
+        )
+
+        if fs.score < -50:  # hard noise
+            continue
+
+        content_rel = file_class.relevance if file_class else 0.0
+        combined = fs.score + content_rel
+
+        if combined <= 0 and not (file_class and file_class.relevance > 0.3):
+            continue
+
+        item: dict[str, Any] = {
+            "path": path,
+            "category": file_class.category if file_class else "source",
+            "confidence": file_class.confidence if file_class else "low",
+            "relevance": round(max(0.0, min(1.0, combined / 2.0)), 3),
+            "reason": file_class.reason if file_class else (fs.reasons[0] if fs.reasons else "source file"),
+            "evidence": file_class.evidence if file_class else [],
+        }
+
+        ranking_reasons = [r for r in fs.reasons if r != "source file"]
+        if ranking_reasons:
+            item["ranking_reasons"] = ranking_reasons
+
+        scored.append((combined, item))
+
+    # Deterministic sort: score desc, then path asc
+    scored.sort(key=lambda x: (-x[0], x[1]["path"]))
+    return [item for _, item in scored[:limit]]
 
 
 def _architecture_context(sm: SourceMap) -> dict[str, Any]:
     arch = sm.architecture
     if arch is not None and arch.requested:
-        pattern = arch.pattern if arch.pattern not in (None, "unknown", "flat") else "no confirmed architecture pattern; inferred partial layering"
-        return {
+        pattern = arch.pattern if arch.pattern not in (None, "unknown", "flat") else None
+        ctx: dict[str, Any] = {
             "summary": sm.architecture_summary,
-            "pattern": pattern,
+            "pattern": pattern or "insufficient_evidence",
             "confidence": arch.confidence,
             "method": arch.method,
-            "layers": [
+        }
+        if arch.layers:
+            ctx["layers"] = [
                 {
                     "name": layer.name,
                     "confidence": layer.confidence,
                     "file_count": len(layer.files),
                 }
                 for layer in arch.layers
-            ],
-            "limitations": arch.limitations,
-        }
+            ]
+        else:
+            ctx["no_layers_detected"] = True
+        if arch.confidence == "low" and not pattern:
+            ctx["note"] = "directory structure insufficient for reliable architectural inference; use --semantics for higher accuracy"
+        if arch.limitations:
+            ctx["limitations"] = arch.limitations
+        return ctx
     return {
         "summary": sm.architecture_summary,
-        "pattern": "no confirmed architecture pattern; inferred partial layering",
+        "pattern": "insufficient_evidence",
         "confidence": "low",
         "method": "not_requested",
         "limitations": [
             "architecture analyzer not requested; summary limited to stack, filesystem and entrypoint evidence"
         ],
     }
+
+
+def _serialize_file_metric(m: Any) -> dict[str, Any]:
+    """Serialize FileMetrics, omitting null cyclomatic_complexity when availability is unavailable.
+
+    Prevents 100% of JS/TS/Go/Rust files from appearing as errors due to null complexity.
+    The complexity_availability field already communicates the reason — the null value adds noise.
+    """
+    d = asdict(m)
+    if d.get("complexity_availability") == "unavailable":
+        d.pop("cyclomatic_complexity", None)
+    return d
 
 
 def _section_confidence(sm: SourceMap) -> dict[str, str]:
@@ -254,12 +323,33 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
         dep_summary_dict = None  # "not analyzed" — agent should add --dependencies
 
     env_summary_dict: Any = None
+    env_map_items: Any = None
     if sm.env_summary is not None and sm.env_summary.requested:
         env_summary_dict = asdict(sm.env_summary)
+        if sm.env_map:
+            _sorted_env = sorted(
+                sm.env_map,
+                key=lambda e: (not getattr(e, "required", False), getattr(e, "key", "")),
+            )
+            env_map_items = [
+                {k: v for k, v in asdict(e).items() if v is not None and v != "" and v != []}
+                for e in _sorted_env[:15]
+            ]
 
     code_notes_summary_dict: Any = None
+    code_notes_items: Any = None
     if sm.code_notes_summary is not None and sm.code_notes_summary.requested:
         code_notes_summary_dict = asdict(sm.code_notes_summary)
+        if sm.code_notes:
+            _SEVERITY_ORDER = {"BUG": 0, "FIXME": 1, "DEPRECATED": 2, "TODO": 3, "HACK": 4, "WARNING": 5}
+            _sorted_notes = sorted(
+                sm.code_notes,
+                key=lambda n: (_SEVERITY_ORDER.get(getattr(n, "kind", "").upper(), 9), getattr(n, "path", "")),
+            )
+            code_notes_items = [
+                {k: v for k, v in asdict(n).items() if v is not None}
+                for n in _sorted_notes[:20]
+            ]
 
     # Entry points: production runtime only. Auxiliary and development entries
     # are exposed separately so agents do not mix tooling with execution paths.
@@ -298,7 +388,9 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
         "dependency_summary": dep_summary_dict,
         "key_dependencies": key_deps,
         "env_summary": env_summary_dict,
+        "env_map": env_map_items,
         "code_notes_summary": code_notes_summary_dict,
+        "code_notes": code_notes_items,
         "confidence_summary": conf_dict,
         "anomalies": anomalies,
         "analysis_gaps": gaps_list,
@@ -682,11 +774,33 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
         }
         if sm.env_summary.categories:
             signals["env_vars"]["categories"] = sm.env_summary.categories
+        if sm.env_map:
+            _sorted_env = sorted(
+                sm.env_map,
+                key=lambda e: (not getattr(e, "required", False), getattr(e, "key", "")),
+            )
+            signals["env_vars"]["keys"] = [
+                {k: v for k, v in asdict(e).items() if v is not None and v != "" and v != []}
+                for e in _sorted_env[:10]
+            ]
 
     if sm.code_notes_summary and sm.code_notes_summary.requested and sm.code_notes_summary.total > 0:
         by_kind = {k: v for k, v in sm.code_notes_summary.by_kind.items() if v > 0}
+        _code_notes_signal: dict[str, Any] = {}
         if by_kind:
-            signals["code_notes"] = {"total": sm.code_notes_summary.total, "by_kind": by_kind}
+            _code_notes_signal = {"total": sm.code_notes_summary.total, "by_kind": by_kind}
+        if sm.code_notes:
+            _SEVERITY_ORDER = {"BUG": 0, "FIXME": 1, "DEPRECATED": 2, "TODO": 3, "HACK": 4, "WARNING": 5}
+            _sorted_notes = sorted(
+                sm.code_notes,
+                key=lambda n: (_SEVERITY_ORDER.get(getattr(n, "kind", "").upper(), 9), getattr(n, "path", "")),
+            )
+            _code_notes_signal["top"] = [
+                {k: v for k, v in asdict(n).items() if v is not None}
+                for n in _sorted_notes[:10]
+            ]
+        if _code_notes_signal:
+            signals["code_notes"] = _code_notes_signal
         if sm.code_notes_summary.adr_count > 0:
             signals["adrs"] = sm.code_notes_summary.adr_count
 
@@ -849,7 +963,7 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
 
     if sm.metrics_summary is not None and sm.metrics_summary.requested:
         result["metrics_summary"] = asdict(sm.metrics_summary)
-        result["file_metrics"] = [asdict(m) for m in sm.file_metrics]
+        result["file_metrics"] = [_serialize_file_metric(m) for m in sm.file_metrics]
 
     if sm.architecture is not None and sm.architecture.requested:
         result["architecture"] = asdict(sm.architecture)
@@ -1131,6 +1245,12 @@ def _serialize_contract_minimal(c: Any) -> dict[str, Any]:
     if c.hooks_used:
         item["hooks"] = c.hooks_used
 
+    # Ranking signals: why this file was ranked here
+    if getattr(c, "ranking_reasons", None):
+        non_trivial = [r for r in c.ranking_reasons if r not in ("source file", "noise")]
+        if non_trivial:
+            item["why"] = non_trivial
+
     return item
 
 
@@ -1231,6 +1351,10 @@ def _contract_view_standard(
                 item["dependencies"] = c.dependencies
             if c.limitations:
                 item["limitations"] = c.limitations
+            if getattr(c, "ranking_reasons", None):
+                non_trivial = [r for r in c.ranking_reasons if r not in ("source file", "noise")]
+                if non_trivial:
+                    item["ranking_reasons"] = non_trivial
             item["method"] = c.extraction_method
             serialized.append(item)
         result["file_contracts"] = serialized

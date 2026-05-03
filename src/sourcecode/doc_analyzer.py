@@ -185,6 +185,13 @@ class DocAnalyzer:
         if any(r.doc_text and r.doc_text.endswith(self._TRUNCATION_SUFFIX) for r in records):
             truncated = True
 
+        # Explicit absence signal: scanned files but found nothing
+        if total_count == 0 and file_paths:
+            limitations.append(
+                f"no_docs_found: {len(file_paths)} file(s) scanned, "
+                "no docstrings or JSDoc comments found"
+            )
+
         summary = DocSummary(
             requested=True,
             total_count=total_count,

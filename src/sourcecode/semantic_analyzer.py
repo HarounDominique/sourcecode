@@ -105,9 +105,13 @@ class SemanticAnalyzer:
 
         # 1. Flatten file_tree and filter to Python files
         all_paths = flatten_file_tree(file_tree)
+        from sourcecode.relevance_scorer import RelevanceScorer as _RS
+        _is_noise = _RS([]).is_noise
         source_files = [
             p for p in all_paths
-            if Path(p).suffix in _PY_EXTENSIONS and (root / p).is_file()
+            if Path(p).suffix in _PY_EXTENSIONS
+            and (root / p).is_file()
+            and not _is_noise(p)
         ]
 
         # Files referenced in tree but not on disk (read_error)
@@ -347,7 +351,9 @@ class SemanticAnalyzer:
         # -----------------------------------------------------------------------
         js_source_files = [
             p for p in all_paths
-            if Path(p).suffix in self._NODE_EXTENSIONS and (root / p).is_file()
+            if Path(p).suffix in self._NODE_EXTENSIONS
+            and (root / p).is_file()
+            and not _is_noise(p)
         ]
         internal_module_paths: set[str] = set(js_source_files)
 

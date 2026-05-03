@@ -566,7 +566,7 @@ def main(
     entrypoints_only: bool = typer.Option(
         False,
         "--entrypoints-only",
-        help="Contract mode: include only files that are entrypoints or have exported symbols.",
+        help="Contract mode: include only files that are runtime entrypoints or have exported symbols (public API surface). Note: 'entrypoints' here includes all files with exports, not strictly detected runtime entry points.",
     ),
     changed_only: bool = typer.Option(
         False,
@@ -1156,10 +1156,14 @@ def main(
 
         _all_call_files = set(_fan_in) | set(_fan_out)
         _hotspots: list[dict] = []
-        # Filter test paths from hotspots — they dominate fan-in by calling many modules
+        # Filter test, noise, and auxiliary paths — they dominate fan-in but carry no signal
         _TEST_MARKERS = {"/test", "/tests", "/spec", "/specs", "_test.", ".test.", ".spec."}
+        from sourcecode.ranking_engine import RankingEngine as _RankingEngine
+        _sem_engine = _RankingEngine(sm.monorepo_packages)
         for _p in _all_call_files:
             if any(_m in _p for _m in _TEST_MARKERS) or _p.startswith("test"):
+                continue
+            if _sem_engine.is_noise(_p) or _sem_engine.is_auxiliary(_p):
                 continue
             _in = _fan_in[_p]
             _out = _fan_out[_p]

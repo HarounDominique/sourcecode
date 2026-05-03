@@ -20,12 +20,13 @@ _RELEASE_COMMIT_RE = re.compile(
 )
 # Matches version-bump phrases anywhere in the commit subject (multilingual)
 _RELEASE_COMMIT_CONTAINS_RE = re.compile(
-    r"subiendo a v?[\d.]"          # Spanish: "subiendo a v.0.28.0"
+    r"subiendo a v?[\d.]"              # Spanish: "subiendo a 0.38.0", "subiendo a v.0.31.0"
+    r"|actualizando a v?[\d.]"         # Spanish: "actualizando a 0.15.1"
     r"|bumping to v?[\d.]"
     r"|preparing (?:v|release)[\d. ]"
     r"|releasing v?[\d.]"
     r"|cut v?[\d.]"
-    r"|\bv\d+\.\d+\.\d+\b",       # bare version tag in middle of message
+    r"|\bv\d+\.\d+\.\d+\b",           # bare version tag in middle of message
     re.IGNORECASE,
 )
 
@@ -34,11 +35,24 @@ _HOTSPOT_ADMIN_FILENAMES: frozenset[str] = frozenset({
     "CHANGELOG.md", "CHANGELOG", "CHANGES.md", "CHANGES", "HISTORY.md",
     "RELEASE.md", "RELEASES.md", "RELEASE_NOTES.md", "CHANGELOG.rst", "NEWS.md", "NEWS.rst",
     "VERSION", "VERSION.txt", "version.txt", ".version",
+    "_version.py", "__version__.py", "version.py",
+    "pyproject.toml", "setup.cfg",
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
     "Cargo.lock", "poetry.lock", "Pipfile.lock", "composer.lock",
     "go.sum", "Gemfile.lock",
 })
 _HOTSPOT_ADMIN_SUFFIXES: tuple[str, ...] = (".lock", ".snap", ".min.js", ".min.css")
+
+# Auxiliary directory names whose files should be excluded from hotspots —
+# docs, examples, benchmarks etc. are high-commit but low operational signal.
+_HOTSPOT_AUX_DIRS: frozenset[str] = frozenset({
+    "docs", "doc", "benchmark", "benchmarks", "example", "examples",
+    "demo", "demos", "playground", "playgrounds", "fixture", "fixtures",
+    "generated", "generate", "storybook", ".storybook", "stories",
+    "sandbox", "sandboxes",
+    "ci", "translations", "locales", "locale", "i18n", "l10n",
+    ".planning",
+})
 
 
 def _run_git(args: list[str], cwd: Path, timeout: int = 15) -> tuple[str, int]:
@@ -191,7 +205,7 @@ def _parse_commits(output: str) -> list:
 
 
 def _is_hotspot_admin(path: str) -> bool:
-    """True for files that are noisy from release/bot commits, not semantic changes."""
+    """True for files that are noisy from release/bot commits or auxiliary dirs."""
     filename = path.rsplit("/", 1)[-1]
     if filename in _HOTSPOT_ADMIN_FILENAMES:
         return True
@@ -202,9 +216,15 @@ def _is_hotspot_admin(path: str) -> bool:
     _lower = filename.lower()
     if _lower.startswith("changelog.") or _lower.startswith("changes."):
         return True
-    # lerna.json and root-level package.json are modified by version bumps, not dev work
+    # lerna.json is modified by version bumps, not dev work
     if filename in ("lerna.json",):
         return True
+    # Auxiliary directory parts — docs, benchmarks, examples, demos, etc.
+    # These may have high commit counts but are not operational signal for agents.
+    parts = path.split("/")
+    for part in parts[:-1]:  # check directory components, not the filename itself
+        if part.lower() in _HOTSPOT_AUX_DIRS:
+            return True
     return False
 
 
@@ -230,6 +250,9 @@ def _parse_hotspots(output: str) -> list:
             )
             continue
         if skip_commit:
+            continue
+        # Skip git artifact lines that are not file paths: flags (-o, --), separators, etc.
+        if line.startswith("-") or not ("/" in line or "." in line):
             continue
         if _is_hotspot_admin(line):
             continue

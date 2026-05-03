@@ -627,94 +627,81 @@ class TaskContextBuilder:
         git_hotspots: Optional[dict[str, int]] = None,
         uncommitted_files: Optional[set[str]] = None,
     ) -> list[RelevantFile]:
-        from sourcecode.relevance_scorer import RelevanceScorer
+        from sourcecode.ranking_engine import RankingEngine
         from sourcecode.file_classifier import FileClassifier
-        scorer = RelevanceScorer(monorepo_packages or [])
-        file_classifier = FileClassifier(self.root, [
-            # _rank_files only needs production path evidence; EntryPoint objects
-            # are not available here, so category evidence is best-effort below.
-        ], monorepo_packages or [])
 
-        # Auxiliary entry points (benchmark, docs, examples) must not get
-        # the production entry boost — they are not runtime signals.
-        runtime_entry_set = {ep for ep in entry_set if not scorer.is_auxiliary(ep)}
+        engine = RankingEngine(monorepo_packages or [])
+        file_classifier = FileClassifier(self.root, [], monorepo_packages or [])
+
+        # Auxiliary entry points (benchmark, docs, examples) are not runtime
+        runtime_entry_set = {ep for ep in entry_set if not engine.is_auxiliary(ep)}
 
         _hotspots = git_hotspots or {}
         _uncommitted = uncommitted_files or set()
         _max_churn = max(_hotspots.values(), default=1)
 
-        scored: list[tuple[float, RelevantFile]] = []
+        scored: list[tuple[float, str, RelevantFile]] = []
 
         for path in all_paths:
             if Path(path).suffix.lower() not in _ALL_EXTENSIONS:
                 continue
             if any(pen in path for pen in spec.ranking_penalties):
                 continue
-
-            # Hard filter: tooling/config noise
-            if scorer.is_noise(path):
+            if engine.is_noise(path):
                 continue
 
             is_test = path in test_set
             if is_test and task_name != "generate-tests":
                 continue
 
-            score = 0.0
-            reasons: list[str] = []
+            # Structural + git signals from unified engine (task-weighted)
+            fs = engine.score(
+                path,
+                is_entrypoint=(path in runtime_entry_set),
+                git_churn=_hotspots.get(path, 0),
+                max_churn=_max_churn,
+                is_changed=(path in _uncommitted),
+                task=task_name,
+            )
 
-            # Only runtime entry points get the production boost
-            if path in runtime_entry_set:
-                score += 3.0
-                reasons.append("entry point")
+            if fs.score < -50:  # hard noise
+                continue
 
+            # Content classification boost (reads file imports)
+            content_boost = 0.0
+            content_reasons: list[str] = []
             file_class = file_classifier.classify(path)
             if file_class is not None:
-                score += file_class.relevance * 2.0
-                reasons.append(f"{file_class.category}: {file_class.reason}")
+                content_boost = file_class.relevance * 2.0
+                content_reasons.append(f"{file_class.category}: {file_class.reason}")
 
             if is_test:
-                score += 2.0
-                reasons.append("existing test")
-            elif self._is_source(path):
-                score += 0.5
-                if not reasons:
-                    reasons.append("source file with supported extension")
+                content_boost += 2.0
+                content_reasons.append("existing test")
+            elif self._is_source(path) and not content_reasons:
+                content_boost += 0.5
 
-            # Operational relevance boost/penalty from package role
-            rel = scorer.score(path)
-            score += (rel - 0.3) * 2.0  # center around 0.3 baseline
-
-            # Suppress auxiliary dirs (benchmarks, docs, examples, demos)
-            if scorer.is_auxiliary(path):
-                score -= 2.0
-
-            # Git churn: frequently changed files are high-signal for active work
-            churn = _hotspots.get(path, 0)
-            if churn > 0:
-                score += (churn / _max_churn) * 1.5
-                reasons.append(f"git churn ({churn})")
-
-            # Uncommitted changes: files actively being edited rank highest
-            if path in _uncommitted:
-                score += 1.0
-                reasons.append("uncommitted changes")
-
-            if score <= 0:
+            total = fs.score + content_boost
+            if total <= 0:
                 continue
 
             role = (
                 "entrypoint" if path in runtime_entry_set
                 else ("test" if is_test else "source")
             )
-            scored.append((score, RelevantFile(
+            all_reasons = [r for r in fs.reasons if r != "source file"] + content_reasons
+            reason_str = ", ".join(all_reasons) if all_reasons else "source file"
+
+            scored.append((total, path, RelevantFile(
                 path=path,
                 role=role,
-                score=round(score, 1),
-                reason=", ".join(reasons) if reasons else "source file",
+                score=round(min(total / 3.0, 1.0), 2),
+                reason=reason_str,
             )))
 
-        scored.sort(key=lambda x: -x[0])
-        return [f for _, f in scored[:15]]
+        # Deterministic: score desc, then path asc as tiebreaker
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        return [f for _, _, f in scored[:15]]
 
     def _is_test(self, path: str) -> bool:
         name = Path(path).name.lower()

@@ -222,6 +222,10 @@ class RelevanceScorer:
     def _is_auxiliary(self, norm: str) -> bool:
         return any(p.search(norm) for p in _AUXILIARY_DIR_PATTERNS)
 
+    def package_role(self, path: str) -> str:
+        """Return the monorepo package role for this path, or empty string."""
+        return self._package_role(path.replace("\\", "/").lstrip("/"))
+
     def _package_role(self, norm: str) -> str:
         for prefix, role in self._pkg_roles.items():
             if norm.startswith(prefix):

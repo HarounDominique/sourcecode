@@ -91,6 +91,7 @@ class FileContract:
     fan_out: int = 0  # how many files this imports
     is_entrypoint: bool = False
     is_changed: bool = False
+    ranking_reasons: list[str] = field(default_factory=list)
 
     # Extraction quality
     extraction_method: str = "heuristic"  # ast | tree_sitter | heuristic
