@@ -728,11 +728,13 @@ class TaskContextBuilder:
                 cwd=str(self.root),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
             if result.returncode == 0:
                 return [
-                    line.strip() for line in result.stdout.splitlines()
+                    line.strip() for line in (result.stdout or "").splitlines()
                     if line.strip()
                 ]
         except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -744,10 +746,12 @@ class TaskContextBuilder:
                 cwd=str(self.root),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
             if result.returncode == 0:
-                return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                return [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
         return []

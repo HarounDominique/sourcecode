@@ -60,9 +60,13 @@ def _run_git(args: list[str], cwd: Path, timeout: int = 15) -> tuple[str, int]:
         ["git", "-C", str(cwd)] + args,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
     )
-    return result.stdout, result.returncode
+    # `result.stdout` is typed Optional[str]; guard against None on edge-case
+    # platforms (Windows subprocess encoding failures, detached processes, etc.)
+    return result.stdout or "", result.returncode
 
 
 class GitAnalyzer:
@@ -80,6 +84,7 @@ class GitAnalyzer:
         branch: Optional[str] = None
         recent_commits: list[CommitRecord] = []
         change_hotspots: list[ChangeHotspot] = []
+        hotspots_status: str = "ok"
         uncommitted: Optional[UncommittedChanges] = None
         contributors: list[str] = []
 
@@ -137,8 +142,10 @@ class GitAnalyzer:
             change_hotspots = _parse_hotspots(stdout)
         except subprocess.TimeoutExpired:
             limitations.append("hotspots_timeout")
+            hotspots_status = "failed"
         except Exception as exc:
             limitations.append(f"hotspots_error:{exc}")
+            hotspots_status = "failed"
 
         try:
             stdout, _ = _run_git(["status", "--porcelain"], path, timeout=10)
@@ -166,6 +173,7 @@ class GitAnalyzer:
             branch=branch,
             recent_commits=recent_commits,
             change_hotspots=change_hotspots,
+            hotspots_status=hotspots_status,
             uncommitted_changes=uncommitted,
             contributors=contributors,
             git_summary=git_summary,
@@ -228,8 +236,11 @@ def _is_hotspot_admin(path: str) -> bool:
     return False
 
 
-def _parse_hotspots(output: str) -> list:
+def _parse_hotspots(output: str | None) -> list:
     from sourcecode.schema import ChangeHotspot
+
+    if not output:
+        return []
 
     file_counts: Counter = Counter()
     file_last_date: dict[str, str] = {}

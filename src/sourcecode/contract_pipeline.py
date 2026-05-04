@@ -45,9 +45,10 @@ def _get_changed_files(root: Path) -> set[str]:
     ]:
         try:
             result = subprocess.run(
-                cmd, cwd=root, capture_output=True, text=True, timeout=10
+                cmd, cwd=root, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=10,
             )
-            for line in result.stdout.splitlines():
+            for line in (result.stdout or "").splitlines():
                 line = line.strip()
                 if line:
                     changed.add(line.replace("\\", "/"))
@@ -56,9 +57,10 @@ def _get_changed_files(root: Path) -> set[str]:
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=root, capture_output=True, text=True, timeout=10
+            cwd=root, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=10,
         )
-        for line in result.stdout.splitlines():
+        for line in (result.stdout or "").splitlines():
             if len(line) > 3:
                 changed.add(line[3:].strip().replace("\\", "/"))
     except Exception:
@@ -129,11 +131,12 @@ def _get_git_churn(root: Path, file_paths: list[str]) -> dict[str, int]:
     try:
         result = subprocess.run(
             ["git", "log", "--name-only", "--format=", "--since=90.days.ago"],
-            cwd=root, capture_output=True, text=True, timeout=15,
+            cwd=root, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=15,
         )
         path_set = set(file_paths)
         counter: Counter[str] = Counter()
-        for line in result.stdout.splitlines():
+        for line in (result.stdout or "").splitlines():
             line = line.strip().replace("\\", "/")
             if line in path_set:
                 counter[line] += 1

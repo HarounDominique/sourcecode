@@ -27,9 +27,13 @@ _ENV_EXAMPLE_NAMES = {
 
 # Spring Boot application.properties / application.yml and their profile variants
 _SPRING_CONF_BASE = {"application.properties", "application.yml", "application.yaml"}
-_SPRING_CONF_PROFILE_RE = re.compile(r'^application-[a-z0-9_-]+\.(properties|ya?ml)$', re.IGNORECASE)
-# Matches ${ENV_VAR} or ${ENV_VAR:default} where ENV_VAR is UPPER_SNAKE_CASE
-_SPRING_ENV_REF_RE = re.compile(r'\$\{([A-Z][A-Z0-9_]*)(?::[^}]*)?\}')
+_SPRING_CONF_PROFILE_RE = re.compile(r'^application-([a-z0-9_-]+)\.(properties|ya?ml)$', re.IGNORECASE)
+# Matches ${ENV_VAR} or ${ENV_VAR:default} where ENV_VAR is UPPER_SNAKE_CASE.
+# Group 1 = key, Group 2 = default (may be empty string, absent = no default).
+_SPRING_ENV_VAR_RE = re.compile(r'\$\{([A-Z][A-Z0-9_]*)(?::([^}]*))?\}')
+# Matches ${spring.dotted.key} or ${spring.dotted.key:default} — Spring property references.
+# These are internal property cross-references, not OS env vars, but still config signals.
+_SPRING_PROP_REF_RE = re.compile(r'\$\{([a-z][a-z0-9]*(?:\.[a-z][a-z0-9_-]*)*)(?::([^}]*))?\}')
 
 # Patterns where absence of the variable causes a hard runtime error (not just None/null).
 # py_environ_bracket → os.environ["KEY"] raises KeyError
@@ -140,9 +144,9 @@ def _infer_type_hint(key: str) -> str:
 def _scan_file(
     path: Path,
     rel_path: str,
-    findings: dict[str, list[tuple[str, Optional[str], bool]]],
+    findings: dict[str, list[tuple[str, Optional[str], bool, Optional[str]]]],
 ) -> None:
-    """Escanea un fichero y acumula hallazgos en findings[key] = [(file_ref, default, is_hard)]."""
+    """Escanea un fichero y acumula hallazgos en findings[key] = [(file_ref, default, is_hard, profile)]."""
     try:
         size = path.stat().st_size
         if size > _MAX_FILE_SIZE:
@@ -168,7 +172,7 @@ def _scan_file(
 
             line_num = content.count("\n", 0, m.start()) + 1
             file_ref = f"{rel_path}:{line_num}"
-            findings[key].append((file_ref, default, is_hard))
+            findings[key].append((file_ref, default, is_hard, None))
 
 
 def _parse_env_example(
@@ -204,22 +208,66 @@ def _parse_env_example(
     return results
 
 
+def _extract_spring_profile(filename: str) -> Optional[str]:
+    """Extract Spring profile from filename.
+
+    application.yml / application.properties → 'default'
+    application-m3dev.yml → 'm3dev'
+    """
+    name_lower = filename.lower()
+    if name_lower in _SPRING_CONF_BASE:
+        return "default"
+    m = _SPRING_CONF_PROFILE_RE.match(name_lower)
+    if m:
+        return m.group(1)
+    return None
+
+
 def _parse_spring_config(
     path: Path,
     rel_path: str,
     findings: dict,
-) -> None:
-    """Parse application.properties / application.yml looking for ${ENV_VAR} refs."""
+    profile: Optional[str] = None,
+) -> int:
+    """Parse application.properties / application.yml for ${ENV_VAR} refs.
+
+    Returns the total number of ${...} placeholders found (candidates).
+    Captures default values from ${VAR:default} syntax.
+    Marks vars without defaults as hard-required (Spring fails to start if missing).
+    """
     try:
         content = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return
+        return 0
 
-    for m in _SPRING_ENV_REF_RE.finditer(content):
+    candidates = 0
+
+    # 1. UPPER_SNAKE_CASE env var references: ${DB_HOST} or ${DB_HOST:localhost}
+    for m in _SPRING_ENV_VAR_RE.finditer(content):
         key = m.group(1)
+        raw_default = m.group(2)  # None if no colon, "" if colon with empty default
+        # A colon means a default was specified (even if empty string)
+        has_default = raw_default is not None
+        default: Optional[str] = raw_default if (raw_default and raw_default.strip()) else None
         line_num = content.count("\n", 0, m.start()) + 1
-        # Spring fails to start if a referenced env var has no default → hard required
-        findings[key].append((f"{rel_path}:{line_num}", None, True))
+        # Hard required only when no default is provided
+        is_hard = not has_default
+        findings[key].append((f"{rel_path}:{line_num}", default, is_hard, profile))
+        candidates += 1
+
+    # 2. lowercase.dotted Spring property refs: ${spring.datasource.url:default}
+    # These are internal property cross-references; store with a special prefix so
+    # callers can distinguish them from OS env vars. We do NOT mark them hard-required
+    # because they reference Spring's own property resolution chain.
+    for m in _SPRING_PROP_REF_RE.finditer(content):
+        key = m.group(1)
+        raw_default = m.group(2)
+        default = raw_default if (raw_default and raw_default.strip()) else None
+        line_num = content.count("\n", 0, m.start()) + 1
+        findings[key].append((f"{rel_path}:{line_num}", default, False, profile))
+        candidates += 1
+
+    return candidates
 
 
 class EnvAnalyzer:
@@ -232,13 +280,18 @@ class EnvAnalyzer:
     ) -> tuple[list, object]:
         from sourcecode.schema import EnvSummary, EnvVarRecord
 
-        # findings[key] = list of (file_ref, default_or_None, is_hard_required)
-        findings: dict[str, list[tuple[str, Optional[str], bool]]] = defaultdict(list)
+        # findings[key] = list of (file_ref, default_or_None, is_hard_required, profile_or_None)
+        findings: dict[str, list[tuple[str, Optional[str], bool, Optional[str]]]] = defaultdict(list)
         example_entries: list[tuple[str, Optional[str], Optional[str]]] = []
         example_files_found: list[str] = []
         limitations: list[str] = []
+        profiles_scanned: list[str] = []
+        spring_candidates: int = 0
 
-        self._walk(root, root, findings, example_entries, example_files_found, limitations)
+        spring_candidates = self._walk(
+            root, root, findings, example_entries, example_files_found,
+            limitations, profiles_scanned,
+        )
 
         # Merge findings into EnvVarRecord per key
         records: dict[str, EnvVarRecord] = {}
@@ -248,19 +301,23 @@ class EnvAnalyzer:
             if len(records) >= _MAX_KEYS:
                 limitations.append(f"key_limit_reached:{_MAX_KEYS}")
                 break
-            defaults = [d for _, d, _ in refs if d is not None]
+            defaults = [d for _, d, _, _ in refs if d is not None]
             # required only when access pattern causes a hard runtime error if missing:
             # os.environ["KEY"] (KeyError) or Spring @Value/${KEY} without default.
             # os.getenv("KEY") / os.environ.get("KEY") return None — not hard required.
-            has_hard_access = any(is_hard for _, _, is_hard in refs)
+            has_hard_access = any(is_hard for _, _, is_hard, _ in refs)
             required = has_hard_access and not defaults
             default_val = defaults[0] if defaults else None
             unique_files: list[str] = []
             seen: set[str] = set()
-            for file_ref, _, _ in refs:
+            # Collect first profile seen for this key (from Spring config files)
+            first_profile: Optional[str] = None
+            for file_ref, _, _, prof in refs:
                 if file_ref not in seen:
                     seen.add(file_ref)
                     unique_files.append(file_ref)
+                if first_profile is None and prof is not None:
+                    first_profile = prof
                 if len(unique_files) >= _MAX_FILES_PER_KEY:
                     break
             records[key] = EnvVarRecord(
@@ -270,6 +327,7 @@ class EnvAnalyzer:
                 type_hint=_infer_type_hint(key),
                 category=_infer_category(key),
                 files=unique_files,
+                profile=first_profile,
             )
 
         # 2. Supplement with .env.example entries (fill description + add missing keys)
@@ -300,6 +358,20 @@ class EnvAnalyzer:
         # Build summary
         categories = sorted({r.category for r in sorted_records if r.category})
         required_count = sum(1 for r in sorted_records if r.required)
+
+        # Coverage note: warn if Spring config was scanned but coverage seems partial
+        coverage_note: Optional[str] = None
+        if profiles_scanned and spring_candidates > 0:
+            spring_key_count = sum(
+                1 for r in sorted_records if r.profile is not None
+            )
+            if spring_key_count < spring_candidates:
+                coverage_note = (
+                    f"{spring_candidates} Spring ${{VAR}} placeholder(s) found across "
+                    f"{len(profiles_scanned)} profile(s); {spring_key_count} unique key(s) "
+                    "extracted. Duplicates across profiles collapsed."
+                )
+
         summary = EnvSummary(
             requested=True,
             total=len(sorted_records),
@@ -308,6 +380,9 @@ class EnvAnalyzer:
             categories=categories,
             example_files_found=example_files_found,
             limitations=limitations,
+            profiles_scanned=sorted(set(profiles_scanned)),
+            spring_candidates=spring_candidates,
+            coverage_note=coverage_note,
         )
 
         return sorted_records, summary
@@ -320,11 +395,15 @@ class EnvAnalyzer:
         example_entries: list,
         example_files_found: list,
         limitations: list,
-    ) -> None:
+        profiles_scanned: list,
+    ) -> int:
+        """Walk the directory tree accumulating env var findings. Returns spring_candidates count."""
         try:
             entries = sorted(current.iterdir())
         except PermissionError:
-            return
+            return 0
+
+        total_spring_candidates = 0
 
         for entry in entries:
             name = entry.name
@@ -333,7 +412,10 @@ class EnvAnalyzer:
             if entry.is_dir():
                 if name in _SKIP_DIRS:
                     continue
-                self._walk(root, entry, findings, example_entries, example_files_found, limitations)
+                total_spring_candidates += self._walk(
+                    root, entry, findings, example_entries, example_files_found,
+                    limitations, profiles_scanned,
+                )
             elif entry.is_file():
                 rel = entry.relative_to(root).as_posix()
                 name_lower = name.lower()
@@ -344,12 +426,18 @@ class EnvAnalyzer:
                     continue
                 # Spring Boot application.properties / application.yml (incl. profiles)
                 if name_lower in _SPRING_CONF_BASE or _SPRING_CONF_PROFILE_RE.match(name_lower):
-                    _parse_spring_config(entry, rel, findings)
+                    profile = _extract_spring_profile(name)
+                    if profile and profile not in profiles_scanned:
+                        profiles_scanned.append(profile)
+                    count = _parse_spring_config(entry, rel, findings, profile)
+                    total_spring_candidates += count
                     continue
                 # Source code files
                 suffix = entry.suffix.lower()
                 if suffix in _CODE_EXTENSIONS:
                     _scan_file(entry, rel, findings)
+
+        return total_spring_candidates
 
 
 def _replace_description(record, description: str):

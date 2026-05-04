@@ -957,9 +957,21 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
 
     if sm.semantic_summary is not None and sm.semantic_summary.requested:
         result["semantic_summary"] = asdict(sm.semantic_summary)
-        result["semantic_calls"] = [asdict(c) for c in sm.semantic_calls]
-        result["semantic_symbols"] = [asdict(s) for s in sm.semantic_symbols]
-        result["semantic_links"] = [asdict(lnk) for lnk in sm.semantic_links]
+        # Defensive filter: never emit objects with null required fields.
+        # A null entry in these arrays is worse than a shorter array — it causes
+        # agents to misinterpret the analysis as valid when it is not.
+        result["semantic_calls"] = [
+            asdict(c) for c in sm.semantic_calls
+            if c.caller_path and c.callee_path
+        ]
+        result["semantic_symbols"] = [
+            asdict(s) for s in sm.semantic_symbols
+            if s.symbol and s.kind and s.language and s.path
+        ]
+        result["semantic_links"] = [
+            asdict(lnk) for lnk in sm.semantic_links
+            if lnk.importer_path and lnk.symbol
+        ]
 
     if sm.metrics_summary is not None and sm.metrics_summary.requested:
         result["metrics_summary"] = asdict(sm.metrics_summary)

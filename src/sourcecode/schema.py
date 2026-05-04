@@ -252,6 +252,9 @@ class DocSummary:
     depth: Optional[DocsDepth] = None
     truncated: bool = False
     limitations: list[str] = field(default_factory=list)
+    # Per-language support status: "supported" | "unsupported" | "partial"
+    # Absent key = language not present in scanned files.
+    language_coverage: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -303,11 +306,21 @@ class SemanticSummary:
     """Summary of the --semantics analysis."""
 
     requested: bool = False
+    # Explicit analysis outcome — never omit, never silent.
+    # "ok": analysis ran and produced results
+    # "partial": analysis ran but with significant coverage gaps
+    # "failed": analysis could not produce useful results
+    status: str = "ok"
+    reason: Optional[str] = None        # human-readable failure/partial reason
     call_count: int = 0
     symbol_count: int = 0
     link_count: int = 0
     languages: list[str] = field(default_factory=list)
     language_coverage: dict[str, str] = field(default_factory=dict)
+    # Structured per-language support details. Each value:
+    # {"supported": bool, "status": str, "reason": str}
+    # status: "full" | "heuristic" | "unsupported"
+    language_coverage_details: dict[str, Any] = field(default_factory=dict)
     files_analyzed: int = 0
     files_skipped: int = 0
     truncated: bool = False
@@ -393,6 +406,13 @@ class ArchitectureAnalysis:
     confidence: Literal["high", "medium", "low"] = "low"
     method: str = "heuristic"
     limitations: list[str] = field(default_factory=list)
+    # Structured evidence for each architectural inference.
+    # Each entry: {"type": str, "paths": list[str], "reason": str, "confidence": str}
+    # type: "workspace_config" | "filesystem_naming" | "import_graph" | "entry_files"
+    evidence: list[dict] = field(default_factory=list)
+    # True when pattern is inferred from weak signals (e.g. directory names only).
+    # Agents must not treat tentative patterns as confirmed facts.
+    tentative: bool = False
 
 
 # --- Env Map ---
@@ -408,6 +428,7 @@ class EnvVarRecord:
     category: Optional[str] = None    # database | cache | storage | auth | service | observability | feature_flag | server | general
     description: Optional[str] = None
     files: list[str] = field(default_factory=list)  # "path:line"
+    profile: Optional[str] = None     # Spring profile if first occurrence is in application-{profile}.yml
 
 
 @dataclass
@@ -421,6 +442,10 @@ class EnvSummary:
     categories: list[str] = field(default_factory=list)
     example_files_found: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
+    # Spring Boot coverage metadata
+    profiles_scanned: list[str] = field(default_factory=list)
+    spring_candidates: int = 0   # total ${VAR} refs found across Spring config files
+    coverage_note: Optional[str] = None  # explicit note about partial coverage
 
 
 # --- Code Notes ---
@@ -557,6 +582,10 @@ class GitContext:
     branch: Optional[str] = None
     recent_commits: list[CommitRecord] = field(default_factory=list)
     change_hotspots: list[ChangeHotspot] = field(default_factory=list)
+    # Explicit hotspot analysis outcome — distinguishes "no hotspots found" from "analysis failed".
+    # "ok": hotspot analysis ran (change_hotspots may still be empty if no changes in window)
+    # "failed": hotspot analysis threw an exception (see limitations for hotspots_error:...)
+    hotspots_status: str = "ok"
     uncommitted_changes: Optional[UncommittedChanges] = None
     contributors: list[str] = field(default_factory=list)
     git_summary: Optional[str] = None

@@ -343,8 +343,14 @@ class SemanticAnalyzer:
 
         # Plan 12-02: language_coverage["python"] = "full" when Python files are analyzed
         lang_coverage: dict[str, str] = {}
+        lang_coverage_details: dict[str, Any] = {}
         if source_files:
             lang_coverage["python"] = "full"
+            lang_coverage_details["python"] = {
+                "supported": True,
+                "status": "full",
+                "reason": "AST-based: symbols, cross-file calls, and imports fully resolved",
+            }
 
         # -----------------------------------------------------------------------
         # Plan 12-03: JS/TS analysis block
@@ -489,6 +495,12 @@ class SemanticAnalyzer:
                         js_languages.add("javascript")
             languages.extend(sorted(js_languages))
             lang_coverage["nodejs"] = "heuristic"
+            for js_lang in js_languages:
+                lang_coverage_details[js_lang] = {
+                    "supported": True,
+                    "status": "heuristic",
+                    "reason": "Regex-based: exports/imports extracted; cross-file call resolution is heuristic, not AST",
+                }
 
         # -----------------------------------------------------------------------
         # Plan 12-04: Go analysis block
@@ -530,6 +542,11 @@ class SemanticAnalyzer:
                 files_analyzed += 1
             languages.append("go")
             lang_coverage["go"] = "heuristic"
+            lang_coverage_details["go"] = {
+                "supported": True,
+                "status": "heuristic",
+                "reason": "Regex-based: func/struct names and same-file calls extracted; no cross-file resolution",
+            }
 
         # -----------------------------------------------------------------------
         # Plan 12-04: Rust analysis block
@@ -571,6 +588,11 @@ class SemanticAnalyzer:
                 files_analyzed += 1
             languages.append("rust")
             lang_coverage["rust"] = "heuristic"
+            lang_coverage_details["rust"] = {
+                "supported": True,
+                "status": "heuristic",
+                "reason": "Regex-based: fn/struct names and module-qualified calls extracted; no cross-file resolution",
+            }
 
         # -----------------------------------------------------------------------
         # Plan 12-04: JVM analysis block (Java, Kotlin, Scala)
@@ -612,14 +634,56 @@ class SemanticAnalyzer:
                 files_analyzed += 1
             languages.append("java")
             lang_coverage["java"] = "heuristic"
+            lang_coverage_details["java"] = {
+                "supported": True,
+                "status": "heuristic",
+                "reason": (
+                    "Regex-based only: class/interface/method names extracted, "
+                    "same-file call sites detected. "
+                    "No cross-file resolution, no type inference, no import graph. "
+                    "Spring annotations (@Service, @Component, etc.) not semantically interpreted."
+                ),
+            }
+
+        # Determine explicit analysis status — never emit silent empty results.
+        # An agent must be able to tell "analysis ran and found nothing" from
+        # "analysis failed to run" or "significant coverage gap".
+        _total_candidates = (
+            len(source_files)
+            + len(js_source_files)
+            + len(go_source_files)
+            + len(rust_source_files)
+            + len(jvm_source_files)
+        )
+        if _total_candidates == 0:
+            _sem_status = "failed"
+            _sem_reason = "no analyzable source files found in project"
+        elif files_analyzed == 0:
+            _sem_status = "failed"
+            _sem_reason = (
+                f"all {_total_candidates} candidate file(s) failed to analyze; "
+                "check limitations for parse/read errors"
+            )
+        elif files_analyzed < _total_candidates // 2 and _total_candidates > 4:
+            _sem_status = "partial"
+            _sem_reason = (
+                f"{files_analyzed} of {_total_candidates} file(s) analyzed; "
+                f"{files_skipped} skipped; see limitations"
+            )
+        else:
+            _sem_status = "ok"
+            _sem_reason = None
 
         summary = SemanticSummary(
             requested=True,
+            status=_sem_status,
+            reason=_sem_reason,
             call_count=len(calls),
             symbol_count=len(all_symbols),
             link_count=len(links),
             languages=languages,
             language_coverage=lang_coverage,
+            language_coverage_details=lang_coverage_details,
             files_analyzed=files_analyzed,
             files_skipped=files_skipped,
             truncated=truncated,

@@ -172,6 +172,7 @@ class ArchitectureAnalyzer:
         graph: Optional[ModuleGraph] = None,
     ) -> ArchitectureAnalysis:
         limitations: list[str] = []
+        evidence: list[dict] = []
 
         # Step 1: filter paths
         filtered = self._filter_paths(sm.file_paths)
@@ -180,6 +181,8 @@ class ArchitectureAnalyzer:
                 requested=True,
                 pattern="unknown",
                 limitations=["Arquitectura no inferida: proyecto sin archivos de codigo suficientes"],
+                evidence=[{"type": "none", "paths": [], "reason": "insufficient source files", "confidence": "high"}],
+                tentative=False,
             )
 
         # Step 2: domain clustering
@@ -193,17 +196,32 @@ class ArchitectureAnalyzer:
             elif pattern == "unknown":
                 limitations.append("Patron de capas no reconocido: estructura de directorios sin senales claras")
 
-        # Step 3b: monorepo override — workspace config is hard evidence
-        if self._has_workspace_config(sm.file_paths) and pattern not in (
+        # Step 3b: monorepo override — workspace config is hard evidence.
+        # Overrides all weak inferred patterns; only truly specialised patterns
+        # (cqrs, clean, onion, hexagonal) take precedence over workspace config.
+        has_workspace = self._has_workspace_config(sm.file_paths)
+        if has_workspace and pattern not in (
             "monorepo", "cqrs", "clean", "onion", "hexagonal"
         ):
             mono_layers = self._detect_monorepo_packages(filtered)
-            if mono_layers or pattern in (None, "unknown", "flat", "modular", "layered"):
+            # Override whenever: monorepo packages detected, OR pattern is any weak/generic type.
+            # "fullstack", "layered", "mvc", "microservices", "modular", "flat", "unknown", None
+            # all yield to workspace config evidence.
+            _WEAK_PATTERNS = {None, "unknown", "flat", "modular", "layered",
+                              "fullstack", "mvc", "microservices"}
+            if mono_layers or pattern in _WEAK_PATTERNS:
                 pattern = "monorepo"
                 layers = mono_layers
                 limitations.append(
                     "Workspace config detectado — arquitectura refleja topologia de paquetes"
                 )
+                ws_files = [p for p in sm.file_paths if p.split("/")[-1] in _WORKSPACE_CONFIG_FILES]
+                evidence.append({
+                    "type": "workspace_config",
+                    "paths": ws_files[:4],
+                    "reason": "Monorepo workspace config file(s) detected — hard evidence for monorepo topology",
+                    "confidence": "high",
+                })
 
         # Step 4: bounded context inference
         bounded_contexts = self._infer_bounded_contexts(domains, graph)
@@ -212,25 +230,91 @@ class ArchitectureAnalyzer:
         confidence: Literal["high", "medium", "low"]
         strong_domains = [d for d in domains if d.confidence in ("high", "medium")]
         all_layers_weak = layers and all(l.confidence == "low" for l in layers)
+
+        method = "graph+structure" if graph is not None else "filesystem_inference"
+        # High-confidence evidence (workspace config) makes pattern non-tentative.
+        tentative = not any(e.get("confidence") == "high" for e in evidence)
+
+        # _hard_evidence: high-confidence evidence was already set (e.g. workspace_config).
+        # When True, tentative must stay False and confidence must stay at least "medium".
+        _hard_evidence = not tentative  # tentative=False iff high-conf evidence present
+
         if pattern not in (None, "unknown", "flat"):
-            if all_layers_weak:
+            if graph is not None:
+                # Import graph provided — structural validation available
+                confidence = "medium" if len(strong_domains) >= 3 else "low"
+                evidence.append({
+                    "type": "import_graph",
+                    "paths": [n.id for n in graph.nodes[:6]],
+                    "reason": f"Module import graph with {len(graph.nodes)} nodes used for pattern validation",
+                    "confidence": "medium",
+                })
+            elif all_layers_weak:
                 # Layers came from file-naming heuristic only, not directory structure
                 confidence = "low"
+                if not _hard_evidence:
+                    tentative = True
                 limitations.append(
                     "Low confidence inference: pattern inferred from filenames only, without import graph confirmation"
                 )
+                evidence.append({
+                    "type": "filesystem_naming",
+                    "paths": [l.files[0] for l in layers if l.files][:6],
+                    "reason": (
+                        f"Pattern '{pattern}' inferred from file stem naming conventions only "
+                        "(e.g. *_controller.py, *_service.py). "
+                        "No directory structure or import graph confirmation."
+                    ),
+                    "confidence": "low",
+                })
             else:
-                confidence = "medium" if len(strong_domains) >= 3 else "low"
-                if graph is None:
+                # Directory structure match (or monorepo/workspace override with no layers)
+                confidence = "medium" if (_hard_evidence or len(strong_domains) >= 3) else "low"
+                if confidence == "low" and not _hard_evidence:
+                    tentative = True
+                if not _hard_evidence:
                     limitations.append(
                         "Pattern not confirmed by module import graph; run with --graph-modules for structural validation"
                     )
+                if not _hard_evidence:
+                    matched_dirs = sorted({
+                        p.replace("\\", "/").split("/")[0]
+                        for layer in layers for p in layer.files
+                    })
+                    evidence.append({
+                        "type": "filesystem_naming",
+                        "paths": matched_dirs[:8],
+                        "reason": (
+                            f"Pattern '{pattern}' inferred from directory names matching layer keywords. "
+                            "Import graph not available — structural direction of dependencies unverified."
+                        ),
+                        "confidence": "low" if confidence == "low" else "medium",
+                    })
         elif len(strong_domains) >= 1:
             confidence = "medium"
+            if not _hard_evidence:
+                tentative = True
+            evidence.append({
+                "type": "filesystem_naming",
+                "paths": [d.name for d in strong_domains[:6]],
+                "reason": "Domain clustering from directory names; no layer pattern confirmed",
+                "confidence": "low",
+            })
         else:
             confidence = "low"
-
-        method = "graph+structure" if graph is not None else "filesystem_inference"
+            if not _hard_evidence:
+                tentative = True
+            if not evidence:
+                limitations.append(
+                    "insufficient_evidence: no recognizable architectural signals found; "
+                    "filesystem structure does not match known patterns"
+                )
+                evidence.append({
+                    "type": "filesystem_naming",
+                    "paths": filtered[:6],
+                    "reason": "Only filesystem paths available; no pattern matched",
+                    "confidence": "low",
+                })
 
         return ArchitectureAnalysis(
             requested=True,
@@ -241,6 +325,8 @@ class ArchitectureAnalyzer:
             confidence=confidence,
             method=method,
             limitations=limitations,
+            evidence=evidence,
+            tentative=tentative,
         )
 
     # ------------------------------------------------------------------

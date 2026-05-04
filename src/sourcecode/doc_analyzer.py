@@ -132,6 +132,8 @@ class DocAnalyzer:
         records: list[DocRecord] = []
         limitations: list[str] = list(limitations_pre)
         languages: set[str] = set()
+        # Track per-language support status for honest reporting
+        unsupported_langs: set[str] = set()
 
         for relative_path in file_paths:
             abs_path = root / relative_path
@@ -176,7 +178,17 @@ class DocAnalyzer:
                 # Unsupported language — D-04: no emitir DocRecord, solo registrar limitation
                 limitations.append(f"docs_unavailable:{norm_path}:language={lang}")
                 languages.add(lang)
+                unsupported_langs.add(lang)
                 # NO records.append() here
+
+        # Build language_coverage: explicit per-language support status
+        _SUPPORTED_LANGS = {"python", "javascript", "typescript"}
+        lang_coverage: dict[str, str] = {}
+        for lang in languages:
+            if lang in _SUPPORTED_LANGS:
+                lang_coverage[lang] = "supported"
+            else:
+                lang_coverage[lang] = "unsupported"
 
         # Build summary
         symbol_count = sum(1 for r in records if r.kind != "module")
@@ -192,6 +204,15 @@ class DocAnalyzer:
                 "no docstrings or JSDoc comments found"
             )
 
+        # Warn explicitly when unsupported languages are present — agents must not
+        # assume full coverage when Java/Go/Rust files are in scope but not analyzed.
+        if unsupported_langs:
+            sorted_unsupported = sorted(unsupported_langs)
+            limitations.append(
+                f"docs_not_extracted: language(s) {sorted_unsupported} present but not supported; "
+                "only Python and JS/TS docstrings are extracted"
+            )
+
         summary = DocSummary(
             requested=True,
             total_count=total_count,
@@ -200,6 +221,7 @@ class DocAnalyzer:
             depth=depth,
             truncated=truncated,
             limitations=limitations,
+            language_coverage=lang_coverage,
         )
         return records, summary
 
