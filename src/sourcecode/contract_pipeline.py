@@ -176,6 +176,8 @@ class ContractPipeline:
         symbol: Optional[str] = None,
         compress_types: bool = False,
         max_importers: int = 50,
+        semantic_calls: Optional[list] = None,
+        code_notes: Optional[list] = None,
     ) -> tuple[list[FileContract], ContractSummary]:
         """Run the full extraction pipeline.
 
@@ -257,24 +259,24 @@ class ContractPipeline:
         if rank_by == "git-churn":
             churn = _get_git_churn(root, [c.path for c in contracts])
 
-        # 6. Compute relevance scores via unified ranking engine
-        max_fan_in = max((c.fan_in for c in contracts), default=1) if contracts else 1
-        max_churn_val = max(churn.values(), default=1) if churn else 1
+        # 6. Compute relevance scores via unified scoring engine.
+        # ContextScorer wraps RankingEngine and enriches scores with semantic
+        # centrality (when semantic_calls available) and annotation density
+        # (when code_notes available). Falls back to structural signals only
+        # when neither is present — identical to the old behaviour.
+        from sourcecode.context_scorer import ContextScorer
+        _ctx_scorer = ContextScorer(monorepo_packages)
+        _node_scores = _ctx_scorer.score_nodes(
+            contracts,
+            semantic_calls=semantic_calls,
+            code_notes=code_notes,
+            git_hotspots=churn,
+            task="default",
+        )
         for c in contracts:
-            fs = engine.score(
-                c.path,
-                fan_in=c.fan_in,
-                fan_out=c.fan_out,
-                max_fan_in=max_fan_in,
-                git_churn=churn.get(c.path, 0),
-                max_churn=max_churn_val,
-                is_entrypoint=c.is_entrypoint,
-                is_changed=c.is_changed,
-                export_count=len(c.exports),
-                task="default",
-            )
-            c.relevance_score = fs.display_score
-            c.ranking_reasons = fs.reasons
+            ns = _node_scores[c.path]
+            c.relevance_score = ns.display_score
+            c.ranking_reasons = ns.reasons
 
         # 7. Rank
         contracts = self._rank(contracts, rank_by)

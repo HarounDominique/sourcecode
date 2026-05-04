@@ -701,7 +701,33 @@ class TaskContextBuilder:
 
         # Deterministic: score desc, then path asc as tiebreaker
         scored.sort(key=lambda x: (-x[0], x[1]))
-        return [f for _, _, f in scored[:15]]
+
+        # Apply directory-diversity selection via ContextScorer.
+        # Files from the same directory share the same concern; the scorer
+        # applies a small redundancy penalty so the final set spans more of
+        # the codebase rather than clustering inside a single directory.
+        # Falls back to top-15 slice when scorer is unavailable.
+        try:
+            from sourcecode.context_scorer import ContextScorer, NodeScore
+            _ctx = ContextScorer()
+            _ns: dict[str, NodeScore] = {
+                path: NodeScore(
+                    path=path,
+                    score=total,
+                    display_score=min(total / 3.0, 1.0),
+                    structural=total,
+                    semantic=0.0,
+                    annotation=0.0,
+                    proximity=0.0,
+                    reasons=[rf.reason] if rf.reason else ["source file"],
+                )
+                for total, path, rf in scored
+            }
+            _selected = _ctx.select_subgraph(_ns, contracts=[], budget=15, min_score=0.05)
+            _rf_map = {path: rf for _, path, rf in scored}
+            return [_rf_map[p] for p in _selected if p in _rf_map]
+        except Exception:
+            return [f for _, _, f in scored[:15]]
 
     def _is_test(self, path: str) -> bool:
         name = Path(path).name.lower()

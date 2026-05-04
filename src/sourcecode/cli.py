@@ -1371,6 +1371,8 @@ def main(
             symbol=symbol,
             compress_types=compress_types,
             max_importers=max_importers,
+            semantic_calls=sm.semantic_calls or None,
+            code_notes=sm.code_notes or None,
         )
         sm = _replace(sm, file_contracts=_contracts, contract_summary=_contract_summary)
         if symbol is not None and len(_contracts) == 0:

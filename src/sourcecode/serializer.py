@@ -186,6 +186,21 @@ def _file_relevance(sm: SourceMap, *, limit: int = 15) -> list[dict[str, Any]]:
         git_churn = {h.file: h.commit_count for h in gc.change_hotspots}
     max_churn = max(git_churn.values(), default=1)
 
+    # Incorporate semantic hotspots from --semantics when available.
+    # Hotspots rank files by call-graph centrality (fan_in×2 + fan_out),
+    # normalised across the analysed files.
+    semantic_hub_scores: dict[str, float] = {}
+    ss = sm.semantic_summary
+    if ss and getattr(ss, "requested", False) and ss.hotspots:
+        max_importance = max(
+            (h.get("importance_score", 0.0) for h in ss.hotspots),
+            default=1.0,
+        ) or 1.0
+        for h in ss.hotspots:
+            p = h.get("path", "")
+            if p:
+                semantic_hub_scores[p] = h.get("importance_score", 0.0) / max_importance
+
     entry_paths = {ep.path for ep in sm.entry_points}
     scored: list[tuple[float, dict[str, Any]]] = []
 
@@ -202,7 +217,9 @@ def _file_relevance(sm: SourceMap, *, limit: int = 15) -> list[dict[str, Any]]:
             continue
 
         content_rel = file_class.relevance if file_class else 0.0
-        combined = fs.score + content_rel
+        # Semantic hub bonus: normalised call-graph centrality adds up to +0.30
+        sem_hub = semantic_hub_scores.get(path, 0.0) * 0.30
+        combined = fs.score + content_rel + sem_hub
 
         if combined <= 0 and not (file_class and file_class.relevance > 0.3):
             continue
@@ -217,6 +234,8 @@ def _file_relevance(sm: SourceMap, *, limit: int = 15) -> list[dict[str, Any]]:
         }
 
         ranking_reasons = [r for r in fs.reasons if r != "source file"]
+        if sem_hub >= 0.15:
+            ranking_reasons.append("call graph hub")
         if ranking_reasons:
             item["ranking_reasons"] = ranking_reasons
 

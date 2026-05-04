@@ -45,60 +45,71 @@ class TaskWeights:
     code_notes: float = 0.5
     exports: float = 0.3
     is_changed: float = 0.8
+    # Call graph centrality from --semantics (ContextScorer feeds this in)
+    semantic_centrality: float = 0.5
+    # BFS proximity to a focus symbol/file (added by ContextScorer on top)
+    proximity: float = 1.0
 
 
 # Task profiles: each emphasizes different signals for different agent goals.
 # The contrast between profiles is intentional — fix-bug and explain must
 # produce meaningfully different ranked sets from the same codebase.
 TASK_WEIGHTS: dict[str, TaskWeights] = {
-    # fix-bug: files with bug annotations, recent churn, actively changed logic
+    # fix-bug: bug annotations, recent churn, changed files, proximity to focus
     "fix-bug": TaskWeights(
         path_relevance=0.5, entrypoint=0.5,
         fan_in=0.8, fan_out=0.3,
         git_churn=1.5, code_notes=3.0,
         exports=0.2, is_changed=2.0,
+        semantic_centrality=0.5, proximity=2.0,
     ),
-    # refactor: highly-coupled files, technical debt, complex hubs
+    # refactor: hub modules, coupling, technical debt, call graph hubs
     "refactor": TaskWeights(
         path_relevance=0.8, entrypoint=0.3,
         fan_in=2.0, fan_out=2.0,
         git_churn=0.3, code_notes=2.0,
         exports=1.0, is_changed=0.3,
+        semantic_centrality=1.5, proximity=0.5,
     ),
-    # explain: stable core, entrypoints, central modules — ignore churn noise
+    # explain: stable core, entrypoints, call graph backbone — ignore churn
     "explain": TaskWeights(
         path_relevance=2.0, entrypoint=3.0,
         fan_in=0.8, fan_out=0.3,
         git_churn=0.0, code_notes=0.0,
         exports=0.5, is_changed=0.0,
+        semantic_centrality=1.0, proximity=0.3,
     ),
-    # onboard: same as explain but also values hub modules
+    # onboard: entrypoints + hub modules + call graph backbone
     "onboard": TaskWeights(
         path_relevance=2.0, entrypoint=3.0,
         fan_in=1.2, fan_out=0.5,
         git_churn=0.0, code_notes=0.0,
         exports=1.0, is_changed=0.0,
+        semantic_centrality=1.2, proximity=0.3,
     ),
-    # generate-tests: source files with large public API, not yet covered
+    # generate-tests: large public API, call graph reachability
     "generate-tests": TaskWeights(
         path_relevance=0.8, entrypoint=0.3,
         fan_in=1.5, fan_out=0.8,
         git_churn=0.5, code_notes=0.5,
         exports=2.5, is_changed=0.5,
+        semantic_centrality=0.8, proximity=0.5,
     ),
-    # review-pr: changed files and their importers
+    # review-pr: changed files, their importers, impact radius
     "review-pr": TaskWeights(
         path_relevance=0.5, entrypoint=0.5,
         fan_in=1.5, fan_out=0.5,
         git_churn=0.5, code_notes=0.8,
         exports=0.3, is_changed=3.0,
+        semantic_centrality=1.0, proximity=1.5,
     ),
-    # delta: changed files and dependency impact
+    # delta: changed files, dependency impact, call graph proximity
     "delta": TaskWeights(
         path_relevance=0.5, entrypoint=0.5,
         fan_in=1.5, fan_out=0.5,
         git_churn=0.5, code_notes=0.5,
         exports=0.3, is_changed=3.0,
+        semantic_centrality=1.0, proximity=1.0,
     ),
     # default: balanced, no task bias
     "default": TaskWeights(),
@@ -139,6 +150,8 @@ class RankingEngine:
         code_note_count: int = 0,
         export_count: int = 0,
         task: str = "default",
+        semantic_centrality: float = 0.0,
+        max_semantic: float = 1.0,
     ) -> FileScore:
         """Compute a scored, explained ranking for a single file.
 
@@ -202,6 +215,15 @@ class RankingEngine:
         if is_changed and w.is_changed > 0:
             raw += 0.2 * w.is_changed
             reasons.append("uncommitted changes")
+
+        # 9. Semantic call-graph centrality (fed by ContextScorer from --semantics)
+        if semantic_centrality > 0 and w.semantic_centrality > 0:
+            sc_norm = min(semantic_centrality / max(max_semantic, 1e-9), 1.0)
+            raw += sc_norm * 0.25 * w.semantic_centrality
+            if sc_norm >= 0.60:
+                reasons.append("call graph hub")
+            elif sc_norm >= 0.25:
+                reasons.append("call graph contributor")
 
         # Monorepo package role
         pkg_role = self._scorer.package_role(norm)
