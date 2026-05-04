@@ -722,8 +722,10 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
     # production runtime is represented as entry_points=[], never by fallback.
     ep_groups = _entry_point_groups(sm.entry_points)
     result["entry_points"] = ep_groups["production"]
-    result["development_entry_points"] = ep_groups["development"]
-    result["auxiliary_entry_points"] = ep_groups["auxiliary"]
+    if ep_groups["development"]:
+        result["development_entry_points"] = ep_groups["development"]
+    if ep_groups["auxiliary"]:
+        result["auxiliary_entry_points"] = ep_groups["auxiliary"]
 
     # ── 3. Architecture ───────────────────────────────────────────────────────
     result["architecture"] = _architecture_context(sm)
@@ -888,6 +890,23 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
     if analysis_gaps:
         result["analysis_gaps"] = analysis_gaps
 
+    # ── 8. Agent mode metadata — explicit transparency about auto-enabled/suppressed flags ──
+    _auto_enabled: list[str] = ["--dependencies", "--env-map", "--code-notes"]
+    _suppressed: list[str] = []
+    if sm.metrics_summary is not None and sm.metrics_summary.requested:
+        _suppressed.append("--full-metrics")
+    if sm.module_graph is not None and sm.module_graph.summary.requested:
+        _suppressed.append("--graph-modules")
+    if sm.doc_summary is not None and sm.doc_summary.requested:
+        _suppressed.append("--docs")
+    agent_mode_meta: dict[str, Any] = {
+        "auto_enabled": _auto_enabled,
+    }
+    if _suppressed:
+        agent_mode_meta["suppressed_flags"] = _suppressed
+        agent_mode_meta["suppressed_note"] = "computed but excluded from agent_view"
+    result["agent_mode"] = agent_mode_meta
+
     return result
 
 
@@ -918,9 +937,11 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
         "architecture_summary": sm.architecture_summary,
         "stacks": [asdict(s) for s in sm.stacks],
         "entry_points": ep_groups["production"],
-        "development_entry_points": ep_groups["development"],
-        "auxiliary_entry_points": ep_groups["auxiliary"],
     }
+    if ep_groups["development"]:
+        result["development_entry_points"] = ep_groups["development"]
+    if ep_groups["auxiliary"]:
+        result["auxiliary_entry_points"] = ep_groups["auxiliary"]
 
     # Layer B — signals (only when the corresponding analyzer ran)
     if sm.dependency_summary is not None and sm.dependency_summary.requested:
@@ -1125,6 +1146,8 @@ def _contract_view_minimal(
             summary["degraded"] = True
             summary["degraded_hint"] = "install sourcecode[ast] for full TS/JS extraction"
         result["summary"] = summary
+        if cs.symbol_truncation:
+            result["symbol_query"] = cs.symbol_truncation
 
     return result
 
@@ -1404,6 +1427,8 @@ def _contract_view_standard(
         }
         if cs.limitations:
             result["contract_summary"]["limitations"] = cs.limitations
+        if cs.symbol_truncation:
+            result["symbol_query"] = cs.symbol_truncation
 
     return result
 

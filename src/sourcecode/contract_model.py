@@ -109,3 +109,4 @@ class ContractSummary:
     method_breakdown: dict[str, int] = field(default_factory=dict)
     ranked_by: str = "relevance"
     limitations: list[str] = field(default_factory=list)
+    symbol_truncation: Optional[dict] = None  # set when --symbol truncates importers

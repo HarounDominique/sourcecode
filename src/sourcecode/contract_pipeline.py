@@ -175,6 +175,7 @@ class ContractPipeline:
         changed_only: bool = False,
         symbol: Optional[str] = None,
         compress_types: bool = False,
+        max_importers: int = 50,
     ) -> tuple[list[FileContract], ContractSummary]:
         """Run the full extraction pipeline.
 
@@ -279,17 +280,19 @@ class ContractPipeline:
         contracts = self._rank(contracts, rank_by)
 
         # 8. Symbol filter — keep files that define or import the symbol
+        _symbol_truncation: Optional[dict] = None
         if symbol:
-            contracts = _filter_by_symbol(contracts, symbol)
+            contracts, _symbol_truncation = _filter_by_symbol(contracts, symbol, max_importers=max_importers)
             # When shallow scan missed the defining file (deep monorepo), fall back
             # to a grep-based filesystem search over the full directory tree.
             if not contracts:
-                contracts = self._symbol_deep_scan(
+                contracts, _symbol_truncation = self._symbol_deep_scan(
                     root, symbol,
                     known_paths=set(src_paths),
                     entry_paths=entry_paths,
                     changed_files=changed_files,
                     engine=engine,
+                    max_importers=max_importers,
                 )
 
         # 9. Entrypoints-only filter
@@ -313,6 +316,7 @@ class ContractPipeline:
             method_breakdown=dict(method_counts),
             ranked_by=rank_by,
             limitations=limitations,
+            symbol_truncation=_symbol_truncation,
         )
         return contracts, summary
 
@@ -332,7 +336,8 @@ class ContractPipeline:
         entry_paths: set[str],
         changed_files: set[str],
         engine: RankingEngine,
-    ) -> list[FileContract]:
+        max_importers: int = 50,
+    ) -> tuple[list[FileContract], dict]:
         """Grep-based fallback when the shallow scan missed the defining files.
 
         Searches the full directory tree for source files containing *symbol*,
@@ -356,7 +361,7 @@ class ContractPipeline:
             contract.ranking_reasons = fs.reasons
             extra.append(contract)
 
-        return _filter_by_symbol(extra, symbol)
+        return _filter_by_symbol(extra, symbol, max_importers=max_importers)
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +417,11 @@ def _limit_symbols(contracts: list[FileContract], max_symbols: int) -> list[File
 # Symbol-aware filter
 # ---------------------------------------------------------------------------
 
-def _filter_by_symbol(contracts: list[FileContract], symbol: str) -> list[FileContract]:
+def _filter_by_symbol(
+    contracts: list[FileContract],
+    symbol: str,
+    max_importers: int = 50,
+) -> tuple[list[FileContract], dict]:
     """Return contracts that define, import, or structurally reference *symbol*.
 
     Four tiers applied in order:
@@ -423,6 +432,8 @@ def _filter_by_symbol(contracts: list[FileContract], symbol: str) -> list[FileCo
        function signatures (word-boundary). Only used when tiers 1-3 fail.
 
     Defining contracts are ranked first; importers and references follow.
+    max_importers caps tier 3 results to prevent output explosion on popular symbols.
+    Returns (contracts, truncation_metadata).
     """
     sym_l = symbol.lower()
     word_re = re.compile(
@@ -466,8 +477,14 @@ def _filter_by_symbol(contracts: list[FileContract], symbol: str) -> list[FileCo
 
     # Tier 3: import matching (case-insensitive when no definers found)
     ci_imports = len(defining) == 0
-    importer_paths = {c.path for c in contracts if _imports_sym(c, case=ci_imports)}
-    importers = [c for c in contracts if c.path in importer_paths and c.path not in defining_paths]
+    all_importer_paths = {c.path for c in contracts if _imports_sym(c, case=ci_imports)}
+    all_importers = [c for c in contracts if c.path in all_importer_paths and c.path not in defining_paths]
+
+    # Apply importer cap — definers are never truncated
+    total_importers = len(all_importers)
+    truncated = total_importers > max_importers
+    importers = all_importers[:max_importers] if truncated else all_importers
+    importer_paths = {c.path for c in importers}
 
     # Tier 4: type-reference matching (only when tiers 1-3 yield nothing)
     references: list[FileContract] = []
@@ -483,11 +500,26 @@ def _filter_by_symbol(contracts: list[FileContract], symbol: str) -> list[FileCo
             seen.add(c.path)
             merged.append(c)
 
-    return sorted(merged, key=lambda c: (
+    result = sorted(merged, key=lambda c: (
         c.path not in defining_paths,
         c.path not in importer_paths,
         -c.relevance_score,
     ))
+
+    truncation: dict = {
+        "symbol": symbol,
+        "definers_found": len(defining),
+        "importers_found": total_importers,
+        "importers_returned": len(importers),
+        "references_found": len(references),
+        "total_returned": len(result),
+        "truncated": truncated,
+    }
+    if truncated:
+        truncation["truncation_reason"] = "max_importers_limit"
+        truncation["override_hint"] = f"--symbol {symbol} --max-importers {total_importers}"
+
+    return result, truncation
 
 
 # ---------------------------------------------------------------------------

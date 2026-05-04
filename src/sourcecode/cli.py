@@ -181,6 +181,7 @@ _OPTIONS_WITH_VALUE: frozenset[str] = frozenset({
     "--dependency-depth",
     "--rank-by",
     "--symbol",
+    "--max-importers",
 })
 
 
@@ -594,6 +595,17 @@ def main(
         "--symbol",
         help="Contract mode: extract localized context for a specific symbol name. Returns defining file + all importers.",
     ),
+    max_importers: int = typer.Option(
+        50,
+        "--max-importers",
+        help=(
+            "Maximum importer files returned by --symbol (default: 50). "
+            "Popular symbols can have hundreds of importers — this prevents output explosion. "
+            "Defining files are never truncated. Override: --symbol Foo --max-importers 200."
+        ),
+        min=1,
+        max=10000,
+    ),
     copy: bool = typer.Option(
         False,
         "--copy",
@@ -770,6 +782,21 @@ def main(
         code_notes = True
         no_tree = True  # agents never need the raw file tree
         typer.echo("[agent] dependencies env-map code-notes (no-tree)", err=True)
+        # Warn about flags that are computed but excluded from agent_view output
+        _agent_suppressed: list[str] = []
+        if full_metrics:
+            _agent_suppressed.append("--full-metrics")
+        if graph_modules:
+            _agent_suppressed.append("--graph-modules")
+        if docs:
+            _agent_suppressed.append("--docs")
+        if _agent_suppressed:
+            typer.echo(
+                f"[agent] warning: {', '.join(_agent_suppressed)} computed but excluded "
+                "from --agent output — agent_view does not include these sections. "
+                "Remove these flags to skip unnecessary computation.",
+                err=True,
+            )
 
     scanner = AdaptiveScanner(target, topology=_topology, base_depth=effective_depth)
     raw_tree = scanner.scan_tree()
@@ -1343,6 +1370,7 @@ def main(
             changed_only=changed_only,
             symbol=symbol,
             compress_types=compress_types,
+            max_importers=max_importers,
         )
         sm = _replace(sm, file_contracts=_contracts, contract_summary=_contract_summary)
         if symbol is not None and len(_contracts) == 0:
