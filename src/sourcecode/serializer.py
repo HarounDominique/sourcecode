@@ -24,6 +24,21 @@ from sourcecode.schema import (
     SourceMap,
 )
 
+# ---------------------------------------------------------------------------
+# Visibility caps — public output is intentionally small.
+# Internal analysis stays broad; only high-signal results reach the output.
+# ---------------------------------------------------------------------------
+_EP_PRODUCTION_CAP = 5       # max production entry points in default output
+_EP_DEV_CAP = 3              # max development entry points in default output
+_FILE_RELEVANCE_LIMIT = 10   # max files in file_relevance section
+_FILE_RELEVANCE_MIN_COMBINED = 0.20  # minimum combined score to appear (out of ~2.0 max)
+_PROD_DEPS_CAP = 10          # max production dependencies shown
+_SECONDARY_DEPS_CAP = 5      # max per dev/test/build dependency group
+_MONOREPO_PKGS_CAP = 8       # max workspace/runtime packages shown
+_KEY_DEPS_CAP = 10           # max key dependencies shown
+_CODE_NOTES_CAP = 15         # max code notes in default output
+_ENV_MAP_CAP = 15            # max env var entries in default output
+
 
 def to_json(sm: SourceMap | dict[str, Any], indent: int = 2) -> str:
     """Serialize SourceMap or dict to canonical JSON.
@@ -176,7 +191,7 @@ def _dep_import_key(name: str) -> str:
     return lowered.split("/")[0].replace("_", "-")
 
 
-def _file_relevance(sm: SourceMap, *, limit: int = 15) -> list[dict[str, Any]]:
+def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> list[dict[str, Any]]:
     from sourcecode.ranking_engine import RankingEngine
 
     root = Path(sm.metadata.analyzed_path) if sm.metadata.analyzed_path else Path(".")
@@ -227,7 +242,20 @@ def _file_relevance(sm: SourceMap, *, limit: int = 15) -> list[dict[str, Any]]:
         sem_hub = semantic_hub_scores.get(path, 0.0) * 0.30
         combined = fs.score + content_rel + sem_hub
 
-        if combined <= 0 and not (file_class and file_class.relevance > 0.3):
+        # Visibility threshold: require meaningful combined signal.
+        # Exception: high/medium-confidence files with strong content relevance
+        # can survive even if structural score is weak.
+        if combined < _FILE_RELEVANCE_MIN_COMBINED:
+            if not (file_class
+                    and file_class.relevance > 0.45
+                    and file_class.confidence in {"high", "medium"}):
+                continue
+
+        # Suppress low-confidence auxiliary/config files unless structurally prominent
+        if (file_class
+                and file_class.confidence == "low"
+                and file_class.category in {"config", "auxiliary"}
+                and combined < 0.45):
             continue
 
         item: dict[str, Any] = {
@@ -343,7 +371,7 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
         key_deps = [
             asdict(d) for d in sm.key_dependencies
             if (d.role or "unknown") in _PRODUCTION_DEP_ROLES and d.scope not in {"dev"}
-        ]
+        ][:_KEY_DEPS_CAP]
     elif sm.dependency_summary is None or not sm.dependency_summary.requested:
         dep_summary_dict = None  # "not analyzed" — agent should add --dependencies
 
@@ -358,7 +386,7 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
             )
             env_map_items = [
                 {k: v for k, v in asdict(e).items() if v is not None and v != "" and v != []}
-                for e in _sorted_env[:15]
+                for e in _sorted_env[:_ENV_MAP_CAP]
             ]
 
     code_notes_summary_dict: Any = None
@@ -373,13 +401,13 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
             )
             code_notes_items = [
                 {k: v for k, v in asdict(n).items() if v is not None}
-                for n in _sorted_notes[:20]
+                for n in _sorted_notes[:_CODE_NOTES_CAP]
             ]
 
-    # Entry points: production runtime only. Auxiliary and development entries
-    # are exposed separately so agents do not mix tooling with execution paths.
+    # Entry points: production runtime only, capped.
+    # Development entries shown separately; auxiliary omitted from compact view.
     ep_groups = _entry_point_groups(sm.entry_points)
-    entry_points_compact = ep_groups["production"]
+    entry_points_compact = ep_groups["production"][:_EP_PRODUCTION_CAP]
     if not entry_points_compact:
         entry_points_compact = []  # truth signal: no production runtime detected
 
@@ -408,8 +436,7 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
         "context_summary": context_summary_dict,
         "stacks": [asdict(stack) for stack in sm.stacks],
         "entry_points": entry_points_compact,
-        "development_entry_points": ep_groups["development"] or None,
-        "auxiliary_entry_points": ep_groups["auxiliary"] or None,
+        "development_entry_points": (ep_groups["development"][:_EP_DEV_CAP] or None),
         "dependency_summary": dep_summary_dict,
         "key_dependencies": key_deps,
         "env_summary": env_summary_dict,
@@ -742,25 +769,23 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
 
     result: dict[str, Any] = {"project": project}
 
-    # ── 2. Entry points: production/runtime only in the primary field ─────────
-    # Development and auxiliary entries are explicit side channels. A missing
-    # production runtime is represented as entry_points=[], never by fallback.
+    # ── 2. Entry points: production/runtime only, capped ─────────────────────
+    # Auxiliary entries are not actionable for agents — omitted entirely.
+    # Development entries shown in a separate channel, capped.
     ep_groups = _entry_point_groups(sm.entry_points)
-    result["entry_points"] = ep_groups["production"]
+    result["entry_points"] = ep_groups["production"][:_EP_PRODUCTION_CAP]
     if ep_groups["development"]:
-        result["development_entry_points"] = ep_groups["development"]
-    if ep_groups["auxiliary"]:
-        result["auxiliary_entry_points"] = ep_groups["auxiliary"]
+        result["development_entry_points"] = ep_groups["development"][:_EP_DEV_CAP]
 
     # ── 3. Architecture ───────────────────────────────────────────────────────
     result["architecture"] = _architecture_context(sm)
 
-    # ── 3a. File relevance: evidence-backed categories, not keyword matches ──
+    # ── 3a. File relevance: evidence-backed, high-signal only ────────────────
     relevant_files = _file_relevance(sm)
     if relevant_files:
         result["file_relevance"] = relevant_files
 
-    # ── 3b. Monorepo package roles (when available) ───────────────────────────
+    # ── 3b. Monorepo package roles (when available), capped ──────────────────
     if sm.monorepo_packages:
         _noise_roles = {"benchmark_layer", "tooling_layer", "docs_layer", "test_layer"}
         operational_pkgs = [
@@ -769,15 +794,16 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
             if p.architectural_role not in _noise_roles
         ]
         if operational_pkgs:
-            result["runtime_packages"] = operational_pkgs
+            result["runtime_packages"] = operational_pkgs[:_MONOREPO_PKGS_CAP]
 
-    # ── 4. Dependencies: separated by operational role ───────────────────────
+    # ── 4. Dependencies: separated by operational role, capped ───────────────
+    # noise_dependencies intentionally excluded — not actionable.
     dep_groups = _dependency_groups(sm)
     if dep_groups["production_dependencies"]:
-        result["production_dependencies"] = dep_groups["production_dependencies"][:15]
-    for dep_key in ("dev_tools", "test_utilities", "build_tooling", "noise_dependencies", "suspicious_dependencies"):
+        result["production_dependencies"] = dep_groups["production_dependencies"][:_PROD_DEPS_CAP]
+    for dep_key in ("dev_tools", "test_utilities", "build_tooling", "suspicious_dependencies"):
         if dep_groups[dep_key]:
-            result[dep_key] = dep_groups[dep_key][:15]
+            result[dep_key] = dep_groups[dep_key][:_SECONDARY_DEPS_CAP]
 
     # Backward-compatible compact list, now production-only.
     production_key_deps = [
@@ -788,7 +814,7 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
         _dep_skip = {"parent", "manifest_path", "workspace", "source", "ecosystem"}
         result["key_dependencies"] = [
             {k: v for k, v in asdict(d).items() if v is not None and k not in _dep_skip}
-            for d in production_key_deps[:15]
+            for d in production_key_deps[:_KEY_DEPS_CAP]
         ]
 
     # ── 5. Signals — compact operational context ─────────────────────────────
@@ -961,12 +987,12 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
         "project_summary": sm.project_summary,
         "architecture_summary": sm.architecture_summary,
         "stacks": [asdict(s) for s in sm.stacks],
-        "entry_points": ep_groups["production"],
+        "entry_points": ep_groups["production"][:_EP_PRODUCTION_CAP],
     }
     if ep_groups["development"]:
-        result["development_entry_points"] = ep_groups["development"]
+        result["development_entry_points"] = ep_groups["development"][:_EP_DEV_CAP]
     if ep_groups["auxiliary"]:
-        result["auxiliary_entry_points"] = ep_groups["auxiliary"]
+        result["auxiliary_entry_points"] = ep_groups["auxiliary"][:_EP_DEV_CAP]
 
     # Layer B — signals (only when the corresponding analyzer ran)
     if sm.dependency_summary is not None and sm.dependency_summary.requested:
@@ -976,16 +1002,21 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
         result["key_dependencies"] = [
             asdict(d) for d in sm.key_dependencies
             if (d.role or "unknown") in _PRODUCTION_DEP_ROLES and d.scope not in {"dev"}
-        ]
+        ][:_KEY_DEPS_CAP]
 
     if sm.env_summary is not None and sm.env_summary.requested:
         result["env_summary"] = asdict(sm.env_summary)
-        result["env_map"] = [asdict(e) for e in sm.env_map]
+        result["env_map"] = [asdict(e) for e in sm.env_map[:_ENV_MAP_CAP]]
 
     if sm.code_notes_summary is not None and sm.code_notes_summary.requested:
         result["code_notes_summary"] = asdict(sm.code_notes_summary)
         if sm.code_notes:
-            result["code_notes"] = [asdict(n) for n in sm.code_notes]
+            _SEVERITY_ORDER = {"BUG": 0, "FIXME": 1, "DEPRECATED": 2, "TODO": 3, "HACK": 4, "WARNING": 5}
+            _sorted_notes = sorted(
+                sm.code_notes,
+                key=lambda n: (_SEVERITY_ORDER.get(getattr(n, "kind", "").upper(), 9), getattr(n, "path", "")),
+            )
+            result["code_notes"] = [asdict(n) for n in _sorted_notes[:_CODE_NOTES_CAP]]
         if sm.code_adrs:
             result["code_adrs"] = [asdict(a) for a in sm.code_adrs]
 
@@ -1076,12 +1107,12 @@ def _contract_view_minimal(
     """Minimal contract: project header + stripped per-file contracts."""
     primary = next((s for s in sm.stacks if s.primary), sm.stacks[0] if sm.stacks else None)
 
-    # Entry point paths only (production)
+    # Entry point paths only (production), capped
     ep_paths = sorted({
         ep.path.replace("\\", "/")
         for ep in sm.entry_points
         if is_production_entry_point(ep)
-    })
+    })[:_EP_PRODUCTION_CAP]
 
     project: dict[str, Any] = {"type": sm.project_type}
     if primary:
@@ -1183,7 +1214,7 @@ def _contract_view_minimal(
             if p.architectural_role not in _noise_roles
         ]
         if operational_pkgs:
-            result["workspace_packages"] = operational_pkgs
+            result["workspace_packages"] = operational_pkgs[:_MONOREPO_PKGS_CAP]
 
     # Confidence summary — detection quality signal
     if sm.confidence_summary is not None:
