@@ -1174,6 +1174,33 @@ def _contract_view_minimal(
         if cs.symbol_truncation:
             result["symbol_query"] = cs.symbol_truncation
 
+    # Monorepo package roles — helps agents understand workspace structure
+    if sm.monorepo_packages:
+        _noise_roles = {"benchmark_layer", "tooling_layer", "docs_layer", "test_layer"}
+        operational_pkgs = [
+            {"path": p.path, "role": p.architectural_role, "criticality": p.criticality}
+            for p in sm.monorepo_packages
+            if p.architectural_role not in _noise_roles
+        ]
+        if operational_pkgs:
+            result["workspace_packages"] = operational_pkgs
+
+    # Confidence summary — detection quality signal
+    if sm.confidence_summary is not None:
+        cs_conf = sm.confidence_summary
+        conf: dict[str, Any] = {
+            "overall": cs_conf.overall,
+            "stack": cs_conf.stack_confidence,
+            "entry_points": cs_conf.entry_point_confidence,
+        }
+        if cs_conf.anomalies:
+            conf["anomalies"] = cs_conf.anomalies
+        result["confidence"] = conf
+
+    # Analysis gaps — explicit about what could not be analyzed
+    if sm.analysis_gaps:
+        result["analysis_gaps"] = [asdict(g) for g in sm.analysis_gaps]
+
     return result
 
 

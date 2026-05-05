@@ -349,21 +349,56 @@ class TaskContextBuilder:
         spec = TASKS[task_name]
 
         # ── 1. Scan ────────────────────────────────────────────────────────
-        from sourcecode.scanner import FileScanner
+        from sourcecode.adaptive_scanner import AdaptiveScanner
+        from sourcecode.repo_classifier import RepoClassifier
         from sourcecode.tree_utils import flatten_file_tree
 
-        scanner = FileScanner(self.root, max_depth=6)
+        _topology = RepoClassifier().classify(self.root)
+        scanner = AdaptiveScanner(self.root, topology=_topology, base_depth=6)
         file_tree = scanner.scan_tree()
         manifests = scanner.find_manifests()
         all_paths = [p.replace("\\", "/") for p in flatten_file_tree(file_tree)]
 
         # ── 2. Detect stacks + entry points ───────────────────────────────
+        from dataclasses import replace as _replace
         from sourcecode.detectors import ProjectDetector, build_default_detectors
         from sourcecode.workspace import WorkspaceAnalyzer
 
         detector = ProjectDetector(build_default_detectors())
         workspace_analysis = WorkspaceAnalyzer().analyze(self.root, manifests)
-        stacks, entry_points, _ = detector.detect(self.root, file_tree, manifests)
+
+        _root_manifests = [
+            m for m in manifests
+            if Path(m).resolve().parent == self.root
+        ]
+        _detection_manifests = _root_manifests if workspace_analysis.workspaces else manifests
+        if workspace_analysis.is_monorepo and not _root_manifests:
+            from sourcecode.schema import EntryPoint, StackDetection
+            stacks: list[StackDetection] = []
+            entry_points: list[EntryPoint] = []
+        else:
+            stacks, entry_points, _ = detector.detect(self.root, file_tree, _detection_manifests)
+
+        # Iterate workspaces to collect per-workspace stacks and entry points —
+        # same approach as the main CLI (cli.py lines 971-1041).
+        for workspace in workspace_analysis.workspaces:
+            ws_root = self.root / workspace.path
+            if not ws_root.exists() or not ws_root.is_dir():
+                continue
+            _ws_topology = RepoClassifier().classify(ws_root)
+            _ws_scanner = AdaptiveScanner(ws_root, topology=_ws_topology, base_depth=6)
+            _ws_tree = _ws_scanner.scan_tree()
+            _ws_manifests = _ws_scanner.find_manifests()
+            _ws_stacks, _ws_eps, _ = detector.detect(ws_root, _ws_tree, _ws_manifests)
+            stacks.extend(
+                _replace(s, root=workspace.path, workspace=workspace.path, primary=False)
+                for s in _ws_stacks
+            )
+            entry_points.extend(
+                _replace(ep, path=f"{workspace.path}/{ep.path}")
+                for ep in _ws_eps
+            )
+
         stacks, project_type = detector.classify_results(
             file_tree, stacks, entry_points,
             project_type_override="monorepo" if workspace_analysis.is_monorepo else None,

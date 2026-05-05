@@ -45,7 +45,7 @@ class WorkspaceAnalyzer:
 
     def _detect_markers(self, root: Path) -> list[str]:
         markers: list[str] = []
-        for filename in ("pnpm-workspace.yaml", "go.work", "turbo.json", "lerna.json"):
+        for filename in ("pnpm-workspace.yaml", "go.work", "turbo.json", "lerna.json", "nx.json", "rush.json"):
             if (root / filename).exists():
                 markers.append(filename)
 
@@ -54,6 +54,17 @@ class WorkspaceAnalyzer:
             content = cargo.read_text(encoding="utf-8", errors="replace")
             if "[workspace]" in content:
                 markers.append("Cargo.toml[workspace]")
+
+        pkg = root / "package.json"
+        if pkg.exists():
+            try:
+                import json as _json
+                data = _json.loads(pkg.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(data, dict) and data.get("workspaces"):
+                    markers.append("package.json[workspaces]")
+            except Exception:
+                pass
+
         return markers
 
     def _workspace_candidates_from_manifests(
@@ -84,6 +95,8 @@ class WorkspaceAnalyzer:
             candidates.extend(self._from_go_work(root))
         if "Cargo.toml[workspace]" in markers:
             candidates.extend(self._from_cargo_workspace(root))
+        if "package.json[workspaces]" in markers:
+            candidates.extend(self._from_npm_workspaces(root))
         return [candidate for candidate in candidates if self._is_allowed_workspace(candidate.path)]
 
     def _from_pnpm_workspace(self, root: Path) -> list[WorkspaceCandidate]:
@@ -141,6 +154,27 @@ class WorkspaceAnalyzer:
                                     )
                 if "]" in stripped:
                     in_members = False
+        return candidates
+
+    def _from_npm_workspaces(self, root: Path) -> list[WorkspaceCandidate]:
+        try:
+            import json as _json
+            data = _json.loads((root / "package.json").read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return []
+        workspaces = data.get("workspaces", [])
+        if isinstance(workspaces, dict):
+            workspaces = workspaces.get("packages", [])
+        if not isinstance(workspaces, list):
+            return []
+        candidates: list[WorkspaceCandidate] = []
+        for pattern in workspaces:
+            if not isinstance(pattern, str):
+                continue
+            for path in self._resolve_pattern(root, pattern):
+                candidates.append(
+                    WorkspaceCandidate(path=path, reason="marker:package.json[workspaces]", depth=len(Path(path).parts))
+                )
         return candidates
 
     def _resolve_pattern(self, root: Path, pattern: str) -> list[str]:

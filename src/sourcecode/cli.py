@@ -731,8 +731,11 @@ def main(
     # These flags produce standard_view-only output sections not in contract_view.
     # Preserves backward compat: callers using any legacy flag get their previous format.
     # New callers opt into contract mode via --mode contract (or bare invocation).
+    # Legacy flags that produce output sections incompatible with contract_view
+    # force mode to raw. --agent is excluded: it now runs the contract pipeline
+    # and enriches contract_view with auto-enabled analyzers (deps, env, notes).
     _legacy_flags_active = (
-        compact or agent or tree or format == "yaml" or trace_pipeline
+        compact or tree or format == "yaml" or trace_pipeline
         or docs or semantics or graph_modules or full_metrics or architecture
     )
     if mode in ("contract", "standard") and _legacy_flags_active:
@@ -1429,11 +1432,9 @@ def main(
                     "Try --depth 8 or verify the symbol name.",
                     err=True,
                 )
-        if agent:
-            typer.echo(f"[contract] {len(_contracts)} files extracted ({_contract_summary.method_breakdown})", err=True)
 
     # 4. Serialize
-    if _is_contract_mode:
+    if _is_contract_mode and not agent:
         from sourcecode.serializer import contract_view as _contract_view
         _depth = _CONTRACT_DEPTH.get(mode, "minimal")
         data = _contract_view(sm, emit_graph=emit_graph, depth=_depth)
@@ -1442,6 +1443,19 @@ def main(
         content = json.dumps(data, indent=2, ensure_ascii=False)
     elif agent:
         data = agent_view(sm)
+        # When contract pipeline ran (mode=contract, no legacy flags), include
+        # per-file contracts in agent output so agents get structural context.
+        if _is_contract_mode and sm.file_contracts:
+            from sourcecode.serializer import _serialize_contract_minimal
+            data["contracts"] = [_serialize_contract_minimal(c) for c in sm.file_contracts]
+            if sm.contract_summary is not None:
+                cs = sm.contract_summary
+                data["contract_summary"] = {
+                    "files": cs.extracted_files,
+                    "total": cs.total_files,
+                }
+                if cs.method_breakdown:
+                    data["contract_summary"]["methods"] = cs.method_breakdown
         if not no_redact:
             data = redact_dict(data)
         content = json.dumps(data, indent=2, ensure_ascii=False)
