@@ -350,49 +350,72 @@ def _section_confidence(sm: SourceMap) -> dict[str, str]:
 
 
 def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
-    """Context package ready for prompt or handoff (~600-800 tokens).
+    """Context package ready for prompt or handoff (~300-500 tokens).
 
     Answers: what it is, where it enters, what depends on what,
     what signals matter, and what uncertainty exists.
 
     Includes: project_type, project_summary, architecture_summary,
-    stacks, entry_points, dependency_summary + key_dependencies (when analyzed),
+    stacks (minimal), entry_points (path+kind only), key_dependencies (name+version+role),
     env_summary (when analyzed), code_notes_summary (when analyzed),
-    confidence_summary, anomalies, analysis_gaps.
+    confidence (overall only), analysis_gaps.
 
-    Excludes: file_tree, raw dependency lists, docs, module_graph.
-    Empty sections are explained when relevant.
+    Excludes: file_tree, raw dependency lists, docs, module_graph, verbose metadata.
     """
-    dep_summary_dict: Any = None
+    # Key dependencies — name + version + role only (no ecosystem, source, manifests)
     key_deps: Any = None
     if sm.dependency_summary is not None and sm.dependency_summary.requested:
-        dep_summary_dict = asdict(sm.dependency_summary)
-        dep_summary_dict.pop("dependencies", None)
         key_deps = [
-            asdict(d) for d in sm.key_dependencies
+            {
+                "name": d.name,
+                **({"version": d.declared_version} if d.declared_version else {}),
+                **({"role": d.role} if d.role and d.role != "runtime" else {}),
+            }
+            for d in sm.key_dependencies
             if (d.role or "unknown") in _PRODUCTION_DEP_ROLES and d.scope not in {"dev"}
         ][:_KEY_DEPS_CAP]
-    elif sm.dependency_summary is None or not sm.dependency_summary.requested:
-        dep_summary_dict = None  # "not analyzed" — agent should add --dependencies
 
+    # Dependency summary — requested flag + count + source only
+    dep_summary_dict: Any = None
+    if sm.dependency_summary is not None and sm.dependency_summary.requested:
+        ds = sm.dependency_summary
+        dep_summary_dict = {
+            "requested": True,
+            "total_count": ds.total_count,
+            "direct": ds.direct_count,
+            **({"sources": ds.sources} if ds.sources else {}),
+        }
+
+    # Env map — key + required + category only (drop type_hint, files list)
     env_summary_dict: Any = None
     env_map_items: Any = None
     if sm.env_summary is not None and sm.env_summary.requested:
-        env_summary_dict = asdict(sm.env_summary)
+        env_summary_dict = {
+            "total": sm.env_summary.total,
+            "required": sm.env_summary.required_count,
+            **({"categories": sm.env_summary.categories} if sm.env_summary.categories else {}),
+        }
         if sm.env_map:
             _sorted_env = sorted(
                 sm.env_map,
                 key=lambda e: (not getattr(e, "required", False), getattr(e, "key", "")),
             )
             env_map_items = [
-                {k: v for k, v in asdict(e).items() if v is not None and v != "" and v != []}
+                {
+                    "key": getattr(e, "key", ""),
+                    **({"required": True} if getattr(e, "required", False) else {}),
+                    **({"category": getattr(e, "category", None)} if getattr(e, "category", None) else {}),
+                }
                 for e in _sorted_env[:_ENV_MAP_CAP]
             ]
 
+    # Code notes — kind + path + line + truncated text only
     code_notes_summary_dict: Any = None
     code_notes_items: Any = None
     if sm.code_notes_summary is not None and sm.code_notes_summary.requested:
-        code_notes_summary_dict = asdict(sm.code_notes_summary)
+        cn = sm.code_notes_summary
+        by_kind = {k: v for k, v in cn.by_kind.items() if v > 0}
+        code_notes_summary_dict = {"total": cn.total, **({"by_kind": by_kind} if by_kind else {})}
         if sm.code_notes:
             _SEVERITY_ORDER = {"BUG": 0, "FIXME": 1, "DEPRECATED": 2, "TODO": 3, "HACK": 4, "WARNING": 5}
             _sorted_notes = sorted(
@@ -400,43 +423,62 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
                 key=lambda n: (_SEVERITY_ORDER.get(getattr(n, "kind", "").upper(), 9), getattr(n, "path", "")),
             )
             code_notes_items = [
-                {k: v for k, v in asdict(n).items() if v is not None}
+                {
+                    "kind": getattr(n, "kind", ""),
+                    "path": getattr(n, "path", ""),
+                    "line": getattr(n, "line", None),
+                    **({"text": getattr(n, "text", "")[:60]} if getattr(n, "text", "") else {}),
+                }
                 for n in _sorted_notes[:_CODE_NOTES_CAP]
             ]
 
-    # Entry points: production runtime only, capped.
-    # Development entries shown separately; auxiliary omitted from compact view.
+    # Entry points — path + kind + confidence only
     ep_groups = _entry_point_groups(sm.entry_points)
-    entry_points_compact = ep_groups["production"][:_EP_PRODUCTION_CAP]
-    if not entry_points_compact:
-        entry_points_compact = []  # truth signal: no production runtime detected
+    entry_points_compact = [
+        {
+            "path": ep["path"],
+            **({"kind": ep["kind"]} if ep.get("kind") else {}),
+            **({"confidence": ep["confidence"]} if ep.get("confidence") else {}),
+        }
+        for ep in ep_groups["production"][:_EP_PRODUCTION_CAP]
+    ]
 
-    # Confidence summary
+    # Stacks — name + method + confidence + frameworks (names only)
+    stacks_compact = [
+        {
+            "stack": s.stack,
+            "detection_method": s.detection_method,
+            "confidence": s.confidence,
+            **({"primary": True} if s.primary else {}),
+            **({"frameworks": [f.name for f in s.frameworks]} if s.frameworks else {}),
+            **({"package_manager": s.package_manager} if s.package_manager else {}),
+        }
+        for s in sm.stacks
+    ]
+
+    # Confidence — overall only + anomalies
     conf_dict: Any = None
-    anomalies: Any = None
     if sm.confidence_summary is not None:
-        conf_dict = asdict(sm.confidence_summary)
-        if sm.confidence_summary.anomalies:
-            anomalies = sm.confidence_summary.anomalies
+        cs = sm.confidence_summary
+        conf_dict = {"overall": cs.overall, "stack": cs.stack_confidence, "entry_points": cs.entry_point_confidence}
+        if cs.anomalies:
+            conf_dict["anomalies"] = cs.anomalies
 
     # Analysis gaps
     gaps_list: Any = None
     if sm.analysis_gaps:
-        gaps_list = [asdict(g) for g in sm.analysis_gaps]
-
-    context_summary_dict: Any = None
-    if sm.context_summary is not None and sm.context_summary.requested:
-        context_summary_dict = asdict(sm.context_summary)
+        gaps_list = [
+            {"area": g.area, "reason": g.reason, "impact": g.impact}
+            for g in sm.analysis_gaps
+        ]
 
     result: dict[str, Any] = {
         "schema_version": sm.metadata.schema_version,
         "project_type": sm.project_type,
         "project_summary": sm.project_summary,
         "architecture_summary": sm.architecture_summary,
-        "context_summary": context_summary_dict,
-        "stacks": [asdict(stack) for stack in sm.stacks],
+        "stacks": stacks_compact,
         "entry_points": entry_points_compact,
-        "development_entry_points": (ep_groups["development"][:_EP_DEV_CAP] or None),
         "dependency_summary": dep_summary_dict,
         "key_dependencies": key_deps,
         "env_summary": env_summary_dict,
@@ -444,14 +486,10 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
         "code_notes_summary": code_notes_summary_dict,
         "code_notes": code_notes_items,
         "confidence_summary": conf_dict,
-        "anomalies": anomalies,
         "analysis_gaps": gaps_list,
     }
-    # Strip keys that are fully None and not informative
-    return {k: v for k, v in result.items() if v is not None or k in (
-        "project_type", "project_summary", "architecture_summary",
-        "dependency_summary", "confidence_summary",
-    )}
+    _always_include = {"project_type", "project_summary", "architecture_summary", "dependency_summary"}
+    return {k: v for k, v in result.items() if v is not None or k in _always_include}
 
 
 def normalize_source_map(sm: SourceMap) -> SourceMap:
