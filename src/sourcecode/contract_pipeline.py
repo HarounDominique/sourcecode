@@ -27,8 +27,8 @@ from sourcecode.schema import EntryPoint, MonorepoPackageInfo
 # ---------------------------------------------------------------------------
 
 _MAX_FILES = 500          # hard cap on files extracted per run
-_MAX_CONTRACTS = 25       # default top-N output cap — omit rather than flood
-_MIN_CONTRACT_SCORE = 0.10  # drop contracts below this relevance threshold
+_MAX_CONTRACTS = 15       # default top-N output cap — omit rather than flood
+_MIN_CONTRACT_SCORE = 0.15  # drop contracts below this relevance threshold
 _SRC_EXTENSIONS: frozenset[str] = frozenset(_LANGUAGE_MAP.keys())
 
 

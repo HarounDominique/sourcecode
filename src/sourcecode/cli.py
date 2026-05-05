@@ -1445,8 +1445,10 @@ def main(
         data = agent_view(sm)
         # When contract pipeline ran (mode=contract, no legacy flags), include
         # per-file contracts in agent output so agents get structural context.
+        # Remove file_relevance — contracts cover this signal with more detail.
         if _is_contract_mode and sm.file_contracts:
             from sourcecode.serializer import _serialize_contract_minimal
+            data.pop("file_relevance", None)
             data["contracts"] = [_serialize_contract_minimal(c) for c in sm.file_contracts]
             if sm.contract_summary is not None:
                 cs = sm.contract_summary

@@ -1130,9 +1130,6 @@ def _contract_view_minimal(
         "project": project,
     }
 
-    if sm.metadata.traversal_topology:
-        result["traversal"] = sm.metadata.traversal_topology
-
     # Per-file contracts
     if contracts:
         serialized: list[dict[str, Any]] = []
@@ -1310,6 +1307,10 @@ def _compress_sig(name: str, sig: str, max_len: int = 100) -> str:
     return full
 
 
+_MAX_FN_PER_CONTRACT = 5   # max function signatures per contract (token budget)
+_MAX_SIG_LEN = 60          # max chars per compressed signature
+
+
 def _serialize_contract_minimal(c: Any) -> dict[str, Any]:
     """Serialize one FileContract to minimal format."""
     item: dict[str, Any] = {"path": c.path, "role": c.role}
@@ -1317,37 +1318,46 @@ def _serialize_contract_minimal(c: Any) -> dict[str, Any]:
     if c.is_changed:
         item["changed"] = True
 
-    # Exports: flat string for functions/unknown, {name,k} for others
-    # When all exports are same non-function kind, group them
-    if c.exports:
-        exs: list[Any] = []
-        kinds = {e.kind for e in c.exports}
-        if len(kinds) == 1 and "function" not in kinds and "unknown" not in kinds:
-            # All same non-function kind — compact: {"k": "class", "names": [...]}
-            only_kind = next(iter(kinds))
-            exs = [{"k": only_kind, "names": sorted(e.name for e in c.exports)}]
-        else:
-            for e in sorted(c.exports, key=lambda e: e.name):
-                if e.kind in ("function", "unknown"):
-                    exs.append(e.name)
-                else:
-                    exs.append({"name": e.name, "k": e.kind})
-        item["exports"] = exs
-
-    # External deps (non-stdlib already filtered in extractor)
-    if c.dependencies:
-        item["deps"] = sorted(c.dependencies)
-
-    # Exported function signatures — compressed
+    # Exported function signatures — compressed, capped
     exported_names = {e.name for e in c.exports}
+    fn_names_in_sigs: set[str] = set()
     if c.functions:
         fns = []
         for f in sorted(c.functions, key=lambda f: f.name):
             if not (f.exported or f.name in exported_names):
                 continue
-            fns.append(_compress_sig(f.name, f.signature))
+            fns.append(_compress_sig(f.name, f.signature, max_len=_MAX_SIG_LEN))
+            fn_names_in_sigs.add(f.name)
+            if len(fns) >= _MAX_FN_PER_CONTRACT:
+                break
         if fns:
             item["fn"] = fns
+
+    # Exports: omit function names already shown in fn; keep non-function exports
+    if c.exports:
+        exs: list[Any] = []
+        non_fn_exports = [e for e in c.exports if e.kind not in ("function", "unknown")]
+        fn_exports_not_in_sig = [
+            e for e in c.exports
+            if e.kind in ("function", "unknown") and e.name not in fn_names_in_sigs
+        ]
+        remaining = non_fn_exports + fn_exports_not_in_sig
+        if remaining:
+            kinds = {e.kind for e in remaining}
+            if len(kinds) == 1 and "function" not in kinds and "unknown" not in kinds:
+                only_kind = next(iter(kinds))
+                exs = [{"k": only_kind, "names": sorted(e.name for e in remaining)}]
+            else:
+                for e in sorted(remaining, key=lambda e: e.name):
+                    if e.kind in ("function", "unknown"):
+                        exs.append(e.name)
+                    else:
+                        exs.append({"name": e.name, "k": e.kind})
+            item["exports"] = exs
+
+    # External deps (non-stdlib already filtered in extractor)
+    if c.dependencies:
+        item["deps"] = sorted(c.dependencies)
 
     # Types: skip if fully covered by exports (avoids duplication in model files)
     if c.types:
@@ -1362,12 +1372,6 @@ def _serialize_contract_minimal(c: Any) -> dict[str, Any]:
     # Hooks (TSX/JSX — usually short list)
     if c.hooks_used:
         item["hooks"] = c.hooks_used
-
-    # Ranking signals: why this file was ranked here
-    if getattr(c, "ranking_reasons", None):
-        non_trivial = [r for r in c.ranking_reasons if r not in ("source file", "noise")]
-        if non_trivial:
-            item["why"] = non_trivial
 
     return item
 
