@@ -121,10 +121,16 @@ def _dependency_groups(sm: SourceMap) -> dict[str, list[dict[str, Any]]]:
 
         if role in _PRODUCTION_DEP_ROLES and scope not in {"dev"}:
             groups["production_dependencies"].append(item)
+            _jvm_ecosystems = {"maven", "gradle", "java", "kotlin", "scala", "groovy"}
             if dep.source == "manifest" and name_key not in import_index:
-                suspect = dict(item)
-                suspect["reason"] = "declared as production dependency but no static import observed"
-                groups["suspicious_dependencies"].append(suspect)
+                if dep.ecosystem in _jvm_ecosystems:
+                    # Static import check unsupported for JVM: import index only covers
+                    # Python/JS/TS. Flagging JVM deps as suspicious produces only false positives.
+                    pass
+                else:
+                    suspect = dict(item)
+                    suspect["reason"] = "declared as production dependency but no static import observed"
+                    groups["suspicious_dependencies"].append(suspect)
         elif role in _TEST_DEP_ROLES:
             groups["test_utilities"].append(item)
         elif role in _BUILD_DEP_ROLES:

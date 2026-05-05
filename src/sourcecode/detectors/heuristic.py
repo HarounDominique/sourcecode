@@ -66,6 +66,13 @@ class HeuristicDetector(AbstractDetector):
                     counts[stack] += 1
                     break
 
+        # Suppress minority stacks: if a language appears in fewer than 3 files
+        # AND represents less than 10% of detected source files, it is likely
+        # noise (stray config files, vendored snippets) rather than a real stack.
+        # Always emit the dominant language regardless of absolute count.
+        total_detected = sum(counts.values())
+        _ABS_MIN = 3
+        _REL_MIN = 0.10
         stacks = [
             StackDetection(
                 stack=stack,
@@ -73,7 +80,8 @@ class HeuristicDetector(AbstractDetector):
                 confidence="low",
                 manifests=[],
             )
-            for stack, _count in counts.most_common()
+            for stack, count in counts.most_common()
+            if count >= _ABS_MIN or (total_detected > 0 and count / total_detected >= _REL_MIN)
         ]
 
         entry_points: list[EntryPoint] = []

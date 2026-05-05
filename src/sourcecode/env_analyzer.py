@@ -11,8 +11,8 @@ _MAX_FILE_SIZE = 512 * 1024  # 512 KB
 
 _SKIP_DIRS = {
     "node_modules", ".git", "__pycache__", ".venv", "venv",
-    ".mypy_cache", "dist", "build", ".tox", ".eggs", "coverage",
-    ".next", ".nuxt", ".output", "vendor",
+    ".mypy_cache", "dist", "build", "target", ".gradle",
+    ".tox", ".eggs", "coverage", ".next", ".nuxt", ".output", "vendor",
 }
 
 _CODE_EXTENSIONS = {

@@ -660,6 +660,21 @@ def main(
         )
         raise typer.Exit(code=1)
 
+    if symbol and mode not in ("contract", "standard"):
+        typer.echo(
+            f"Error: --symbol requires --mode contract or standard (got '{mode}'). "
+            "Symbol search uses the contract pipeline which does not run in raw mode.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if entrypoints_only and mode not in ("contract", "standard"):
+        typer.echo(
+            f"Error: --entrypoints-only requires --mode contract or standard (got '{mode}').",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     if dependency_depth > 0:
         typer.echo(
             f"[warning] --dependency-depth {dependency_depth} has no effect: "
@@ -1257,7 +1272,13 @@ def main(
             eco_order = 0 if d.ecosystem == primary_ecosystem else 1
             return (role_order, eco_order, d.name.lower())
 
-        sm.key_dependencies = sorted(direct_deps, key=_dep_sort_key)[:15]
+        _seen_dep_names: set[str] = set()
+        _deduped_deps: list[Any] = []
+        for d in sorted(direct_deps, key=_dep_sort_key):
+            if d.name not in _seen_dep_names:
+                _seen_dep_names.add(d.name)
+                _deduped_deps.append(d)
+        sm.key_dependencies = _deduped_deps[:15]
 
     # LQN-02: deterministic NL summary
     sm.project_summary = ProjectSummarizer(target).generate(sm)
@@ -1356,32 +1377,58 @@ def main(
     _is_contract_mode = mode in ("contract", "standard")
     if _is_contract_mode:
         from sourcecode.contract_pipeline import ContractPipeline
+        from sourcecode.contract_model import ContractSummary as _ContractSummary
         _cp = ContractPipeline()
-        _contracts, _contract_summary = _cp.run(
-            target,
-            sm.file_paths,
-            entry_points=sm.entry_points,
-            monorepo_packages=sm.monorepo_packages,
-            mode=mode,
-            rank_by=rank_by,  # type: ignore[arg-type]
-            max_symbols=max_symbols,
-            dependency_depth=dependency_depth,
-            entrypoints_only=entrypoints_only,
-            changed_only=changed_only,
-            symbol=symbol,
-            compress_types=compress_types,
-            max_importers=max_importers,
-            semantic_calls=sm.semantic_calls or None,
-            code_notes=sm.code_notes or None,
-        )
+        try:
+            _contracts, _contract_summary = _cp.run(
+                target,
+                sm.file_paths,
+                entry_points=sm.entry_points,
+                monorepo_packages=sm.monorepo_packages,
+                mode=mode,
+                rank_by=rank_by,  # type: ignore[arg-type]
+                max_symbols=max_symbols,
+                dependency_depth=dependency_depth,
+                entrypoints_only=entrypoints_only,
+                changed_only=changed_only,
+                symbol=symbol,
+                compress_types=compress_types,
+                max_importers=max_importers,
+                semantic_calls=sm.semantic_calls or None,
+                code_notes=sm.code_notes or None,
+            )
+        except Exception as _exc:
+            typer.echo(f"[error] contract pipeline failed: {_exc}", err=True)
+            _contracts = []
+            _contract_summary = _ContractSummary(
+                mode=mode,
+                total_files=0,
+                extracted_files=0,
+                filtered_files=0,
+                method_breakdown={},
+                ranked_by=rank_by,
+                limitations=[f"pipeline_error: {type(_exc).__name__}"],
+            )
         sm = _replace(sm, file_contracts=_contracts, contract_summary=_contract_summary)
         if symbol is not None and len(_contracts) == 0:
-            typer.echo(
-                f"[warning] --symbol '{symbol}' matched 0 files. "
-                "The symbol may not exist at the current --depth, or the name may differ in case. "
-                "Try --depth 8 or verify the symbol name.",
-                err=True,
-            )
+            _jvm_stacks = {"java", "kotlin", "scala", "groovy"}
+            _is_jvm_repo = any(s.stack in _jvm_stacks for s in sm.stacks)
+            if _is_jvm_repo:
+                typer.echo(
+                    f"[warning] --symbol '{symbol}' matched 0 files. "
+                    "Per-file AST extraction is not available for Java/JVM repos — "
+                    "symbol search works only with Python, TypeScript, and JavaScript. "
+                    "Use --git-context or --code-notes for JVM navigation.",
+                    err=True,
+                )
+            else:
+                typer.echo(
+                    f"[warning] --symbol '{symbol}' matched 0 files. "
+                    "The symbol may not exist, the name may differ in case, "
+                    "or the file may be outside the scanned depth. "
+                    "Try --depth 8 or verify the symbol name.",
+                    err=True,
+                )
         if agent:
             typer.echo(f"[contract] {len(_contracts)} files extracted ({_contract_summary.method_breakdown})", err=True)
 

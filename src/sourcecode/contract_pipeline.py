@@ -241,7 +241,9 @@ class ContractPipeline:
             contracts.append(contract)
             method_counts[contract.extraction_method] += 1
 
-        if not self._extractor.has_tree_sitter():
+        _js_ts_languages = {"typescript", "javascript", "tsx", "jsx"}
+        _has_js_ts = any(c.language in _js_ts_languages for c in contracts)
+        if _has_js_ts and not self._extractor.has_tree_sitter():
             limitations.append(
                 "tree_sitter_unavailable: JS/TS extraction uses heuristics. "
                 "Install with: pip install 'sourcecode[ast]'"
