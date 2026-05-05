@@ -17,6 +17,7 @@ from typing import Any, Literal, Optional
 
 from sourcecode.ast_extractor import AstExtractor, _LANGUAGE_MAP
 from sourcecode.contract_model import ContractSummary, FileContract
+from sourcecode.entrypoint_classifier import is_production_entry_point
 from sourcecode.ranking_engine import RankingEngine
 from sourcecode.relevance_scorer import RelevanceScorer
 from sourcecode.schema import EntryPoint, MonorepoPackageInfo
@@ -25,7 +26,9 @@ from sourcecode.schema import EntryPoint, MonorepoPackageInfo
 # Constants
 # ---------------------------------------------------------------------------
 
-_MAX_FILES = 500      # hard cap on files extracted per run
+_MAX_FILES = 500          # hard cap on files extracted per run
+_MAX_CONTRACTS = 25       # default top-N output cap — omit rather than flood
+_MIN_CONTRACT_SCORE = 0.10  # drop contracts below this relevance threshold
 _SRC_EXTENSIONS: frozenset[str] = frozenset(_LANGUAGE_MAP.keys())
 
 
@@ -178,12 +181,20 @@ class ContractPipeline:
         max_importers: int = 50,
         semantic_calls: Optional[list] = None,
         code_notes: Optional[list] = None,
+        max_contracts: Optional[int] = _MAX_CONTRACTS,
     ) -> tuple[list[FileContract], ContractSummary]:
         """Run the full extraction pipeline.
 
         Returns (ranked_contracts, summary).
         """
-        entry_paths = {ep.path.replace("\\", "/") for ep in (entry_points or [])}
+        # Only treat production-classified entrypoints as anchors.
+        # Convention/heuristic entrypoints (index.ts barrels, plugin examples)
+        # must not bubble to the top via is_entrypoint=True ranking boost.
+        entry_paths = {
+            ep.path.replace("\\", "/")
+            for ep in (entry_points or [])
+            if is_production_entry_point(ep)
+        }
         scorer = RelevanceScorer(monorepo_packages)
         engine = RankingEngine(monorepo_packages)
 
@@ -299,16 +310,25 @@ class ContractPipeline:
                     max_importers=max_importers,
                 )
 
-        # 9. Entrypoints-only filter
+        # 9. Entrypoints-only filter — production entry points only, no export spill
         if entrypoints_only and not symbol:
-            contracts = [c for c in contracts if c.is_entrypoint or c.exports]
+            contracts = [c for c in contracts if c.is_entrypoint]
 
-        # 10. Compress types if requested
+        # 10. Top-N cap — enforce max_contracts when not in symbol-search mode.
+        # Symbol searches must return all matching files; budget applies only to
+        # the default architectural briefing use case.
+        if symbol is None and max_contracts is not None:
+            contracts = [
+                c for c in contracts
+                if c.relevance_score >= _MIN_CONTRACT_SCORE or c.is_entrypoint
+            ][:max_contracts]
+
+        # 11. Compress types if requested
         if compress_types:
             for c in contracts:
                 _compress_contract_types(c)
 
-        # 11. Apply max_symbols limit (limits total exports across all contracts)
+        # 12. Apply max_symbols limit (limits total exports across all contracts)
         if max_symbols is not None and max_symbols > 0:
             contracts = _limit_symbols(contracts, max_symbols)
 

@@ -177,8 +177,8 @@ class ContextScorer:
         node_scores: dict[str, NodeScore],
         contracts: list[Any],
         *,
-        budget: int = 30,
-        min_score: float = 0.05,
+        budget: int = 25,
+        min_score: float = 0.15,
     ) -> list[str]:
         """Greedy minimum-sufficient subgraph selection with diversity re-ranking.
 

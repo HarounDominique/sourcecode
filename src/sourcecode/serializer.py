@@ -31,7 +31,7 @@ from sourcecode.schema import (
 _EP_PRODUCTION_CAP = 5       # max production entry points in default output
 _EP_DEV_CAP = 3              # max development entry points in default output
 _FILE_RELEVANCE_LIMIT = 10   # max files in file_relevance section
-_FILE_RELEVANCE_MIN_COMBINED = 0.20  # minimum combined score to appear (out of ~2.0 max)
+_FILE_RELEVANCE_MIN_COMBINED = 0.40  # minimum combined score — must earn inclusion
 _PROD_DEPS_CAP = 10          # max production dependencies shown
 _SECONDARY_DEPS_CAP = 5      # max per dev/test/build dependency group
 _MONOREPO_PKGS_CAP = 8       # max workspace/runtime packages shown
@@ -1409,12 +1409,12 @@ def _contract_view_standard(
              "package_manager": s.package_manager}
             for s in sm.stacks
         ],
-        "entry_points": ep_groups["production"],
+        "entry_points": ep_groups["production"][:_EP_PRODUCTION_CAP],
     }
     if sm.metadata.traversal_topology:
         result["traversal"] = sm.metadata.traversal_topology
     if ep_groups["development"]:
-        result["development_entry_points"] = ep_groups["development"]
+        result["development_entry_points"] = ep_groups["development"][:_EP_DEV_CAP]
 
     if sm.confidence_summary is not None:
         result["confidence"] = {

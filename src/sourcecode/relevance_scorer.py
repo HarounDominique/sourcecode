@@ -124,8 +124,9 @@ _HIGH_VALUE_SUFFIXES: frozenset[str] = frozenset({
 })
 
 _ENTRYPOINT_STEMS: frozenset[str] = frozenset({
-    "main", "cli", "app", "server", "index", "__main__",
+    "main", "cli", "app", "server", "__main__",
     "application", "bootstrap", "entry",
+    # "index" removed — barrel export convention, not a runtime entrypoint signal
 })
 
 

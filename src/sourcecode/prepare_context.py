@@ -758,7 +758,7 @@ class TaskContextBuilder:
                 )
                 for total, path, rf in scored
             }
-            _selected = _ctx.select_subgraph(_ns, contracts=[], budget=15, min_score=0.05)
+            _selected = _ctx.select_subgraph(_ns, contracts=[], budget=15, min_score=0.15)
             _rf_map = {path: rf for _, path, rf in scored}
             return [_rf_map[p] for p in _selected if p in _rf_map]
         except Exception:
