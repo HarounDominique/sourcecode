@@ -23,8 +23,15 @@ jobs:
           pip install .
 
       - name: Build EXE
-        run: |
-          python -m nuitka --onefile --standalone --follow-imports --output-dir=build run_cli.py
+  	run: |
+    	python -m nuitka ^
+      		--onefile ^
+      		--standalone ^
+      		--follow-imports ^
+      		--assume-yes-for-downloads ^
+      		--output-dir=build ^
+      		run_cli.py
+  	shell: cmd
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
