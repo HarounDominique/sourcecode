@@ -182,8 +182,19 @@ class ArchitectureAnalyzer:
         ddd_result = self._detect_ddd(sm.file_paths)
         if ddd_result is not None:
             ddd_pattern, ddd_layers, ddd_contexts, ddd_layer_names = ddd_result
-            domains_for_ddd = self._cluster_domains(filtered) if len(filtered) >= 2 else []
             module_files = self._build_ddd_module_files(sm.file_paths, ddd_contexts)
+            # Use DDD bounded context names as domains so --architecture shows each
+            # context as a distinct domain instead of collapsing all files under
+            # the Maven path segment (e.g. "java").
+            domains_for_ddd = [
+                ArchitectureDomain(
+                    name=n,
+                    files=module_files.get(n, []),
+                    role="DDD bounded context",
+                    confidence="high",
+                )
+                for n in ddd_contexts
+            ]
             bc_list = [
                 BoundedContext(name=n, modules=module_files.get(n, []), confidence="high")
                 for n in ddd_contexts

@@ -1191,6 +1191,18 @@ class DependencyAnalyzer:
         limitations: list[str] = []
         if not records:
             limitations.append("java: pom.xml sin dependencias parseables (puede usar BOM o propiedades)")
+
+        # Warn when Spring Boot BOM manages transitive deps — they can't be resolved statically.
+        parent_artifact_local = (
+            root_elem.findtext(f"{ns}parent/{ns}artifactId") or ""
+        ).strip() if parent_elem is not None else ""
+        if parent_artifact_local == "spring-boot-starter-parent" and parent_version:
+            limitations.append(
+                f"spring_boot_bom_detected: transitive deps managed by Spring Boot BOM "
+                f"v{parent_version}, not resolved statically. "
+                "Run 'mvn dependency:tree' for the full transitive tree."
+            )
+
         return records, limitations
 
     def _analyze_gradle(self, root: Path) -> tuple[list[DependencyRecord], list[str]]:

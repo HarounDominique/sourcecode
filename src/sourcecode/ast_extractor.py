@@ -1173,6 +1173,51 @@ def _detect_role(path: str, contract: FileContract) -> str:
 
 
 # ---------------------------------------------------------------------------
+# MyBatis XML mapper extractor
+# ---------------------------------------------------------------------------
+
+def _extract_mybatis_xml(rel_path: str, source: str) -> FileContract:
+    """Extract namespace and SQL operations from a MyBatis *Mapper.xml file."""
+    import re as _re
+    from xml.etree import ElementTree
+
+    _NS_STRIP = _re.compile(r"\{[^}]+\}")
+    _SQL_OPS = frozenset({"select", "insert", "update", "delete"})
+
+    exports: list[ExportRecord] = []
+    namespace: str | None = None
+
+    try:
+        root_elem = ElementTree.fromstring(source.encode("utf-8"))
+        namespace = root_elem.get("namespace") or None
+        for elem in root_elem:
+            tag = _NS_STRIP.sub("", elem.tag).lower()
+            if tag in _SQL_OPS:
+                op_id = (elem.get("id") or "").strip()
+                if op_id:
+                    # type_ref carries select/insert/update/delete for the serializer
+                    exports.append(ExportRecord(kind="query", name=op_id, type_ref=tag))
+    except Exception:
+        return FileContract(
+            path=rel_path,
+            language="mybatis-xml",
+            role="mybatis-mapper",
+            extraction_method="heuristic",
+            limitations=["xml_parse_error: failed to parse mapper XML"],
+        )
+
+    deps = [f"namespace:{namespace}"] if namespace else []
+    return FileContract(
+        path=rel_path,
+        language="mybatis-xml",
+        role="mybatis-mapper",
+        exports=exports,
+        dependencies=deps,
+        extraction_method="heuristic",
+    )
+
+
+# ---------------------------------------------------------------------------
 # AstExtractor public class
 # ---------------------------------------------------------------------------
 
@@ -1191,6 +1236,16 @@ class AstExtractor:
         return self._ts_ok
 
     def extract(self, path: Path, root: Optional[Path] = None) -> Optional[FileContract]:
+        # MyBatis mapper XML — handled before the language map lookup so .xml
+        # files are only processed when they match the mapper naming convention.
+        if path.suffix.lower() == ".xml" and path.name.endswith("Mapper.xml"):
+            try:
+                source = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return None
+            rel_path = str(path.relative_to(root)).replace("\\", "/") if root else path.name
+            return _extract_mybatis_xml(rel_path, source)
+
         ext = path.suffix.lower()
         language = _LANGUAGE_MAP.get(ext)
         if language is None:

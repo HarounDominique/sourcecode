@@ -18,7 +18,7 @@ _NS_TAG_RE = re.compile(r"\{[^}]+\}")
 
 _MAX_FILE_SIZE = 256 * 1024  # 256 KB
 _MAX_JAVA_ENTRY_SCAN = 1000
-_MAX_ANNOTATION_ENTRY_POINTS = 500
+_MAX_ANNOTATION_ENTRY_POINTS = 1000
 
 _REST_CONTROLLER_RE = re.compile(r'@RestController\b')
 _MVC_CONTROLLER_RE = re.compile(r'@Controller\b')
@@ -236,10 +236,12 @@ class JavaDetector(AbstractDetector):
         ]
 
         # 2. Annotation-based scan: @RestController, @WebFilter, FilterRegistrationBean
-        scan_candidates = [
-            p for p in all_java
-            if "/test/" not in p and "/tests/" not in p
-        ][:_MAX_JAVA_ENTRY_SCAN]
+        # Prioritize Controller-named files so all REST controllers are detected
+        # even in large codebases where total files > _MAX_JAVA_ENTRY_SCAN.
+        _non_test = [p for p in all_java if "/test/" not in p and "/tests/" not in p]
+        _ctrl_files = [p for p in _non_test if "Controller" in p]
+        _other_files = [p for p in _non_test if "Controller" not in p]
+        scan_candidates = _ctrl_files + _other_files[:max(0, _MAX_JAVA_ENTRY_SCAN - len(_ctrl_files))]
 
         annotation_eps: list[EntryPoint] = []
         for rel_path in scan_candidates:

@@ -188,7 +188,7 @@ def test_cli_raw_mode_preserves_standard_output(tmp_path: Path) -> None:
     data = json.loads(result.output)
     assert "metadata" in data
     assert data["metadata"]["schema_version"] == "1.0"
-    assert "file_contracts" not in data
+    assert "contracts" not in data
 
 
 def test_cli_max_symbols_flag(tmp_path: Path) -> None:
@@ -198,11 +198,11 @@ def test_cli_max_symbols_flag(tmp_path: Path) -> None:
             f"def func{i}a(): pass\ndef func{i}b(): pass\n"
         )
 
-    # Use --mode standard to get file_contracts with full per-symbol detail
+    # Use --mode standard to get contracts with full per-symbol detail
     result = runner.invoke(app, ["--mode", "standard", "--max-symbols", "5", str(tmp_path)])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    contracts = data.get("file_contracts", [])
+    contracts = data.get("contracts", [])
     total = sum(
         len(c.get("exports", [])) + len(c.get("functions", [])) + len(c.get("types", []))
         for c in contracts
@@ -250,7 +250,7 @@ def test_cli_standard_mode_includes_detail_fields(tmp_path: Path) -> None:
     assert "schema_version" in data
     assert "stacks" in data
     assert "entry_points" in data
-    assert "file_contracts" in data
+    assert "contracts" in data
 
 
 def test_cli_invalid_mode_exits_nonzero(tmp_path: Path) -> None:

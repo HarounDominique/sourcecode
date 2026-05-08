@@ -219,9 +219,18 @@ class ContractPipeline:
             fname = Path(pn).name
             return any(fname.startswith(pat) or f".{pat.strip('.')}" in fname for pat in _TEST_PATTERNS)
 
+        def _is_extractable(p: str) -> bool:
+            suf = Path(p).suffix.lower()
+            if suf in _SRC_EXTENSIONS:
+                return True
+            # MyBatis mapper XML files — only *Mapper.xml, not all XML
+            if suf == ".xml" and p.endswith("Mapper.xml"):
+                return True
+            return False
+
         src_paths = [
             p for p in file_paths
-            if Path(p).suffix.lower() in _SRC_EXTENSIONS
+            if _is_extractable(p)
             and not scorer.is_noise(p)
             and (symbol is not None or changed_only or not _is_test(p))
         ]

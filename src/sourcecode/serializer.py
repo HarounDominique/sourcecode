@@ -1439,10 +1439,31 @@ def _serialize_contract_java(c: Any) -> dict[str, Any]:
     return item
 
 
+def _serialize_contract_mybatis_xml(c: Any) -> dict[str, Any]:
+    """Serialize a MyBatis *Mapper.xml contract."""
+    item: dict[str, Any] = {"path": c.path, "language": "mybatis-xml"}
+    # Extract namespace stored as "namespace:<fqn>" in dependencies
+    for dep in (c.dependencies or []):
+        if dep.startswith("namespace:"):
+            item["namespace"] = dep[len("namespace:"):]
+            break
+    exports_out: list[dict] = []
+    for e in c.exports:
+        entry: dict = {"kind": e.kind, "name": e.name}
+        if getattr(e, "type_ref", None):
+            entry["type"] = e.type_ref
+        exports_out.append(entry)
+    if exports_out:
+        item["exports"] = exports_out
+    return item
+
+
 def _serialize_contract_minimal(c: Any) -> dict[str, Any]:
     """Serialize one FileContract to minimal format."""
     if getattr(c, "language", None) == "java":
         return _serialize_contract_java(c)
+    if getattr(c, "language", None) == "mybatis-xml":
+        return _serialize_contract_mybatis_xml(c)
     item: dict[str, Any] = {"path": c.path, "role": c.role}
 
     if c.is_changed:
@@ -1560,6 +1581,11 @@ def _contract_view_standard(
     if contracts:
         serialized: list[dict[str, Any]] = []
         for c in contracts:
+            if getattr(c, "language", None) == "mybatis-xml":
+                item = _serialize_contract_mybatis_xml(c)
+                item["relevance_score"] = round(c.relevance_score, 3)
+                serialized.append(item)
+                continue
             item: dict[str, Any] = {
                 "path": c.path,
                 "language": c.language,
@@ -1609,7 +1635,7 @@ def _contract_view_standard(
                     item["ranking_reasons"] = non_trivial
             item["method"] = c.extraction_method
             serialized.append(item)
-        result["file_contracts"] = serialized
+        result["contracts"] = serialized
 
     # Optional analysis sections (deep mode or when analyzers ran)
     if include_optional:
