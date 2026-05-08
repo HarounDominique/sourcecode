@@ -10,6 +10,7 @@ import typer
 
 from sourcecode import __version__
 from sourcecode.entrypoint_classifier import is_production_entry_point, normalize_entry_point
+from sourcecode.progress import Progress
 
 
 # ---------------------------------------------------------------------------
@@ -138,18 +139,19 @@ def _check_pipeline_coherence(sm: "SourceMap") -> list[str]:  # type: ignore[nam
     return issues
 
 _HELP = """\
-Deterministic codebase context for AI coding agents.
+Compressed AI-ready context for Java/Spring enterprise codebases.
 
-[bold]Usage:[/bold]
-  sourcecode                   [dim]# analyze current directory[/dim]
-  sourcecode /path/to/repo     [dim]# analyze specific path[/dim]
-  sourcecode --agent           [dim]# structured output for AI agents[/dim]
+[bold]Examples:[/bold]
+  sourcecode saint-server --compact
+  sourcecode . --changed-only --git-context
+  sourcecode saint-server --symbol SeguridadRestController
+  sourcecode prepare-context onboard saint-server
+  sourcecode prepare-context delta . --since main
 
 [bold]Subcommands:[/bold]
-  prepare-context TASK [PATH]  [dim]# task-specific context[/dim]
+  prepare-context TASK [PATH]  [dim]# task-specific context (onboard, delta, fix-bug, ...)[/dim]
   telemetry status|enable|disable
   version
-  config
 """
 
 # Known subcommand names — tokens matching these are routed as subcommands,
@@ -352,58 +354,55 @@ def main(
         "json",
         "--format",
         "-f",
-        help="Output format: json (default) or yaml. Both carry identical data — yaml is more human-readable, json is preferred for agent pipelines.",
+        help="Output format: json (default) or yaml.",
         show_default=True,
     ),
     output: Optional[Path] = typer.Option(
         None,
         "--output",
         "-o",
-        help="Write output to a file instead of stdout. Useful for storing analysis snapshots or piping to downstream tools.",
+        help="Write output to a file instead of stdout.",
     ),
     compact: bool = typer.Option(
         False,
         "--compact",
         help=(
-            "Compact output (~600–800 tokens): project type, stacks, production entry points, "
-            "dependency summary, confidence summary, and analysis gaps. "
-            "Omits file tree, raw dependency lists, docs, and module graph. "
-            "Designed for agent context windows. Automatically enables --dependencies, --env-map, and --code-notes."
+            "High-signal summary (~600–800 tokens): stacks, entry points, "
+            "dependency summary, confidence, and gaps. "
+            "Optimized for agent context windows."
         ),
     ),
     dependencies: bool = typer.Option(
         False,
         "--dependencies",
-        help=(
-            "Analyze direct and transitive dependencies. Reads manifests (pyproject.toml, package.json, go.mod, etc.) "
-            "and lockfiles when available. Adds dependency_summary and key_dependencies to output."
-        ),
+        hidden=True,
+        help="Analyze direct dependencies from manifests and lockfiles.",
     ),
     graph_modules: bool = typer.Option(
         False,
         "--graph-modules",
-        help=(
-            "Include a structural module graph: nodes (files/symbols) and edges (imports, calls, contains). "
-            "Useful for understanding coupling and call flows. Adds module_graph to output. "
-            "Combine with --graph-detail and --graph-edges to control scope."
-        ),
+        hidden=True,
+        help="Include a structural module graph in output.",
     ),
     graph_detail: str = typer.Option(
         "high",
         "--graph-detail",
-        help="Detail level for --graph-modules: high (top modules by importance), medium (filtered by relevance), full (all nodes and edges). Default: high.",
+        hidden=True,
+        help="Detail level for --graph-modules: high, medium, full.",
         show_default=True,
     ),
     max_nodes: Optional[int] = typer.Option(
         None,
         "--max-nodes",
-        help="Maximum number of nodes in --graph-modules output when using high or medium detail. Prevents oversized graphs in large codebases.",
+        hidden=True,
+        help="Maximum nodes in --graph-modules output.",
         min=1,
     ),
     graph_edges: Optional[str] = typer.Option(
         None,
         "--graph-edges",
-        help="Edge types for --graph-modules, comma-separated: imports,calls,contains,extends. Default: all available. Example: --graph-edges imports,calls",
+        hidden=True,
+        help="Edge types for --graph-modules, comma-separated: imports,calls,contains,extends.",
     ),
     no_tree: bool = typer.Option(
         False,
@@ -414,18 +413,13 @@ def main(
     tree: bool = typer.Option(
         False,
         "--tree",
-        help=(
-            "Include the full file_tree and flat file_paths list in output (deep-dive layer). "
-            "Adds significant size — use when the agent needs to browse the full file structure."
-        ),
+        hidden=True,
+        help="Include the full file_tree and flat file_paths list in output.",
     ),
     no_redact: bool = typer.Option(
         False,
         "--no-redact",
-        help=(
-            "Disable automatic secret redaction. By default, potential secrets (API keys, tokens, passwords) "
-            "are replaced with [REDACTED]. Use with caution — output may contain sensitive values."
-        ),
+        help="Disable secret redaction. Use with caution — output may contain sensitive values.",
     ),
     version: Optional[bool] = typer.Option(
         None,
@@ -438,122 +432,97 @@ def main(
     depth: int = typer.Option(
         4,
         "--depth",
-        help=(
-            "Maximum depth for file tree traversal (default: 4, range: 1–20). "
-            "Increase for deeply nested projects — Maven/Java requires at least 8 (src/main/java/...)."
-        ),
+        help="File tree traversal depth (default: 4). Java/Maven projects auto-adjust to 12.",
         min=1,
         max=20,
     ),
     docs: bool = typer.Option(
         False,
         "--docs",
-        help="Extract documentation: docstrings, function signatures, and module-level comments. Adds doc_summary and docs to output. Combine with --docs-depth to control coverage.",
+        hidden=True,
+        help="Extract documentation: docstrings, function signatures, and module-level comments.",
     ),
     docs_depth: str = typer.Option(
         "symbols",
         "--docs-depth",
-        help="Documentation extraction depth: module (module-level only), symbols (functions and classes), full (all symbols including private). Default: symbols.",
+        hidden=True,
+        help="Documentation extraction depth: module, symbols, full.",
         show_default=True,
     ),
     full_metrics: bool = typer.Option(
         False,
         "--full-metrics",
-        help=(
-            "Technical audit: lines of code, symbol counts, cyclomatic complexity, and test coverage per file. "
-            "Produces file_metrics and metrics_summary. "
-            "Not included in --agent output — designed for CI pipelines and code review tools, not as primary agent context."
-        ),
+        hidden=True,
+        help="Technical audit: LOC, complexity, test coverage per file.",
     ),
     semantics: bool = typer.Option(
         False,
         "--semantics",
-        help=(
-            "Semantic analysis: cross-file symbol resolution, call graph with confidence levels, and import linking. "
-            "Adds semantic_calls, semantic_symbols, semantic_links, semantic_summary, and hotspots (files ranked by fan-in/fan-out). "
-            "Slower than default analysis — skip for quick scans. "
-            "Confidence degrades on dynamic dispatch, decorators, and generated code."
-        ),
+        hidden=True,
+        help="Cross-file symbol resolution and call graph analysis.",
     ),
     architecture: bool = typer.Option(
         False,
         "--architecture",
-        help=(
-            "Architectural inference: detect functional layers (MVC/layered/hexagonal), bounded contexts, "
-            "and dominant structural patterns. Adds architecture to output. "
-            "Confidence is low when based on directory names alone — combine with --semantics for higher accuracy."
-        ),
+        hidden=True,
+        help="Architectural layer inference (MVC/hexagonal/layered).",
     ),
     git_context: bool = typer.Option(
         False,
         "--git-context",
         "-g",
-        help="Include git activity: recent commits, change hotspots (most frequently modified files), pending uncommitted changes, and contributors. Adds git_context to output.",
+        help="Include git activity: recent commits, change hotspots, and uncommitted changes.",
     ),
     git_depth: int = typer.Option(
         20,
         "--git-depth",
-        help="Number of recent commits to include with --git-context (default: 20, max: 100).",
+        hidden=True,
+        help="Number of recent commits to include with --git-context (default: 20).",
         min=1,
         max=100,
     ),
     git_days: int = typer.Option(
         90,
         "--git-days",
-        help="Time window in days for detecting change hotspots with --git-context (default: 90). Hotspots are files with the most commits in this window.",
+        hidden=True,
+        help="Time window in days for change hotspot detection (default: 90).",
         min=1,
         max=3650,
     ),
     env_map: bool = typer.Option(
         False,
         "--env-map",
-        help="Map environment variables: keys, types (string/int/bool/url/path), categories (database/auth/service/...), and which files reference them. Adds env_map and env_summary.",
+        hidden=True,
+        help="Map environment variables referenced across the codebase.",
     ),
     code_notes: bool = typer.Option(
         False,
         "--code-notes",
-        help=(
-            "Extract inline annotations: TODO, FIXME, HACK, NOTE, DEPRECATED, WARNING, BUG, XXX, OPTIMIZE — "
-            "with file location and enclosing symbol. "
-            "Also detects Architecture Decision Records (ADRs) in docs/decisions/, docs/adr/, and similar paths."
-        ),
+        hidden=True,
+        help="Extract inline annotations: TODO, FIXME, HACK, DEPRECATED, ADRs.",
     ),
     agent: bool = typer.Option(
         False,
         "--agent",
-        help=(
-            "Agent-optimized output: structured, noise-free JSON for AI consumption. "
-            "Automatically enables --dependencies, --env-map, and --code-notes. Suppresses file tree. "
-            "Output includes: identity, entry points, architecture, runtime dependencies, "
-            "operational signals, confidence summary, and analysis gaps. No empty sections."
-        ),
+        help="Structured noise-free JSON for AI agents: identity, entry points, dependencies, confidence, gaps.",
     ),
     trace_pipeline: bool = typer.Option(
         False,
         "--trace-pipeline",
-        help=(
-            "Diagnostic mode: include pipeline_trace in output showing every candidate, filter decision, "
-            "and data origin across all pipeline stages. "
-            "Use to diagnose unexpected or contaminated results. Not intended for normal agent use."
-        ),
+        hidden=True,
+        help="Diagnostic: include full pipeline trace in output.",
     ),
     mode: str = typer.Option(
         "contract",
         "--mode",
-        help=(
-            "Output mode: contract (default) | standard | raw. "
-            "contract: minimal per-file contracts — exports, signatures, deps. "
-            "Smallest output, recommended for AI agents. "
-            "minimal is accepted as an alias for contract. "
-            "standard: full per-file detail with imports, relevance scores, extraction method. "
-            "raw: project-level analysis only (stacks, entry points, dependency summary). "
-            "No per-file contracts."
-        ),
+        hidden=True,
+        help="Output mode: contract (default) | standard | raw.",
     ),
     max_symbols: Optional[int] = typer.Option(
         None,
         "--max-symbols",
-        help="Limit total exported semantic nodes across all file contracts. Trims lowest-ranked files first.",
+        hidden=True,
+        help="Limit total exported semantic nodes across all file contracts.",
         min=1,
     ),
     dependency_depth: int = typer.Option(
@@ -567,22 +536,25 @@ def main(
     entrypoints_only: bool = typer.Option(
         False,
         "--entrypoints-only",
-        help="Contract mode: include only files that are runtime entrypoints or have exported symbols (public API surface). Note: 'entrypoints' here includes all files with exports, not strictly detected runtime entry points.",
+        hidden=True,
+        help="Include only files with exported symbols or runtime entrypoints.",
     ),
     changed_only: bool = typer.Option(
         False,
         "--changed-only",
-        help="Contract mode: include only git-modified files (staged, unstaged, untracked).",
+        help="Limit output to git-modified files (staged, unstaged, untracked).",
     ),
     rank_by: str = typer.Option(
         "relevance",
         "--rank-by",
+        hidden=True,
         help="Contract ranking strategy: relevance (default) | centrality | git-churn.",
     ),
     emit_graph: bool = typer.Option(
         False,
         "--emit-graph",
-        help="Contract mode: include a compact dependency graph (nodes + edges) in output.",
+        hidden=True,
+        help="Include a compact dependency graph in contract output.",
     ),
     compress_types: bool = typer.Option(
         False,
@@ -593,16 +565,13 @@ def main(
     symbol: Optional[str] = typer.Option(
         None,
         "--symbol",
-        help="Contract mode: extract localized context for a specific symbol name. Returns defining file + all importers.",
+        help="Extract context for a specific symbol: defining file + all importers.",
     ),
     max_importers: int = typer.Option(
         50,
         "--max-importers",
-        help=(
-            "Maximum importer files returned by --symbol (default: 50). "
-            "Popular symbols can have hundreds of importers — this prevents output explosion. "
-            "Defining files are never truncated. Override: --symbol Foo --max-importers 200."
-        ),
+        hidden=True,
+        help="Maximum importer files returned by --symbol (default: 50).",
         min=1,
         max=10000,
     ),
@@ -797,22 +766,9 @@ def main(
         env_map = True
         code_notes = True
         no_tree = True  # agents never need the raw file tree
-        typer.echo("[agent] dependencies env-map code-notes (no-tree)", err=True)
-        # Warn about flags that are computed but excluded from agent_view output
-        _agent_suppressed: list[str] = []
-        if full_metrics:
-            _agent_suppressed.append("--full-metrics")
-        if graph_modules:
-            _agent_suppressed.append("--graph-modules")
-        if docs:
-            _agent_suppressed.append("--docs")
-        if _agent_suppressed:
-            typer.echo(
-                f"[agent] warning: {', '.join(_agent_suppressed)} computed but excluded "
-                "from --agent output — agent_view does not include these sections. "
-                "Remove these flags to skip unnecessary computation.",
-                err=True,
-            )
+
+    _progress = Progress()
+    _progress.start("scanning files")
 
     scanner = AdaptiveScanner(target, topology=_topology, base_depth=effective_depth)
     raw_tree = scanner.scan_tree()
@@ -850,6 +806,7 @@ def main(
                 node = child
         return pruned
 
+    _progress.update("parsing manifests")
     file_tree = filter_sensitive_files(raw_tree)
     detector = ProjectDetector(build_default_detectors())
     workspace_analysis = WorkspaceAnalyzer().analyze(target, manifests)
@@ -1318,6 +1275,7 @@ def main(
 
     # Git Context (--git-context flag)
     if git_context:
+        _progress.update("git analysis")
         from sourcecode.git_analyzer import GitAnalyzer
         sm.git_context = GitAnalyzer().analyze(target, depth=git_depth, days=git_days)
 
@@ -1425,6 +1383,7 @@ def main(
             changed_only = False
 
     # Contract pipeline — runs for mode=contract|standard|deep|hybrid (skip for raw)
+    _progress.update("extracting contracts")
     _is_contract_mode = mode in ("contract", "standard")
     _pipeline_error = False
     if _is_contract_mode:
@@ -1495,6 +1454,7 @@ def main(
                 )
 
     # 4. Serialize
+    _progress.update("serializing output")
     if _is_contract_mode and not agent:
         from sourcecode.serializer import contract_view as _contract_view
         _depth = _CONTRACT_DEPTH.get(mode, "minimal")
@@ -1586,6 +1546,7 @@ def main(
         pass
 
     # 6. Write output (CLI-04)
+    _progress.finish()
     write_output(content, output=output)
 
     if _pipeline_error:

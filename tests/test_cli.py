@@ -42,18 +42,23 @@ def test_telemetry_status():
     assert "Telemetry" in result.output
 
 
-def test_help_contains_all_flags():
+def test_help_contains_core_flags():
     result = invoke(["--help"])
     assert result.exit_code == 0
+    # Core visible flags
     assert "--format" in result.output
     assert "--output" in result.output
     assert "--compact" in result.output
-    assert "--dependencies" in result.output
-    assert "--graph-modules" in result.output
-    assert "--graph-detail" in result.output
-    assert "--max-nodes" in result.output
-    assert "--graph-edges" in result.output
+    assert "--git-context" in result.output
+    assert "--agent" in result.output
+    assert "--changed-only" in result.output
+    assert "--symbol" in result.output
     assert "--no-redact" in result.output
+    # Hidden flags must not appear in default help
+    assert "--dependencies" not in result.output
+    assert "--graph-modules" not in result.output
+    assert "--semantics" not in result.output
+    assert "--architecture" not in result.output
 
 
 def test_no_args_runs_without_exception(tmp_project: Path):
