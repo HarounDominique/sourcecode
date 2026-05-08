@@ -182,6 +182,7 @@ class ContractPipeline:
         semantic_calls: Optional[list] = None,
         code_notes: Optional[list] = None,
         max_contracts: Optional[int] = _MAX_CONTRACTS,
+        min_score: Optional[float] = None,
     ) -> tuple[list[FileContract], ContractSummary]:
         """Run the full extraction pipeline.
 
@@ -317,11 +318,17 @@ class ContractPipeline:
         # 10. Top-N cap — enforce max_contracts when not in symbol-search mode.
         # Symbol searches must return all matching files; budget applies only to
         # the default architectural briefing use case.
+        _effective_min_score = min_score if min_score is not None else _MIN_CONTRACT_SCORE
         if symbol is None and max_contracts is not None:
             contracts = [
                 c for c in contracts
-                if c.relevance_score >= _MIN_CONTRACT_SCORE or c.is_entrypoint
+                if c.relevance_score >= _effective_min_score or c.is_entrypoint
             ][:max_contracts]
+        elif symbol is None and max_contracts is None:
+            contracts = [
+                c for c in contracts
+                if c.relevance_score >= _effective_min_score or c.is_entrypoint
+            ]
 
         # 11. Compress types if requested
         if compress_types:

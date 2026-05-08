@@ -940,19 +940,51 @@ def _extract_python(path: str, source: str) -> FileContract:
 
 
 # ---------------------------------------------------------------------------
-# Minimal Java extraction (regex-based, no AST)
+# ---------------------------------------------------------------------------
+# Enhanced Java extraction (regex-based, annotation-aware)
 # ---------------------------------------------------------------------------
 
-_JAVA_CLASS_DECL_RE = re.compile(
-    r'public\s+(?:(?:abstract|final|static)\s+)*(class|interface|enum)\s+(\w+)'
-    r'(?:\s+extends\s+([\w.]+))?(?:\s+implements\s+([\w.,\s]+?))?(?=\s*[\{<])',
-    re.MULTILINE,
-)
-_JAVA_METHOD_SIG_RE = re.compile(
-    r'^\s{0,12}public\s+[^\{]+\(',
-    re.MULTILINE,
-)
 _JAVA_IMPORT_RE = re.compile(r'^import\s+(?:static\s+)?([^;\s]+)\s*;', re.MULTILINE)
+
+# Single annotation on one line (captures name + optional parens args)
+_JAVA_ANNO_LINE_RE = re.compile(r'^\s*(@[\w.]+(?:\s*\([^)]*\))?)\s*$')
+# Class/interface/enum declaration line (public or package-private)
+_JAVA_CLASS_LINE_RE = re.compile(
+    r'(?:public\s+)?(?:(?:abstract|final|static|sealed)\s+)*'
+    r'(class|interface|enum|@interface)\s+(\w+)'
+    r'(?:\s+extends\s+([\w.]+))?'
+    r'(?:\s+implements\s+([\w.,\s<>]+?))?'
+    r'(?=\s*[\{<])'
+)
+# Public method: up to 12 leading spaces, return type, name, open paren
+_JAVA_PUB_METHOD_LINE_RE = re.compile(
+    r'^\s{0,12}public\s+(?:(?:static|final|synchronized|abstract|default)\s+)*'
+    r'[\w<>\[\]?,\s]+?\s+(\w+)\s*\(',
+    re.MULTILINE,
+)
+# @Autowired or @Inject field
+_JAVA_FIELD_DECL_RE = re.compile(
+    r'^\s*(?:private|protected|public)?\s*'
+    r'([\w<>.,\[\]? ]+?)\s+(\w+)\s*[;=]'
+)
+
+
+def _java_collect_preceding_annotations(lines: list[str], decl_idx: int) -> list[str]:
+    """Walk back from decl_idx and collect @annotation lines immediately before it."""
+    annotations: list[str] = []
+    i = decl_idx - 1
+    while i >= 0:
+        stripped = lines[i].strip()
+        if not stripped or stripped.startswith("//") or stripped.startswith("*"):
+            i -= 1
+            continue
+        m = re.match(r'(@[\w.]+(?:\s*\([^)]*\))?)', stripped)
+        if m:
+            annotations.insert(0, m.group(1))
+            i -= 1
+        else:
+            break
+    return annotations
 
 
 def _extract_java(path: str, source: str) -> FileContract:
@@ -960,35 +992,93 @@ def _extract_java(path: str, source: str) -> FileContract:
     types: list[TypeDefinition] = []
     functions: list[FunctionSignature] = []
     imports: list[ImportRecord] = []
+    autowired_fields: list[dict] = []
 
-    # Class / interface / enum declarations
-    for m in _JAVA_CLASS_DECL_RE.finditer(source):
-        name = m.group(2)
-        extends_str = m.group(3)
-        implements_str = m.group(4)
-        all_extends: list[str] = []
-        if extends_str:
-            all_extends.append(extends_str.strip())
-        if implements_str:
-            all_extends.extend(i.strip() for i in implements_str.split(",") if i.strip())
-        types.append(TypeDefinition(name=name, kind="class", fields=[], extends=all_extends))
-        exports.append(ExportRecord(name=name, kind="class"))
+    lines = source.splitlines()
 
-    class_names = {t.name for t in types}
+    # Pass 1: collect imports
+    seen_sources: set[str] = set()
+    for m in _JAVA_IMPORT_RE.finditer(source):
+        full_import = m.group(1).strip()
+        if full_import not in seen_sources:
+            seen_sources.add(full_import)
+            imports.append(ImportRecord(source=full_import, kind="named", symbols=[]))
 
-    # Public method signatures (one-line heuristic)
+    # Pass 2: line-by-line scan for classes, methods, @Autowired fields
+    class_names: set[str] = set()
     seen_methods: set[str] = set()
-    for m in _JAVA_METHOD_SIG_RE.finditer(source):
-        sig_text = m.group(0).strip()
-        name_match = re.search(r'(\w+)\s*\($', sig_text)
-        if not name_match:
-            name_match = re.search(r'(\w+)\s*\(', sig_text)
-        if not name_match:
+    autowired_pending = False
+
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+
+        # Detect @Autowired / @Inject annotations
+        if stripped.startswith("@Autowired") or stripped.startswith("@Inject"):
+            autowired_pending = True
             continue
-        mname = name_match.group(1)
-        if mname in class_names or mname in seen_methods or mname in {"if", "for", "while", "switch"}:
+
+        # Capture autowired field on next non-annotation, non-blank line
+        if autowired_pending and stripped and not stripped.startswith("@"):
+            autowired_pending = False
+            fm = _JAVA_FIELD_DECL_RE.match(line)
+            if fm:
+                type_name = fm.group(1).strip().split()[-1]  # last word = simple type
+                field_name = fm.group(2).strip()
+                if field_name and type_name and field_name not in {"class", "interface"}:
+                    autowired_fields.append({"type": type_name, "name": field_name})
+        elif stripped and not stripped.startswith("@"):
+            autowired_pending = False
+
+        # Class/interface/enum declaration
+        cm = _JAVA_CLASS_LINE_RE.search(stripped)
+        if cm and ("class " in stripped or "interface " in stripped or "enum " in stripped):
+            kind_kw = cm.group(1)  # class | interface | enum | @interface
+            name = cm.group(2)
+            extends_str = cm.group(3)
+            implements_str = cm.group(4)
+
+            annotations = _java_collect_preceding_annotations(lines, idx)
+            all_extends: list[str] = []
+            if extends_str:
+                all_extends.append(extends_str.strip())
+
+            implements_list: list[str] = []
+            if implements_str:
+                implements_list = [i.strip() for i in implements_str.split(",") if i.strip()]
+
+            export_kind = "class" if kind_kw in ("class", "@interface") else kind_kw
+            exports.append(ExportRecord(
+                name=name,
+                kind=export_kind,
+                annotations=annotations,
+                extends=extends_str.strip() if extends_str else None,
+                implements=implements_list,
+            ))
+            types.append(TypeDefinition(
+                name=name,
+                kind=export_kind,
+                fields=[],
+                extends=all_extends,
+            ))
+            class_names.add(name)
+
+    # Pass 3: public methods with their preceding annotations
+    for m in _JAVA_PUB_METHOD_LINE_RE.finditer(source):
+        sig_text = m.group(0).strip()
+        mname = m.group(1)
+        if (mname in class_names or mname in seen_methods
+                or mname in {"if", "for", "while", "switch", "return", "new"}):
             continue
         seen_methods.add(mname)
+        # Find line index for this match to collect preceding annotations
+        line_start = source.count("\n", 0, m.start())
+        annotations = _java_collect_preceding_annotations(lines, line_start)
+        exports.append(ExportRecord(
+            name=mname,
+            kind="method",
+            annotations=annotations,
+            signature=sig_text,
+        ))
         functions.append(FunctionSignature(
             name=mname,
             signature=sig_text,
@@ -996,14 +1086,6 @@ def _extract_java(path: str, source: str) -> FileContract:
             exported=True,
             return_type=None,
         ))
-
-    # Import statements
-    seen_sources: set[str] = set()
-    for m in _JAVA_IMPORT_RE.finditer(source):
-        full_import = m.group(1).strip()
-        if full_import not in seen_sources:
-            seen_sources.add(full_import)
-            imports.append(ImportRecord(source=full_import, kind="named", symbols=[]))
 
     # External deps: top-2 package segments, skip java.* / javax.*
     deps = sorted({
@@ -1021,6 +1103,7 @@ def _extract_java(path: str, source: str) -> FileContract:
         functions=sorted(functions, key=lambda f: f.name)[:20],
         types=sorted(types, key=lambda t: t.name),
         dependencies=deps[:20],
+        autowired_fields=autowired_fields[:20],
         extraction_method="heuristic",
     )
 

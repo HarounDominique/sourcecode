@@ -1016,82 +1016,35 @@ class GraphAnalyzer:
         type_map: dict[str, tuple[str, str]],
         workspace: str | None,
     ) -> tuple[list[GraphNode], list[GraphEdge], list[str]]:
+        """Extract module-to-module import edges for JVM files.
+
+        Class/function nodes are intentionally skipped: for large Java codebases
+        (2000+ files) creating one node per class exhausts the node budget before
+        most import edges are processed, resulting in almost no graph edges.
+        Skipping class nodes keeps one module node per file and allows the full
+        import graph to be built within the budget.
+        """
         module_node_id = f"module:{relative_path}"
-        language = self._language_for_suffix(Path(relative_path).suffix)
         nodes: list[GraphNode] = []
         edges: list[GraphEdge] = []
         limitations: list[str] = []
-        imported_type_map = {
-            imported.split(".")[-1]: imported
-            for imported in re.findall(r"(?m)^\s*import\s+([A-Za-z0-9_.]+)", content)
-        }
 
-        class_pattern = re.compile(
-            r"(?m)^\s*(?:public\s+|private\s+|protected\s+|internal\s+)?"
-            r"(?:class|interface|object|trait)\s+([A-Za-z_][A-Za-z0-9_]*)"
-            r"(?:\s+extends\s+([A-Za-z_][A-Za-z0-9_.]*))?"
-        )
-        local_class_ids: dict[str, str] = {}
-        for match in class_pattern.finditer(content):
-            name = match.group(1)
-            base = match.group(2)
-            node_id = f"class:{relative_path}:{name}"
-            local_class_ids[name] = node_id
-            nodes.append(
-                GraphNode(
-                    id=node_id,
-                    kind="class",
-                    language=language,
-                    path=relative_path,
-                    symbol=name,
-                    display_name=name,
-                    workspace=workspace,
-                )
-            )
-            edges.append(
-                GraphEdge(
-                    source=module_node_id,
-                    target=node_id,
-                    kind="contains",
-                    confidence="medium",
-                    method="heuristic",
-                )
-            )
-            if base:
-                base_short = base.split(".")[-1]
-                if base_short in local_class_ids:
-                    edges.append(
-                        GraphEdge(
-                            source=node_id,
-                            target=local_class_ids[base_short],
-                            kind="extends",
-                            confidence="low",
-                            method="heuristic",
-                        )
-                    )
-                else:
-                    imported_base = imported_type_map.get(base_short)
-                    fqcn = imported_base or base
-                    mapping = type_map.get(fqcn)
-                    if mapping is None:
-                        continue
-                    base_path, _base_name = mapping
-                    edges.append(
-                        GraphEdge(
-                            source=node_id,
-                            target=f"class:{base_path}:{base_short}",
-                            kind="extends",
-                            confidence="low",
-                            method="heuristic",
-                        )
-                    )
+        # Extract imports, skipping static imports and wildcard imports
+        # Pattern includes optional 'static' keyword; \w at end excludes wildcards
+        _import_re = re.compile(r"(?m)^\s*import\s+(?:static\s+)?([A-Za-z][A-Za-z0-9_.]*\w)\s*;")
+        imported_fqcns: set[str] = set()
+        for m in _import_re.finditer(content):
+            imported_fqcns.add(m.group(1))
 
-        for imported in imported_type_map.values():
-            mapping = type_map.get(imported)
+        seen_targets: set[str] = set()
+        for fqcn in imported_fqcns:
+            mapping = type_map.get(fqcn)
             if mapping is None:
-                limitations.append(f"jvm_unresolved:{relative_path}:{imported}")
                 continue
             target_path, _symbol = mapping
+            if target_path == relative_path or target_path in seen_targets:
+                continue
+            seen_targets.add(target_path)
             edges.append(
                 GraphEdge(
                     source=module_node_id,

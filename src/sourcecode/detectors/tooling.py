@@ -47,6 +47,11 @@ def infer_package_manager(stack: str, file_tree: dict[str, object]) -> str | Non
         return "composer"
     if stack == "ruby" and "Gemfile.lock" in flat_paths:
         return "bundler"
+    if stack == "java":
+        if "pom.xml" in flat_paths:
+            return "maven"
+        if any(p == "build.gradle" or p == "build.gradle.kts" for p in flat_paths):
+            return "gradle"
     if stack == "terraform" and any(path.endswith(".tf") for path in flat_paths):
         return "terraform"
     return None

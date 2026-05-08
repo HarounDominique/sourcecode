@@ -128,6 +128,8 @@ def _infer_role(name: str, ecosystem: str, scope: str) -> str:
         return "runtime"
 
     if ecosystem == "java":
+        if scope == "provided":
+            return "provided"
         artifact = n.split(":")[-1] if ":" in n else n
         if any(x in artifact for x in ("spring-boot", "spring-security")):
             return "runtime"
@@ -1120,6 +1122,23 @@ class DependencyAnalyzer:
         properties = self._parse_maven_properties(root_elem, ns)
         dm_versions = self._parse_dependency_management(root_elem, ns, properties)
 
+        # FIX-9: extract parent version for BOM resolution
+        parent_elem = root_elem.find(f"{ns}parent")
+        parent_version: Optional[str] = None
+        parent_group: str = ""
+        if parent_elem is not None:
+            parent_version = (parent_elem.findtext(f"{ns}version") or "").strip() or None
+            parent_group = (parent_elem.findtext(f"{ns}groupId") or "").strip()
+            parent_artifact = (parent_elem.findtext(f"{ns}artifactId") or "").strip()
+            # Propagate parent version into properties for ${project.parent.version}
+            if parent_version:
+                properties.setdefault("project.parent.version", parent_version)
+                properties.setdefault("revision", parent_version)
+
+        # Infer packaging for FIX-6 (used by scope hint for provided)
+        packaging_elem = root_elem.find(f"{ns}packaging")
+        is_war = packaging_elem is not None and (packaging_elem.text or "").strip().lower() == "war"
+
         records: list[DependencyRecord] = []
         deps_elem = root_elem.find(f"{ns}dependencies")
         if deps_elem is None:
@@ -1134,14 +1153,36 @@ class DependencyAnalyzer:
             declared = self._resolve_maven_version(version_raw, properties)
             if declared is None:
                 declared = dm_versions.get(f"{group_id}:{artifact_id}")
+
+            # FIX-4: proper maven scope mapping
             scope_text = (dep.findtext(f"{ns}scope") or "compile").strip().lower()
-            scope = "dev" if scope_text == "test" else "direct"
+            if scope_text == "test":
+                scope = "dev"
+            elif scope_text == "provided":
+                scope = "provided"
+            else:
+                scope = "direct"  # compile, runtime, system, import
+
+            # FIX-4: infer provided for embedded tomcat in WAR projects
+            if (is_war and scope == "direct"
+                    and artifact_id in ("spring-boot-starter-tomcat", "tomcat-embed-core")):
+                scope = "provided"
+
+            # FIX-9: resolve BOM version for Spring Boot / Spring Security starters
+            resolved_version: Optional[str] = None
+            if declared is None and parent_version:
+                if group_id == "org.springframework.boot":
+                    resolved_version = parent_version
+                elif group_id == "org.springframework.security" and "spring-security.version" in properties:
+                    resolved_version = properties["spring-security.version"]
+
             records.append(
                 DependencyRecord(
                     name=f"{group_id}:{artifact_id}",
                     ecosystem="java",
                     scope=scope,
                     declared_version=declared,
+                    resolved_version=resolved_version,
                     source="manifest",
                     manifest_path="pom.xml",
                 )

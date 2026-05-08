@@ -728,15 +728,13 @@ def main(
         mode = "contract"   # unknown → safe default
 
     # Legacy flags imply raw mode unless --mode was explicitly overridden.
-    # These flags produce standard_view-only output sections not in contract_view.
-    # Preserves backward compat: callers using any legacy flag get their previous format.
-    # New callers opt into contract mode via --mode contract (or bare invocation).
-    # Legacy flags that produce output sections incompatible with contract_view
-    # force mode to raw. --agent is excluded: it now runs the contract pipeline
-    # and enriches contract_view with auto-enabled analyzers (deps, env, notes).
+    # --format yaml and --graph-modules are now compatible with contract_view:
+    #   yaml is a serialization format (not an output-section flag)
+    #   graph-modules output is included in contract_view when available
+    # Other flags that produce sections exclusive to standard_view still force raw.
     _legacy_flags_active = (
-        compact or tree or format == "yaml" or trace_pipeline
-        or docs or semantics or graph_modules or full_metrics or architecture
+        compact or tree or trace_pipeline
+        or docs or semantics or full_metrics or architecture
     )
     if mode in ("contract", "standard") and _legacy_flags_active:
         mode = "raw"
@@ -1106,6 +1104,17 @@ def main(
         metrics_summary=metrics_summary,
     )
 
+    # Populate Java-specific root fields from java stack detection (FIX-6, 7, 8)
+    _java_stack = next((s for s in stacks if s.stack == "java"), None)
+    if _java_stack is not None:
+        from dataclasses import replace as _dc_replace
+        sm = _dc_replace(sm,
+            packaging=getattr(_java_stack, "packaging", None) or None,
+            language_version=getattr(_java_stack, "language_version", None) or None,
+            spring_profiles=getattr(_java_stack, "spring_profiles", []) or [],
+            app_server_hint=getattr(_java_stack, "app_server_hint", None) or None,
+        )
+
     # Semantic analysis (--semantics flag)
     if semantic_analyzer is not None:
         if workspace_analysis.workspaces:
@@ -1402,7 +1411,16 @@ def main(
     if _is_contract_mode:
         from sourcecode.contract_pipeline import ContractPipeline
         from sourcecode.contract_model import ContractSummary as _ContractSummary
-        _cp = ContractPipeline()
+        # FIX-1: Java projects need higher caps — many files, comprehensive coverage required
+        _jvm_stacks = {"java", "kotlin", "scala", "groovy"}
+        _is_jvm = any(s.stack in _jvm_stacks for s in sm.stacks)
+        # FIX-1: Java projects need higher caps and no relevance threshold
+        _max_files_cp = 2500 if _is_jvm else 500
+        _cp = ContractPipeline(max_files=_max_files_cp)
+        _java_pipeline_kwargs: dict = {}
+        if _is_jvm:
+            _java_pipeline_kwargs["max_contracts"] = 500
+            _java_pipeline_kwargs["min_score"] = 0.0
         try:
             _contracts, _contract_summary = _cp.run(
                 target,
@@ -1420,6 +1438,7 @@ def main(
                 max_importers=max_importers,
                 semantic_calls=sm.semantic_calls or None,
                 code_notes=sm.code_notes or None,
+                **_java_pipeline_kwargs,
             )
         except Exception as _exc:
             typer.echo(f"[error] contract pipeline failed: {_exc}", err=True)
@@ -1462,7 +1481,22 @@ def main(
         data = _contract_view(sm, emit_graph=emit_graph, depth=_depth)
         if not no_redact:
             data = redact_dict(data)
-        content = json.dumps(data, indent=2, ensure_ascii=False)
+        if format == "yaml":
+            from io import StringIO
+            from ruamel.yaml import YAML as _YAML
+            _yaml = _YAML()
+            _yaml.default_flow_style = False
+            _yaml.representer.add_representer(
+                type(None),
+                lambda dumper, data_val: dumper.represent_scalar(
+                    "tag:yaml.org,2002:null", "null"
+                ),
+            )
+            _stream = StringIO()
+            _yaml.dump(data, _stream)
+            content = _stream.getvalue()
+        else:
+            content = json.dumps(data, indent=2, ensure_ascii=False)
     elif agent:
         data = agent_view(sm)
         # When contract pipeline ran (mode=contract, no legacy flags), include

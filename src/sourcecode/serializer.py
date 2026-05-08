@@ -1056,6 +1056,16 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
     if ep_groups["auxiliary"]:
         result["auxiliary_entry_points"] = ep_groups["auxiliary"][:_EP_DEV_CAP]
 
+    # Java-specific root fields (FIX-6, FIX-7, FIX-8)
+    if getattr(sm, "packaging", None):
+        result["packaging"] = sm.packaging
+    if getattr(sm, "language_version", None):
+        result["language_version"] = sm.language_version
+    if getattr(sm, "spring_profiles", None):
+        result["spring_profiles"] = sm.spring_profiles
+    if getattr(sm, "app_server_hint", None):
+        result["app_server_hint"] = sm.app_server_hint
+
     # Layer B — signals (only when the corresponding analyzer ran)
     if sm.dependency_summary is not None and sm.dependency_summary.requested:
         dep_dict = asdict(sm.dependency_summary)
@@ -1196,6 +1206,20 @@ def _contract_view_minimal(
         "project": project,
     }
 
+    # Full stacks list (needed for version checks in smoke tests)
+    if sm.stacks:
+        result["stacks"] = [asdict(s) for s in sm.stacks]
+
+    # Java-specific root fields
+    if getattr(sm, "packaging", None):
+        result["packaging"] = sm.packaging
+    if getattr(sm, "language_version", None):
+        result["language_version"] = sm.language_version
+    if getattr(sm, "spring_profiles", None):
+        result["spring_profiles"] = sm.spring_profiles
+    if getattr(sm, "app_server_hint", None):
+        result["app_server_hint"] = sm.app_server_hint
+
     # Per-file contracts
     if contracts:
         serialized: list[dict[str, Any]] = []
@@ -1295,6 +1319,15 @@ def _contract_view_minimal(
     if sm.analysis_gaps:
         result["analysis_gaps"] = [asdict(g) for g in sm.analysis_gaps]
 
+    # Module graph — included when --graph-modules was requested
+    if sm.module_graph is not None and sm.module_graph_summary is not None and sm.module_graph_summary.requested:
+        result["module_graph"] = {
+            "nodes": [asdict(n) for n in sm.module_graph.nodes],
+            "edges": [asdict(e) for e in sm.module_graph.edges],
+            "summary": asdict(sm.module_graph_summary),
+        }
+        result["module_graph_summary"] = asdict(sm.module_graph_summary)
+
     return result
 
 
@@ -1377,8 +1410,39 @@ _MAX_FN_PER_CONTRACT = 5   # max function signatures per contract (token budget)
 _MAX_SIG_LEN = 60          # max chars per compressed signature
 
 
+def _serialize_contract_java(c: Any) -> dict[str, Any]:
+    """Java-specific contract serializer with full field names and annotations."""
+    item: dict[str, Any] = {"path": c.path, "language": "java"}
+
+    exports_out: list[dict] = []
+    for e in c.exports:
+        entry: dict = {"kind": e.kind, "name": e.name}
+        if getattr(e, "annotations", None):
+            entry["annotations"] = e.annotations
+        if getattr(e, "extends", None):
+            entry["extends"] = e.extends
+        if getattr(e, "implements", None) and e.implements:
+            entry["implements"] = e.implements
+        if getattr(e, "signature", None):
+            entry["signature"] = e.signature
+        exports_out.append(entry)
+    if exports_out:
+        item["exports"] = exports_out
+
+    if c.imports:
+        item["imports"] = [imp.source for imp in c.imports[:20]]
+
+    autowired = getattr(c, "autowired_fields", [])
+    if autowired:
+        item["autowired_fields"] = autowired
+
+    return item
+
+
 def _serialize_contract_minimal(c: Any) -> dict[str, Any]:
     """Serialize one FileContract to minimal format."""
+    if getattr(c, "language", None) == "java":
+        return _serialize_contract_java(c)
     item: dict[str, Any] = {"path": c.path, "role": c.role}
 
     if c.is_changed:

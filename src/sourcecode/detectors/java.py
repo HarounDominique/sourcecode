@@ -14,6 +14,8 @@ from sourcecode.detectors.parsers import read_text_lines, unique_strings
 from sourcecode.schema import FrameworkDetection
 from sourcecode.tree_utils import flatten_file_tree
 
+_NS_TAG_RE = re.compile(r"\{[^}]+\}")
+
 _MAX_FILE_SIZE = 256 * 1024  # 256 KB
 _MAX_JAVA_ENTRY_SCAN = 1000
 _MAX_ANNOTATION_ENTRY_POINTS = 500
@@ -50,13 +52,33 @@ class JavaDetector(AbstractDetector):
     def detect(self, context: DetectionContext) -> tuple[list[StackDetection], list[EntryPoint]]:
         frameworks: list[FrameworkDetection] = []
         manifests: list[str] = []
+        language_version: str | None = None
+        packaging: str | None = None
+        app_server_hint: str | None = None
+        spring_profiles: list[str] = []
 
         if "pom.xml" in context.manifests:
             manifests.append("pom.xml")
-            frameworks.extend(self._frameworks_from_pom(context.root / "pom.xml"))
+            pom_path = context.root / "pom.xml"
+            frameworks.extend(self._frameworks_from_pom(pom_path))
+            meta = self._parse_pom_metadata(pom_path)
+            if meta.get("language_version"):
+                language_version = meta["language_version"]
+            if meta.get("packaging"):
+                packaging = meta["packaging"]
         if "build.gradle" in context.manifests:
             manifests.append("build.gradle")
             frameworks.extend(self._frameworks_from_gradle(context.root / "build.gradle"))
+
+        # Detect app server from descriptor files
+        all_paths = flatten_file_tree(context.file_tree)
+        if any("weblogic.xml" in p or "weblogic-ejb-jar.xml" in p for p in all_paths):
+            app_server_hint = "weblogic"
+        elif any("wildfly" in p.lower() or "jboss" in p.lower() for p in all_paths):
+            app_server_hint = "wildfly"
+
+        # Spring profiles — check src/main/options/, src/main/resources/
+        spring_profiles = self._detect_spring_profiles(context.root, all_paths)
 
         entry_points = self._collect_entry_points(context)
         stack = StackDetection(
@@ -65,27 +87,124 @@ class JavaDetector(AbstractDetector):
             confidence="high",
             frameworks=self._dedupe_frameworks(frameworks),
             manifests=manifests,
+            language_version=language_version,
+            packaging=packaging,
+            app_server_hint=app_server_hint,
+            spring_profiles=spring_profiles,
         )
         return [stack], entry_points
+
+    def _parse_pom_metadata(self, path: Path) -> dict:
+        """Extract packaging, java version from pom.xml properties/parent."""
+        result: dict = {}
+        try:
+            tree = ElementTree.parse(path)
+        except (OSError, ElementTree.ParseError):
+            return result
+        root = tree.getroot()
+        ns_match = _NS_TAG_RE.match(root.tag)
+        ns = ns_match.group(0) if ns_match else ""
+
+        # Packaging (FIX-6)
+        packaging_elem = root.find(f"{ns}packaging")
+        if packaging_elem is not None and packaging_elem.text:
+            result["packaging"] = packaging_elem.text.strip().lower()
+
+        # Properties
+        props_elem = root.find(f"{ns}properties")
+        props: dict[str, str] = {}
+        if props_elem is not None:
+            for prop in props_elem:
+                tag = prop.tag.replace(ns, "") if ns else prop.tag
+                if prop.text:
+                    props[tag] = prop.text.strip()
+
+        # Java version (FIX-7) — check properties first, then compiler plugin
+        for key in ("maven.compiler.source", "java.version", "maven.compiler.release"):
+            if key in props:
+                result["language_version"] = props[key]
+                break
+        if "language_version" not in result:
+            # Check maven-compiler-plugin configuration
+            for plugin in root.findall(f".//{ns}plugin"):
+                artifact = (plugin.findtext(f"{ns}artifactId") or "").strip()
+                if artifact == "maven-compiler-plugin":
+                    config = plugin.find(f"{ns}configuration")
+                    if config is not None:
+                        for tag in ("source", "release"):
+                            val = config.findtext(f"{ns}{tag}")
+                            if val:
+                                result["language_version"] = val.strip()
+                                break
+                    break
+
+        return result
+
+    def _detect_spring_profiles(self, root: Path, all_paths: list[str]) -> list[str]:
+        """Detect Spring profiles from option/resource directories and application-{profile}.yml."""
+        profiles: list[str] = []
+        seen: set[str] = set()
+
+        # Pattern 1: src/main/options/{profile}/ directories
+        _PROFILE_DIRS = ("src/main/options/", "src/main/resources/")
+        for path in all_paths:
+            for prefix in _PROFILE_DIRS:
+                if path.startswith(prefix):
+                    remainder = path[len(prefix):]
+                    parts = remainder.split("/")
+                    if len(parts) >= 1 and parts[0] and not parts[0].startswith("."):
+                        candidate = parts[0]
+                        # Only if it's a directory (has sub-paths) with application.yml
+                        if candidate not in seen and not candidate.endswith(".yml") and not candidate.endswith(".yaml") and not candidate.endswith(".properties"):
+                            seen.add(candidate)
+                            profiles.append(candidate)
+                break
+
+        # Pattern 2: application-{profile}.yml files
+        _APP_PROFILE_RE = re.compile(r"application-([A-Za-z0-9_-]+)\.ya?ml$")
+        for path in all_paths:
+            m = _APP_PROFILE_RE.search(path)
+            if m:
+                profile = m.group(1)
+                if profile not in seen:
+                    seen.add(profile)
+                    profiles.append(profile)
+
+        # Filter out generic names that aren't profiles
+        _SKIP = frozenset({"test", "it", "integration"})
+        return [p for p in profiles if p.lower() not in _SKIP]
 
     def _frameworks_from_pom(self, path: Path) -> list[FrameworkDetection]:
         try:
             tree = ElementTree.parse(path)
         except (OSError, ElementTree.ParseError):
             return []
-        text = ElementTree.tostring(tree.getroot(), encoding="unicode").lower()
-        return self._detect_jvm_frameworks(text, "pom.xml")
+        root_elem = tree.getroot()
+        ns_match = _NS_TAG_RE.match(root_elem.tag)
+        ns = ns_match.group(0) if ns_match else ""
+
+        # Extract Spring Boot version from <parent> (FIX-3)
+        sb_version: str | None = None
+        parent_elem = root_elem.find(f"{ns}parent")
+        if parent_elem is not None:
+            parent_artifact = (parent_elem.findtext(f"{ns}artifactId") or "").strip()
+            if parent_artifact == "spring-boot-starter-parent":
+                sb_version = (parent_elem.findtext(f"{ns}version") or "").strip() or None
+
+        text = ElementTree.tostring(root_elem, encoding="unicode").lower()
+        frameworks = self._detect_jvm_frameworks(text, "pom.xml", sb_version=sb_version)
+        return frameworks
 
     def _frameworks_from_gradle(self, path: Path) -> list[FrameworkDetection]:
         content = "\n".join(read_text_lines(path)).lower()
         return self._detect_jvm_frameworks(content, "build.gradle")
 
-    def _detect_jvm_frameworks(self, text: str, source: str) -> list[FrameworkDetection]:
+    def _detect_jvm_frameworks(self, text: str, source: str, *, sb_version: str | None = None) -> list[FrameworkDetection]:
         frameworks: list[FrameworkDetection] = []
         if "com.android.application" in text or "com.android.library" in text:
             frameworks.append(FrameworkDetection(name="Android", source=source))
         if "spring-boot" in text:
-            frameworks.append(FrameworkDetection(name="Spring Boot", source=source))
+            frameworks.append(FrameworkDetection(name="Spring Boot", source=source, version=sb_version))
         if "spring-webmvc" in text or "spring-web" in text:
             frameworks.append(FrameworkDetection(name="Spring MVC", source=source))
         if "spring-webflux" in text:

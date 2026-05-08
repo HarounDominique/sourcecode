@@ -45,6 +45,7 @@ class FrameworkDetection:
     source: str = "manifest"
     confidence: Literal["high", "medium", "low"] = "high"
     detected_via: list[str] = field(default_factory=list)
+    version: Optional[str] = None  # e.g. "2.7.18" for Spring Boot
 
 
 @dataclass
@@ -62,6 +63,11 @@ class StackDetection:
     workspace: Optional[str] = None
     signals: list[str] = field(default_factory=list)
     produced_by: Optional[str] = None  # which detector emitted this
+    # Java-specific fields (FIX-6, FIX-7)
+    language_version: Optional[str] = None   # e.g. "1.8" from maven.compiler.source
+    packaging: Optional[str] = None          # e.g. "war" | "jar"
+    app_server_hint: Optional[str] = None    # e.g. "weblogic" | "wildfly"
+    spring_profiles: list[str] = field(default_factory=list)  # detected Spring profiles
 
 
 @dataclass
@@ -656,3 +662,8 @@ class SourceMap:
     # AST contract mode (v0.33.0) — populated when --mode contract|hybrid
     file_contracts: list[Any] = field(default_factory=list)   # list[FileContract]
     contract_summary: Optional[Any] = None                    # ContractSummary
+    # Java-specific root fields (v1.3.0) — additive, null/empty for non-Java projects
+    packaging: Optional[str] = None           # "war" | "jar"
+    language_version: Optional[str] = None    # "1.8" | "11" | "17"
+    spring_profiles: list[str] = field(default_factory=list)
+    app_server_hint: Optional[str] = None     # "weblogic" | "wildfly" | "tomcat"

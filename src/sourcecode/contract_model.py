@@ -25,9 +25,13 @@ class ExportRecord:
     """Exported symbol."""
 
     name: str
-    kind: str = "unknown"  # function | class | const | type | default | react_component | enum | interface
+    kind: str = "unknown"  # function | class | const | type | default | react_component | enum | interface | method
     type_ref: Optional[str] = None
     async_: bool = False
+    annotations: list[str] = field(default_factory=list)  # Java: ["@Controller", "@Transactional"]
+    extends: Optional[str] = None                          # Java: parent class
+    implements: list[str] = field(default_factory=list)    # Java: interfaces
+    signature: Optional[str] = None                        # Java method: full signature
 
 
 @dataclass
@@ -96,6 +100,8 @@ class FileContract:
     # Extraction quality
     extraction_method: str = "heuristic"  # ast | tree_sitter | heuristic
     limitations: list[str] = field(default_factory=list)
+    # Java-specific (FIX-1)
+    autowired_fields: list[dict] = field(default_factory=list)  # [{"type": "...", "name": "..."}]
 
 
 @dataclass

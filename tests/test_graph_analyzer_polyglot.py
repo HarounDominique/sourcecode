@@ -61,8 +61,11 @@ public class App extends Base {}
     graph = GraphAnalyzer().analyze(tmp_path, _scan_tree(tmp_path), detail="full")
 
     edge_pairs = {(edge.source, edge.target, edge.kind) for edge in graph.edges}
+    # JVM analysis now emits module-to-module import edges only (no class nodes).
+    # This allows processing large codebases within the node budget (FIX-2).
     assert ("module:src/App.java", "module:src/Base.java", "imports") in edge_pairs
-    assert ("class:src/App.java:App", "class:src/Base.java:Base", "extends") in edge_pairs
+    # Class-level extends edges are no longer emitted — node budget is reserved for modules.
+    assert not any(e.kind == "extends" for e in graph.edges), "extends edges removed in FIX-2"
 
 
 def test_graph_respects_workspace_context(tmp_path: Path) -> None:

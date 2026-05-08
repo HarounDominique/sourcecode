@@ -50,7 +50,8 @@ def test_full_yaml_output(tmp_project: Path):
 
     from ruamel.yaml import YAML
 
-    result = runner.invoke(app, ["--format", "yaml", str(tmp_project)])
+    # --mode raw: get standard_view output as YAML (--format yaml no longer forces raw mode)
+    result = runner.invoke(app, ["--mode", "raw", "--format", "yaml", str(tmp_project)])
     assert result.exit_code == 0, f"Error: {result.output}"
     yaml = YAML()
     data = yaml.load(StringIO(result.output))
