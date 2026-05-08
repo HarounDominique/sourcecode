@@ -1110,6 +1110,10 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
 
     if sm.semantic_summary is not None and sm.semantic_summary.requested:
         result["semantic_summary"] = asdict(sm.semantic_summary)
+        # Backward compat: also emit hotspots at top level (moved to semantic_summary in v1.5.0).
+        # Consumers reading d["hotspots"] directly still work.
+        if sm.semantic_summary.hotspots:
+            result["hotspots"] = sm.semantic_summary.hotspots[:10]
         # Defensive filter: never emit objects with null required fields.
         # A null entry in these arrays is worse than a shorter array — it causes
         # agents to misinterpret the analysis as valid when it is not.

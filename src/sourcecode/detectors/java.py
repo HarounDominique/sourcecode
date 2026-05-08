@@ -225,6 +225,12 @@ class JavaDetector(AbstractDetector):
         all_paths = flatten_file_tree(context.file_tree)
         all_java = [p for p in all_paths if p.endswith(".java")]
 
+        # Augment with a direct scan of standard Java source roots for Controller-named
+        # files that the depth-limited file_tree scanner may have missed.
+        # DDD layouts place REST controllers at depth 10+ (e.g.
+        # src/main/java/com/org/app/ddd/domain/infraestructure/rest/XxxRestController.java).
+        self._augment_deep_java_controllers(context, all_java)
+
         # 1. @SpringBootApplication entry: Application.java / Main.java by name
         app_candidates = [
             p for p in all_java
@@ -269,6 +275,40 @@ class JavaDetector(AbstractDetector):
                 seen.add(key)
                 unique_eps.append(ep)
         return unique_eps
+
+    def _augment_deep_java_controllers(self, context: DetectionContext, all_java: list[str]) -> None:
+        """Scan standard Java source roots for *Controller*.java files not in all_java.
+
+        The depth-limited file_tree scanner misses files at depth >= max_depth.
+        DDD layouts place REST controllers deep (e.g. depth 10+), so we supplement
+        with a direct filesystem walk scoped to the standard Maven/Gradle source root.
+        """
+        import os as _os
+        existing = set(all_java)
+        # Standard Java source root candidates (Maven first, then Gradle/other)
+        _SRC_ROOTS = ("src/main/java", "src/main/kotlin", "src/java", "src")
+        for src_root_name in _SRC_ROOTS:
+            src_root = context.root / src_root_name
+            if not src_root.is_dir():
+                continue
+            try:
+                for dirpath, _dirs, filenames in _os.walk(str(src_root)):
+                    for fname in filenames:
+                        if "Controller" not in fname or not fname.endswith(".java"):
+                            continue
+                        full = Path(dirpath) / fname
+                        if full.is_symlink():
+                            continue
+                        try:
+                            rel = str(full.relative_to(context.root)).replace("\\", "/")
+                            if rel not in existing:
+                                all_java.append(rel)
+                                existing.add(rel)
+                        except ValueError:
+                            pass
+            except OSError:
+                pass
+            return  # use only first matching source root
 
     def _scan_java_file_for_entry_points(self, abs_path: Path, rel_path: str) -> list[EntryPoint]:
         try:

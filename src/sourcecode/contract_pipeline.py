@@ -240,10 +240,18 @@ class ContractPipeline:
 
         # Apply max_files cap — bypass when symbol search to ensure defining files are found.
         # A symbol query over a large repo needs all files; result set is small after filtering.
+        # MyBatis Mapper.xml contracts rank below Java files on path score alone (.xml has no
+        # suffix boost). Give them the same priority slot as entry_points so they survive the cap.
+        def _is_priority(p: str) -> bool:
+            if p in entry_paths:
+                return True
+            name = p.rsplit("/", 1)[-1]
+            return name.lower().endswith("mapper.xml")
+
         if symbol is None and len(src_paths) > self.max_files:
             src_paths = sorted(
                 src_paths,
-                key=lambda p: (p in entry_paths, scorer.score(p)),
+                key=lambda p: (_is_priority(p), scorer.score(p)),
                 reverse=True,
             )[:self.max_files]
 
@@ -362,7 +370,9 @@ class ContractPipeline:
 
     def _rank(self, contracts: list[FileContract], rank_by: RankStrategy) -> list[FileContract]:
         if rank_by == "centrality":
-            return sorted(contracts, key=lambda c: (-(c.fan_in + c.fan_out), c.path))
+            # Entrypoints (REST controllers, main classes) surface first even in centrality mode:
+            # they have low fan_in (not imported) but are the primary API surface.
+            return sorted(contracts, key=lambda c: (-c.is_entrypoint, -(c.fan_in + c.fan_out), c.path))
         if rank_by == "git-churn":
             return sorted(contracts, key=lambda c: (-c.is_changed, -c.relevance_score, c.path))
         # Default: relevance — path breaks ties deterministically

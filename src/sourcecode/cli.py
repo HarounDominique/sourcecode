@@ -1399,12 +1399,6 @@ def main(
                         ))
         sm = _replace(sm, pipeline_trace=_trace.build_trace())
 
-    # P3-B: Auto-switch to centrality ranking when DDD layout detected
-    if (rank_by == "relevance"
-            and sm.architecture is not None
-            and sm.architecture.pattern == "ddd"):
-        rank_by = "centrality"
-
     # Contract pipeline — runs for mode=contract|standard|deep|hybrid (skip for raw)
     _is_contract_mode = mode in ("contract", "standard")
     _pipeline_error = False
