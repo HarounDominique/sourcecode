@@ -79,6 +79,7 @@ _LANGUAGE_MAP: dict[str, str] = {
     ".jsx": "jsx",
     ".mjs": "javascript",
     ".cjs": "javascript",
+    ".java": "java",
 }
 
 _REACT_HOOKS: frozenset[str] = frozenset({
@@ -939,6 +940,92 @@ def _extract_python(path: str, source: str) -> FileContract:
 
 
 # ---------------------------------------------------------------------------
+# Minimal Java extraction (regex-based, no AST)
+# ---------------------------------------------------------------------------
+
+_JAVA_CLASS_DECL_RE = re.compile(
+    r'public\s+(?:(?:abstract|final|static)\s+)*(class|interface|enum)\s+(\w+)'
+    r'(?:\s+extends\s+([\w.]+))?(?:\s+implements\s+([\w.,\s]+?))?(?=\s*[\{<])',
+    re.MULTILINE,
+)
+_JAVA_METHOD_SIG_RE = re.compile(
+    r'^\s{0,12}public\s+[^\{]+\(',
+    re.MULTILINE,
+)
+_JAVA_IMPORT_RE = re.compile(r'^import\s+(?:static\s+)?([^;\s]+)\s*;', re.MULTILINE)
+
+
+def _extract_java(path: str, source: str) -> FileContract:
+    exports: list[ExportRecord] = []
+    types: list[TypeDefinition] = []
+    functions: list[FunctionSignature] = []
+    imports: list[ImportRecord] = []
+
+    # Class / interface / enum declarations
+    for m in _JAVA_CLASS_DECL_RE.finditer(source):
+        name = m.group(2)
+        extends_str = m.group(3)
+        implements_str = m.group(4)
+        all_extends: list[str] = []
+        if extends_str:
+            all_extends.append(extends_str.strip())
+        if implements_str:
+            all_extends.extend(i.strip() for i in implements_str.split(",") if i.strip())
+        types.append(TypeDefinition(name=name, kind="class", fields=[], extends=all_extends))
+        exports.append(ExportRecord(name=name, kind="class"))
+
+    class_names = {t.name for t in types}
+
+    # Public method signatures (one-line heuristic)
+    seen_methods: set[str] = set()
+    for m in _JAVA_METHOD_SIG_RE.finditer(source):
+        sig_text = m.group(0).strip()
+        name_match = re.search(r'(\w+)\s*\($', sig_text)
+        if not name_match:
+            name_match = re.search(r'(\w+)\s*\(', sig_text)
+        if not name_match:
+            continue
+        mname = name_match.group(1)
+        if mname in class_names or mname in seen_methods or mname in {"if", "for", "while", "switch"}:
+            continue
+        seen_methods.add(mname)
+        functions.append(FunctionSignature(
+            name=mname,
+            signature=sig_text,
+            async_=False,
+            exported=True,
+            return_type=None,
+        ))
+
+    # Import statements
+    seen_sources: set[str] = set()
+    for m in _JAVA_IMPORT_RE.finditer(source):
+        full_import = m.group(1).strip()
+        if full_import not in seen_sources:
+            seen_sources.add(full_import)
+            imports.append(ImportRecord(source=full_import, kind="named", symbols=[]))
+
+    # External deps: top-2 package segments, skip java.* / javax.*
+    deps = sorted({
+        ".".join(imp.source.split(".")[:2])
+        for imp in imports
+        if not imp.source.startswith("java.") and not imp.source.startswith("javax.")
+        and len(imp.source.split(".")) >= 2
+    })
+
+    return FileContract(
+        path=path,
+        language="java",
+        exports=exports,
+        imports=sorted(imports, key=lambda i: i.source)[:30],
+        functions=sorted(functions, key=lambda f: f.name)[:20],
+        types=sorted(types, key=lambda t: t.name),
+        dependencies=deps[:20],
+        extraction_method="heuristic",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Role detection
 # ---------------------------------------------------------------------------
 
@@ -1048,6 +1135,8 @@ class AstExtractor:
 
         if language == "python":
             contract = _extract_python(rel_path, source)
+        elif language == "java":
+            contract = _extract_java(rel_path, source)
         else:
             if self._ensure_ts():
                 lang_obj = _get_ts_lang(language)

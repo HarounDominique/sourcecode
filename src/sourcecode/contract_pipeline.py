@@ -370,7 +370,15 @@ class ContractPipeline:
         """
         candidates = _find_symbol_files(root, symbol, known_paths, engine)
         if not candidates:
-            return []
+            return [], {
+                "symbol": symbol,
+                "definers_found": 0,
+                "importers_found": 0,
+                "importers_returned": 0,
+                "references_found": 0,
+                "total_returned": 0,
+                "truncated": False,
+            }
 
         extra: list[FileContract] = []
         for rel_path in candidates[:300]:  # cap to prevent excessive extraction
@@ -577,7 +585,7 @@ def _find_symbol_files(
                 "grep", "-rl",
                 "--include=*.ts", "--include=*.tsx",
                 "--include=*.js", "--include=*.jsx",
-                "--include=*.py",
+                "--include=*.py", "--include=*.java",
                 symbol, ".",
             ],
             cwd=str(root),

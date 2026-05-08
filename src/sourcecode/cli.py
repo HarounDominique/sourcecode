@@ -1270,10 +1270,24 @@ def main(
             and d.scope not in {"dev"}
         ]
 
-        def _dep_sort_key(d: Any) -> tuple[int, int, str]:
+        _JAVA_SEMANTIC_PRIORITY: dict[str, int] = {
+            "spring-boot": 0, "spring-security": 1, "mybatis": 2,
+            "poi": 3, "pdfbox": 4, "jackson": 5, "jjwt": 6,
+        }
+
+        def _java_priority(d: Any) -> int:
+            if d.ecosystem != "java":
+                return 99
+            art = (d.name.split(":")[-1] if ":" in d.name else d.name).lower()
+            for key, pri in _JAVA_SEMANTIC_PRIORITY.items():
+                if key in art:
+                    return pri
+            return 50
+
+        def _dep_sort_key(d: Any) -> tuple[int, int, int, str]:
             role_order = _ROLE_PRIORITY.get(d.role or "runtime", 5)
             eco_order = 0 if d.ecosystem == primary_ecosystem else 1
-            return (role_order, eco_order, d.name.lower())
+            return (role_order, eco_order, _java_priority(d), d.name.lower())
 
         _seen_dep_names: set[str] = set()
         _deduped_deps: list[Any] = []
@@ -1281,7 +1295,7 @@ def main(
             if d.name not in _seen_dep_names:
                 _seen_dep_names.add(d.name)
                 _deduped_deps.append(d)
-        sm.key_dependencies = _deduped_deps[:15]
+        sm.key_dependencies = _deduped_deps  # no cap — all direct deps included
 
     # LQN-02: deterministic NL summary
     sm.project_summary = ProjectSummarizer(target).generate(sm)
@@ -1384,6 +1398,7 @@ def main(
 
     # Contract pipeline — runs for mode=contract|standard|deep|hybrid (skip for raw)
     _is_contract_mode = mode in ("contract", "standard")
+    _pipeline_error = False
     if _is_contract_mode:
         from sourcecode.contract_pipeline import ContractPipeline
         from sourcecode.contract_model import ContractSummary as _ContractSummary
@@ -1408,6 +1423,7 @@ def main(
             )
         except Exception as _exc:
             typer.echo(f"[error] contract pipeline failed: {_exc}", err=True)
+            _pipeline_error = True
             _contracts = []
             _contract_summary = _ContractSummary(
                 mode=mode,
@@ -1517,6 +1533,9 @@ def main(
 
     # 6. Write output (CLI-04)
     write_output(content, output=output)
+
+    if _pipeline_error:
+        raise typer.Exit(code=2)
 
     # 7. Clipboard copy (--copy / -c)
     if copy and output is None:

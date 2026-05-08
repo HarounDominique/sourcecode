@@ -76,7 +76,7 @@ class GraphAnalyzer:
     def __init__(
         self,
         *,
-        max_files: int = 200,
+        max_files: int = 2000,
         max_file_size: int = 200_000,
         max_nodes: int = 1_000,
         max_edges: int = 2_000,

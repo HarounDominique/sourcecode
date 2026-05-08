@@ -174,6 +174,14 @@ class DocAnalyzer:
                 limitations.extend(file_limitations)
                 if file_records:
                     languages.add(lang)
+            elif suffix == ".java":
+                file_records, file_limitations = self._analyze_java_file(
+                    norm_path, content, depth, workspace, entry_points
+                )
+                records.extend(file_records)
+                limitations.extend(file_limitations)
+                if file_records:
+                    languages.add("java")
             else:
                 # Unsupported language — D-04: no emitir DocRecord, solo registrar limitation
                 limitations.append(f"docs_unavailable:{norm_path}:language={lang}")
@@ -182,7 +190,7 @@ class DocAnalyzer:
                 # NO records.append() here
 
         # Build language_coverage: explicit per-language support status
-        _SUPPORTED_LANGS = {"python", "javascript", "typescript"}
+        _SUPPORTED_LANGS = {"python", "javascript", "typescript", "java"}
         lang_coverage: dict[str, str] = {}
         for lang in languages:
             if lang in _SUPPORTED_LANGS:
@@ -224,6 +232,73 @@ class DocAnalyzer:
             language_coverage=lang_coverage,
         )
         return records, summary
+
+    # Javadoc: /** ... */ block followed by class/method declaration
+    _JAVADOC_RE = re.compile(r'/\*\*(.*?)\*/', re.DOTALL)
+    _JAVA_CLASS_AFTER_RE = re.compile(
+        r'(?:public\s+)?(?:abstract\s+)?(?:final\s+)?(?:class|interface|enum)\s+(\w+)',
+    )
+    _JAVA_METHOD_AFTER_RE = re.compile(
+        r'public\s+[\w<>\[\],\s]+?\s+(\w+)\s*\(',
+    )
+
+    def _clean_javadoc(self, raw: str) -> str:
+        lines = raw.strip().splitlines()
+        cleaned: list[str] = []
+        for line in lines:
+            line = re.sub(r'^\s*\*\s?', '', line).strip()
+            if line.startswith('@'):
+                continue
+            if line:
+                cleaned.append(line)
+        result = ' '.join(cleaned)
+        if len(result) > self._DOCSTRING_MAX_CHARS:
+            result = result[:self._DOCSTRING_MAX_CHARS] + self._TRUNCATION_SUFFIX
+        return result
+
+    def _analyze_java_file(
+        self,
+        path: str,
+        content: str,
+        depth: "DocsDepth",
+        workspace: "str | None",
+        entry_points: "list[str] | None",
+    ) -> "tuple[list[DocRecord], list[str]]":
+        records: list[DocRecord] = []
+        for jd_match in self._JAVADOC_RE.finditer(content):
+            lookahead = content[jd_match.end():jd_match.end() + 400].lstrip()
+            # Class-level Javadoc
+            class_m = self._JAVA_CLASS_AFTER_RE.match(lookahead)
+            if class_m:
+                name = class_m.group(1)
+                doc_text = self._clean_javadoc(jd_match.group(1))
+                records.append(DocRecord(
+                    path=path,
+                    workspace=workspace,
+                    kind="class",
+                    name=name,
+                    doc_text=doc_text,
+                    importance=self._infer_importance(path, "class", entry_points),
+                ))
+                continue
+            # Method-level Javadoc (only when depth != "module")
+            if depth == "module":
+                continue
+            method_m = self._JAVA_METHOD_AFTER_RE.match(lookahead)
+            if method_m:
+                name = method_m.group(1)
+                if name in {"if", "for", "while", "switch", "return", "new"}:
+                    continue
+                doc_text = self._clean_javadoc(jd_match.group(1))
+                records.append(DocRecord(
+                    path=path,
+                    workspace=workspace,
+                    kind="function",
+                    name=name,
+                    doc_text=doc_text,
+                    importance=self._infer_importance(path, "function", entry_points),
+                ))
+        return records, []
 
     def merge_summaries(self, summaries: Iterable[DocSummary]) -> DocSummary:
         """Agrega multiples DocSummary en uno.

@@ -127,6 +127,22 @@ def _infer_role(name: str, ecosystem: str, scope: str) -> str:
             return "infra"
         return "runtime"
 
+    if ecosystem == "java":
+        artifact = n.split(":")[-1] if ":" in n else n
+        if any(x in artifact for x in ("spring-boot", "spring-security")):
+            return "runtime"
+        if any(x in artifact for x in ("spring-web", "spring-mvc", "spring-core", "spring-context")):
+            return "runtime"
+        if any(x in artifact for x in ("mybatis", "hibernate", "jpa", "druid", "datasource")):
+            return "infra"
+        if any(x in artifact for x in ("jackson", "gson", "fastjson")):
+            return "serialization"
+        if any(x in artifact for x in ("poi", "pdfbox", "itext", "openpdf")):
+            return "parsing"
+        if any(x in artifact for x in ("jjwt", "nimbus-jose")):
+            return "runtime"
+        return "devtool" if is_dev else "runtime"
+
     return "devtool" if is_dev else "runtime"
 
 

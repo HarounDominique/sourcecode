@@ -137,7 +137,7 @@ def _mccabe(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
 class MetricsAnalyzer:
     """Analiza metricas de calidad de codigo: LOC, simbolos y complejidad ciclomatica."""
 
-    _MAX_FILES = 500
+    _MAX_FILES = 2000
     _MAX_FILE_SIZE = 500_000  # bytes
 
     # ---------------------------------------------------------------------------
@@ -158,6 +158,21 @@ class MetricsAnalyzer:
         all_paths = flatten_file_tree(file_tree)
         # Keep only paths that are actual files (not directories)
         file_paths = [p for p in all_paths if (root / p).is_file()]
+
+        # Sort: JVM source first, then other source, then config, then dotfiles
+        # Prevents the 500-file cap from cutting all Java files when dotfiles sort first.
+        def _sort_key(p: str) -> tuple[int, str]:
+            if Path(p).suffix.lower() in {".java", ".kt", ".scala"}:
+                return (0, p)
+            if Path(p).suffix.lower() in {".py", ".go", ".rs", ".ts", ".js", ".tsx", ".jsx"}:
+                return (1, p)
+            if Path(p).suffix.lower() in {".xml", ".yaml", ".yml", ".json", ".toml", ".properties"}:
+                return (2, p)
+            if Path(p).name.startswith("."):
+                return (4, p)
+            return (3, p)
+
+        file_paths.sort(key=_sort_key)
 
         limitations: list[str] = []
 

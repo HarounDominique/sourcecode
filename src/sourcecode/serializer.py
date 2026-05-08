@@ -35,7 +35,7 @@ _FILE_RELEVANCE_MIN_COMBINED = 0.40  # minimum combined score — must earn incl
 _PROD_DEPS_CAP = 10          # max production dependencies shown
 _SECONDARY_DEPS_CAP = 5      # max per dev/test/build dependency group
 _MONOREPO_PKGS_CAP = 8       # max workspace/runtime packages shown
-_KEY_DEPS_CAP = 10           # max key dependencies shown
+_KEY_DEPS_CAP = 50           # max key dependencies shown
 _CODE_NOTES_CAP = 15         # max code notes in default output
 _ENV_MAP_CAP = 15            # max env var entries in default output
 
@@ -223,6 +223,11 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
                 semantic_hub_scores[p] = h.get("importance_score", 0.0) / max_importance
 
     entry_paths = {ep.path for ep in sm.entry_points}
+    # REST/MVC controllers are HTTP surface — surface before @Transactional services
+    _rest_ctrl_paths = {
+        ep.path for ep in sm.entry_points
+        if getattr(ep, "kind", "") in {"rest_controller", "mvc_controller"}
+    }
     scored: list[tuple[float, dict[str, Any]]] = []
 
     for path in sm.file_paths:
@@ -241,6 +246,9 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
         # Semantic hub bonus: normalised call-graph centrality adds up to +0.30
         sem_hub = semantic_hub_scores.get(path, 0.0) * 0.30
         combined = fs.score + content_rel + sem_hub
+        # REST controller boost: surface above @Transactional service files
+        if path in _rest_ctrl_paths:
+            combined += 2.0
 
         # Visibility threshold: require meaningful combined signal.
         # Exception: high/medium-confidence files with strong content relevance
@@ -1586,8 +1594,8 @@ def write_output(content: str, output: Optional[Path]) -> None:
         output: Destination file path. None = stdout.
     """
     if output is None:
-        sys.stdout.write(content)
+        sys.stdout.buffer.write(content.encode("utf-8"))
         if not content.endswith("\n"):
-            sys.stdout.write("\n")
+            sys.stdout.buffer.write(b"\n")
     else:
         output.write_text(content, encoding="utf-8")

@@ -760,6 +760,33 @@ class TaskContextBuilder:
             elif self._is_source(path) and not content_reasons:
                 content_boost += 0.5
 
+            # Task-specific boosts for differentiated file weighting
+            path_lower = path.lower()
+            if task_name == "fix-bug":
+                if any(x in path_lower for x in ("exception", "error", "handler", "advice")):
+                    content_boost += 1.5
+                    content_reasons.append("exception handler — high risk area")
+            elif task_name == "generate-tests":
+                stem = Path(path).stem.lower()
+                has_test = any(
+                    stem in Path(tp).stem.lower() or Path(tp).stem.lower() in stem
+                    for tp in test_set
+                )
+                if not has_test and self._is_source(path):
+                    content_boost += 1.0
+                    content_reasons.append("no test pair found")
+            elif task_name == "onboard":
+                if path in runtime_entry_set:
+                    content_boost += 2.0
+                    content_reasons.append("runtime entry point")
+                if any(x in path_lower for x in ("config", "application.yml", "application.properties", "settings", "bootstrap")):
+                    content_boost += 1.0
+                    content_reasons.append("configuration class")
+            elif task_name == "explain":
+                if "controller" in path_lower and path in runtime_entry_set:
+                    content_boost += 1.5
+                    content_reasons.append("DDD module controller")
+
             total = fs.score + content_boost
             if total <= 0:
                 continue

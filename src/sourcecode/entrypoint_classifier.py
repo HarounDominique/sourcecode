@@ -67,6 +67,9 @@ def runtime_relevance(ep: EntryPoint, classification: Classification | None = No
     classification = classification or classify_entry_point(ep)
     if classification != "production":
         return "low"
+    # Annotation-detected HTTP controllers are the primary runtime surface
+    if ep.source == "annotation" and ep.kind in {"rest_controller", "mvc_controller"}:
+        return "high"
     reason = (ep.reason or "").lower()
     if ep.source == "package.json#bin" or reason == "bin" or reason in _PRODUCTION_SCRIPT_REASONS:
         return "high"
