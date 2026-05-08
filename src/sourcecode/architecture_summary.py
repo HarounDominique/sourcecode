@@ -84,6 +84,11 @@ class ArchitectureSummarizer:
                 elif suffix in {".cs", ".fs", ".vb"}:
                     lang_lines = self._summarize_dotnet_entry(sm.stacks)
 
+        # MyBatis XML mapper count line (Java projects)
+        mybatis_line = self._mybatis_summary_line(file_paths)
+        if mybatis_line:
+            lang_lines.append(mybatis_line)
+
         # Merge: rich lines first, stack-specific details appended (deduped)
         lines = rich_lines + [l for l in lang_lines if l not in rich_lines]
 
@@ -295,6 +300,13 @@ class ArchitectureSummarizer:
         elif not lines:
             lines.append("Orquesta el arranque de la aplicacion JVM.")
         return lines
+
+    def _mybatis_summary_line(self, file_paths: list[str]) -> str | None:
+        """Return a summary line when >5 MyBatis XML mappers are detected."""
+        mapper_xml_count = sum(1 for p in file_paths if p.endswith("Mapper.xml"))
+        if mapper_xml_count > 5:
+            return f"MyBatis XML mappers: {mapper_xml_count} *Mapper.xml detected."
+        return None
 
     def _summarize_dotnet_entry(self, stacks: list[StackDetection]) -> list[str]:
         dotnet_stacks = [s for s in stacks if s.stack == "dotnet"]

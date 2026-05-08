@@ -78,6 +78,29 @@ _IMPORT_RE = re.compile(
 )
 _DEF_RE = re.compile(r"\b(class|def|function|const|export\s+class|interface|type)\s+[A-Za-z_]", re.MULTILINE)
 
+# Java Spring stereotype annotation detection
+_JAVA_ANNOTATION_RE = re.compile(r'@(RestController|Controller|Service|Repository|Mapper|Entity|Data|Configuration|EnableWebSecurity|ControllerAdvice|Transactional)\b')
+
+# (annotation_set, category, relevance, why_template)
+# Checked in priority order; first match wins.
+_JAVA_STEREOTYPE_RULES: list[tuple[frozenset, str, float, str]] = [
+    (frozenset({"EnableWebSecurity"}),               "security",        0.85, "Spring Security configuration"),
+    (frozenset({"RestController"}),                  "api_endpoint",    0.90, "Spring REST controller — defines HTTP API surface"),
+    (frozenset({"Controller", "RequestMapping"}),    "api_endpoint",    0.80, "Spring MVC controller"),
+    (frozenset({"Service", "Transactional"}),        "business_logic",  0.75, "Transactional service — business logic boundary"),
+    (frozenset({"Service"}),                         "business_logic",  0.65, "Spring service component"),
+    (frozenset({"Repository"}),                      "data_access",     0.65, "Spring repository — data access layer"),
+    (frozenset({"Mapper"}),                          "data_access",     0.65, "MyBatis mapper — SQL data access"),
+    (frozenset({"Configuration"}),                   "configuration",   0.70, "Spring configuration class"),
+    (frozenset({"Entity"}),                          "domain_model",    0.50, "JPA entity — domain model"),
+    (frozenset({"Data"}),                            "dto",             0.40, "Lombok DTO"),
+]
+
+# Categories produced by Java stereotype detection — used downstream to apply direct relevance
+JAVA_STEREOTYPE_CATEGORIES: frozenset[str] = frozenset(
+    cat for _, cat, _, _ in _JAVA_STEREOTYPE_RULES
+)
+
 
 class FileClassifier:
     def __init__(
@@ -137,6 +160,12 @@ class FileClassifier:
 
         if norm in self.production_entry_paths:
             return FileClassification(norm, "runtime_core", "high", 0.95, "declared production runtime entrypoint", ["entry_points"])
+
+        # Java Spring stereotype detection (Java/Kotlin files only)
+        if suffix in {".java", ".kt"}:
+            java_class = self._classify_java_stereotype(norm, content)
+            if java_class is not None:
+                return java_class
 
         if self._has_any_import(imports, _API_IMPORTS):
             evidence = self._matched_imports(imports, _API_IMPORTS)
@@ -212,4 +241,22 @@ class FileClassifier:
 
     def _sample(self, imports: list[str]) -> list[str]:
         return [f"import:{imp}" for imp in imports[:4]]
+
+    def _classify_java_stereotype(self, path: str, content: str) -> "FileClassification | None":
+        """Classify Java file by Spring/JPA/MyBatis annotation stereotypes."""
+        if not content:
+            return None
+        found = frozenset(m.group(1) for m in _JAVA_ANNOTATION_RE.finditer(content))
+        if not found:
+            return None
+        for required_annotations, category, relevance, why in _JAVA_STEREOTYPE_RULES:
+            # For @Data DTO: must have @Data but NOT @Entity
+            if required_annotations == frozenset({"Data"}):
+                if "Data" in found and "Entity" not in found:
+                    return FileClassification(path, category, "high", relevance, why, list(found))
+                continue
+            # For compound rules (Service+Transactional, Controller+RequestMapping): all required
+            if required_annotations <= found:
+                return FileClassification(path, category, "high", relevance, why, list(found))
+        return None
 

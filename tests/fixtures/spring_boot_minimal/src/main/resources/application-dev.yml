@@ -1,0 +1,4 @@
+saint:
+  env: dev
+  ldap:
+    url: ldap://dev.example.com:389

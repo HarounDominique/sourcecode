@@ -1,0 +1,20 @@
+spring:
+  profiles:
+    active: dev
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:h2:mem:testdb}
+    username: ${SPRING_DATASOURCE_USERNAME:sa}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+
+app:
+  name: demo-service
+  timeout: 30
+
+saint:
+  env: local
+  ldap:
+    url: ldap://localhost:389
+    userDn: cn=admin
+    password: ${LDAP_PASSWORD}
+  integration:
+    url: http://localhost:8081

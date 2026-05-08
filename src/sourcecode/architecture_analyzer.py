@@ -176,6 +176,36 @@ class ArchitectureAnalyzer:
 
         # Step 1: filter paths
         filtered = self._filter_paths(sm.file_paths)
+
+        # Step 1b: DDD filesystem detection — runs before the filtered-paths guard
+        # because DDD signals live in directory structure, not just file extensions.
+        ddd_result = self._detect_ddd(sm.file_paths)
+        if ddd_result is not None:
+            ddd_pattern, ddd_layers, ddd_contexts, ddd_layer_names = ddd_result
+            domains_for_ddd = self._cluster_domains(filtered) if len(filtered) >= 2 else []
+            bc_list = [BoundedContext(name=n, confidence="high") for n in ddd_contexts]
+            return ArchitectureAnalysis(
+                requested=True,
+                pattern=ddd_pattern,
+                domains=domains_for_ddd,
+                layers=ddd_layers,
+                bounded_contexts=bc_list,
+                ddd_layers_detected=ddd_layer_names,
+                confidence="high",
+                method="filesystem_inference",
+                limitations=[],
+                evidence=[{
+                    "type": "filesystem_naming",
+                    "paths": [f"{ddd_contexts[0]}/" if ddd_contexts else ""],
+                    "reason": (
+                        f"DDD layout detected: {len(ddd_contexts)} modules under common prefix "
+                        "each contain application/, domain/, infrastructure/ subdirectories."
+                    ),
+                    "confidence": "high",
+                }],
+                tentative=False,
+            )
+
         if len(filtered) < 2:
             return ArchitectureAnalysis(
                 requested=True,
@@ -332,6 +362,57 @@ class ArchitectureAnalyzer:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _detect_ddd(
+        self, paths: list[str]
+    ) -> "Optional[tuple[str, list[ArchitectureLayer], list[str], list[str]]]":
+        """Detect DDD: ≥5 modules under a common prefix each with application/domain/infrastructure."""
+        _DDD_LAYERS = frozenset({"application", "domain", "infrastructure"})
+        _DDD_MIN_MODULES = 5
+
+        # Map (prefix, module) → set of DDD layer names found under that module
+        prefix_module_layers: dict[tuple[str, str], set[str]] = {}
+
+        for p in paths:
+            parts = p.replace("\\", "/").split("/")
+            for i, part in enumerate(parts):
+                if part in _DDD_LAYERS and i >= 2:
+                    module = parts[i - 1]
+                    prefix = "/".join(parts[:i - 1])
+                    key = (prefix, module)
+                    prefix_module_layers.setdefault(key, set()).add(part)
+                    break
+
+        # Group by prefix; find prefixes where ≥5 modules have all 3 DDD layers
+        prefix_modules: dict[str, list[str]] = {}
+        for (prefix, module), layers_found in prefix_module_layers.items():
+            if _DDD_LAYERS <= layers_found:  # module has all 3
+                prefix_modules.setdefault(prefix, []).append(module)
+
+        best_prefix = max(
+            prefix_modules,
+            key=lambda p: len(prefix_modules[p]),
+            default=None,
+        )
+        if best_prefix is None or len(prefix_modules[best_prefix]) < _DDD_MIN_MODULES:
+            return None
+
+        bounded_context_names = sorted(set(prefix_modules[best_prefix]))
+        ddd_layer_names = sorted(_DDD_LAYERS)
+
+        arch_layers: list[ArchitectureLayer] = [
+            ArchitectureLayer(
+                name=layer,
+                pattern="ddd",
+                files=[
+                    p for p in paths
+                    if f"/{layer}/" in p.replace("\\", "/")
+                ],
+                confidence="high",
+            )
+            for layer in ddd_layer_names
+        ]
+        return "ddd", arch_layers, bounded_context_names, ddd_layer_names
 
     def _is_tooling(self, path: str) -> bool:
         norm = path.replace("\\", "/")

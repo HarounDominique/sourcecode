@@ -15,12 +15,19 @@ from sourcecode.schema import FrameworkDetection
 from sourcecode.tree_utils import flatten_file_tree
 
 _MAX_FILE_SIZE = 256 * 1024  # 256 KB
-_MAX_JAVA_ENTRY_SCAN = 200
-_MAX_ANNOTATION_ENTRY_POINTS = 20
+_MAX_JAVA_ENTRY_SCAN = 1000
+_MAX_ANNOTATION_ENTRY_POINTS = 500
 
-_REST_CONTROLLER_RE = re.compile(r'@(?:Rest)?Controller\b')
+_REST_CONTROLLER_RE = re.compile(r'@RestController\b')
+_MVC_CONTROLLER_RE = re.compile(r'@Controller\b')
+_REQUEST_MAPPING_RE = re.compile(r'@RequestMapping\b')
+_CONTROLLER_ADVICE_RE = re.compile(r'@ControllerAdvice\b')
 _WEB_FILTER_RE = re.compile(r'@WebFilter\b')
 _FILTER_BEAN_RE = re.compile(r'FilterRegistrationBean\b')
+# Extracts path from @RequestMapping("/v1/foo"), @GetMapping("/bar"), etc.
+_HTTP_PATH_RE = re.compile(
+    r'@(?:Request|Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']'
+)
 
 
 class JavaDetector(AbstractDetector):
@@ -81,6 +88,8 @@ class JavaDetector(AbstractDetector):
             frameworks.append(FrameworkDetection(name="Vert.x", source=source))
         if "jakarta.ee" in text or "javax.ws.rs" in text:
             frameworks.append(FrameworkDetection(name="Jakarta EE", source=source))
+        if "mybatis" in text:
+            frameworks.append(FrameworkDetection(name="MyBatis", source=source))
         return frameworks
 
     def _collect_entry_points(self, context: DetectionContext) -> list[EntryPoint]:
@@ -139,13 +148,30 @@ class JavaDetector(AbstractDetector):
             return []
 
         # Quick pre-filter before running regexes
-        if "Controller" not in content and "Filter" not in content:
+        if ("Controller" not in content and "Filter" not in content
+                and "ControllerAdvice" not in content):
             return []
 
         if _REST_CONTROLLER_RE.search(content):
+            http_path_match = _HTTP_PATH_RE.search(content)
+            http_path = http_path_match.group(1) if http_path_match else None
             return [EntryPoint(
-                path=rel_path, stack="java", kind="http_handler",
+                path=rel_path, stack="java", kind="rest_controller",
                 source="annotation", confidence="high",
+                http_path=http_path,
+            )]
+        if _CONTROLLER_ADVICE_RE.search(content):
+            return [EntryPoint(
+                path=rel_path, stack="java", kind="exception_handler",
+                source="annotation", confidence="medium",
+            )]
+        if _MVC_CONTROLLER_RE.search(content) and _REQUEST_MAPPING_RE.search(content):
+            http_path_match = _HTTP_PATH_RE.search(content)
+            http_path = http_path_match.group(1) if http_path_match else None
+            return [EntryPoint(
+                path=rel_path, stack="java", kind="mvc_controller",
+                source="annotation", confidence="medium",
+                http_path=http_path,
             )]
         if _WEB_FILTER_RE.search(content):
             return [EntryPoint(

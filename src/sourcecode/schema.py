@@ -79,6 +79,7 @@ class EntryPoint:
     classification: Optional[Literal["production", "development", "auxiliary"]] = None
     runtime_relevance: Optional[Literal["high", "medium", "low"]] = None
     produced_by: Optional[str] = None  # which detector emitted this
+    http_path: Optional[str] = None  # extracted from @RequestMapping / @GetMapping (Java REST controllers)
 
 
 @dataclass
@@ -413,6 +414,7 @@ class ArchitectureAnalysis:
     # True when pattern is inferred from weak signals (e.g. directory names only).
     # Agents must not treat tentative patterns as confirmed facts.
     tentative: bool = False
+    ddd_layers_detected: list[str] = field(default_factory=list)  # e.g. ["application", "domain", "infrastructure"]
 
 
 # --- Env Map ---
@@ -425,10 +427,11 @@ class EnvVarRecord:
     required: bool = True
     default: Optional[str] = None
     type_hint: Optional[str] = None   # string | int | bool | url | path | enum
-    category: Optional[str] = None    # database | cache | storage | auth | service | observability | feature_flag | server | general
+    category: Optional[str] = None    # database | cache | storage | auth | service | observability | feature_flag | server | general | application
     description: Optional[str] = None
     files: list[str] = field(default_factory=list)  # "path:line"
     profile: Optional[str] = None     # Spring profile if first occurrence is in application-{profile}.yml
+    source: Optional[str] = None      # yml_property | env_var | source_code
 
 
 @dataclass
@@ -446,6 +449,7 @@ class EnvSummary:
     profiles_scanned: list[str] = field(default_factory=list)
     spring_candidates: int = 0   # total ${VAR} refs found across Spring config files
     coverage_note: Optional[str] = None  # explicit note about partial coverage
+    spring_profiles: list[str] = field(default_factory=list)  # canonical list: profile names from application-{profile}.yml
 
 
 # --- Code Notes ---

@@ -258,11 +258,19 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
                 and combined < 0.45):
             continue
 
+        # For Java stereotype annotations use the table relevance directly —
+        # the combined/2 formula would dilute the stereotype signal.
+        from sourcecode.file_classifier import JAVA_STEREOTYPE_CATEGORIES
+        if file_class and file_class.category in JAVA_STEREOTYPE_CATEGORIES:
+            relevance_val = round(file_class.relevance, 3)
+        else:
+            relevance_val = round(max(0.0, min(1.0, combined / 2.0)), 3)
+
         item: dict[str, Any] = {
             "path": path,
             "category": file_class.category if file_class else "source",
             "confidence": file_class.confidence if file_class else "low",
-            "relevance": round(max(0.0, min(1.0, combined / 2.0)), 3),
+            "relevance": relevance_val,
             "reason": file_class.reason if file_class else (fs.reasons[0] if fs.reasons else "source file"),
             "evidence": file_class.evidence if file_class else [],
         }
@@ -301,6 +309,10 @@ def _architecture_context(sm: SourceMap) -> dict[str, Any]:
             ]
         else:
             ctx["no_layers_detected"] = True
+        if arch.bounded_contexts:
+            ctx["bounded_contexts"] = [bc.name for bc in arch.bounded_contexts]
+        if arch.ddd_layers_detected:
+            ctx["ddd_layers_detected"] = arch.ddd_layers_detected
         if arch.confidence == "low" and not pattern:
             ctx["note"] = "directory structure insufficient for reliable architectural inference; use --semantics for higher accuracy"
         if arch.limitations:
@@ -865,6 +877,10 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
         }
         if sm.env_summary.categories:
             signals["env_vars"]["categories"] = sm.env_summary.categories
+        _spring_profiles = (sm.env_summary.spring_profiles
+                            or sm.env_summary.profiles_scanned)
+        if _spring_profiles:
+            signals["env_vars"]["spring_profiles"] = sorted(set(_spring_profiles))
         if sm.env_map:
             _sorted_env = sorted(
                 sm.env_map,
@@ -1043,7 +1059,11 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
         ][:_KEY_DEPS_CAP]
 
     if sm.env_summary is not None and sm.env_summary.requested:
-        result["env_summary"] = asdict(sm.env_summary)
+        env_sum_dict = asdict(sm.env_summary)
+        _sp = sm.env_summary.spring_profiles or sm.env_summary.profiles_scanned
+        if _sp:
+            env_sum_dict["spring_profiles"] = sorted(set(_sp))
+        result["env_summary"] = env_sum_dict
         result["env_map"] = [asdict(e) for e in sm.env_map[:_ENV_MAP_CAP]]
 
     if sm.code_notes_summary is not None and sm.code_notes_summary.requested:

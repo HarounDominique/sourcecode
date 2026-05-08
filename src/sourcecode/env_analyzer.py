@@ -35,6 +35,15 @@ _SPRING_ENV_VAR_RE = re.compile(r'\$\{([A-Z][A-Z0-9_]*)(?::([^}]*))?\}')
 # These are internal property cross-references, not OS env vars, but still config signals.
 _SPRING_PROP_REF_RE = re.compile(r'\$\{([a-z][a-z0-9]*(?:\.[a-z][a-z0-9_-]*)*)(?::([^}]*))?\}')
 
+# Known Spring-internal namespaces — NOT emitted as custom application properties.
+_SPRING_BUILTIN_NAMESPACES: frozenset[str] = frozenset({
+    "spring", "logging", "management", "server", "info", "debug",
+    "endpoints", "security", "eureka", "feign", "ribbon", "hystrix",
+    "zuul", "cloud", "flyway", "liquibase", "jpa", "datasource",
+    "kafka", "rabbitmq", "redis", "mail", "thymeleaf", "mvc",
+    "web", "actuator", "metrics", "tracing",
+})
+
 # Patterns where absence of the variable causes a hard runtime error (not just None/null).
 # py_environ_bracket → os.environ["KEY"] raises KeyError
 # java_spring_value   → Spring fails to start if ${KEY} has no default
@@ -223,6 +232,66 @@ def _extract_spring_profile(filename: str) -> Optional[str]:
     return None
 
 
+def _parse_yaml_custom_properties(
+    content: str,
+    rel_path: str,
+    profile: Optional[str],
+    findings: dict,
+) -> None:
+    """Extract custom namespace leaf properties from YAML (e.g. saint.ldap.url).
+
+    Builds dotted key paths by tracking indentation levels. Emits only properties
+    whose top-level namespace is NOT a well-known Spring built-in namespace.
+    """
+    # Stack of (indent, key_segment)
+    key_stack: list[tuple[int, str]] = []
+
+    for line in content.splitlines():
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        if ':' not in stripped:
+            continue
+
+        indent = len(line) - len(stripped)
+        colon_idx = stripped.index(':')
+        key_part = stripped[:colon_idx].strip()
+        value_part = stripped[colon_idx + 1:].strip() if colon_idx + 1 < len(stripped) else ""
+
+        # Only plain identifiers (no special chars)
+        if not re.match(r'^[a-zA-Z][a-zA-Z0-9_-]*$', key_part):
+            continue
+
+        # Pop stack entries at same or deeper indent
+        while key_stack and key_stack[-1][0] >= indent:
+            key_stack.pop()
+
+        key_stack.append((indent, key_part))
+
+        # Only emit leaf values (non-empty, not a nested mapping start)
+        if not value_part or value_part.startswith('{') or value_part.startswith('['):
+            continue
+
+        # Reconstruct full dotted key
+        full_key = '.'.join(seg for _, seg in key_stack)
+        top_ns = key_stack[0][1].lower()
+
+        # Skip Spring built-in namespaces
+        if top_ns in _SPRING_BUILTIN_NAMESPACES:
+            continue
+
+        # Skip entries that look like ${...} references (already handled elsewhere)
+        if value_part.startswith('${'):
+            continue
+
+        # Strip inline YAML comments
+        clean_value = value_part.split('#')[0].strip()
+        if not clean_value:
+            continue
+
+        findings[full_key].append((rel_path, clean_value, False, profile))
+
+
 def _parse_spring_config(
     path: Path,
     rel_path: str,
@@ -234,6 +303,7 @@ def _parse_spring_config(
     Returns the total number of ${...} placeholders found (candidates).
     Captures default values from ${VAR:default} syntax.
     Marks vars without defaults as hard-required (Spring fails to start if missing).
+    Also extracts custom namespace properties (saint.*, app.*, etc.) as yml_property entries.
     """
     try:
         content = path.read_text(encoding="utf-8", errors="replace")
@@ -266,6 +336,10 @@ def _parse_spring_config(
         line_num = content.count("\n", 0, m.start()) + 1
         findings[key].append((f"{rel_path}:{line_num}", default, False, profile))
         candidates += 1
+
+    # 3. Custom YAML namespace properties (YAML/YML files only)
+    if rel_path.endswith((".yml", ".yaml")):
+        _parse_yaml_custom_properties(content, rel_path, profile, findings)
 
     return candidates
 
@@ -320,14 +394,17 @@ class EnvAnalyzer:
                     first_profile = prof
                 if len(unique_files) >= _MAX_FILES_PER_KEY:
                     break
+            # Custom YAML properties use lowercase.dotted keys and category "application"
+            is_yml_prop = '.' in key and key[0].islower()
             records[key] = EnvVarRecord(
                 key=key,
                 required=required,
                 default=default_val,
                 type_hint=_infer_type_hint(key),
-                category=_infer_category(key),
+                category="application" if is_yml_prop else _infer_category(key),
                 files=unique_files,
                 profile=first_profile,
+                source="yml_property" if is_yml_prop else None,
             )
 
         # 2. Supplement with .env.example entries (fill description + add missing keys)
@@ -372,6 +449,8 @@ class EnvAnalyzer:
                     "extracted. Duplicates across profiles collapsed."
                 )
 
+        # spring_profiles: named profiles only (exclude "default")
+        _named_profiles = sorted({p for p in profiles_scanned if p != "default"})
         summary = EnvSummary(
             requested=True,
             total=len(sorted_records),
@@ -383,6 +462,7 @@ class EnvAnalyzer:
             profiles_scanned=sorted(set(profiles_scanned)),
             spring_candidates=spring_candidates,
             coverage_note=coverage_note,
+            spring_profiles=_named_profiles,
         )
 
         return sorted_records, summary

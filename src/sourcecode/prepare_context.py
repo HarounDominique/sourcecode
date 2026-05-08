@@ -332,6 +332,50 @@ _SOURCE_EXTENSIONS: frozenset[str] = frozenset({
     ".go", ".rs", ".rb", ".php", ".cs", ".dart",
 })
 
+
+def _extract_ddd_domain(path: str) -> str:
+    """Extract domain name from DDD package path.
+
+    For m3informatica.saint.ddd.{domain}.infrastructure.rest.*RestController
+    the domain is the segment just before application/ domain/ or infrastructure/.
+    """
+    parts = path.replace("\\", "/").split("/")
+    _DDD_LAYERS = {"application", "domain", "infrastructure"}
+    for i, part in enumerate(parts):
+        if part in _DDD_LAYERS and i >= 1:
+            return parts[i - 1]
+    # Fallback: penultimate directory segment
+    if len(parts) >= 2:
+        return parts[-2]
+    return ""
+
+
+def _java_why(path: str, file_class: "Optional[object]") -> str:
+    """Generate why string for Java files based on stereotype classification."""
+    if file_class is None:
+        return ""
+    from sourcecode.file_classifier import JAVA_STEREOTYPE_CATEGORIES
+    category = getattr(file_class, "category", "")
+    if category not in JAVA_STEREOTYPE_CATEGORIES:
+        return ""
+    domain = _extract_ddd_domain(path)
+    class_name = Path(path).stem
+    if category == "api_endpoint":
+        return f"Defines HTTP endpoints for the {domain} domain" if domain else "Defines HTTP API endpoints"
+    if category == "business_logic":
+        return f"Orchestrates {domain} business logic" if domain else "Business logic service"
+    if category == "data_access":
+        return f"SQL queries for {domain} data access" if domain else "Data access layer"
+    if category == "domain_model":
+        return f"JPA entity for {class_name} persistence"
+    if category == "configuration":
+        return getattr(file_class, "reason", "Spring configuration class")
+    if category == "security":
+        return getattr(file_class, "reason", "Spring Security configuration")
+    if category == "dto":
+        return f"Lombok DTO — {class_name}"
+    return getattr(file_class, "reason", "")
+
 _ALL_EXTENSIONS: frozenset[str] = _SOURCE_EXTENSIONS | frozenset({
     ".md", ".toml", ".yaml", ".yml", ".json", ".xml",
 })
@@ -726,12 +770,14 @@ class TaskContextBuilder:
             )
             all_reasons = [r for r in fs.reasons if r != "source file"] + content_reasons
             reason_str = ", ".join(all_reasons) if all_reasons else "source file"
+            why_str = _java_why(path, file_class)
 
             scored.append((total, path, RelevantFile(
                 path=path,
                 role=role,
                 score=round(min(total / 3.0, 1.0), 2),
                 reason=reason_str,
+                why=why_str,
             )))
 
         # Deterministic: score desc, then path asc as tiebreaker
