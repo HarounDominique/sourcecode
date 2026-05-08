@@ -229,6 +229,29 @@ class MetricsAnalyzer:
                 "null complexity fields are expected, not an error."
             )
 
+        # P2-C: DDD module metrics — group by module, count files/methods per layer
+        _DDD_LAYERS = {"domain", "application", "infrastructure"}
+        ddd_files = [r for r in records if "/ddd/" in r.path.replace("\\", "/")]
+        if ddd_files:
+            module_layer_data: dict[str, dict[str, dict]] = {}
+            for fm in ddd_files:
+                parts = fm.path.replace("\\", "/").split("/")
+                for i, part in enumerate(parts):
+                    if part in _DDD_LAYERS and i >= 2:
+                        module = parts[i - 1]
+                        layer = part
+                        if module not in module_layer_data:
+                            module_layer_data[module] = {lyr: {"files": 0, "methods": 0} for lyr in _DDD_LAYERS}
+                        module_layer_data[module][layer]["files"] += 1
+                        module_layer_data[module][layer]["methods"] += fm.function_count or 0
+                        break
+            ddd_metrics = [
+                {"module": mod, "layers": layers}
+                for mod, layers in sorted(module_layer_data.items())
+            ]
+        else:
+            ddd_metrics = []
+
         summary = MetricsSummary(
             requested=True,
             file_count=len(records),
@@ -238,6 +261,7 @@ class MetricsAnalyzer:
             coverage_records=coverage_records,
             coverage_sources_found=sorted({r.format for r in coverage_records}),
             limitations=limitations,
+            ddd_module_metrics=ddd_metrics,
         )
         return records, summary
 

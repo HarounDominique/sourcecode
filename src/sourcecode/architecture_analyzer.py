@@ -183,7 +183,11 @@ class ArchitectureAnalyzer:
         if ddd_result is not None:
             ddd_pattern, ddd_layers, ddd_contexts, ddd_layer_names = ddd_result
             domains_for_ddd = self._cluster_domains(filtered) if len(filtered) >= 2 else []
-            bc_list = [BoundedContext(name=n, confidence="high") for n in ddd_contexts]
+            module_files = self._build_ddd_module_files(sm.file_paths, ddd_contexts)
+            bc_list = [
+                BoundedContext(name=n, modules=module_files.get(n, []), confidence="high")
+                for n in ddd_contexts
+            ]
             return ArchitectureAnalysis(
                 requested=True,
                 pattern=ddd_pattern,
@@ -413,6 +417,22 @@ class ArchitectureAnalyzer:
             for layer in ddd_layer_names
         ]
         return "ddd", arch_layers, bounded_context_names, ddd_layer_names
+
+    def _build_ddd_module_files(
+        self, paths: list[str], bounded_context_names: list[str]
+    ) -> "dict[str, list[str]]":
+        """Build a mapping of DDD module name → list of file paths."""
+        _DDD_LAYERS = frozenset({"application", "domain", "infrastructure"})
+        module_files: dict[str, list[str]] = {}
+        for p in paths:
+            parts = p.replace("\\", "/").split("/")
+            for i, part in enumerate(parts):
+                if part in _DDD_LAYERS and i >= 2:
+                    mod = parts[i - 1]
+                    if mod in bounded_context_names:
+                        module_files.setdefault(mod, []).append(p)
+                    break
+        return module_files
 
     def _is_tooling(self, path: str) -> bool:
         norm = path.replace("\\", "/")

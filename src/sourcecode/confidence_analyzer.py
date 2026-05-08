@@ -193,6 +193,27 @@ class ConfidenceAnalyzer:
                 impact="low",
             ))
 
+        # ── Java test coverage gap check (P2-A) ──────────────────────────────
+        _java_all = [p for p in sm.file_paths if p.endswith(".java")]
+        _java_tests = [
+            p for p in _java_all
+            if "/test/" in p.replace("\\", "/") or "/tests/" in p.replace("\\", "/")
+            or Path(p).stem.endswith(("Test", "Tests", "IT", "Spec"))
+        ]
+        _java_prod = [p for p in _java_all if p not in set(_java_tests)]
+        if _java_prod and len(_java_prod) >= 10:
+            _ratio = len(_java_tests) / len(_java_prod)
+            if _ratio < 0.05:
+                gaps.append(AnalysisGap(
+                    area="testing",
+                    reason=(
+                        f"Backend test coverage critical: {len(_java_tests)} test files "
+                        f"for {len(_java_prod)} Java files "
+                        f"({_ratio:.1%})"
+                    ),
+                    impact="high",
+                ))
+
         # ── Compute overall confidence ─────────────────────────────────────────
         # Stack: use best manifest-detected stack, fall back to min
         manifest_stacks = [s for s in sm.stacks if s.detection_method != "heuristic"]

@@ -25,8 +25,18 @@ _CONTROLLER_ADVICE_RE = re.compile(r'@ControllerAdvice\b')
 _WEB_FILTER_RE = re.compile(r'@WebFilter\b')
 _FILTER_BEAN_RE = re.compile(r'FilterRegistrationBean\b')
 # Extracts path from @RequestMapping("/v1/foo"), @GetMapping("/bar"), etc.
+# Handles attribute order: value= may come after method= in legacy @RequestMapping style.
 _HTTP_PATH_RE = re.compile(
-    r'@(?:Request|Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']'
+    r'@(?:Request|Get|Post|Put|Delete|Patch)Mapping\s*\([^)]*?(?:value\s*=\s*)?["\']([^"\']+)["\']'
+)
+_REQUEST_METHOD_VERB_RE = re.compile(
+    r'method\s*=\s*RequestMethod\.([A-Z]+)'
+)
+# @M3FiltroSeguridad custom security annotation
+_M3_FILTRO_RE = re.compile(r'@M3FiltroSeguridad\b')
+_M3_FILTRO_PARAMS_RE = re.compile(
+    r'@M3FiltroSeguridad\s*\(\s*(?:nombreRecurso\s*=\s*"([^"]*)")?'
+    r'(?:[^)]*nivelRequerido\s*=\s*(\d+))?'
 )
 
 
@@ -149,16 +159,29 @@ class JavaDetector(AbstractDetector):
 
         # Quick pre-filter before running regexes
         if ("Controller" not in content and "Filter" not in content
-                and "ControllerAdvice" not in content):
+                and "ControllerAdvice" not in content
+                and "M3FiltroSeguridad" not in content):
             return []
 
         if _REST_CONTROLLER_RE.search(content):
             http_path_match = _HTTP_PATH_RE.search(content)
             http_path = http_path_match.group(1) if http_path_match else None
+            verb_match = _REQUEST_METHOD_VERB_RE.search(content)
+            if verb_match and http_path:
+                http_path = f"[{verb_match.group(1)}] {http_path}"
+            elif verb_match:
+                http_path = f"[{verb_match.group(1)}]"
+            security_evidence = None
+            m3_match = _M3_FILTRO_PARAMS_RE.search(content)
+            if m3_match:
+                nombre = m3_match.group(1) or ""
+                nivel = m3_match.group(2) or ""
+                security_evidence = f"@M3FiltroSeguridad(nombreRecurso={nombre!r}, nivelRequerido={nivel})"
             return [EntryPoint(
                 path=rel_path, stack="java", kind="rest_controller",
                 source="annotation", confidence="high",
                 http_path=http_path,
+                evidence=security_evidence,
             )]
         if _CONTROLLER_ADVICE_RE.search(content):
             return [EntryPoint(
@@ -168,10 +191,22 @@ class JavaDetector(AbstractDetector):
         if _MVC_CONTROLLER_RE.search(content) and _REQUEST_MAPPING_RE.search(content):
             http_path_match = _HTTP_PATH_RE.search(content)
             http_path = http_path_match.group(1) if http_path_match else None
+            verb_match = _REQUEST_METHOD_VERB_RE.search(content)
+            if verb_match and http_path:
+                http_path = f"[{verb_match.group(1)}] {http_path}"
+            elif verb_match:
+                http_path = f"[{verb_match.group(1)}]"
+            security_evidence = None
+            m3_match = _M3_FILTRO_PARAMS_RE.search(content)
+            if m3_match:
+                nombre = m3_match.group(1) or ""
+                nivel = m3_match.group(2) or ""
+                security_evidence = f"@M3FiltroSeguridad(nombreRecurso={nombre!r}, nivelRequerido={nivel})"
             return [EntryPoint(
                 path=rel_path, stack="java", kind="mvc_controller",
                 source="annotation", confidence="medium",
                 http_path=http_path,
+                evidence=security_evidence,
             )]
         if _WEB_FILTER_RE.search(content):
             return [EntryPoint(

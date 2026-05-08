@@ -225,6 +225,7 @@ class MetricsSummary:
     coverage_records: list[CoverageRecord] = field(default_factory=list)
     coverage_sources_found: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
+    ddd_module_metrics: list[dict] = field(default_factory=list)
 
 
 @dataclass

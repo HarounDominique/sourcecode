@@ -27,6 +27,8 @@ _ENV_EXAMPLE_NAMES = {
 
 # Spring Boot application.properties / application.yml and their profile variants
 _SPRING_CONF_BASE = {"application.properties", "application.yml", "application.yaml"}
+# Matches options/{profile}/ in multi-tenant SAS layout paths
+_OPTIONS_PROFILE_PATH_RE = re.compile(r'options/([a-z0-9_-]+)/', re.IGNORECASE)
 _SPRING_CONF_PROFILE_RE = re.compile(r'^application-([a-z0-9_-]+)\.(properties|ya?ml)$', re.IGNORECASE)
 # Matches ${ENV_VAR} or ${ENV_VAR:default} where ENV_VAR is UPPER_SNAKE_CASE.
 # Group 1 = key, Group 2 = default (may be empty string, absent = no default).
@@ -507,6 +509,10 @@ class EnvAnalyzer:
                 # Spring Boot application.properties / application.yml (incl. profiles)
                 if name_lower in _SPRING_CONF_BASE or _SPRING_CONF_PROFILE_RE.match(name_lower):
                     profile = _extract_spring_profile(name)
+                    # Override profile if path contains options/{profile}/ (multi-tenant SAS layout)
+                    path_profile_match = _OPTIONS_PROFILE_PATH_RE.search(rel)
+                    if path_profile_match:
+                        profile = path_profile_match.group(1)
                     if profile and profile not in profiles_scanned:
                         profiles_scanned.append(profile)
                     count = _parse_spring_config(entry, rel, findings, profile)

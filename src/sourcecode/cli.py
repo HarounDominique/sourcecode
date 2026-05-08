@@ -790,7 +790,7 @@ def main(
     # Require at least 8: src(1)+main(2)+java(3)+com(4)+co(5)+app(6)+module(7)+file.
     _java_manifest_names = {"pom.xml", "build.gradle", "build.gradle.kts"}
     _is_java = any(Path(m).name in _java_manifest_names for m in manifests)
-    _java_min_depth = 8
+    _java_min_depth = 10
     effective_depth = max(depth, _java_min_depth) if _is_java and depth < _java_min_depth else depth
 
     # --agent: enable signal analyzers; output via agent_view (not compact)
@@ -1375,6 +1375,12 @@ def main(
                             f"anomalies={len(_cs.anomalies)}"
                         ))
         sm = _replace(sm, pipeline_trace=_trace.build_trace())
+
+    # P3-B: Auto-switch to centrality ranking when DDD layout detected
+    if (rank_by == "relevance"
+            and sm.architecture is not None
+            and sm.architecture.pattern == "ddd"):
+        rank_by = "centrality"
 
     # Contract pipeline — runs for mode=contract|standard|deep|hybrid (skip for raw)
     _is_contract_mode = mode in ("contract", "standard")

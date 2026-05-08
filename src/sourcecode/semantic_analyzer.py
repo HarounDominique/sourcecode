@@ -40,6 +40,34 @@ _MAX_SYMBOLS = 10_000
 # JS/TS keyword and builtin exclusions (Plan 12-03)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Java/JVM heuristic regex constants (module-level for performance)
+# ---------------------------------------------------------------------------
+
+_AUTOWIRED_FIELD_RE = re.compile(
+    r'@Autowired\s+(?:private\s+|protected\s+|public\s+)?([A-Z][A-Za-z0-9_<>]*)\s+(\w+)\s*;'
+)
+_MAPPER_IFACE_RE = re.compile(
+    r'@Mapper\b.*?(?:public\s+)?interface\s+([A-Z][A-Za-z0-9_]*)',
+    re.DOTALL,
+)
+_EXTENDS_RE = re.compile(
+    r'(?:class|interface)\s+([A-Z][A-Za-z0-9_]*)\s+extends\s+([A-Z][A-Za-z0-9_]*)'
+)
+_M3_FILTRO_METHOD_RE = re.compile(
+    r'@M3FiltroSeguridad(?:\([^)]*\))?\s+(?:@[^\s]+\s+)*'
+    r'(?:public|private|protected)\s+\w[\w<>\[\]]*\s+([a-z][A-Za-z0-9_]*)\s*\('
+)
+_LOMBOK_CLASS_RE = re.compile(
+    r'(@(?:Data|Slf4j|Builder|AllArgsConstructor|NoArgsConstructor)(?:\([^)]*\))?\s+)*'
+    r'(?:public\s+)?(?:class|interface)\s+([A-Z][A-Za-z0-9_]*)',
+    re.MULTILINE,
+)
+
+# ---------------------------------------------------------------------------
+# JS/TS keyword and builtin exclusions (Plan 12-03)
+# ---------------------------------------------------------------------------
+
 _JS_KEYWORD_EXCLUSIONS: frozenset[str] = frozenset({
     # JS reserved words
     "if", "else", "for", "while", "do", "switch", "case", "break", "continue",
@@ -645,6 +673,29 @@ class SemanticAnalyzer:
                 ),
             }
 
+            # P1-D: Link @Mapper interfaces to their *Mapper.xml files
+            xml_paths = [p for p in all_paths if p.endswith(("Mapper.xml", "MyBatis.xml"))]
+            mapper_xml_index: dict[str, str] = {}
+            for xp in xml_paths:
+                stem = Path(xp).stem  # e.g. "PacienteMapper"
+                mapper_xml_index[stem] = xp
+
+            for sym in all_symbols:
+                if sym.kind == "mapper_interface" and sym.language == "java":
+                    xml_key = sym.symbol
+                    if xml_key in mapper_xml_index:
+                        xml_path = mapper_xml_index[xml_key]
+                        links.append(SymbolLink(
+                            importer_path=Path(sym.path).as_posix(),
+                            symbol=sym.symbol,
+                            source_path=xml_path,
+                            source_line=None,
+                            is_external=False,
+                            confidence="high",
+                            method="heuristic",
+                            workspace=workspace,
+                        ))
+
         # Determine explicit analysis status — never emit silent empty results.
         # An agent must be able to tell "analysis ran and found nothing" from
         # "analysis failed to run" or "significant coverage gap".
@@ -865,6 +916,8 @@ class SemanticAnalyzer:
         """Heuristic Java/Kotlin: detecta class/method declarations y call sites.
 
         method="heuristic", confidence="low" para todos los edges Java.
+        Includes: Lombok synthetic symbols, @Autowired field edges,
+        @Mapper interface detection, inheritance chains, @M3FiltroSeguridad AOP edges.
         """
         _JAVA_KEYWORDS: frozenset[str] = frozenset({
             "if", "for", "while", "switch", "catch", "super", "this", "new",
@@ -922,6 +975,105 @@ class SemanticAnalyzer:
                     confidence="low",
                     method="heuristic",
                 ))
+
+        # P1-D: @Mapper interface detection — emit as mapper_interface symbol
+        for m in _MAPPER_IFACE_RE.finditer(content):
+            iface_name = m.group(1)
+            line = content[: m.start()].count("\n") + 1
+            symbols.append(SymbolRecord(
+                symbol=iface_name,
+                kind="mapper_interface",
+                language="java",
+                path=rel_path,
+                line=line,
+                exported=True,
+            ))
+
+        # P1-E: Inheritance chain — class X extends Y → edge X→Y
+        for m in _EXTENDS_RE.finditer(content):
+            subclass = m.group(1)
+            superclass = m.group(2)
+            line = content[: m.start()].count("\n") + 1
+            calls.append(CallRecord(
+                caller_path=rel_path,
+                caller_symbol=subclass,
+                callee_path=rel_path,
+                callee_symbol=superclass,
+                call_line=line,
+                confidence="low",
+                method="heuristic",
+            ))
+
+        # P1-F: Lombok annotations — emit synthetic symbols
+        for m in _LOMBOK_CLASS_RE.finditer(content):
+            annotations_block = m.group(0)
+            class_name = m.group(2)
+            line = content[: m.start()].count("\n") + 1
+            if "@Slf4j" in annotations_block:
+                symbols.append(SymbolRecord(
+                    symbol="log",
+                    kind="field",
+                    language="java",
+                    path=rel_path,
+                    line=line,
+                    exported=False,
+                ))
+            if "@Builder" in annotations_block:
+                symbols.append(SymbolRecord(
+                    symbol=f"{class_name}.builder",
+                    kind="function",
+                    language="java",
+                    path=rel_path,
+                    line=line,
+                    exported=True,
+                ))
+            if "@AllArgsConstructor" in annotations_block or "@Data" in annotations_block:
+                symbols.append(SymbolRecord(
+                    symbol=f"{class_name}(allArgs)",
+                    kind="function",
+                    language="java",
+                    path=rel_path,
+                    line=line,
+                    exported=True,
+                ))
+            if "@NoArgsConstructor" in annotations_block:
+                symbols.append(SymbolRecord(
+                    symbol=f"{class_name}()",
+                    kind="function",
+                    language="java",
+                    path=rel_path,
+                    line=line,
+                    exported=True,
+                ))
+
+        # P1-G: @Autowired field injection — emit dependency edges
+        for m in _AUTOWIRED_FIELD_RE.finditer(content):
+            field_type = m.group(1)
+            field_name = m.group(2)
+            line = content[: m.start()].count("\n") + 1
+            calls.append(CallRecord(
+                caller_path=rel_path,
+                caller_symbol=field_name,
+                callee_path=rel_path,
+                callee_symbol=field_type,
+                call_line=line,
+                confidence="medium",
+                method="heuristic",
+            ))
+
+        # P3-C: @M3FiltroSeguridad AOP proxy edges
+        for m in _M3_FILTRO_METHOD_RE.finditer(content):
+            method_name = m.group(1)
+            line = content[: m.start()].count("\n") + 1
+            calls.append(CallRecord(
+                caller_path=rel_path,
+                caller_symbol="M3FiltroSeguridadImpl",
+                callee_path=rel_path,
+                callee_symbol=method_name,
+                call_line=line,
+                confidence="medium",
+                method="heuristic",
+            ))
 
         return symbols, calls
 
