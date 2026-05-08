@@ -788,7 +788,7 @@ def main(
     # Require at least 8: src(1)+main(2)+java(3)+com(4)+co(5)+app(6)+module(7)+file.
     _java_manifest_names = {"pom.xml", "build.gradle", "build.gradle.kts"}
     _is_java = any(Path(m).name in _java_manifest_names for m in manifests)
-    _java_min_depth = 10
+    _java_min_depth = 12
     effective_depth = max(depth, _java_min_depth) if _is_java and depth < _java_min_depth else depth
 
     # --agent: enable signal analyzers; output via agent_view (not compact)
@@ -1399,6 +1399,31 @@ def main(
                         ))
         sm = _replace(sm, pipeline_trace=_trace.build_trace())
 
+    # Pre-compute uncommitted files for --changed-only.
+    # The contract pipeline filter and git_context are two separate subsystems;
+    # wire them here so the pipeline uses git_context data, not an independent git call.
+    _allowed_changed_files: Optional[set[str]] = None
+    if changed_only:
+        from sourcecode.git_analyzer import GitAnalyzer as _GitAnalyzerEarly
+        try:
+            _gc_early = _GitAnalyzerEarly().analyze(target, depth=1, days=1)
+            _bad_gc = {"no_git_repo", "git_not_found", "git_timeout"}
+            if _gc_early and not (_bad_gc & set(_gc_early.limitations)):
+                _uc = _gc_early.uncommitted_changes
+                if _uc:
+                    _allowed_changed_files = (
+                        set(_uc.staged) | set(_uc.unstaged) | set(_uc.untracked)
+                    )
+            if not _allowed_changed_files:
+                typer.echo(
+                    "[changed-only] git unavailable or no uncommitted changes — falling back to full scan.",
+                    err=True,
+                )
+                changed_only = False
+        except Exception:
+            typer.echo("[changed-only] git error — falling back to full scan.", err=True)
+            changed_only = False
+
     # Contract pipeline — runs for mode=contract|standard|deep|hybrid (skip for raw)
     _is_contract_mode = mode in ("contract", "standard")
     _pipeline_error = False
@@ -1432,6 +1457,7 @@ def main(
                 max_importers=max_importers,
                 semantic_calls=sm.semantic_calls or None,
                 code_notes=sm.code_notes or None,
+                allowed_changed_files=_allowed_changed_files,
                 **_java_pipeline_kwargs,
             )
         except Exception as _exc:
@@ -1706,8 +1732,13 @@ def prepare_context_cmd(
     if llm_prompt:
         out["llm_prompt"] = builder.render_prompt(output)
 
+    import sys as _sys
     _pc_content = json.dumps(out, indent=2, ensure_ascii=False)
-    typer.echo(_pc_content)
+    _pc_bytes = _pc_content.encode("utf-8")
+    _sys.stdout.buffer.write(_pc_bytes)
+    if not _pc_content.endswith("\n"):
+        _sys.stdout.buffer.write(b"\n")
+    _sys.stdout.buffer.flush()
 
     if copy:
         _trimmed = _pc_content.strip()

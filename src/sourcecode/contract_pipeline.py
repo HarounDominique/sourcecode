@@ -183,6 +183,7 @@ class ContractPipeline:
         code_notes: Optional[list] = None,
         max_contracts: Optional[int] = _MAX_CONTRACTS,
         min_score: Optional[float] = None,
+        allowed_changed_files: Optional[set[str]] = None,
     ) -> tuple[list[FileContract], ContractSummary]:
         """Run the full extraction pipeline.
 
@@ -200,9 +201,14 @@ class ContractPipeline:
         engine = RankingEngine(monorepo_packages)
 
         # 1. Changed files (for --changed-only and ranking)
+        # When allowed_changed_files is provided (from pre-computed git uncommitted_changes),
+        # use it directly. Otherwise fall back to independent git commands.
         changed_files: set[str] = set()
         if changed_only or rank_by == "git-churn":
-            changed_files = _get_changed_files(root)
+            if allowed_changed_files is not None:
+                changed_files = allowed_changed_files
+            else:
+                changed_files = _get_changed_files(root)
 
         # 2. Select files to extract
         # Exclude test files by default — they dominate by count but add noise

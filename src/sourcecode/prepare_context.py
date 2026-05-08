@@ -398,10 +398,26 @@ class TaskContextBuilder:
         from sourcecode.tree_utils import flatten_file_tree
 
         _topology = RepoClassifier().classify(self.root)
-        scanner = AdaptiveScanner(self.root, topology=_topology, base_depth=6)
+        # Shallow pre-scan to detect Java manifests before choosing depth.
+        from sourcecode.scanner import FileScanner as _FileScanner
+        _pre = _FileScanner(self.root, max_depth=1)
+        _pre_manifests = _pre.find_manifests()
+        _java_names = {"pom.xml", "build.gradle", "build.gradle.kts"}
+        _is_java = any(Path(m).name in _java_names for m in _pre_manifests)
+        _base_depth = 12 if _is_java else 6
+        scanner = AdaptiveScanner(self.root, topology=_topology, base_depth=_base_depth)
         file_tree = scanner.scan_tree()
         manifests = scanner.find_manifests()
         all_paths = [p.replace("\\", "/") for p in flatten_file_tree(file_tree)]
+
+        # Warn when Java project has no Mapper.xml — suggests files below scan depth.
+        _mybatis_warning: dict | None = None
+        if _is_java and not any(p.endswith("Mapper.xml") for p in all_paths):
+            _mybatis_warning = {
+                "area": "mybatis",
+                "reason": "Mapper XML files may exist below scan depth. Re-run with --depth 12.",
+                "impact": "high",
+            }
 
         # ── 2. Detect stacks + entry points ───────────────────────────────
         from dataclasses import replace as _replace
@@ -500,6 +516,7 @@ class TaskContextBuilder:
         code_notes_summary: Optional[dict[str, Any]] = None
         suspected_areas: list[str] = []
         improvement_opportunities: list[str] = []
+        cn_notes_for_ranking: list = []
 
         if spec.enable_code_notes:
             from dataclasses import asdict
@@ -507,6 +524,7 @@ class TaskContextBuilder:
 
             cn_notes, _cn_adrs, cn_summary = CodeNotesAnalyzer().analyze(self.root)
             code_notes_summary = asdict(cn_summary)
+            cn_notes_for_ranking = cn_notes
 
             if task_name == "fix-bug":
                 bug_kinds = {"FIXME", "BUG", "HACK", "XXX"}
@@ -555,6 +573,7 @@ class TaskContextBuilder:
             monorepo_packages=sm.monorepo_packages if sm.monorepo_packages else None,
             git_hotspots=git_hotspots,
             uncommitted_files=uncommitted_files,
+            code_notes=cn_notes_for_ranking if cn_notes_for_ranking else None,
         )
 
         # ── 7. Test gaps (generate-tests only) ────────────────────────────
@@ -594,6 +613,8 @@ class TaskContextBuilder:
         conf_summary, analysis_gaps = ConfidenceAnalyzer().analyze(sm_for_conf)
         confidence = conf_summary.overall
         gaps = [g.reason for g in analysis_gaps]
+        if _mybatis_warning:
+            gaps.append(_mybatis_warning["reason"])
 
         # ── 9. why_these_files ────────────────────────────────────────────────
         why_these_files: dict[str, str] = {
@@ -705,6 +726,7 @@ class TaskContextBuilder:
         monorepo_packages: Optional[list] = None,
         git_hotspots: Optional[dict[str, int]] = None,
         uncommitted_files: Optional[set[str]] = None,
+        code_notes: Optional[list] = None,
     ) -> list[RelevantFile]:
         from sourcecode.ranking_engine import RankingEngine
         from sourcecode.file_classifier import FileClassifier
@@ -718,6 +740,35 @@ class TaskContextBuilder:
         _hotspots = git_hotspots or {}
         _uncommitted = uncommitted_files or set()
         _max_churn = max(_hotspots.values(), default=1)
+
+        # Pre-compute fix-bug signals (used only when task_name == "fix-bug")
+        _annotated_files: set[str] = set()
+        _dominant_stack = ""
+        _recently_changed_stacks: set[str] = set()
+        if task_name == "fix-bug":
+            _bug_kinds = {"FIXME", "BUG"}
+            for _n in (code_notes or []):
+                if getattr(_n, "kind", "").upper() in _bug_kinds:
+                    _annotated_files.add(getattr(_n, "path", ""))
+
+            def _file_stack(p: str) -> str:
+                ext = Path(p).suffix.lower()
+                if ext == ".java": return "java"
+                if ext in (".ts", ".tsx", ".js", ".jsx", ".mjs"): return "typescript"
+                if ext == ".py": return "python"
+                if ext == ".go": return "go"
+                if ext in (".kt", ".kts"): return "kotlin"
+                if ext == ".rs": return "rust"
+                if ext == ".rb": return "ruby"
+                return "unknown"
+
+            from collections import Counter as _Counter
+            _stk_counts: _Counter[str] = _Counter(
+                _file_stack(f) for f in _uncommitted if _file_stack(f) != "unknown"
+            )
+            if _stk_counts:
+                _dominant_stack = _stk_counts.most_common(1)[0][0]
+                _recently_changed_stacks = set(_stk_counts.keys())
 
         scored: list[tuple[float, str, RelevantFile]] = []
 
@@ -762,10 +813,28 @@ class TaskContextBuilder:
 
             # Task-specific boosts for differentiated file weighting
             path_lower = path.lower()
+            _fix_bug_why = ""
             if task_name == "fix-bug":
-                if any(x in path_lower for x in ("exception", "error", "handler", "advice")):
-                    content_boost += 1.5
-                    content_reasons.append("exception handler — high risk area")
+                _why_parts: list[str] = []
+                if path in _uncommitted:
+                    content_boost += 0.40
+                    _why_parts.append("uncommitted change (+0.40)")
+                _recency = min(0.30, _hotspots.get(path, 0) * 0.05)
+                if _recency > 0:
+                    content_boost += _recency
+                    _why_parts.append(f"recent commits (+{_recency:.2f})")
+                if path in _annotated_files:
+                    content_boost += 0.20
+                    _why_parts.append("FIXME/BUG annotation (+0.20)")
+                _file_stk = _file_stack(path)
+                if _dominant_stack and _file_stk == _dominant_stack:
+                    content_boost += 0.10
+                    _why_parts.append("dominant changed stack (+0.10)")
+                if _recently_changed_stacks and _file_stk not in _recently_changed_stacks and _file_stk != "unknown":
+                    content_boost -= 0.30
+                    _why_parts.append("different stack from recent changes (-0.30)")
+                if _why_parts:
+                    _fix_bug_why = ", ".join(_why_parts)
             elif task_name == "generate-tests":
                 stem = Path(path).stem.lower()
                 has_test = any(
@@ -797,7 +866,7 @@ class TaskContextBuilder:
             )
             all_reasons = [r for r in fs.reasons if r != "source file"] + content_reasons
             reason_str = ", ".join(all_reasons) if all_reasons else "source file"
-            why_str = _java_why(path, file_class)
+            why_str = _fix_bug_why if _fix_bug_why else _java_why(path, file_class)
 
             scored.append((total, path, RelevantFile(
                 path=path,

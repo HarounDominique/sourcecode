@@ -135,7 +135,8 @@ class AdaptiveScanner:
             if current_depth >= n:
                 # At or inside the source root
                 if rel_parts[:n] == src_parts:
-                    return src_max  # definite source territory — early exit
+                    # base_depth acts as a floor — explicit --depth always wins
+                    return max(src_max, self.base_depth)
             else:
                 # Ancestor check: src_parts starts with rel_parts?
                 if src_parts[:current_depth] == rel_parts:
