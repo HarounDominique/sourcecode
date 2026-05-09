@@ -38,6 +38,19 @@ _MONOREPO_PKGS_CAP = 8       # max workspace/runtime packages shown
 _KEY_DEPS_CAP = 50           # max key dependencies shown
 _CODE_NOTES_CAP = 15         # max code notes in default output
 _ENV_MAP_CAP = 15            # max env var entries in default output
+_MAX_DEFAULT_CONTRACTS = 20  # max contracts in default/standard contract output
+_MAX_HARD_SIGNALS_DEFAULT = 20  # max hard_signals entries in default output
+
+
+def _cap_contracts_for_output(
+    contracts: list[Any],
+    max_count: int = _MAX_DEFAULT_CONTRACTS,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Sort contracts by relevance_score desc, cap to max_count, return (sampled, meta)."""
+    total = len(contracts)
+    sampled = sorted(contracts, key=lambda c: getattr(c, "relevance_score", 0.0), reverse=True)[:max_count]
+    meta: dict[str, Any] = {"total": total, "shown": len(sampled), "truncated": total > max_count}
+    return sampled, meta
 
 
 def to_json(sm: SourceMap | dict[str, Any], indent: int = 2) -> str:
@@ -1230,13 +1243,11 @@ def _contract_view_minimal(
     if getattr(sm, "app_server_hint", None):
         result["app_server_hint"] = sm.app_server_hint
 
-    # Per-file contracts
+    # Per-file contracts — capped to avoid token bloat on large projects
     if contracts:
-        serialized: list[dict[str, Any]] = []
-        for c in contracts:
-            item = _serialize_contract_minimal(c)
-            serialized.append(item)
-        result["contracts"] = serialized
+        _capped, _meta = _cap_contracts_for_output(contracts)
+        result["contracts"] = [_serialize_contract_minimal(c) for c in _capped]
+        result["contracts_meta"] = _meta
 
     # Optional analysis sections — included when the analyzer explicitly ran
     # (user passed --dependencies, --env-map, --code-notes, --git-context)
@@ -1587,10 +1598,11 @@ def _contract_view_standard(
             "stack": sm.confidence_summary.stack_confidence,
         }
 
-    # Per-file contracts (full detail)
+    # Per-file contracts (full detail) — capped to avoid token bloat on large projects
     if contracts:
+        _capped, _meta = _cap_contracts_for_output(contracts)
         serialized: list[dict[str, Any]] = []
-        for c in contracts:
+        for c in _capped:
             if getattr(c, "language", None) == "mybatis-xml":
                 item = _serialize_contract_mybatis_xml(c)
                 item["relevance_score"] = round(c.relevance_score, 3)
@@ -1646,6 +1658,7 @@ def _contract_view_standard(
             item["method"] = c.extraction_method
             serialized.append(item)
         result["contracts"] = serialized
+        result["contracts_meta"] = _meta
 
     # Optional analysis sections (deep mode or when analyzers ran)
     if include_optional:
