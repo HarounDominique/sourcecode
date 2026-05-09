@@ -958,7 +958,13 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
             "sections": _section_confidence(sm),
         }
         if cs.hard_signals:
-            conf["hard_signals"] = cs.hard_signals
+            _MAX_HARD_SIGNALS = 20
+            _hs = cs.hard_signals
+            _hs_total = len(_hs)
+            conf["hard_signals"] = _hs[:_MAX_HARD_SIGNALS]
+            if _hs_total > _MAX_HARD_SIGNALS:
+                conf["hard_signals_truncated"] = True
+                conf["hard_signals_total"] = _hs_total
         if cs.soft_signals:
             conf["soft_signals"] = cs.soft_signals
         if cs.ignored_signals:

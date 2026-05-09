@@ -1485,7 +1485,17 @@ def main(
         if _is_contract_mode and sm.file_contracts:
             from sourcecode.serializer import _serialize_contract_minimal
             data.pop("file_relevance", None)
-            data["contracts"] = [_serialize_contract_minimal(c) for c in sm.file_contracts]
+            _MAX_AGENT_CONTRACTS = 10
+            _all_contracts = sm.file_contracts
+            _sorted = sorted(_all_contracts, key=lambda c: getattr(c, "relevance_score", 0.0), reverse=True)
+            _sampled = _sorted[:_MAX_AGENT_CONTRACTS]
+            _total_contracts = len(_all_contracts)
+            data["contracts"] = [_serialize_contract_minimal(c) for c in _sampled]
+            data["contracts_meta"] = {
+                "total": _total_contracts,
+                "shown": len(_sampled),
+                "truncated": _total_contracts > _MAX_AGENT_CONTRACTS,
+            }
             if sm.contract_summary is not None:
                 cs = sm.contract_summary
                 data["contract_summary"] = {
