@@ -121,6 +121,7 @@ class ProjectDetector:
             packaging=stack.packaging,
             app_server_hint=stack.app_server_hint,
             spring_profiles=list(stack.spring_profiles),
+            transactional_classes=list(stack.transactional_classes),
         )
 
     def _merge_stack(self, current: StackDetection, incoming: StackDetection) -> StackDetection:
@@ -144,6 +145,8 @@ class ProjectDetector:
             current.app_server_hint = incoming.app_server_hint
         if incoming.spring_profiles and not current.spring_profiles:
             current.spring_profiles = list(incoming.spring_profiles)
+        if incoming.transactional_classes and not current.transactional_classes:
+            current.transactional_classes = list(incoming.transactional_classes)
         return current
 
     def _merge_frameworks(

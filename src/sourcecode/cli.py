@@ -141,10 +141,14 @@ def _check_pipeline_coherence(sm: "SourceMap") -> list[str]:  # type: ignore[nam
 _HELP = """\
 Compressed AI-ready context for Java/Spring enterprise codebases.
 
+[bold]Primary usage:[/bold]
+  sourcecode --compact                  high-signal summary (~600-800 tokens)
+  sourcecode --compact --git-context    include git hotspots and uncommitted files
+
 [bold]Examples:[/bold]
   sourcecode saint-server --compact
+  sourcecode . --compact --git-context --copy
   sourcecode . --changed-only --git-context
-  sourcecode saint-server --symbol SeguridadRestController
   sourcecode prepare-context onboard saint-server
   sourcecode prepare-context delta . --since main
 
@@ -565,7 +569,8 @@ def main(
     symbol: Optional[str] = typer.Option(
         None,
         "--symbol",
-        help="Extract context for a specific symbol: defining file + all importers.",
+        hidden=True,
+        help="Extract context for a specific symbol (Python/TS/JS only — not supported for Java).",
     ),
     max_importers: int = typer.Option(
         50,
@@ -586,10 +591,10 @@ def main(
 
     \b
     Examples:
-      sourcecode                        analyze current directory
-      sourcecode /path/to/repo          analyze specific path
-      sourcecode --agent                agent-optimized output
-      sourcecode --agent --git-context  include git activity signals
+      sourcecode --compact              high-signal summary (recommended)
+      sourcecode --compact --git-context  include git hotspots
+      sourcecode /path/to/repo --compact  analyze specific path
+      sourcecode --agent                agent-optimized output (full detail)
     """
     # First-run consent (skip for telemetry/version/config subcommands)
     if ctx.invoked_subcommand not in ("telemetry", "version", "config"):
@@ -763,6 +768,16 @@ def main(
     _is_java = any(Path(m).name in _java_manifest_names for m in manifests)
     _java_min_depth = 12
     effective_depth = max(depth, _java_min_depth) if _is_java and depth < _java_min_depth else depth
+
+    if symbol is not None and _is_java:
+        typer.echo(
+            f"Error: --symbol is not supported for Java/JVM repositories. "
+            "Per-file AST extraction is unavailable for JVM — symbol search only works with Python, TypeScript, and JavaScript. "
+            "Alternatives: use --agent --compact to get file relevance scores, "
+            "or use --git-context to find recently changed files.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     # --agent: enable signal analyzers; output via agent_view (not compact)
     if agent:
@@ -1489,7 +1504,9 @@ def main(
         if _is_contract_mode and sm.file_contracts:
             from sourcecode.serializer import _serialize_contract_minimal
             data.pop("file_relevance", None)
-            _MAX_AGENT_CONTRACTS = 10
+            _jvm_stacks_agent = {"java", "kotlin", "scala", "groovy"}
+            _is_jvm_agent = any(s.stack in _jvm_stacks_agent for s in sm.stacks)
+            _MAX_AGENT_CONTRACTS = 50 if _is_jvm_agent else 10
             _all_contracts = sm.file_contracts
             _sorted = sorted(_all_contracts, key=lambda c: getattr(c, "relevance_score", 0.0), reverse=True)
             _sampled = _sorted[:_MAX_AGENT_CONTRACTS]

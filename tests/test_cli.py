@@ -52,9 +52,9 @@ def test_help_contains_core_flags():
     assert "--git-context" in result.output
     assert "--agent" in result.output
     assert "--changed-only" in result.output
-    assert "--symbol" in result.output
     assert "--no-redact" in result.output
     # Hidden flags must not appear in default help
+    assert "--symbol" not in result.output
     assert "--dependencies" not in result.output
     assert "--graph-modules" not in result.output
     assert "--semantics" not in result.output

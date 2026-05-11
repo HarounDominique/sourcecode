@@ -188,6 +188,9 @@ class ProjectSummarizer:
         return None
 
     def _extract_first_useful_paragraph(self, content: str) -> str | None:
+        import re as _re
+        _BADGE_RE = _re.compile(r"^\[?!\[")  # [![badge](...)] or ![img](...)
+        _LINK_ONLY_RE = _re.compile(r"^\[.*?\]\(.*?\)$")  # pure link line
         lines: list[str] = []
         in_code_block = False
         for raw_line in content.splitlines():
@@ -195,9 +198,12 @@ class ProjectSummarizer:
             if line.startswith("```"):
                 in_code_block = not in_code_block
                 continue
-            if in_code_block or not line or line.startswith(("#", "<!--")):
+            if in_code_block or not line or line.startswith(("#", "<!--", ">")):
                 if lines:
                     break
+                continue
+            # Skip badge-only lines and pure-link lines — they are metadata, not descriptions
+            if _BADGE_RE.match(line) or (not lines and _LINK_ONLY_RE.match(line)):
                 continue
             lines.append(line)
         if not lines:

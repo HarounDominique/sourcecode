@@ -68,6 +68,7 @@ class StackDetection:
     packaging: Optional[str] = None          # e.g. "war" | "jar"
     app_server_hint: Optional[str] = None    # e.g. "weblogic" | "wildfly"
     spring_profiles: list[str] = field(default_factory=list)  # detected Spring profiles
+    transactional_classes: list[str] = field(default_factory=list)  # classes with @Transactional
 
 
 @dataclass

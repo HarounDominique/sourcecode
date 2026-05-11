@@ -282,6 +282,24 @@ def _mybatis_pairing(sm: "SourceMap") -> "Optional[dict[str, Any]]":
     return result
 
 
+def _spring_boot_version(sm: "SourceMap") -> "Optional[str]":
+    """Extract Spring Boot version from detected frameworks."""
+    for s in sm.stacks:
+        for fw in s.frameworks:
+            if fw.name == "Spring Boot" and fw.version:
+                return fw.version
+    return None
+
+
+def _transactional_summary(sm: "SourceMap") -> "Optional[dict[str, Any]]":
+    """Surface @Transactional class boundaries from the Java stack detection."""
+    for s in sm.stacks:
+        classes = getattr(s, "transactional_classes", [])
+        if classes:
+            return {"count": len(classes), "classes": classes[:10]}
+    return None
+
+
 def _security_surface_from_eps(eps: list) -> "Optional[dict[str, Any]]":
     """Extract @M3FiltroSeguridad resource names from entry point evidence strings."""
     import re as _re
@@ -715,9 +733,12 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
     _language_version = getattr(sm, "language_version", None)
     _packaging = getattr(sm, "packaging", None)
     _app_server = getattr(sm, "app_server_hint", None)
+    _sb_version = _spring_boot_version(sm)
     _deployment: Any = None
-    if _packaging or _app_server:
+    if _packaging or _app_server or _sb_version:
         _deployment = {}
+        if _sb_version:
+            _deployment["spring_boot_version"] = _sb_version
         if _packaging:
             _deployment["packaging"] = _packaging
         if _app_server:
@@ -725,7 +746,14 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
     _deploy_risks = _project_deployment_risks(sm)
     _security_surface = _security_surface_from_eps(sm.entry_points)
     _mybatis = _mybatis_pairing(sm)
+    _transactional = _transactional_summary(sm)
     _git_ctx = _compact_git_context(sm)
+
+    # Suppress empty optional sections (no signal value)
+    _effective_env_summary = env_summary_dict if (env_summary_dict and env_summary_dict.get("total", 0) > 0) else None
+    _effective_env_map = env_map_items if _effective_env_summary else None
+    _effective_notes_summary = code_notes_summary_dict if (code_notes_summary_dict and code_notes_summary_dict.get("total", 0) > 0) else None
+    _effective_notes = code_notes_items if _effective_notes_summary else None
 
     result: dict[str, Any] = {
         "schema_version": sm.metadata.schema_version,
@@ -736,10 +764,10 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
         "entry_points": entry_points_compact,
         "dependency_summary": dep_summary_dict,
         "key_dependencies": key_deps,
-        "env_summary": env_summary_dict,
-        "env_map": env_map_items,
-        "code_notes_summary": code_notes_summary_dict,
-        "code_notes": code_notes_items,
+        "env_summary": _effective_env_summary,
+        "env_map": _effective_env_map,
+        "code_notes_summary": _effective_notes_summary,
+        "code_notes": _effective_notes,
         "confidence_summary": conf_dict,
         "analysis_gaps": gaps_list,
     }
@@ -753,6 +781,8 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
         result["security_surface"] = _security_surface
     if _mybatis:
         result["mybatis"] = _mybatis
+    if _transactional:
+        result["transactional_boundaries"] = _transactional
     if _git_ctx:
         result["git_context"] = _git_ctx
     _always_include = {"project_type", "project_summary", "architecture_summary", "dependency_summary"}
@@ -1076,10 +1106,13 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
     _lv = getattr(sm, "language_version", None)
     _pkg = getattr(sm, "packaging", None)
     _app_srv = getattr(sm, "app_server_hint", None)
+    _sb_ver = _spring_boot_version(sm)
     if _lv:
         project["language_version"] = _lv
-    if _pkg or _app_srv:
+    if _pkg or _app_srv or _sb_ver:
         _depl: dict[str, Any] = {}
+        if _sb_ver:
+            _depl["spring_boot_version"] = _sb_ver
         if _pkg:
             _depl["packaging"] = _pkg
         if _app_srv:
@@ -1215,13 +1248,16 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
             sem_info["hotspots"] = sem.hotspots[:10]
         signals["semantic_graph"] = sem_info
 
-    # Java/Spring: security surface and ORM structure
+    # Java/Spring: security surface, ORM structure, transactional boundaries
     _sec_surf = _security_surface_from_eps(sm.entry_points)
     if _sec_surf:
         signals["security_surface"] = _sec_surf
     _mb = _mybatis_pairing(sm)
     if _mb:
         signals["mybatis"] = _mb
+    _txn = _transactional_summary(sm)
+    if _txn:
+        signals["transactional_boundaries"] = _txn
 
     if signals:
         result["signals"] = signals

@@ -35,48 +35,45 @@ sourcecode version
 
 ## Quickstart
 
-The most useful command for integrating `sourcecode` into an AI agent:
+The primary command — a high-signal, low-noise summary for Java/Spring codebases:
 
 ```bash
-sourcecode --agent
+sourcecode --compact
+# ~600-800 tokens: stack, entry points, dependencies, risk flags, confidence.
+
+sourcecode --compact --git-context
+# Adds git hotspots and uncommitted file count.
+
+sourcecode --compact --copy
+# Copies the result to clipboard.
 ```
 
-It produces a structured JSON with the essential sections (no noise, no file tree), ready to paste into an LLM context:
+Example output for a Spring Boot project:
 
 ```json
 {
-  "project": {
-    "type": "fullstack",
-    "summary": "Full-stack project in Nodejs, mvc, 4075 source files. Domains: atlas-client, atlas-server, atlas-hub, atlas-reports. 3300 dependencies (java, nodejs).",
-    "primary_stack": "nodejs",
-    "secondary_stacks": ["java"]
+  "project_type": "api",
+  "stacks": [{ "stack": "java", "frameworks": ["Spring Boot", "MyBatis"] }],
+  "entry_points": {
+    "bootstrap": ["src/main/java/io/spring/RealWorldApplication.java"],
+    "security": ["src/main/java/io/spring/api/security/WebSecurityConfig.java"],
+    "controllers": { "count": 8, "sample": [...] }
   },
-  "entry_points": [
-    {
-      "path": "atlas-server/src/main/java/com/example/atlas/AtlasServerApplication.java",
-      "stack": "java",
-      "kind": "application",
-      "confidence": "high"
-    },
-    {
-      "path": "atlas-client/src/main.ts",
-      "stack": "nodejs",
-      "kind": "entrypoint",
-      "confidence": "high"
-    }
+  "key_dependencies": [
+    { "name": "org.mybatis.spring.boot:mybatis-spring-boot-starter",
+      "version": "2.2.2", "risk_flags": ["spring-boot-2.x-eol"] }
   ],
-  "runtime_packages": [ ... ],
-  "dependencies": { ... },
-  "env_map": { ... },
-  "code_notes": [ ... ]
+  "language_version": "11",
+  "deployment": { "spring_boot_version": "2.6.3" },
+  "mybatis": { "mapper_interfaces": 4, "xml_files": 4 },
+  "confidence_summary": { "overall": "high" }
 }
 ```
 
-For large repositories where context matters, use `--compact` to reduce to ~600-800 tokens:
+For full structured output with per-file contracts and signals, use `--agent`:
 
 ```bash
-sourcecode --compact --copy
-# Copies the summary to the clipboard. Ready to paste.
+sourcecode --agent
 ```
 
 ---
@@ -85,41 +82,18 @@ sourcecode --compact --copy
 
 ### Global options
 
-| Flag | Alias | Type | Default | Description | Status |
-|------|-------|------|---------|-------------|--------|
-| `--format` | `-f` | `json\|yaml` | `json` | Output format. YAML is more readable, JSON preferred in pipelines. | ✅ CORE |
-| `--output` | `-o` | `PATH` | stdout | Writes output to a file instead of stdout. | ✅ CORE |
-| `--compact` | | flag | off | ~600-800 token output: stacks, entry points, deps, gaps. No file tree. | ✅ CORE |
-| `--agent` | | flag | off | JSON optimized for agents. Automatically enables `--dependencies`, `--env-map`, `--code-notes`. | ✅ CORE |
-| `--dependencies` | | flag | off | Analyzes direct and transitive deps from manifests and lockfiles. | ✅ CORE |
-| `--git-context` | `-g` | flag | off | Includes recent commits, change hotspots, uncommitted changes, contributors. | ✅ CORE |
-| `--git-depth` | | `INT [1–100]` | `20` | Number of recent commits with `--git-context`. | ✅ CORE |
-| `--git-days` | | `INT [1–3650]` | `90` | Window in days to detect hotspots with `--git-context`. | ✅ CORE |
-| `--env-map` | | flag | off | Maps environment variables: key, type, category, files that reference them. | ✅ CORE |
-| `--code-notes` | | flag | off | Extracts inline annotations: TODO, FIXME, HACK, BUG, DEPRECATED, NOTE, etc. | ✅ CORE |
-| `--copy` | `-c` | flag | off | Copies output to the clipboard after successful execution. | ✅ CORE |
-| `--depth` | | `INT [1–20]` | `4` | Maximum file tree traversal depth. Java/Maven requires ≥8. | ✅ CORE |
-| `--mode` | | `contract\|standard\|raw` | `contract` | `contract`: minimal contracts per file. `standard`: full detail. `raw`: project level only. | ✅ CORE |
-| `--tree` | | flag | off | Includes full `file_tree` and `file_paths` in the output. Increases size significantly. | ✅ CORE |
-| `--changed-only` | | flag | off | Contract mode: only files modified in git (staged, unstaged, untracked). | ✅ CORE |
-| `--rank-by` | | `relevance\|centrality\|git-churn` | `relevance` | File ranking strategy in contract mode. | ✅ CORE |
-| `--semantics` | | flag | off | Cross-file symbol resolution, call graph with confidence levels, fan-in/fan-out hotspots. Slower. | 🧪 EXP |
-| `--architecture` | | flag | off | Architectural layer inference (MVC/hexagonal/bounded contexts). Low confidence without `--semantics`. | 🧪 EXP |
-| `--graph-modules` | | flag | off | Structural module graph: nodes (files/symbols) and edges (imports, calls, contains). | 🧪 EXP |
-| `--graph-detail` | | `high\|medium\|full` | `high` | Module graph detail level. | 🧪 EXP |
-| `--max-nodes` | | `INT [≥1]` | — | Maximum nodes in `--graph-modules`. Prevents huge graphs in large repos. | 🧪 EXP |
-| `--graph-edges` | | `TEXT` | all | Edge types for `--graph-modules`, comma-separated: `imports,calls,contains`. | 🧪 EXP |
-| `--docs` | | flag | off | Extracts docstrings, function signatures, and module comments. | 🧪 EXP |
-| `--docs-depth` | | `module\|symbols\|full` | `symbols` | Docs extraction depth. `full` includes private symbols. | 🧪 EXP |
-| `--symbol` | | `TEXT` | — | Contract mode: localized context for a specific symbol. Python, TS, JS only. **Does not support Java.** | 🧪 EXP |
-| `--max-importers` | | `INT [1–10000]` | `50` | Limit on importer files returned by `--symbol`. | 🧪 EXP |
-| `--full-metrics` | | flag | off | Per-file technical metrics: LOC, cyclomatic complexity, coverage. Aimed at CI, not at agents. | 🧪 EXP |
-| `--emit-graph` | | flag | off | Contract mode: includes a compact dependency graph (nodes + edges) in the output. | 🚧 WIP |
-| `--entrypoints-only` | | flag | off | Contract mode: only files with exports or entry points. Note: includes *all* files with exports. | 🚧 WIP |
-| `--max-symbols` | | `INT [≥1]` | — | Limits total exported symbols in contract mode. Discards lower-ranked files. | 🚧 WIP |
-| `--no-redact` | | flag | off | Disables automatic secret redaction. Output may contain sensitive values. | 🚧 WIP |
-| `--trace-pipeline` | | flag | off | Diagnostic mode: includes a trace of each candidate and filtering decision. Debugging only. | 🚧 WIP |
-| `--version` | `-v` | flag | — | Shows version and exits. | ✅ CORE |
+| Flag | Alias | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--compact` | | flag | off | **Recommended.** ~600-800 token summary: stack, entry points, deps, risk flags, confidence. |
+| `--git-context` | `-g` | flag | off | Adds git hotspots (top changed files), branch, uncommitted file count. Use with `--compact`. |
+| `--agent` | | flag | off | Full structured JSON for AI agents. Auto-enables dependency, env-var, and code-notes analysis. |
+| `--changed-only` | | flag | off | Limit output to git-modified files (staged, unstaged, untracked). |
+| `--depth` | | `INT [1–20]` | `4` | File tree traversal depth. Java projects auto-adjust to 12. |
+| `--format` | `-f` | `json\|yaml` | `json` | Output format. JSON preferred in pipelines. |
+| `--output` | `-o` | `PATH` | stdout | Write output to a file instead of stdout. |
+| `--copy` | `-c` | flag | off | Copy output to clipboard after a successful run. |
+| `--no-redact` | | flag | off | Disable automatic secret redaction. Output may contain sensitive values. |
+| `--version` | `-v` | flag | — | Show version and exit. |
 
 ---
 

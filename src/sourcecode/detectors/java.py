@@ -41,6 +41,34 @@ _M3_FILTRO_PARAMS_RE = re.compile(
     r'(?:[^)]*nivelRequerido\s*=\s*(\d+))?'
 )
 
+# Security config detection
+_WEB_SECURITY_CONFIGURER_RE = re.compile(r'WebSecurityConfigurerAdapter\b')
+_SECURITY_FILTER_CHAIN_RE = re.compile(r'SecurityFilterChain\b')
+_SECURITY_CONFIG_ANNOTATION_RE = re.compile(r'@EnableWebSecurity\b')
+# JWT/token filter detection (files that process every request)
+_ONCE_PER_REQUEST_FILTER_RE = re.compile(r'extends\s+(?:OncePerRequestFilter|GenericFilterBean)\b')
+_JWT_FILTER_KEYWORDS_RE = re.compile(r'\b(?:jwt|token|bearer|authorization)\b', re.IGNORECASE)
+
+# @Transactional detection
+_TRANSACTIONAL_RE = re.compile(r'@Transactional\b')
+# Extracts class name: `public class Foo` or `class Foo`
+_CLASS_NAME_RE = re.compile(r'\bclass\s+([A-Z][A-Za-z0-9_]*)')
+
+# Gradle plugin Spring Boot version: id 'org.springframework.boot' version '2.6.3'
+_GRADLE_SB_PLUGIN_RE = re.compile(
+    r"""id\s*['"]\s*org\.springframework\.boot\s*['"]\s+version\s*['"]([\d.]+)['"']""",
+    re.IGNORECASE,
+)
+# Gradle Java version: sourceCompatibility = '11' or sourceCompatibility = JavaVersion.VERSION_11
+_GRADLE_JAVA_VERSION_RE = re.compile(
+    r"""(?:sourceCompatibility|targetCompatibility|javaVersion)\s*=\s*['"]?([0-9.]+)['"]?""",
+    re.IGNORECASE,
+)
+# JavaVersion.VERSION_11 form
+_GRADLE_JAVA_ENUM_RE = re.compile(
+    r"""(?:sourceCompatibility|targetCompatibility)\s*=\s*JavaVersion\.VERSION_(\d+)"""
+)
+
 
 class JavaDetector(AbstractDetector):
     name = "java"
@@ -69,6 +97,12 @@ class JavaDetector(AbstractDetector):
         if "build.gradle" in context.manifests:
             manifests.append("build.gradle")
             frameworks.extend(self._frameworks_from_gradle(context.root / "build.gradle"))
+            if language_version is None:
+                try:
+                    gradle_content = "\n".join(read_text_lines(context.root / "build.gradle"))
+                    language_version = self._extract_gradle_java_version(gradle_content)
+                except OSError:
+                    pass
 
         # Detect app server from descriptor files
         all_paths = flatten_file_tree(context.file_tree)
@@ -81,6 +115,7 @@ class JavaDetector(AbstractDetector):
         spring_profiles = self._detect_spring_profiles(context.root, all_paths)
 
         entry_points = self._collect_entry_points(context)
+        transactional_classes = self._collect_transactional_classes(context, all_paths)
         stack = StackDetection(
             stack="java",
             detection_method="manifest",
@@ -91,6 +126,7 @@ class JavaDetector(AbstractDetector):
             packaging=packaging,
             app_server_hint=app_server_hint,
             spring_profiles=spring_profiles,
+            transactional_classes=transactional_classes,
         )
         return [stack], entry_points
 
@@ -196,8 +232,24 @@ class JavaDetector(AbstractDetector):
         return frameworks
 
     def _frameworks_from_gradle(self, path: Path) -> list[FrameworkDetection]:
-        content = "\n".join(read_text_lines(path)).lower()
-        return self._detect_jvm_frameworks(content, "build.gradle")
+        original = "\n".join(read_text_lines(path))
+        content = original.lower()
+        sb_version = self._extract_gradle_sb_version(original)
+        return self._detect_jvm_frameworks(content, "build.gradle", sb_version=sb_version)
+
+    def _extract_gradle_sb_version(self, content: str) -> str | None:
+        m = _GRADLE_SB_PLUGIN_RE.search(content)
+        return m.group(1) if m else None
+
+    def _extract_gradle_java_version(self, content: str) -> str | None:
+        m = _GRADLE_JAVA_ENUM_RE.search(content)
+        if m:
+            v = m.group(1)
+            return "1." + v if int(v) <= 8 else v
+        m = _GRADLE_JAVA_VERSION_RE.search(content)
+        if m:
+            return m.group(1)
+        return None
 
     def _detect_jvm_frameworks(self, text: str, source: str, *, sb_version: str | None = None) -> list[FrameworkDetection]:
         frameworks: list[FrameworkDetection] = []
@@ -319,7 +371,11 @@ class JavaDetector(AbstractDetector):
             return []
 
         # Quick pre-filter before running regexes
-        if ("Controller" not in content and "Filter" not in content
+        has_controller = "Controller" in content
+        has_filter = "Filter" in content
+        has_security = "WebSecurityConfigurerAdapter" in content or "SecurityFilterChain" in content or "EnableWebSecurity" in content
+        has_once_filter = "OncePerRequestFilter" in content or "GenericFilterBean" in content
+        if (not has_controller and not has_filter and not has_security
                 and "ControllerAdvice" not in content
                 and "M3FiltroSeguridad" not in content):
             return []
@@ -379,6 +435,23 @@ class JavaDetector(AbstractDetector):
                 path=rel_path, stack="java", kind="filter",
                 source="annotation", confidence="medium",
             )]
+        if has_security and (
+            _WEB_SECURITY_CONFIGURER_RE.search(content)
+            or _SECURITY_CONFIG_ANNOTATION_RE.search(content)
+            or _SECURITY_FILTER_CHAIN_RE.search(content)
+        ):
+            return [EntryPoint(
+                path=rel_path, stack="java", kind="security_config",
+                source="annotation", confidence="high",
+                evidence="Spring Security configuration",
+            )]
+        if has_once_filter and _ONCE_PER_REQUEST_FILTER_RE.search(content):
+            is_jwt = bool(_JWT_FILTER_KEYWORDS_RE.search(content))
+            return [EntryPoint(
+                path=rel_path, stack="java", kind="security_filter",
+                source="annotation", confidence="high",
+                evidence="jwt_filter" if is_jwt else "request_filter",
+            )]
         return []
 
     def _parse_web_xml(self, abs_path: Path, rel_path: str) -> list[EntryPoint]:
@@ -412,3 +485,26 @@ class JavaDetector(AbstractDetector):
                 seen.add(framework.name)
                 result.append(framework)
         return result
+
+    def _collect_transactional_classes(self, context: DetectionContext, all_paths: list[str]) -> list[str]:
+        """Scan Java source files for @Transactional and return unique class names."""
+        classes: list[str] = []
+        seen: set[str] = set()
+        java_paths = [p for p in all_paths if p.endswith(".java") and "/test/" not in p and "/tests/" not in p]
+        for rel_path in java_paths[:_MAX_JAVA_ENTRY_SCAN]:
+            abs_path = context.root / rel_path
+            try:
+                if abs_path.stat().st_size > _MAX_FILE_SIZE:
+                    continue
+                content = abs_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if not _TRANSACTIONAL_RE.search(content):
+                continue
+            m = _CLASS_NAME_RE.search(content)
+            if m:
+                cls = m.group(1)
+                if cls not in seen:
+                    seen.add(cls)
+                    classes.append(cls)
+        return classes
