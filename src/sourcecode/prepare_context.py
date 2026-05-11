@@ -563,6 +563,25 @@ class TaskContextBuilder:
         except Exception:
             pass
 
+        # ── 5c. review-pr suspected_areas (needs git uncommitted_files) ──────
+        if task_name == "review-pr" and spec.enable_code_notes:
+            pr_areas: dict[str, int] = {}
+            for path in uncommitted_files:
+                pr_areas[path] = pr_areas.get(path, 0) + 10
+            review_kinds = {"FIXME", "TODO", "BUG", "HACK"}
+            for note in cn_notes_for_ranking:
+                if note.kind in review_kinds:
+                    pr_areas[note.path] = pr_areas.get(note.path, 0) + 1
+            _BOOST_STEMS = ("Controller", "Service", "Repository", "Mapper", "Filter", "Security")
+            for path in all_paths:
+                stem = Path(path).stem
+                if any(k in stem for k in _BOOST_STEMS):
+                    pr_areas[path] = pr_areas.get(path, 0) + 2
+            suspected_areas = [
+                p for p, _ in sorted(pr_areas.items(), key=lambda x: -x[1])[:8]
+                if not self._is_test(p)
+            ]
+
         # ── 6. Rank files ──────────────────────────────────────────────────
         entry_set = {ep.path for ep in entry_points}
         test_set = {p for p in all_paths if self._is_test(p)}

@@ -629,6 +629,10 @@ def main(
         )
         raise typer.Exit(code=1)
 
+    if symbol is not None and not symbol.strip():
+        typer.echo("symbol query cannot be empty", err=True)
+        raise typer.Exit(code=2)
+
     if symbol and mode not in ("contract", "standard"):
         typer.echo(
             f"Error: --symbol requires --mode contract or standard (got '{mode}'). "

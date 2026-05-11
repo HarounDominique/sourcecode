@@ -138,5 +138,3 @@ Generates task-specific context for AI agents.
 | `refactor` | Structural problems, improvement opportunities | 🧪 EXP |
 | `generate-tests` | Files without tests, coverage gap analysis | 🧪 EXP |
 | `review-pr` | Changed files + architectural impact | 🧪 EXP |
-
-...

@@ -204,6 +204,178 @@ def _dep_import_key(name: str) -> str:
     return lowered.split("/")[0].replace("_", "-")
 
 
+# ---------------------------------------------------------------------------
+# Java/Spring compact-mode helpers (v1.10.0)
+# ---------------------------------------------------------------------------
+
+def _compact_git_context(sm: "SourceMap") -> "Optional[dict[str, Any]]":
+    """Lightweight git_context for compact/agent output. Top-5 hotspots only."""
+    gc = sm.git_context
+    if gc is None or not gc.requested:
+        return None
+    _bad = {"no_git_repo", "git_not_found", "git_timeout"}
+    if _bad & set(gc.limitations):
+        return None
+    ctx: dict[str, Any] = {}
+    if gc.branch:
+        ctx["branch"] = gc.branch
+    if gc.uncommitted_changes is not None:
+        uc = gc.uncommitted_changes
+        ctx["uncommitted_files"] = len(uc.staged) + len(uc.unstaged) + len(uc.untracked)
+    if gc.change_hotspots:
+        ctx["top_hotspots"] = [
+            {"file": h.file, "commits": h.commit_count}
+            for h in gc.change_hotspots[:5]
+        ]
+    return ctx if ctx else None
+
+
+def _dep_risk_flags(name: str, version: "Optional[str]") -> list[str]:
+    """Static heuristic risk flags for a single dependency. No external lookups."""
+    flags: list[str] = []
+    nl = name.lower()
+    if "spring-boot" in nl or "spring.boot" in nl:
+        if version and version.startswith("2."):
+            flags.append("spring-boot-2.x-eol")
+    if nl.startswith("javax.") or nl == "javax":
+        flags.append("javax-to-jakarta-migration-risk")
+    if "ojdbc" in nl or nl in {"com.oracle.database.jdbc", "oracle.jdbc.driver.oracledriver"}:
+        flags.append("oracle-vendor-lock")
+    return flags
+
+
+def _project_deployment_risks(sm: "SourceMap") -> list[str]:
+    """Project-level deployment risk flags derived from Java version and app server."""
+    risks: list[str] = []
+    lv = sm.language_version or ""
+    if lv in ("1.8", "8", "1.7", "7"):
+        risks.append("legacy-java-runtime")
+    if getattr(sm, "app_server_hint", None) == "weblogic" and getattr(sm, "packaging", None) == "war":
+        risks.append("legacy-app-server-deployment")
+    return risks
+
+
+def _mybatis_pairing(sm: "SourceMap") -> "Optional[dict[str, Any]]":
+    """Lightweight MyBatis mapper interface <-> XML file pairing from file_paths."""
+    from pathlib import Path as _Path
+    has_mybatis = any(
+        any(f.name.lower() == "mybatis" for f in s.frameworks)
+        for s in sm.stacks
+    )
+    if not has_mybatis:
+        return None
+    non_test = [p for p in sm.file_paths if "/test/" not in p and "/tests/" not in p]
+    mapper_interfaces = [p for p in non_test if p.endswith("Mapper.java")]
+    xml_files = [p for p in sm.file_paths if p.endswith("Mapper.xml")]
+    interface_index = {_Path(p).stem: p for p in mapper_interfaces}
+    xml_index = {_Path(p).stem: p for p in xml_files}
+    orphan_xml = [xml_index[s] for s in xml_index if s not in interface_index]
+    missing_xml = [s for s in interface_index if s not in xml_index]
+    result: dict[str, Any] = {
+        "mapper_interfaces": len(mapper_interfaces),
+        "xml_files": len(xml_files),
+    }
+    if orphan_xml:
+        result["orphan_xml"] = orphan_xml[:5]
+    if missing_xml:
+        result["missing_xml"] = missing_xml[:5]
+    return result
+
+
+def _security_surface_from_eps(eps: list) -> "Optional[dict[str, Any]]":
+    """Extract @M3FiltroSeguridad resource names from entry point evidence strings."""
+    import re as _re
+    _NOMBRE_RE = _re.compile(r"nombreRecurso=[\"']([^\"']+)[\"']")
+    resource_names: list[str] = []
+    seen: set[str] = set()
+    for ep in eps:
+        evidence = getattr(ep, "evidence", None)
+        if not evidence:
+            continue
+        for m in _NOMBRE_RE.finditer(evidence):
+            nm = m.group(1)
+            if nm and nm not in seen:
+                seen.add(nm)
+                resource_names.append(nm)
+    return {"resource_names": resource_names} if resource_names else None
+
+
+def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
+    """Separate Java entry points into bootstrap / security / controllers groups."""
+    from pathlib import Path as _Path
+    bootstrap: list[str] = []
+    security: list[str] = []
+    controllers: list[dict] = []
+    seen_b: set[str] = set()
+    seen_s: set[str] = set()
+    seen_c: set[str] = set()
+
+    for ep in eps:
+        path = getattr(ep, "path", "")
+        kind = getattr(ep, "kind", "")
+        stem = _Path(path).stem
+
+        if kind == "application" or any(k in stem for k in ("Application", "Main", "Initializer", "Bootstrap")):
+            if path not in seen_b:
+                seen_b.add(path)
+                bootstrap.append(path)
+        elif kind == "filter" or any(k in stem for k in ("Filter", "Security", "Auth", "Jwt", "WebSecurity")):
+            if path not in seen_s:
+                seen_s.add(path)
+                security.append(path)
+        elif kind in ("rest_controller", "mvc_controller"):
+            if path not in seen_c:
+                seen_c.add(path)
+                item: dict[str, Any] = {"path": path}
+                http_path = getattr(ep, "http_path", None)
+                if http_path:
+                    item["http_path"] = http_path
+                controllers.append(item)
+
+    if not bootstrap and not security:
+        return None
+
+    result: dict[str, Any] = {}
+    if bootstrap:
+        result["bootstrap"] = bootstrap
+    if security:
+        result["security"] = security
+    if controllers:
+        result["controllers"] = {
+            "count": len(controllers),
+            "sample": [{"path": c["path"]} for c in controllers[:5]],
+        }
+    return result
+
+
+def _lightweight_arch_pattern(sm: "SourceMap") -> "Optional[dict[str, Any]]":
+    """Heuristic architecture pattern from directory names alone."""
+    if not sm.file_paths:
+        return None
+    dir_names: set[str] = set()
+    for p in sm.file_paths:
+        for part in p.replace("\\", "/").split("/")[:-1]:
+            dir_names.add(part.lower())
+
+    has_controller = bool({"controller", "controllers", "api", "rest", "web", "handler", "handlers"} & dir_names)
+    has_service = bool({"service", "services", "usecase", "usecases", "application"} & dir_names)
+    has_repository = bool({"repository", "repositories", "repo", "repos", "dao", "persistence"} & dir_names)
+    has_domain = bool({"domain", "domains", "core", "model", "models", "entity", "entities"} & dir_names)
+    has_infra = bool({"infrastructure", "infra", "adapter", "adapters"} & dir_names)
+
+    if has_controller and has_service and has_repository and has_domain:
+        return {"pattern": "ddd-layered", "confidence": 0.72 if has_infra else 0.55}
+    if bool({"ports", "port"} & dir_names) and bool({"adapter", "adapters"} & dir_names):
+        return {"pattern": "hexagonal-like", "confidence": 0.65}
+    if has_controller and bool({"model", "models", "entity", "entities"} & dir_names):
+        return {"pattern": "mvc", "confidence": 0.55}
+    if has_controller and has_service and has_repository:
+        return {"pattern": "layered", "confidence": 0.70}
+    if has_controller and has_service:
+        return {"pattern": "layered", "confidence": 0.42}
+    return None
+
+
 def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> list[dict[str, Any]]:
     from sourcecode.ranking_engine import RankingEngine
 
@@ -313,7 +485,20 @@ def _architecture_context(sm: SourceMap) -> dict[str, Any]:
     arch = sm.architecture
     if arch is not None and arch.requested:
         pattern = arch.pattern if arch.pattern not in (None, "unknown", "flat") else None
-        ctx: dict[str, Any] = {
+        if not pattern:
+            _hint = _lightweight_arch_pattern(sm)
+            if _hint:
+                ctx: dict[str, Any] = {
+                    "summary": sm.architecture_summary,
+                    "pattern": _hint["pattern"],
+                    "confidence": arch.confidence,
+                    "pattern_confidence": _hint["confidence"],
+                    "method": arch.method,
+                }
+                if arch.limitations:
+                    ctx["limitations"] = arch.limitations
+                return ctx
+        ctx = {
             "summary": sm.architecture_summary,
             "pattern": pattern or "insufficient_evidence",
             "confidence": arch.confidence,
@@ -339,6 +524,18 @@ def _architecture_context(sm: SourceMap) -> dict[str, Any]:
         if arch.limitations:
             ctx["limitations"] = arch.limitations
         return ctx
+    _hint = _lightweight_arch_pattern(sm)
+    if _hint:
+        return {
+            "summary": sm.architecture_summary,
+            "pattern": _hint["pattern"],
+            "pattern_confidence": _hint["confidence"],
+            "confidence": "low",
+            "method": "filesystem_heuristic",
+            "limitations": [
+                "architecture analyzer not requested; pattern inferred from directory names only"
+            ],
+        }
     return {
         "summary": sm.architecture_summary,
         "pattern": "insufficient_evidence",
@@ -395,18 +592,23 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
 
     Excludes: file_tree, raw dependency lists, docs, module_graph, verbose metadata.
     """
-    # Key dependencies — name + version + role only (no ecosystem, source, manifests)
+    # Key dependencies — name + version + role + risk_flags
     key_deps: Any = None
     if sm.dependency_summary is not None and sm.dependency_summary.requested:
-        key_deps = [
-            {
-                "name": d.name,
-                **({"version": d.declared_version} if d.declared_version else {}),
-                **({"role": d.role} if d.role and d.role != "runtime" else {}),
-            }
-            for d in sm.key_dependencies
-            if (d.role or "unknown") in _PRODUCTION_DEP_ROLES and d.scope not in {"dev"}
-        ][:_KEY_DEPS_CAP]
+        key_deps = []
+        for d in sm.key_dependencies:
+            if (d.role or "unknown") not in _PRODUCTION_DEP_ROLES or d.scope in {"dev"}:
+                continue
+            entry: dict[str, Any] = {"name": d.name}
+            if d.declared_version:
+                entry["version"] = d.declared_version
+            if d.role and d.role != "runtime":
+                entry["role"] = d.role
+            flags = _dep_risk_flags(d.name, d.declared_version)
+            if flags:
+                entry["risk_flags"] = flags
+            key_deps.append(entry)
+        key_deps = key_deps[:_KEY_DEPS_CAP]
 
     # Dependency summary — requested flag + count + source only
     dep_summary_dict: Any = None
@@ -465,16 +667,20 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
                 for n in _sorted_notes[:_CODE_NOTES_CAP]
             ]
 
-    # Entry points — path + kind + confidence only
+    # Entry points — bootstrap-prioritized; structured when bootstrap classes detected
     ep_groups = _entry_point_groups(sm.entry_points)
-    entry_points_compact = [
-        {
-            "path": ep["path"],
-            **({"kind": ep["kind"]} if ep.get("kind") else {}),
-            **({"confidence": ep["confidence"]} if ep.get("confidence") else {}),
-        }
-        for ep in ep_groups["production"][:_EP_PRODUCTION_CAP]
-    ]
+    _bootstrap_struct = _bootstrap_structured(sm.entry_points)
+    if _bootstrap_struct:
+        entry_points_compact: Any = _bootstrap_struct
+    else:
+        entry_points_compact = [
+            {
+                "path": ep["path"],
+                **({"kind": ep["kind"]} if ep.get("kind") else {}),
+                **({"confidence": ep["confidence"]} if ep.get("confidence") else {}),
+            }
+            for ep in ep_groups["production"][:_EP_PRODUCTION_CAP]
+        ]
 
     # Stacks — name + method + confidence + frameworks (names only)
     stacks_compact = [
@@ -505,6 +711,22 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
             for g in sm.analysis_gaps
         ]
 
+    # Java/Spring operational context
+    _language_version = getattr(sm, "language_version", None)
+    _packaging = getattr(sm, "packaging", None)
+    _app_server = getattr(sm, "app_server_hint", None)
+    _deployment: Any = None
+    if _packaging or _app_server:
+        _deployment = {}
+        if _packaging:
+            _deployment["packaging"] = _packaging
+        if _app_server:
+            _deployment["app_server_hint"] = _app_server
+    _deploy_risks = _project_deployment_risks(sm)
+    _security_surface = _security_surface_from_eps(sm.entry_points)
+    _mybatis = _mybatis_pairing(sm)
+    _git_ctx = _compact_git_context(sm)
+
     result: dict[str, Any] = {
         "schema_version": sm.metadata.schema_version,
         "project_type": sm.project_type,
@@ -521,6 +743,18 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
         "confidence_summary": conf_dict,
         "analysis_gaps": gaps_list,
     }
+    if _language_version:
+        result["language_version"] = _language_version
+    if _deployment:
+        result["deployment"] = _deployment
+    if _deploy_risks:
+        result["deployment_risks"] = _deploy_risks
+    if _security_surface:
+        result["security_surface"] = _security_surface
+    if _mybatis:
+        result["mybatis"] = _mybatis
+    if _git_ctx:
+        result["git_context"] = _git_ctx
     _always_include = {"project_type", "project_summary", "architecture_summary", "dependency_summary"}
     return {k: v for k, v in result.items() if v is not None or k in _always_include}
 
@@ -838,15 +1072,34 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
     if secondary:
         project["secondary_stacks"] = sorted({s.stack for s in secondary})
 
+    # Java operational context in project block
+    _lv = getattr(sm, "language_version", None)
+    _pkg = getattr(sm, "packaging", None)
+    _app_srv = getattr(sm, "app_server_hint", None)
+    if _lv:
+        project["language_version"] = _lv
+    if _pkg or _app_srv:
+        _depl: dict[str, Any] = {}
+        if _pkg:
+            _depl["packaging"] = _pkg
+        if _app_srv:
+            _depl["app_server_hint"] = _app_srv
+        project["deployment"] = _depl
+    _proj_risks = _project_deployment_risks(sm)
+    if _proj_risks:
+        project["deployment_risks"] = _proj_risks
+
     result: dict[str, Any] = {"project": project}
 
-    # ── 2. Entry points: production/runtime only, capped ─────────────────────
-    # Auxiliary entries are not actionable for agents — omitted entirely.
-    # Development entries shown in a separate channel, capped.
-    ep_groups = _entry_point_groups(sm.entry_points)
-    result["entry_points"] = ep_groups["production"][:_EP_PRODUCTION_CAP]
-    if ep_groups["development"]:
-        result["development_entry_points"] = ep_groups["development"][:_EP_DEV_CAP]
+    # ── 2. Entry points: bootstrap-prioritized, then production ─────────────
+    _bs = _bootstrap_structured(sm.entry_points)
+    if _bs:
+        result["entry_points"] = _bs
+    else:
+        ep_groups = _entry_point_groups(sm.entry_points)
+        result["entry_points"] = ep_groups["production"][:_EP_PRODUCTION_CAP]
+        if ep_groups["development"]:
+            result["development_entry_points"] = ep_groups["development"][:_EP_DEV_CAP]
 
     # ── 3. Architecture ───────────────────────────────────────────────────────
     result["architecture"] = _architecture_context(sm)
@@ -876,17 +1129,21 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
         if dep_groups[dep_key]:
             result[dep_key] = dep_groups[dep_key][:_SECONDARY_DEPS_CAP]
 
-    # Backward-compatible compact list, now production-only.
+    # Backward-compatible compact list, now production-only, with risk_flags.
     production_key_deps = [
         d for d in sm.key_dependencies
         if (d.role or "unknown") in _PRODUCTION_DEP_ROLES and d.scope not in {"dev"}
     ]
     if sm.dependency_summary and sm.dependency_summary.requested and production_key_deps:
         _dep_skip = {"parent", "manifest_path", "workspace", "source", "ecosystem"}
-        result["key_dependencies"] = [
-            {k: v for k, v in asdict(d).items() if v is not None and k not in _dep_skip}
-            for d in production_key_deps[:_KEY_DEPS_CAP]
-        ]
+        _kd_list = []
+        for d in production_key_deps[:_KEY_DEPS_CAP]:
+            item = {k: v for k, v in asdict(d).items() if v is not None and k not in _dep_skip}
+            flags = _dep_risk_flags(d.name, d.declared_version)
+            if flags:
+                item["risk_flags"] = flags
+            _kd_list.append(item)
+        result["key_dependencies"] = _kd_list
 
     # ── 5. Signals — compact operational context ─────────────────────────────
     signals: dict[str, Any] = {}
@@ -958,8 +1215,21 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
             sem_info["hotspots"] = sem.hotspots[:10]
         signals["semantic_graph"] = sem_info
 
+    # Java/Spring: security surface and ORM structure
+    _sec_surf = _security_surface_from_eps(sm.entry_points)
+    if _sec_surf:
+        signals["security_surface"] = _sec_surf
+    _mb = _mybatis_pairing(sm)
+    if _mb:
+        signals["mybatis"] = _mb
+
     if signals:
         result["signals"] = signals
+
+    # Git context — lightweight (top-5 hotspots, branch, uncommitted count)
+    _gc = _compact_git_context(sm)
+    if _gc:
+        result["git_context"] = _gc
 
     # ── 6. Confidence summary ─────────────────────────────────────────────────
     if sm.confidence_summary is not None:
