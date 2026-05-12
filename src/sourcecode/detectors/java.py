@@ -37,8 +37,9 @@ _REQUEST_METHOD_VERB_RE = re.compile(
 # @M3FiltroSeguridad custom security annotation
 _M3_FILTRO_RE = re.compile(r'@M3FiltroSeguridad\b')
 _M3_FILTRO_PARAMS_RE = re.compile(
-    r'@M3FiltroSeguridad\s*\(\s*(?:nombreRecurso\s*=\s*"([^"]*)")?'
-    r'(?:[^)]*nivelRequerido\s*=\s*(\d+))?'
+    r'@M3FiltroSeguridad\s*\(\s*'
+    r'(?:nombreRecurso\s*=\s*(?:"([^"]*)"|([\w.]+)))?'  # group 1: string literal, group 2: constant ref
+    r'(?:[^)]*nivelRequerido\s*=\s*(\d+))?'  # group 3: nivel
 )
 
 # Security config detection
@@ -391,8 +392,8 @@ class JavaDetector(AbstractDetector):
             security_evidence = None
             m3_match = _M3_FILTRO_PARAMS_RE.search(content)
             if m3_match:
-                nombre = m3_match.group(1) or ""
-                nivel = m3_match.group(2) or ""
+                nombre = m3_match.group(1) or m3_match.group(2) or ""
+                nivel = m3_match.group(3) or ""
                 security_evidence = f"@M3FiltroSeguridad(nombreRecurso={nombre!r}, nivelRequerido={nivel})"
             return [EntryPoint(
                 path=rel_path, stack="java", kind="rest_controller",
@@ -416,8 +417,8 @@ class JavaDetector(AbstractDetector):
             security_evidence = None
             m3_match = _M3_FILTRO_PARAMS_RE.search(content)
             if m3_match:
-                nombre = m3_match.group(1) or ""
-                nivel = m3_match.group(2) or ""
+                nombre = m3_match.group(1) or m3_match.group(2) or ""
+                nivel = m3_match.group(3) or ""
                 security_evidence = f"@M3FiltroSeguridad(nombreRecurso={nombre!r}, nivelRequerido={nivel})"
             return [EntryPoint(
                 path=rel_path, stack="java", kind="mvc_controller",

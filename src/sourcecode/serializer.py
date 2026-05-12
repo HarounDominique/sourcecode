@@ -700,17 +700,26 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
             for ep in ep_groups["production"][:_EP_PRODUCTION_CAP]
         ]
 
-    # Stacks — name + method + confidence + frameworks (names only)
+    # Stacks — deduplicated: for same stack name, prefer manifest over heuristic
+    _stack_best: dict[str, Any] = {}
+    for _s in sm.stacks:
+        _existing = _stack_best.get(_s.stack)
+        if _existing is None:
+            _stack_best[_s.stack] = _s
+        elif _s.detection_method != "heuristic" and _existing.detection_method == "heuristic":
+            _stack_best[_s.stack] = _s
+        elif _s.primary and not _existing.primary and _s.detection_method == _existing.detection_method:
+            _stack_best[_s.stack] = _s
     stacks_compact = [
         {
             "stack": s.stack,
             "detection_method": s.detection_method,
             "confidence": s.confidence,
             **({"primary": True} if s.primary else {}),
-            **({"frameworks": [f.name for f in s.frameworks]} if s.frameworks else {}),
+            **({"frameworks": list(dict.fromkeys(f.name for f in s.frameworks))} if s.frameworks else {}),
             **({"package_manager": s.package_manager} if s.package_manager else {}),
         }
-        for s in sm.stacks
+        for s in _stack_best.values()
     ]
 
     # Confidence — overall only + anomalies

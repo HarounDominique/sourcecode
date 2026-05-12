@@ -150,9 +150,18 @@ class TypeClassifier:
             score = {"low": 0, "medium": 1, "high": 2}.get(stack.confidence, 0)
             manifest_weight = 1 if stack.manifests else 0
             priority = 0
-            if project_type in {"webapp", "fullstack"} and stack.stack in {"nodejs", "elixir"} or project_type == "api" and stack.stack in _API_STACKS or project_type == "cli" and any(
-                framework.name in _CLI_FRAMEWORKS for framework in stack.frameworks
-            ) or project_type == "cli" and stack.stack in {"cpp", "dotnet"}:
+            # Backend server-side stacks with manifest evidence outrank frontend stacks
+            # in fullstack projects (e.g. Java+Spring wins over nodejs+Angular).
+            if (project_type in {"fullstack", "api"}
+                    and stack.stack in _API_STACKS
+                    and stack.manifests):
+                priority = 4
+            elif (project_type in {"webapp", "fullstack"} and stack.stack in {"nodejs", "elixir"}
+                  or project_type == "api" and stack.stack in _API_STACKS
+                  or project_type == "cli" and any(
+                      framework.name in _CLI_FRAMEWORKS for framework in stack.frameworks
+                  )
+                  or project_type == "cli" and stack.stack in {"cpp", "dotnet"}):
                 priority = 3
             return (priority, score, manifest_weight)
 

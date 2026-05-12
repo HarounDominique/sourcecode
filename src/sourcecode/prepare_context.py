@@ -563,6 +563,15 @@ class TaskContextBuilder:
         except Exception:
             pass
 
+        # ── 5c. Delta: resolve git-changed files BEFORE ranking ───────────────
+        # For delta task, relevant_files must rank only files changed in the
+        # specified git range, not the full repo by generic entrypoint scoring.
+        _delta_files: Optional[set[str]] = None
+        if task_name == "delta":
+            _delta_raw = self._get_git_changed_files(since=since)
+            if _delta_raw:
+                _delta_files = set(_delta_raw)
+
         # ── 5c. review-pr suspected_areas (needs git uncommitted_files) ──────
         if task_name == "review-pr" and spec.enable_code_notes:
             pr_areas: dict[str, int] = {}
@@ -593,6 +602,7 @@ class TaskContextBuilder:
             git_hotspots=git_hotspots,
             uncommitted_files=uncommitted_files,
             code_notes=cn_notes_for_ranking if cn_notes_for_ranking else None,
+            delta_files=_delta_files,
         )
 
         # ── 7. Test gaps (generate-tests only) ────────────────────────────
@@ -640,11 +650,11 @@ class TaskContextBuilder:
             rf.path: rf.reason for rf in relevant_files
         }
 
-        # ── 10. Delta: git changed files ──────────────────────────────────────
+        # ── 10. Delta: git changed files (reuse pre-computed set from step 5c) ──
         changed_files: list[str] = []
         affected_entry_points: list[str] = []
         if task_name == "delta":
-            changed_files = self._get_git_changed_files(since=since)
+            changed_files = sorted(_delta_files) if _delta_files else self._get_git_changed_files(since=since)
             ep_set = {ep.path for ep in entry_points}
             affected_entry_points = [f for f in changed_files if f in ep_set]
 
@@ -746,6 +756,7 @@ class TaskContextBuilder:
         git_hotspots: Optional[dict[str, int]] = None,
         uncommitted_files: Optional[set[str]] = None,
         code_notes: Optional[list] = None,
+        delta_files: Optional[set[str]] = None,
     ) -> list[RelevantFile]:
         from sourcecode.ranking_engine import RankingEngine
         from sourcecode.file_classifier import FileClassifier
@@ -791,7 +802,10 @@ class TaskContextBuilder:
 
         scored: list[tuple[float, str, RelevantFile]] = []
 
-        for path in all_paths:
+        # For delta task, score only files changed in the specified git range.
+        paths_to_score = [p for p in all_paths if p in delta_files] if delta_files else all_paths
+
+        for path in paths_to_score:
             if Path(path).suffix.lower() not in _ALL_EXTENSIONS:
                 continue
             if any(pen in path for pen in spec.ranking_penalties):

@@ -705,6 +705,11 @@ def main(
     elif mode not in _CONTRACT_MODES and mode != "raw":
         mode = "contract"   # unknown → safe default
 
+    # --changed-only forces compact output to bound size; full contract/raw scan
+    # of a large repo produces 100KB+ even with only 2 changed files.
+    if changed_only and not compact and not agent:
+        compact = True
+
     # Legacy flags imply raw mode unless --mode was explicitly overridden.
     # --format yaml and --graph-modules are now compatible with contract_view:
     #   yaml is a serialization format (not an output-section flag)
@@ -1498,33 +1503,6 @@ def main(
             content = json.dumps(data, indent=2, ensure_ascii=False)
     elif agent:
         data = agent_view(sm)
-        # When contract pipeline ran (mode=contract, no legacy flags), include
-        # per-file contracts in agent output so agents get structural context.
-        # Remove file_relevance — contracts cover this signal with more detail.
-        if _is_contract_mode and sm.file_contracts:
-            from sourcecode.serializer import _serialize_contract_minimal
-            data.pop("file_relevance", None)
-            _jvm_stacks_agent = {"java", "kotlin", "scala", "groovy"}
-            _is_jvm_agent = any(s.stack in _jvm_stacks_agent for s in sm.stacks)
-            _MAX_AGENT_CONTRACTS = 50 if _is_jvm_agent else 10
-            _all_contracts = sm.file_contracts
-            _sorted = sorted(_all_contracts, key=lambda c: getattr(c, "relevance_score", 0.0), reverse=True)
-            _sampled = _sorted[:_MAX_AGENT_CONTRACTS]
-            _total_contracts = len(_all_contracts)
-            data["contracts"] = [_serialize_contract_minimal(c) for c in _sampled]
-            data["contracts_meta"] = {
-                "total": _total_contracts,
-                "shown": len(_sampled),
-                "truncated": _total_contracts > _MAX_AGENT_CONTRACTS,
-            }
-            if sm.contract_summary is not None:
-                cs = sm.contract_summary
-                data["contract_summary"] = {
-                    "files": cs.extracted_files,
-                    "total": cs.total_files,
-                }
-                if cs.method_breakdown:
-                    data["contract_summary"]["methods"] = cs.method_breakdown
         if not no_redact:
             data = redact_dict(data)
         content = json.dumps(data, indent=2, ensure_ascii=False)
@@ -1701,7 +1679,10 @@ def prepare_context_cmd(
         "project_summary": output.project_summary,
         "architecture_summary": output.architecture_summary,
         "confidence": output.confidence,
-        "relevant_files": [asdict(f) for f in output.relevant_files],
+        "relevant_files": [
+            {k: v for k, v in asdict(f).items() if v != ""}
+            for f in output.relevant_files
+        ],
         "why_these_files": output.why_these_files,
         "key_dependencies": output.key_dependencies,
     }

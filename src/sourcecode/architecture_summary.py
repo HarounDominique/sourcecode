@@ -173,7 +173,7 @@ class ArchitectureSummarizer:
             fw_names = list(dict.fromkeys(fw_names))[:3]  # dedup, preserve order
         else:
             # Filter out frameworks from auxiliary or tooling stacks (docs/, benchmarks/, etc.)
-            fw_names = [
+            fw_names = list(dict.fromkeys(
                 f.name
                 for s in sm.stacks
                 if not self._is_tooling_path(s.root or "")
@@ -181,7 +181,7 @@ class ArchitectureSummarizer:
                 and not self._is_auxiliary_path(s.root or "")
                 and not self._is_auxiliary_path(s.workspace or "")
                 for f in s.frameworks[:2]
-            ][:3]
+            ))[:3]
 
         fw_str = f" using {', '.join(fw_names)}" if fw_names else ""
         if runtime:
@@ -288,7 +288,7 @@ class ArchitectureSummarizer:
 
     def _summarize_java_entry(self, path: str, content: str, stacks: list[StackDetection]) -> list[str]:
         lines: list[str] = []
-        frameworks = [f.name for stack in stacks for f in stack.frameworks]
+        frameworks = list(dict.fromkeys(f.name for stack in stacks for f in stack.frameworks))
         if frameworks:
             lines.append(f"Frameworks detectados: {', '.join(frameworks)}.")
         annotations = re.findall(r"@(SpringBootApplication|QuarkusMain|MicronautApplication|Application)\b", content)
