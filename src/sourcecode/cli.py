@@ -1683,7 +1683,6 @@ def prepare_context_cmd(
             {k: v for k, v in asdict(f).items() if v != ""}
             for f in output.relevant_files
         ],
-        "why_these_files": output.why_these_files,
         "key_dependencies": output.key_dependencies,
     }
     if output.gaps:

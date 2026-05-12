@@ -509,7 +509,11 @@ class TaskContextBuilder:
                 and d.scope not in {"dev"}
             ]
             direct.sort(key=lambda d: (0 if d.ecosystem == primary_eco else 1, d.name.lower()))
-            key_dependencies = [asdict(d) for d in direct[:15]]
+            _SKIP_DEP_KEYS = {"parent", "workspace", "resolved_version", "manifest_path"}
+            key_dependencies = [
+                {k: v for k, v in asdict(d).items() if v is not None and k not in _SKIP_DEP_KEYS}
+                for d in direct[:15]
+            ]
             limitations.extend(dep_summary.limitations)
 
         # ── 5. Code notes ──────────────────────────────────────────────────
@@ -547,6 +551,23 @@ class TaskContextBuilder:
                     f"{p}: {n} refactoring annotation{'s' if n > 1 else ''}"
                     for p, n in sorted(counts2.items(), key=lambda x: -x[1])[:8]
                 ]
+                # Fallback: derive from file size when no code annotations exist
+                if not improvement_opportunities:
+                    _large: list[tuple[int, str]] = []
+                    for _p in all_paths:
+                        if not self._is_source(_p) or self._is_test(_p):
+                            continue
+                        try:
+                            _loc = len((self.root / _p).read_text(errors="replace").splitlines())
+                            if _loc > 200:
+                                _large.append((_loc, _p))
+                        except OSError:
+                            pass
+                    _large.sort(reverse=True)
+                    improvement_opportunities = [
+                        f"{p}: {loc} lines — candidate for decomposition"
+                        for loc, p in _large[:8]
+                    ]
 
         # ── 5b. Git signals for ranking ────────────────────────────────────
         git_hotspots: dict[str, int] = {}
@@ -608,10 +629,18 @@ class TaskContextBuilder:
         # ── 7. Test gaps (generate-tests only) ────────────────────────────
         test_gaps: list[str] = []
         if task_name == "generate-tests":
-            test_stems = {
-                Path(p).stem.removeprefix("test_").removesuffix("_test")
-                for p in test_set
-            }
+            def _normalize_test_stem(stem: str) -> str:
+                # Java: FooTest / FooTests → Foo; TestFoo → Foo
+                if stem.endswith("Tests"):
+                    return stem[:-5]
+                if stem.endswith("Test"):
+                    return stem[:-4]
+                if stem.startswith("Test") and len(stem) > 4 and stem[4].isupper():
+                    return stem[4:]
+                # Python/JS: test_foo / foo_test
+                return stem.removeprefix("test_").removesuffix("_test")
+
+            test_stems = {_normalize_test_stem(Path(p).stem) for p in test_set}
             untested = [
                 p for p in source_set
                 if Path(p).stem not in test_stems

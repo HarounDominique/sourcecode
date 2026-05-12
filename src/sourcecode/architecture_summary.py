@@ -97,7 +97,7 @@ class ArchitectureSummarizer:
             lines = [self._describe_entry_point(entry_point, sm.project_type)]
 
         if not lines:
-            return "Arquitectura no inferida con suficiente evidencia estatica."
+            return "Architecture could not be inferred from available static evidence."
 
         unique_lines: list[str] = []
         seen: set[str] = set()
@@ -239,15 +239,15 @@ class ArchitectureSummarizer:
         # Detection line — infer from core modules present
         has_core = bool(module_set & _CORE_DETECTION_MODULES)
         if has_core:
-            lines.append("Analiza el árbol del repositorio y detecta stack, entrypoints y tipo de proyecto.")
+            lines.append("Analyzes repository tree and detects stack, entry points, and project type.")
         elif module_set:
-            lines.append("Analiza el proyecto y produce información estructurada.")
+            lines.append("Analyzes the project and produces structured output.")
 
         # Output line
         if uses_serializer:
-            out = "Produce un SourceMap serializable en JSON/YAML"
+            out = "Produces a JSON/YAML-serializable SourceMap"
             if uses_redactor:
-                out += " con redacción de secretos"
+                out += " with secret redaction"
             lines.append(out + ".")
 
         # Optional capabilities line
@@ -257,10 +257,7 @@ class ArchitectureSummarizer:
             if cls in _OPTIONAL_LABEL_MAP
         ]
         if opt_labels:
-            if len(opt_labels) > 1:
-                joined = ", ".join(opt_labels[:-1]) + " y " + opt_labels[-1]
-            else:
-                joined = opt_labels[0]
+            joined = ", ".join(opt_labels[:-1]) + " y " + opt_labels[-1] if len(opt_labels) > 1 else opt_labels[0]
             lines.append(f"Opcionalmente añade {joined}.")
 
         return lines
@@ -283,22 +280,21 @@ class ArchitectureSummarizer:
         if modules:
             formatted = self._format_module_list([self._module_label(module) for module in modules])
             if formatted:
-                lines.append(f"Imports internos del entry point: {formatted}.")
+                lines.append(f"Entry point internal imports: {formatted}.")
         return lines
 
     def _summarize_java_entry(self, path: str, content: str, stacks: list[StackDetection]) -> list[str]:
         lines: list[str] = []
         frameworks = list(dict.fromkeys(f.name for stack in stacks for f in stack.frameworks))
         if frameworks:
-            lines.append(f"Frameworks detectados: {', '.join(frameworks)}.")
+            lines.append(f"Detected frameworks: {', '.join(frameworks)}.")
         annotations = re.findall(r"@(SpringBootApplication|QuarkusMain|MicronautApplication|Application)\b", content)
         if annotations:
-            lines.append(f"Anotacion de arranque: @{annotations[0]}.")
-        # Detect Spring Boot profile hints
+            lines.append(f"Bootstrap annotation: @{annotations[0]}.")
         if "@SpringBootApplication" in content:
-            lines.append("Arranca el contexto de Spring con auto-configuracion y component scan.")
+            lines.append("Starts Spring context with auto-configuration and component scan.")
         elif not lines:
-            lines.append("Orquesta el arranque de la aplicacion JVM.")
+            lines.append("Orchestrates JVM application startup.")
         return lines
 
     def _mybatis_summary_line(self, file_paths: list[str]) -> str | None:
@@ -353,19 +349,19 @@ class ArchitectureSummarizer:
         if internal:
             formatted = self._format_module_list([self._module_label(module) for module in internal])
             if formatted:
-                lines.append(f"Imports internos del binario Go: {formatted}.")
+                lines.append(f"Go binary internal imports: {formatted}.")
         return lines
 
     def _describe_entry_point(self, entry_point: EntryPoint, project_type: str | None) -> str:
         if entry_point.kind == "cli" or entry_point.path.endswith("cli.py"):
-            return f"Entry point principal: {entry_point.path} expone la CLI del proyecto."
+            return f"Main entry point: {entry_point.path} exposes the project CLI."
         if entry_point.kind == "web":
-            return f"Entry point principal: {entry_point.path} arranca la interfaz web."
+            return f"Main entry point: {entry_point.path} starts the web interface."
         if project_type == "api" or entry_point.kind == "server":
-            return f"Entry point principal: {entry_point.path} arranca el servicio principal."
+            return f"Main entry point: {entry_point.path} starts the main service."
         if entry_point.kind == "binary":
-            return f"Entry point principal: {entry_point.path} arranca el binario principal."
-        return f"Entry point principal: {entry_point.path} coordina el flujo principal del proyecto."
+            return f"Main entry point: {entry_point.path} starts the main binary."
+        return f"Main entry point: {entry_point.path} coordinates the main project flow."
 
     def _extract_optional_analyzer(self, node: ast.Assign) -> str | None:
         value = node.value

@@ -227,6 +227,19 @@ def _compact_git_context(sm: "SourceMap") -> "Optional[dict[str, Any]]":
             {"file": h.file, "commits": h.commit_count}
             for h in gc.change_hotspots[:5]
         ]
+    elif gc.recent_commits:
+        # No activity in the hotspot window — derive hotspots from recent commit history.
+        # Repos with old or infrequent commits still deserve file-level signal.
+        from collections import Counter as _Counter
+        _fc: _Counter[str] = _Counter(
+            f for c in gc.recent_commits for f in (c.files_changed or [])
+        )
+        if _fc:
+            ctx["top_hotspots"] = [
+                {"file": f, "commits": n}
+                for f, n in _fc.most_common(5)
+            ]
+            ctx["hotspots_source"] = "recent_commits"
     return ctx if ctx else None
 
 
@@ -245,13 +258,16 @@ def _dep_risk_flags(name: str, version: "Optional[str]") -> list[str]:
 
 
 def _project_deployment_risks(sm: "SourceMap") -> list[str]:
-    """Project-level deployment risk flags derived from Java version and app server."""
+    """Project-level deployment risk flags derived from Java version, app server, and framework."""
     risks: list[str] = []
     lv = sm.language_version or ""
     if lv in ("1.8", "8", "1.7", "7"):
         risks.append("legacy-java-runtime")
     if getattr(sm, "app_server_hint", None) == "weblogic" and getattr(sm, "packaging", None) == "war":
         risks.append("legacy-app-server-deployment")
+    sb_ver = _spring_boot_version(sm)
+    if sb_ver and sb_ver.startswith("2."):
+        risks.append("spring-boot-2.x-eol")
     return risks
 
 
@@ -496,7 +512,21 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
 
     # Deterministic sort: score desc, then path asc
     scored.sort(key=lambda x: (-x[0], x[1]["path"]))
-    return [item for _, item in scored[:limit]]
+
+    # Diversity cap: at most half the budget from any single category.
+    # Prevents 10/10 controllers drowning out services, repositories, domain.
+    _CAT_CAP = max(1, limit // 2)
+    _cat_counts: dict[str, int] = {}
+    result: list[dict[str, Any]] = []
+    for _, item in scored:
+        cat = item.get("category", "source")
+        if _cat_counts.get(cat, 0) >= _CAT_CAP:
+            continue
+        _cat_counts[cat] = _cat_counts.get(cat, 0) + 1
+        result.append(item)
+        if len(result) >= limit:
+            break
+    return result
 
 
 def _architecture_context(sm: SourceMap) -> dict[str, Any]:
