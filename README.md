@@ -17,11 +17,22 @@ Optimized for Java/Spring Boot monorepos. Works on any codebase.
 
 ## Installation
 
+### Homebrew (macOS / Linux)
+
+```bash
+brew tap haroundominique/sourcecode
+brew install sourcecode
+```
+
+### pip / pipx
+
 ```bash
 pip install sourcecode
 # or with isolation:
 pipx install sourcecode
 ```
+
+### Verify
 
 ```bash
 sourcecode version
