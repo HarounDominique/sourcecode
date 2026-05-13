@@ -856,7 +856,14 @@ class TaskContextBuilder:
         if task_name == "delta":
             changed_files = sorted(_delta_files) if _delta_files else self._get_git_changed_files(since=since)
             _ep_set = {ep.path for ep in entry_points}
-            affected_entry_points = [f for f in changed_files if f in _ep_set]
+            # include framework-detected entry points AND files classified as
+            # entrypoint/controller by artifact taxonomy (CLI mains, Spring controllers)
+            _EP_ARTIFACT_TYPES = frozenset({"entrypoint", "controller"})
+            affected_entry_points = sorted({
+                f for f in changed_files
+                if f in _ep_set
+                or self._classify_changed_file(f)["artifact_type"] in _EP_ARTIFACT_TYPES
+            })
 
         return TaskOutput(
             task=task_name,
@@ -1177,10 +1184,16 @@ class TaskContextBuilder:
 
     @staticmethod
     def _classify_changed_file(path: str) -> dict[str, Any]:
-        """Classify a changed file by artifact type, risk areas, and impact level.
+        """Classify a changed file by artifact type, risk areas, impact level, and confidence.
 
-        Returns dict: artifact_type, risk_areas, impact_level, is_noise, module.
+        Returns dict: artifact_type, risk_areas, impact_level, is_noise, module, confidence.
         Pure path/name heuristics — no file reads, fully deterministic.
+
+        Closed taxonomy (no unknown_* values ever emitted):
+          entrypoint | controller | service | repository | mapper | config |
+          spring_config | spring_profile | security | domain_model | dto |
+          test | build_manifest | documentation | ide_noise | db_migration |
+          generic_source
         """
         norm = path.replace("\\", "/")
         name = Path(path).name
@@ -1212,6 +1225,7 @@ class TaskContextBuilder:
                 "impact_level": "noise",
                 "is_noise": True,
                 "module": "",
+                "confidence": "high",
             }
 
         module = _extract_ddd_domain(path)
@@ -1227,76 +1241,101 @@ class TaskContextBuilder:
             ))
         )
         if _is_test:
-            return {"artifact_type": "test", "risk_areas": ["tests"], "impact_level": "low", "is_noise": False, "module": module}
+            return {"artifact_type": "test", "risk_areas": ["tests"], "impact_level": "low", "is_noise": False, "module": module, "confidence": "high"}
 
-        # Security surface
+        # Entrypoints: Spring Boot Application, CLI mains, framework entry files
+        _ENTRYPOINT_NAMES = frozenset({
+            "main.py", "app.py", "run.py", "server.py", "wsgi.py", "asgi.py",
+            "__main__.py", "index.js", "index.ts", "server.js", "server.ts",
+            "app.js", "app.ts", "main.js", "main.ts",
+        })
+        if (
+            name_lower in _ENTRYPOINT_NAMES
+            or (suffix in _CODE_EXTS and stem_lower in ("cli", "manage", "entrypoint", "startup", "launcher"))
+            or (suffix in (".java", ".kt") and stem_lower.endswith("application"))
+        ):
+            return {"artifact_type": "entrypoint", "risk_areas": ["api", "config"], "impact_level": "critical", "is_noise": False, "module": module, "confidence": "high"}
+
+        # Security surface (extended: interceptor, filter, cors, acl)
         _SECURITY_KW = ("security", "auth", "jwt", "token", "permission", "role",
                          "credential", "encrypt", "decrypt", "oauth", "saml", "ldap",
-                         "password", "secret")
+                         "password", "secret", "interceptor", "filter", "cors", "acl")
         if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _SECURITY_KW):
             impact = "critical" if any(kw in stem_lower for kw in ("security", "auth", "jwt")) else "high"
-            return {"artifact_type": "security", "risk_areas": ["security"], "impact_level": impact, "is_noise": False, "module": module}
+            return {"artifact_type": "security", "risk_areas": ["security"], "impact_level": impact, "is_noise": False, "module": module, "confidence": "high"}
 
         # API / controller layer
         _API_KW = ("controller", "restcontroller", "resource", "handler",
                    "router", "route", "endpoint", "servlet")
         if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _API_KW):
-            return {"artifact_type": "api_endpoint", "risk_areas": ["api"], "impact_level": "high", "is_noise": False, "module": module}
+            return {"artifact_type": "controller", "risk_areas": ["api"], "impact_level": "high", "is_noise": False, "module": module, "confidence": "high"}
 
-        # Business logic / services
-        if suffix in _CODE_EXTS and "service" in stem_lower:
-            return {"artifact_type": "business_logic", "risk_areas": ["transactions", "business_logic"], "impact_level": "high", "is_noise": False, "module": module}
+        # Business logic / services (extended: facade, usecase, aspect, listener, component)
+        _SERVICE_KW = ("service", "serviceimpl", "servicefacade", "facade", "usecase",
+                       "interactor", "aspect", "listener", "subscriber", "eventhandler", "component")
+        if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _SERVICE_KW):
+            return {"artifact_type": "service", "risk_areas": ["transactions", "business_logic"], "impact_level": "high", "is_noise": False, "module": module, "confidence": "high"}
 
-        # Data access
-        _DAO_KW = ("repository", "repositoryimpl", "dao", "daoimpl", "store")
+        # Data access / repositories
+        _DAO_KW = ("repository", "repositoryimpl", "dao", "daoimpl", "store", "jparepository")
         if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _DAO_KW):
-            return {"artifact_type": "data_access", "risk_areas": ["persistence"], "impact_level": "high", "is_noise": False, "module": module}
+            return {"artifact_type": "repository", "risk_areas": ["persistence"], "impact_level": "high", "is_noise": False, "module": module, "confidence": "high"}
+
+        # MyBatis / ORM mappers
         if "mapper" in stem_lower:
-            atype = "mybatis_mapper" if suffix == ".xml" else "data_access"
-            return {"artifact_type": atype, "risk_areas": ["persistence"], "impact_level": "high", "is_noise": False, "module": module}
+            return {"artifact_type": "mapper", "risk_areas": ["persistence"], "impact_level": "high", "is_noise": False, "module": module, "confidence": "high"}
 
         # Spring / app config files (by canonical name)
         if name_lower in ("application.yml", "application.yaml", "application.properties",
                            "bootstrap.yml", "bootstrap.yaml", "bootstrap.properties"):
-            return {"artifact_type": "spring_config", "risk_areas": ["config"], "impact_level": "high", "is_noise": False, "module": module}
+            return {"artifact_type": "spring_config", "risk_areas": ["config"], "impact_level": "high", "is_noise": False, "module": module, "confidence": "high"}
         if name_lower.startswith("application-") and suffix in (".yml", ".yaml", ".properties"):
-            return {"artifact_type": "spring_profile", "risk_areas": ["config"], "impact_level": "medium", "is_noise": False, "module": module}
-        if name_lower in ("pom.xml", "build.gradle", "build.gradle.kts",
-                           "settings.gradle", "settings.gradle.kts"):
-            return {"artifact_type": "build_manifest", "risk_areas": ["config", "dependencies"], "impact_level": "medium", "is_noise": False, "module": module}
+            return {"artifact_type": "spring_profile", "risk_areas": ["config"], "impact_level": "medium", "is_noise": False, "module": module, "confidence": "high"}
+        _BUILD_MANIFEST_NAMES = frozenset({
+            "pom.xml", "build.gradle", "build.gradle.kts",
+            "settings.gradle", "settings.gradle.kts",
+            "pyproject.toml", "setup.py", "setup.cfg",
+            "package.json", "package-lock.json", "yarn.lock",
+            "cargo.toml", "go.mod", "go.sum",
+            "gemfile", "gemfile.lock", "build.sbt",
+            "requirements.txt", "requirements-dev.txt",
+        })
+        if name_lower in _BUILD_MANIFEST_NAMES:
+            return {"artifact_type": "build_manifest", "risk_areas": ["config", "dependencies"], "impact_level": "medium", "is_noise": False, "module": module, "confidence": "high"}
 
         # Configuration classes / files
         _CONFIG_STEM_KW = ("config", "configuration", "properties", "settings")
         if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _CONFIG_STEM_KW):
-            return {"artifact_type": "configuration", "risk_areas": ["config"], "impact_level": "medium", "is_noise": False, "module": module}
+            return {"artifact_type": "config", "risk_areas": ["config"], "impact_level": "medium", "is_noise": False, "module": module, "confidence": "high"}
 
         # DB migrations / SQL
         if suffix == ".sql" or any(kw in norm_lower for kw in ("migration", "flyway", "liquibase", "changelog")):
-            return {"artifact_type": "db_migration", "risk_areas": ["persistence"], "impact_level": "high", "is_noise": False, "module": module}
+            return {"artifact_type": "db_migration", "risk_areas": ["persistence"], "impact_level": "high", "is_noise": False, "module": module, "confidence": "high"}
 
         # Domain models / entities
         _ENTITY_KW = ("entity", "model", "domain", "aggregate", "valueobject")
         if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _ENTITY_KW):
-            return {"artifact_type": "domain_model", "risk_areas": ["persistence"], "impact_level": "medium", "is_noise": False, "module": module}
+            return {"artifact_type": "domain_model", "risk_areas": ["persistence"], "impact_level": "medium", "is_noise": False, "module": module, "confidence": "high"}
 
         # DTOs / request-response objects
         _DTO_KW = ("dto", "request", "response", "payload", "command", "query", "event")
         if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _DTO_KW):
-            return {"artifact_type": "dto", "risk_areas": [], "impact_level": "low", "is_noise": False, "module": module}
+            return {"artifact_type": "dto", "risk_areas": [], "impact_level": "low", "is_noise": False, "module": module, "confidence": "high"}
 
-        # Generic source code
+        # Generic source code — closed taxonomy, confidence=low signals uncertain classification
         if suffix in _CODE_EXTS:
-            return {"artifact_type": "unknown_source", "risk_areas": [], "impact_level": "medium", "is_noise": False, "module": module}
+            return {"artifact_type": "generic_source", "risk_areas": [], "impact_level": "medium", "is_noise": False, "module": module, "confidence": "low"}
 
-        # Config / data files
+        # Generic config / data files — fold into config type
         if suffix in _CONFIG_EXTS:
-            return {"artifact_type": "unknown_config", "risk_areas": ["config"], "impact_level": "low", "is_noise": False, "module": module}
+            return {"artifact_type": "config", "risk_areas": ["config"], "impact_level": "low", "is_noise": False, "module": module, "confidence": "low"}
 
         # Docs
         if suffix in (".md", ".rst", ".txt", ".adoc"):
-            return {"artifact_type": "documentation", "risk_areas": [], "impact_level": "low", "is_noise": False, "module": module}
+            return {"artifact_type": "documentation", "risk_areas": [], "impact_level": "low", "is_noise": False, "module": module, "confidence": "high"}
 
-        return {"artifact_type": "binary_or_unknown", "risk_areas": [], "impact_level": "noise", "is_noise": True, "module": module}
+        # Binaries, images, lock files — treat as noise (closed taxonomy: no unknown_*)
+        return {"artifact_type": "ide_noise", "risk_areas": [], "impact_level": "noise", "is_noise": True, "module": module, "confidence": "low"}
 
     def _build_delta_impact(
         self,
@@ -1312,16 +1351,118 @@ class TaskContextBuilder:
              why_these_files, analysis_gaps)
 
         Changed files are always included in relevant_files (never dropped by score).
-        Related files from the same module/directory are appended with lower scores.
+        Related files are expanded type-aware: controller→service→repository→mapper chain.
+        Scoring is hierarchical by artifact_type, not by heuristic impact_level.
         """
-        _IMPACT_SCORE: dict[str, float] = {
-            "critical": 1.00,
-            "high":     0.85,
-            "medium":   0.65,
-            "low":      0.40,
-            "noise":    0.10,
+        # Per-artifact deterministic scores — strictly ordered by semantic role
+        _ARTIFACT_SCORE: dict[str, float] = {
+            "entrypoint":     0.95,
+            "security":       0.90,
+            "controller":     0.85,
+            "service":        0.80,
+            "db_migration":   0.75,
+            "repository":     0.70,
+            "mapper":         0.65,
+            "spring_config":  0.60,
+            "config":         0.55,
+            "spring_profile": 0.50,
+            "domain_model":   0.50,
+            "build_manifest": 0.45,
+            "generic_source": 0.45,
+            "dto":            0.35,
+            "test":           0.30,
+            "documentation":  0.25,
+            "ide_noise":      0.10,
         }
+
+        # impact_level per artifact_type — used for risk_areas severity ordering
+        _ARTIFACT_IMPACT: dict[str, str] = {
+            "entrypoint": "critical", "security": "critical",
+            "controller": "high", "service": "high", "repository": "high",
+            "mapper": "high", "db_migration": "high", "spring_config": "high",
+            "config": "medium", "spring_profile": "medium",
+            "build_manifest": "medium", "domain_model": "medium",
+            "generic_source": "medium",
+            "dto": "low", "test": "low", "documentation": "low", "ide_noise": "noise",
+        }
+
+        # propagation_risk per artifact_type
+        _PROPAGATION_RISK: dict[str, str] = {
+            "entrypoint": "high", "security": "high", "controller": "high",
+            "db_migration": "high", "spring_config": "high",
+            "service": "medium", "repository": "medium", "mapper": "medium",
+            "config": "medium", "domain_model": "medium",
+            "spring_profile": "low", "build_manifest": "low", "generic_source": "low",
+            "dto": "low", "test": "low", "documentation": "low", "ide_noise": "low",
+        }
+
+        # type-aware expansion: which artifact types a changed type should pull in
+        _EXPANSION_TARGETS: dict[str, frozenset[str]] = {
+            "controller":    frozenset({"service", "security", "dto"}),
+            "service":       frozenset({"repository", "mapper"}),
+            "repository":    frozenset({"mapper", "domain_model"}),
+            "mapper":        frozenset({"repository", "domain_model"}),
+            "security":      frozenset({"controller", "config", "spring_config"}),
+            "spring_config": frozenset({"service", "config", "repository"}),
+            "config":        frozenset({"service", "repository", "controller"}),
+            "entrypoint":    frozenset({"security", "config", "spring_config"}),
+            "dto":           frozenset({"controller", "service"}),
+            "domain_model":  frozenset({"repository", "service"}),
+            "db_migration":  frozenset({"repository", "mapper"}),
+            "spring_profile": frozenset({"service", "config"}),
+            "generic_source": frozenset({"service", "repository"}),
+            "test":          frozenset(),
+            "documentation": frozenset(),
+            "ide_noise":     frozenset(),
+            "build_manifest": frozenset(),
+        }
+
         _SEV_ORDER = ["noise", "low", "medium", "high", "critical"]
+
+        # primary impact area used in structured reasoning
+        def _impact_area(risk_areas: list[str], atype: str) -> str:
+            if "security" in risk_areas:
+                return "security"
+            if "api" in risk_areas:
+                return "api"
+            if "persistence" in risk_areas or "transactions" in risk_areas:
+                return "persistence"
+            if "config" in risk_areas or "dependencies" in risk_areas:
+                return "config"
+            if "tests" in risk_areas:
+                return "tests"
+            return {
+                "controller": "api", "service": "business_logic",
+                "repository": "persistence", "mapper": "persistence",
+                "security": "security", "config": "config",
+                "spring_config": "config", "spring_profile": "config",
+                "build_manifest": "build", "domain_model": "persistence",
+                "dto": "api", "db_migration": "persistence",
+                "test": "tests", "entrypoint": "api",
+                "generic_source": "unknown",
+            }.get(atype, "unknown")
+
+        def _role_in_system(atype: str, in_ep_paths: bool) -> str:
+            if in_ep_paths or atype in ("entrypoint", "controller"):
+                return "entrypoint"
+            if atype in ("config", "spring_config", "spring_profile", "build_manifest"):
+                return "config"
+            if atype in ("dto", "domain_model", "test", "documentation"):
+                return "leaf"
+            return "dependency"
+
+        def _structured_why(atype: str, module: str, role: str, risk_areas: list[str]) -> str:
+            area = _impact_area(risk_areas, atype)
+            prop = _PROPAGATION_RISK.get(atype, "low")
+            parts = [
+                f"artifact_type: {atype}",
+                f"role_in_system: {role}",
+                f"impact_area: {area}",
+                f"propagation_risk: {prop}",
+            ]
+            if module:
+                parts.append(f"module: {module}")
+            return " | ".join(parts)
 
         if not changed_files:
             return (
@@ -1348,8 +1489,12 @@ class TaskContextBuilder:
         risk_acc: dict[str, dict[str, Any]] = {}  # area → {files, severity}
         ref_label = since or "HEAD~1"
 
+        # union of expansion targets across all changed artifact types
+        wanted_expansion_types: frozenset[str] = frozenset()
+
         for path, cls in classifications.items():
-            score = _IMPACT_SCORE.get(cls["impact_level"], 0.50)
+            atype = cls["artifact_type"]
+            score = _ARTIFACT_SCORE.get(atype, 0.45)
             module = cls["module"]
 
             if module:
@@ -1359,54 +1504,45 @@ class TaskContextBuilder:
                 if parent and parent != ".":
                     changed_dirs.add(parent)
 
+            impact_level = _ARTIFACT_IMPACT.get(atype, "medium")
             for area in cls["risk_areas"]:
                 if area not in risk_acc:
                     risk_acc[area] = {"files": [], "severity": "noise"}
                 risk_acc[area]["files"].append(path)
                 cur_idx = _SEV_ORDER.index(risk_acc[area]["severity"])
-                new_idx = _SEV_ORDER.index(cls["impact_level"])
+                new_idx = _SEV_ORDER.index(impact_level)
                 if new_idx > cur_idx:
-                    risk_acc[area]["severity"] = cls["impact_level"]
+                    risk_acc[area]["severity"] = impact_level
 
-            artifact_display = cls["artifact_type"].replace("_", " ")
-            reason_parts = [f"changed since {ref_label}", f"artifact: {cls['artifact_type']}"]
-            if cls["risk_areas"]:
-                reason_parts.append(f"risk: {', '.join(cls['risk_areas'])}")
-            reason = ", ".join(reason_parts)
+            wanted_expansion_types = wanted_expansion_types | _EXPANSION_TARGETS.get(atype, frozenset())
 
-            why_parts = [f"Changed {artifact_display}"]
-            if module:
-                why_parts.append(f"in module '{module}'")
-            if cls["risk_areas"]:
-                why_parts.append(f"Risk: {', '.join(cls['risk_areas'])}")
-            why_str = ". ".join(why_parts) + "."
+            in_ep = path in ep_paths
+            role = _role_in_system(atype, in_ep)
+            why_str = _structured_why(atype, module, role, cls["risk_areas"])
+            reason = f"changed since {ref_label} | artifact: {atype} | score: {score:.2f}"
 
-            role = "entrypoint" if path in ep_paths else ("source" if not cls["is_noise"] else "noise")
             relevant.append(RelevantFile(path=path, role=role, score=round(score, 2), reason=reason, why=why_str))
             why[path] = why_str
 
         relevant.sort(key=lambda f: (-f.score, f.path))
 
-        # ── Step 3: expand to related files (same module or same directory) ───
+        # ── Step 3: type-aware expansion to related files ─────────────────────
         existing_paths = {rf.path for rf in relevant}
-
-        _HIGH_IMPACT_STEMS = frozenset({
-            "controller", "restcontroller", "resource", "handler",
-            "service", "serviceimpl", "servicefacade",
-            "repository", "repositoryimpl", "dao", "daoimpl",
-            "mapper", "security", "securityconfig",
-            "config", "configuration", "filter", "authcontroller",
-        })
 
         related: list[tuple[float, str, RelevantFile]] = []
         for path in all_paths:
             if path in existing_paths:
                 continue
-            suffix = Path(path).suffix.lower()
-            if suffix not in _ALL_EXTENSIONS:
+            if Path(path).suffix.lower() not in _ALL_EXTENSIONS:
                 continue
-            stem_lower = Path(path).stem.lower()
-            if not any(s in stem_lower for s in _HIGH_IMPACT_STEMS):
+
+            rel_cls = self._classify_changed_file(path)
+            if rel_cls["is_noise"]:
+                continue
+
+            rel_atype = rel_cls["artifact_type"]
+            # only expand if this file's type is in the wanted expansion set
+            if rel_atype not in wanted_expansion_types:
                 continue
 
             parent = str(Path(path).parent).replace("\\", "/")
@@ -1418,11 +1554,8 @@ class TaskContextBuilder:
             if not (in_same_module or in_same_dir):
                 continue
 
-            rel_cls = self._classify_changed_file(path)
-            if rel_cls["is_noise"]:
-                continue
-
-            rel_score = _IMPACT_SCORE.get(rel_cls["impact_level"], 0.50) * 0.50
+            rel_base = _ARTIFACT_SCORE.get(rel_atype, 0.45)
+            rel_score = round(rel_base * 0.60, 2)
             ctx_type = "module" if in_same_module else "directory"
             ctx_val = path_module if in_same_module else parent
 
@@ -1433,14 +1566,16 @@ class TaskContextBuilder:
                      else str(Path(f).parent).replace("\\", "/") == parent)
                 )
             ]
-            reason = f"related: same {ctx_type} '{ctx_val}', artifact: {rel_cls['artifact_type']}"
+            in_ep = path in ep_paths
+            role = _role_in_system(rel_atype, in_ep)
             why_str = (
-                f"In changed {ctx_type} '{ctx_val}'. "
-                f"May be affected by: {', '.join(triggers[:3])}"
+                f"artifact_type: {rel_atype} | role_in_system: {role}"
+                f" | pulled_by: type-aware expansion from {ctx_type} '{ctx_val}'"
+                f" | triggered_by: {', '.join(triggers[:3])}"
             )
-            role = "entrypoint" if path in ep_paths else "source"
+            reason = f"expansion: {ctx_type} '{ctx_val}' | artifact: {rel_atype} | score: {rel_score:.2f}"
             related.append((rel_score, path, RelevantFile(
-                path=path, role=role, score=round(rel_score, 2), reason=reason, why=why_str
+                path=path, role=role, score=rel_score, reason=reason, why=why_str
             )))
             why[path] = why_str
 
@@ -1460,21 +1595,21 @@ class TaskContextBuilder:
         meaningful = len(changed_files) - noise_count
 
         _SUMMARY_LABELS: dict[str, str] = {
+            "entrypoint":     "entrypoint(s)",
             "security":       "security file(s)",
-            "api_endpoint":   "API endpoint(s)",
-            "business_logic": "service(s)",
-            "data_access":    "data access file(s)",
-            "mybatis_mapper": "MyBatis mapper(s)",
+            "controller":     "controller(s)",
+            "service":        "service(s)",
+            "repository":     "repository/repositories",
+            "mapper":         "MyBatis mapper(s)",
             "spring_config":  "Spring config file(s)",
             "spring_profile": "Spring profile config(s)",
-            "configuration":  "configuration file(s)",
+            "config":         "configuration file(s)",
             "build_manifest": "build manifest(s)",
             "db_migration":   "database migration(s)",
             "domain_model":   "domain model(s)",
             "dto":            "DTO(s)",
             "test":           "test file(s)",
-            "unknown_source": "source file(s)",
-            "unknown_config": "config file(s)",
+            "generic_source": "source file(s)",
             "documentation":  "documentation file(s)",
         }
 
@@ -1488,14 +1623,9 @@ class TaskContextBuilder:
             parts = []
             for atype, count in sorted(
                 type_counts.items(),
-                key=lambda kv: -_sev_rank.get(
-                    classifications[next(
-                        (f for f in changed_files if classifications[f]["artifact_type"] == kv[0]),
-                        changed_files[0],
-                    )]["impact_level"], 0,
-                ),
+                key=lambda kv: -_sev_rank.get(_ARTIFACT_IMPACT.get(kv[0], "medium"), 0),
             ):
-                if atype in ("ide_noise", "binary_or_unknown"):
+                if atype == "ide_noise":
                     continue
                 label = _SUMMARY_LABELS.get(atype, f"source file(s) ({atype})")
                 parts.append(f"{count} {label}")
@@ -1520,7 +1650,7 @@ class TaskContextBuilder:
 
         # ── Step 6: analysis gaps ──────────────────────────────────────────────
         analysis_gaps: list[str] = [
-            "Related file expansion uses module/package and directory heuristics — import graph not traced",
+            "Related file expansion uses type-aware propagation chains + module/directory heuristics — import graph not traced",
         ]
         if noise_count > 0 and meaningful > 0:
             analysis_gaps.append(
@@ -1530,11 +1660,13 @@ class TaskContextBuilder:
             analysis_gaps.append(
                 "All changed files are IDE/tooling — no actionable semantic impact detected"
             )
-        unknown_sources = [f for f, cls in classifications.items() if cls["artifact_type"] == "unknown_source"]
-        if unknown_sources:
+        low_confidence = [f for f, cls in classifications.items() if cls.get("confidence") == "low" and not cls["is_noise"]]
+        if low_confidence:
             analysis_gaps.append(
-                f"{len(unknown_sources)} source file(s) could not be classified by artifact type: "
-                + ", ".join(Path(f).name for f in unknown_sources[:3])
+                f"{len(low_confidence)} file(s) classified with low confidence"
+                " (artifact type inferred from extension only)"
+                " — consider adding stem patterns to _classify_changed_file: "
+                + ", ".join(Path(f).name for f in low_confidence[:3])
             )
         if not affected_modules_set and any(not cls["is_noise"] for cls in classifications.values()):
             analysis_gaps.append(
