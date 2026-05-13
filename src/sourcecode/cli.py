@@ -1783,6 +1783,14 @@ def prepare_context_cmd(
             out["risk_areas"] = output.risk_areas
         if output.why_these_files:
             out["reasoning"] = output.why_these_files
+        if output.change_type:
+            out["change_type"] = output.change_type
+        if output.system_impact:
+            out["system_impact"] = output.system_impact
+        if output.dependency_graph_summary:
+            out["dependency_graph_summary"] = output.dependency_graph_summary
+        if output.impact_score_per_file:
+            out["impact_score_per_file"] = output.impact_score_per_file
     if output.limitations:
         out["limitations"] = output.limitations
     if output.symptom:

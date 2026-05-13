@@ -329,6 +329,10 @@ class TaskOutput:
     affected_modules: list[str] = field(default_factory=list)
     risk_areas: list[dict] = field(default_factory=list)
     since: Optional[str] = None
+    system_impact: dict = field(default_factory=dict)
+    change_type: list[str] = field(default_factory=list)
+    dependency_graph_summary: dict = field(default_factory=dict)
+    impact_score_per_file: dict = field(default_factory=dict)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -651,6 +655,10 @@ class TaskContextBuilder:
         _delta_risk_areas: list[dict] = []
         _delta_why: dict[str, str] = {}
         _delta_analysis_gaps: list[str] = []
+        _delta_system_impact: dict = {}
+        _delta_change_type: list[str] = []
+        _delta_dep_graph_summary: dict = {}
+        _delta_impact_score_per_file: dict = {}
 
         if task_name == "delta":
             _delta_changed_list: list[str] = sorted(_delta_files) if _delta_files else []
@@ -661,6 +669,10 @@ class TaskContextBuilder:
                 _delta_risk_areas,
                 _delta_why,
                 _delta_analysis_gaps,
+                _delta_system_impact,
+                _delta_change_type,
+                _delta_dep_graph_summary,
+                _delta_impact_score_per_file,
             ) = self._build_delta_impact(
                 changed_files=_delta_changed_list,
                 all_paths=all_paths,
@@ -857,8 +869,9 @@ class TaskContextBuilder:
             changed_files = sorted(_delta_files) if _delta_files else self._get_git_changed_files(since=since)
             _ep_set = {ep.path for ep in entry_points}
             # include framework-detected entry points AND files classified as
-            # entrypoint/controller by artifact taxonomy (CLI mains, Spring controllers)
-            _EP_ARTIFACT_TYPES = frozenset({"entrypoint", "controller"})
+            # entrypoint/controller/security by artifact taxonomy
+            # (CLI mains, Spring controllers, Spring Security filters/interceptors)
+            _EP_ARTIFACT_TYPES = frozenset({"entrypoint", "controller", "security"})
             affected_entry_points = sorted({
                 f for f in changed_files
                 if f in _ep_set
@@ -889,6 +902,10 @@ class TaskContextBuilder:
             affected_modules=_delta_affected_modules,
             risk_areas=_delta_risk_areas,
             since=since if task_name == "delta" else None,
+            system_impact=_delta_system_impact,
+            change_type=_delta_change_type,
+            dependency_graph_summary=_delta_dep_graph_summary,
+            impact_score_per_file=_delta_impact_score_per_file,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
@@ -1189,11 +1206,15 @@ class TaskContextBuilder:
         Returns dict: artifact_type, risk_areas, impact_level, is_noise, module, confidence.
         Pure path/name heuristics — no file reads, fully deterministic.
 
-        Closed taxonomy (no unknown_* values ever emitted):
+        Closed taxonomy (no unknown_* or generic_* values ever emitted):
           entrypoint | controller | service | repository | mapper | config |
           spring_config | spring_profile | security | domain_model | dto |
-          test | build_manifest | documentation | ide_noise | db_migration |
-          generic_source
+          test | build_manifest | documentation | ide_noise | db_migration | source
+
+        Fallback order for unmatched source files:
+          1. Stem keyword match (controller/service/repository/…)
+          2. Folder path component match (innermost directory first)
+          3. source (confidence=low — extension only)
         """
         norm = path.replace("\\", "/")
         name = Path(path).name
@@ -1322,9 +1343,45 @@ class TaskContextBuilder:
         if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _DTO_KW):
             return {"artifact_type": "dto", "risk_areas": [], "impact_level": "low", "is_noise": False, "module": module, "confidence": "high"}
 
-        # Generic source code — closed taxonomy, confidence=low signals uncertain classification
+        # Folder-based disambiguation: check directory path components for layer hints
+        # (innermost directory first) before falling back to unclassified source
+        _FOLDER_TYPE_MAP: dict[str, tuple[str, list[str], str]] = {
+            "controller":    ("controller",   ["api"],                          "high"),
+            "controllers":   ("controller",   ["api"],                          "high"),
+            "api":           ("controller",   ["api"],                          "high"),
+            "web":           ("controller",   ["api"],                          "high"),
+            "rest":          ("controller",   ["api"],                          "high"),
+            "resource":      ("controller",   ["api"],                          "high"),
+            "resources":     ("controller",   ["api"],                          "high"),
+            "service":       ("service",      ["transactions", "business_logic"],"high"),
+            "services":      ("service",      ["transactions", "business_logic"],"high"),
+            "business":      ("service",      ["transactions", "business_logic"],"high"),
+            "usecase":       ("service",      ["business_logic"],               "high"),
+            "usecases":      ("service",      ["business_logic"],               "high"),
+            "repository":    ("repository",   ["persistence"],                  "high"),
+            "repositories":  ("repository",   ["persistence"],                  "high"),
+            "dao":           ("repository",   ["persistence"],                  "high"),
+            "persistence":   ("repository",   ["persistence"],                  "high"),
+            "mapper":        ("mapper",       ["persistence"],                  "high"),
+            "mappers":       ("mapper",       ["persistence"],                  "high"),
+            "security":      ("security",     ["security"],                     "high"),
+            "auth":          ("security",     ["security"],                     "high"),
+            "config":        ("config",       ["config"],                       "medium"),
+            "configuration": ("config",       ["config"],                       "medium"),
+            "configs":       ("config",       ["config"],                       "medium"),
+            "domain":        ("domain_model", ["persistence"],                  "medium"),
+            "model":         ("domain_model", ["persistence"],                  "medium"),
+            "models":        ("domain_model", ["persistence"],                  "medium"),
+            "entity":        ("domain_model", ["persistence"],                  "medium"),
+            "entities":      ("domain_model", ["persistence"],                  "medium"),
+        }
         if suffix in _CODE_EXTS:
-            return {"artifact_type": "generic_source", "risk_areas": [], "impact_level": "medium", "is_noise": False, "module": module, "confidence": "low"}
+            for part in reversed(path_dir_parts):  # innermost directory first
+                if part in _FOLDER_TYPE_MAP:
+                    atype, risk_areas, impact_level = _FOLDER_TYPE_MAP[part]
+                    return {"artifact_type": atype, "risk_areas": risk_areas, "impact_level": impact_level, "is_noise": False, "module": module, "confidence": "medium"}
+            # No stem or folder hint matched — last-resort source type (extension-only classification)
+            return {"artifact_type": "source", "risk_areas": [], "impact_level": "medium", "is_noise": False, "module": module, "confidence": "low"}
 
         # Generic config / data files — fold into config type
         if suffix in _CONFIG_EXTS:
@@ -1336,6 +1393,69 @@ class TaskContextBuilder:
 
         # Binaries, images, lock files — treat as noise (closed taxonomy: no unknown_*)
         return {"artifact_type": "ide_noise", "risk_areas": [], "impact_level": "noise", "is_noise": True, "module": module, "confidence": "low"}
+
+    def _scan_import_dependents(
+        self,
+        changed_paths: list[str],
+        candidate_paths: list[str],
+        *,
+        max_candidates: int = 40,
+    ) -> dict[str, list[str]]:
+        """Find files in candidate_paths that import/reference each changed file.
+
+        Returns mapping: changed_path → list[dependent_paths].
+        Reads file contents — bounded by max_candidates per changed file.
+        Only scans source files (.py, .java, .kt, .ts, .js, .tsx, .jsx).
+        """
+        import re as _re
+
+        _SCANNABLE = frozenset({".py", ".java", ".kt", ".ts", ".js", ".tsx", ".jsx", ".mjs"})
+        dependents: dict[str, list[str]] = {p: [] for p in changed_paths}
+
+        for changed_path in changed_paths:
+            stem = Path(changed_path).stem
+            suffix = Path(changed_path).suffix.lower()
+            if suffix not in _SCANNABLE:
+                continue
+
+            # Build search patterns per language
+            if suffix == ".py":
+                patterns = [
+                    rf"(?:from|import)\s+[^\n]*\b{_re.escape(stem)}\b",
+                ]
+            elif suffix in (".java", ".kt"):
+                patterns = [
+                    rf"\bimport\b[^;]*\b{_re.escape(stem)}\b",
+                    rf"(?:@Autowired|@Inject|@Resource)[^\n]*\n[^\n]*\b{_re.escape(stem)}\b",
+                    rf"\b{_re.escape(stem)}\s+\w",  # field/param declaration: FooService fooService
+                ]
+            elif suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs"):
+                patterns = [
+                    rf"from\s+['\"][^'\"]*{_re.escape(stem)}['\"]",
+                    rf"require\s*\(\s*['\"][^'\"]*{_re.escape(stem)}['\"]",
+                ]
+            else:
+                continue
+
+            combined = _re.compile("|".join(patterns), _re.MULTILINE)
+
+            scanned = 0
+            for candidate in candidate_paths:
+                if candidate == changed_path:
+                    continue
+                if Path(candidate).suffix.lower() not in _SCANNABLE:
+                    continue
+                if scanned >= max_candidates:
+                    break
+                try:
+                    text = (self.root / candidate).read_text(encoding="utf-8", errors="ignore")
+                    if combined.search(text):
+                        dependents[changed_path].append(candidate)
+                except OSError:
+                    pass
+                scanned += 1
+
+        return dependents
 
     def _build_delta_impact(
         self,
@@ -1368,7 +1488,7 @@ class TaskContextBuilder:
             "spring_profile": 0.50,
             "domain_model":   0.50,
             "build_manifest": 0.45,
-            "generic_source": 0.45,
+            "source":         0.45,
             "dto":            0.35,
             "test":           0.30,
             "documentation":  0.25,
@@ -1382,7 +1502,7 @@ class TaskContextBuilder:
             "mapper": "high", "db_migration": "high", "spring_config": "high",
             "config": "medium", "spring_profile": "medium",
             "build_manifest": "medium", "domain_model": "medium",
-            "generic_source": "medium",
+            "source": "medium",
             "dto": "low", "test": "low", "documentation": "low", "ide_noise": "noise",
         }
 
@@ -1392,7 +1512,7 @@ class TaskContextBuilder:
             "db_migration": "high", "spring_config": "high",
             "service": "medium", "repository": "medium", "mapper": "medium",
             "config": "medium", "domain_model": "medium",
-            "spring_profile": "low", "build_manifest": "low", "generic_source": "low",
+            "spring_profile": "low", "build_manifest": "low", "source": "low",
             "dto": "low", "test": "low", "documentation": "low", "ide_noise": "low",
         }
 
@@ -1410,55 +1530,126 @@ class TaskContextBuilder:
             "domain_model":  frozenset({"repository", "service"}),
             "db_migration":  frozenset({"repository", "mapper"}),
             "spring_profile": frozenset({"service", "config"}),
-            "generic_source": frozenset({"service", "repository"}),
+            "source":        frozenset({"service", "repository"}),
             "test":          frozenset(),
             "documentation": frozenset(),
             "ide_noise":     frozenset(),
             "build_manifest": frozenset(),
         }
 
+        # deterministic change_effect descriptions per artifact type
+        _CHANGE_EFFECT: dict[str, str] = {
+            "entrypoint":     "modifies application startup, CLI entry, or framework bootstrap — all request flows may be affected",
+            "controller":     "alters HTTP routing, API contract, or response shape — API consumers are affected",
+            "service":        "changes business rules, transaction scope, or orchestration logic — callers and dependents affected",
+            "repository":     "modifies persistence queries or data access patterns — data consistency and service layer affected",
+            "mapper":         "alters SQL-to-object binding or query templates — data shape and repositories affected",
+            "security":       "changes authentication flow, access control rules, or session handling — all secured endpoints affected",
+            "spring_config":  "modifies bean wiring, datasource, or framework-wide settings — all wired beans potentially affected",
+            "spring_profile": "changes environment-specific overrides — behavior differs per active profile",
+            "config":         "adjusts configuration values — all modules reading this config are affected",
+            "build_manifest": "changes dependencies, plugins, or project structure — compile-time and runtime classpath affected",
+            "db_migration":   "modifies database schema — existing queries, mappings, and constraints may break",
+            "domain_model":   "alters entity structure — cascades to repositories, DTOs, serializers, and mappers",
+            "dto":            "changes data transfer contract — serialization and API consumers may break",
+            "test":           "modifies test coverage or test behavior — no production code affected",
+            "documentation":  "updates documentation only — no runtime impact",
+            "ide_noise":      "IDE/tooling artifact — no application impact",
+            "source":         "modifies application source — artifact role derived from file path structure",
+        }
+
+        # change_type taxonomy — closed set, derived from artifact type
+        _ARTIFACT_CHANGE_TYPES: dict[str, list[str]] = {
+            "entrypoint":      ["behavioral_change", "structural_change"],
+            "security":        ["behavioral_change", "security_change"],
+            "controller":      ["behavioral_change", "structural_change"],
+            "service":         ["behavioral_change"],
+            "repository":      ["behavioral_change"],
+            "mapper":          ["behavioral_change"],
+            "spring_config":   ["configuration_change"],
+            "spring_profile":  ["configuration_change"],
+            "config":          ["configuration_change"],
+            "build_manifest":  ["dependency_change"],
+            "db_migration":    ["structural_change"],
+            "domain_model":    ["structural_change"],
+            "dto":             ["structural_change"],
+            "source":          ["behavioral_change"],
+            "test":            [],
+            "documentation":   [],
+            "ide_noise":       [],
+        }
+
         _SEV_ORDER = ["noise", "low", "medium", "high", "critical"]
 
-        # primary impact area used in structured reasoning
-        def _impact_area(risk_areas: list[str], atype: str) -> str:
-            if "security" in risk_areas:
-                return "security"
-            if "api" in risk_areas:
-                return "api"
-            if "persistence" in risk_areas or "transactions" in risk_areas:
-                return "persistence"
-            if "config" in risk_areas or "dependencies" in risk_areas:
-                return "config"
-            if "tests" in risk_areas:
-                return "tests"
-            return {
-                "controller": "api", "service": "business_logic",
-                "repository": "persistence", "mapper": "persistence",
-                "security": "security", "config": "config",
-                "spring_config": "config", "spring_profile": "config",
-                "build_manifest": "build", "domain_model": "persistence",
-                "dto": "api", "db_migration": "persistence",
-                "test": "tests", "entrypoint": "api",
-                "generic_source": "unknown",
-            }.get(atype, "unknown")
+        # Closed impact_area taxonomy — 9 categories, no "unknown"
+        _ATYPE_IMPACT_AREA: dict[str, str] = {
+            "entrypoint":     "api_surface",
+            "controller":     "api_surface",
+            "dto":            "api_surface",
+            "security":       "security_layer",
+            "spring_config":  "dependency_injection",
+            "service":        "transaction_boundary",
+            "repository":     "persistence_layer",
+            "mapper":         "persistence_layer",
+            "db_migration":   "persistence_layer",
+            "domain_model":   "persistence_layer",
+            "config":         "configuration",
+            "spring_profile": "configuration",
+            "build_manifest": "build_system",
+            "source":         "transaction_boundary",
+            "test":           "configuration",
+            "documentation":  "configuration",
+            "ide_noise":      "configuration",
+        }
+        _UI_PATH_SEGS = frozenset({"frontend", "angular", "react", "webapp", "web-app", "ui", "client-app", "client"})
+        _INTEGRATION_STEMS = frozenset({"client", "adapter", "gateway", "proxy", "stub", "feignclient"})
 
-        def _role_in_system(atype: str, in_ep_paths: bool) -> str:
-            if in_ep_paths or atype in ("entrypoint", "controller"):
+        def _classify_impact_area(path: str, risk_areas: list[str], atype: str) -> str:
+            path_lower = path.lower()
+            suffix = Path(path).suffix.lower()
+            path_segs = set(path_lower.replace("\\", "/").split("/"))
+            # UI layer: frontend file extensions or frontend directory segments
+            if suffix in (".tsx", ".jsx", ".vue") or (
+                suffix in (".ts", ".js") and bool(path_segs & _UI_PATH_SEGS)
+            ):
+                return "ui_layer"
+            # Integration layer: external service clients and adapters
+            stem_lower = Path(path).stem.lower()
+            if any(kw in stem_lower for kw in _INTEGRATION_STEMS):
+                return "integration_layer"
+            return _ATYPE_IMPACT_AREA.get(atype, "transaction_boundary")
+
+        # Closed role_in_system taxonomy — 8 roles, no "leaf"/"dependency"
+        def _role_in_system(path: str, atype: str, in_ep_paths: bool) -> str:
+            if atype == "build_manifest":
+                return "build_artifact"
+            if atype == "test":
+                return "test"
+            stem_lower = Path(path).stem.lower()
+            if atype == "dto" or any(kw in stem_lower for kw in ("util", "helper", "constant", "enum", "exception")):
+                return "utility"
+            if in_ep_paths or atype == "entrypoint":
                 return "entrypoint"
-            if atype in ("config", "spring_config", "spring_profile", "build_manifest"):
-                return "config"
-            if atype in ("dto", "domain_model", "test", "documentation"):
-                return "leaf"
-            return "dependency"
+            if atype == "controller":
+                return "external_interface"
+            if atype == "security":
+                return "external_interface"
+            if atype in ("config", "spring_config", "spring_profile"):
+                return "configuration"
+            if atype in ("repository", "mapper", "db_migration"):
+                return "data_access"
+            return "core_service"
 
-        def _structured_why(atype: str, module: str, role: str, risk_areas: list[str]) -> str:
-            area = _impact_area(risk_areas, atype)
+        def _structured_why(path: str, atype: str, module: str, role: str, risk_areas: list[str]) -> str:
+            area = _classify_impact_area(path, risk_areas, atype)
             prop = _PROPAGATION_RISK.get(atype, "low")
+            effect = _CHANGE_EFFECT.get(atype, "modifies application logic")
             parts = [
                 f"artifact_type: {atype}",
                 f"role_in_system: {role}",
                 f"impact_area: {area}",
                 f"propagation_risk: {prop}",
+                f"change_effect: {effect}",
             ]
             if module:
                 parts.append(f"module: {module}")
@@ -1472,9 +1663,14 @@ class TaskContextBuilder:
                 [],
                 {},
                 ["No changed files found. Check that --since ref exists and the diff is non-empty."],
+                {},   # system_impact
+                [],   # change_type
+                {"edges": [], "propagation_depth": 0},  # dependency_graph_summary
+                {},   # impact_score_per_file
             )
 
         ep_paths = {ep.path for ep in entry_points}
+        graph_edges: list[dict] = []
 
         # ── Step 1: classify every changed file ───────────────────────────────
         classifications: dict[str, dict[str, Any]] = {
@@ -1517,8 +1713,8 @@ class TaskContextBuilder:
             wanted_expansion_types = wanted_expansion_types | _EXPANSION_TARGETS.get(atype, frozenset())
 
             in_ep = path in ep_paths
-            role = _role_in_system(atype, in_ep)
-            why_str = _structured_why(atype, module, role, cls["risk_areas"])
+            role = _role_in_system(path, atype, in_ep)
+            why_str = _structured_why(path, atype, module, role, cls["risk_areas"])
             reason = f"changed since {ref_label} | artifact: {atype} | score: {score:.2f}"
 
             relevant.append(RelevantFile(path=path, role=role, score=round(score, 2), reason=reason, why=why_str))
@@ -1567,9 +1763,12 @@ class TaskContextBuilder:
                 )
             ]
             in_ep = path in ep_paths
-            role = _role_in_system(rel_atype, in_ep)
+            role = _role_in_system(path, rel_atype, in_ep)
             why_str = (
                 f"artifact_type: {rel_atype} | role_in_system: {role}"
+                f" | impact_area: {_classify_impact_area(path, rel_cls['risk_areas'], rel_atype)}"
+                f" | propagation_risk: {_PROPAGATION_RISK.get(rel_atype, 'low')}"
+                f" | change_effect: {_CHANGE_EFFECT.get(rel_atype, 'modifies application logic')}"
                 f" | pulled_by: type-aware expansion from {ctx_type} '{ctx_val}'"
                 f" | triggered_by: {', '.join(triggers[:3])}"
             )
@@ -1578,9 +1777,207 @@ class TaskContextBuilder:
                 path=path, role=role, score=rel_score, reason=reason, why=why_str
             )))
             why[path] = why_str
+            for trigger_name in triggers[:3]:
+                trigger_full = next((f for f in changed_files if Path(f).name == trigger_name), None)
+                if trigger_full:
+                    graph_edges.append({"from": trigger_full, "to": path, "edge_type": "module_proximity", "hop": 1})
 
         related.sort(key=lambda x: (-x[0], x[1]))
         relevant.extend(rf for _, _, rf in related[:10])
+
+        # ── Step 3b: import-link expansion (bounded file scan) ────────────────
+        # Find files in the same module that import/reference a changed file.
+        # More precise than directory proximity: based on actual import statements.
+        _import_candidates = [
+            p for p in all_paths
+            if p not in existing_paths and Path(p).suffix.lower() in {
+                ".py", ".java", ".kt", ".ts", ".js", ".tsx", ".jsx", ".mjs"
+            }
+            and (
+                _extract_ddd_domain(p) in affected_modules_set
+                or str(Path(p).parent).replace("\\", "/") in changed_dirs
+            )
+        ]
+        if _import_candidates:
+            _import_dep_map = self._scan_import_dependents(
+                changed_paths=changed_files,
+                candidate_paths=_import_candidates,
+            )
+            _import_seen = {rf.path for rf in relevant}
+            _import_extra: list[tuple[float, str, RelevantFile]] = []
+            for changed_path, dep_paths in _import_dep_map.items():
+                changed_atype = classifications[changed_path]["artifact_type"]
+                for dep_path in dep_paths:
+                    if dep_path in _import_seen:
+                        continue
+                    dep_cls = self._classify_changed_file(dep_path)
+                    if dep_cls["is_noise"]:
+                        continue
+                    dep_atype = dep_cls["artifact_type"]
+                    dep_base = _ARTIFACT_SCORE.get(dep_atype, 0.45)
+                    dep_score = round(dep_base * 0.70, 2)
+                    dep_role = _role_in_system(dep_path, dep_atype, dep_path in ep_paths)
+                    why_str = (
+                        f"artifact_type: {dep_atype} | role_in_system: {dep_role}"
+                        f" | impact_area: {_classify_impact_area(dep_path, dep_cls['risk_areas'], dep_atype)}"
+                        f" | propagation_risk: {_PROPAGATION_RISK.get(dep_atype, 'low')}"
+                        f" | change_effect: {_CHANGE_EFFECT.get(dep_atype, 'modifies application logic')}"
+                        f" | pulled_by: import-link from {Path(changed_path).name}"
+                    )
+                    reason = f"import-dependent of {Path(changed_path).name} ({changed_atype}) | score: {dep_score:.2f}"
+                    _import_extra.append((dep_score, dep_path, RelevantFile(
+                        path=dep_path, role=dep_role, score=dep_score,
+                        reason=reason, why=why_str,
+                    )))
+                    why[dep_path] = why_str
+                    _import_seen.add(dep_path)
+                    graph_edges.append({"from": changed_path, "to": dep_path, "edge_type": "import_dependency", "hop": 1})
+            _import_extra.sort(key=lambda x: (-x[0], x[1]))
+            relevant.extend(rf for _, _, rf in _import_extra[:8])
+
+        # ── Step 3c: hop-2 import propagation (callers of hop-1 dependents) ────
+        _hop1_seeds = list(dict.fromkeys(
+            dep_path
+            for dep_paths in (_import_dep_map.values() if _import_candidates else [])
+            for dep_path in dep_paths
+        ))
+        if _hop1_seeds:
+            _hop2_seen = {rf.path for rf in relevant}
+            _hop2_candidates = [
+                p for p in all_paths
+                if p not in _hop2_seen
+                and Path(p).suffix.lower() in {".py", ".java", ".kt", ".ts", ".js", ".tsx", ".jsx", ".mjs"}
+                and (
+                    _extract_ddd_domain(p) in affected_modules_set
+                    or str(Path(p).parent).replace("\\", "/") in changed_dirs
+                )
+            ]
+            if _hop2_candidates:
+                _hop2_dep_map = self._scan_import_dependents(
+                    changed_paths=_hop1_seeds,
+                    candidate_paths=_hop2_candidates,
+                    max_candidates=20,
+                )
+                _hop2_extra: list[tuple[float, str, RelevantFile]] = []
+                for hop1_path, dep_paths in _hop2_dep_map.items():
+                    hop1_cls = self._classify_changed_file(hop1_path)
+                    hop1_atype = hop1_cls["artifact_type"]
+                    for dep_path in dep_paths:
+                        if dep_path in _hop2_seen:
+                            continue
+                        dep_cls = self._classify_changed_file(dep_path)
+                        if dep_cls["is_noise"]:
+                            continue
+                        dep_atype = dep_cls["artifact_type"]
+                        dep_base = _ARTIFACT_SCORE.get(dep_atype, 0.45)
+                        dep_score = round(dep_base * 0.50, 2)
+                        dep_role = _role_in_system(dep_path, dep_atype, dep_path in ep_paths)
+                        why_str = (
+                            f"artifact_type: {dep_atype} | role_in_system: {dep_role}"
+                            f" | impact_area: {_classify_impact_area(dep_path, dep_cls['risk_areas'], dep_atype)}"
+                            f" | propagation_risk: {_PROPAGATION_RISK.get(dep_atype, 'low')}"
+                            f" | change_effect: {_CHANGE_EFFECT.get(dep_atype, 'modifies application logic')}"
+                            f" | pulled_by: hop-2 import from {Path(hop1_path).name}"
+                        )
+                        reason = f"hop-2 import-dependent of {Path(hop1_path).name} ({hop1_atype}) | score: {dep_score:.2f}"
+                        _hop2_extra.append((dep_score, dep_path, RelevantFile(
+                            path=dep_path, role=dep_role, score=dep_score,
+                            reason=reason, why=why_str,
+                        )))
+                        why[dep_path] = why_str
+                        _hop2_seen.add(dep_path)
+                        graph_edges.append({"from": hop1_path, "to": dep_path, "edge_type": "import_dependency", "hop": 2})
+                _hop2_extra.sort(key=lambda x: (-x[0], x[1]))
+                relevant.extend(rf for _, _, rf in _hop2_extra[:5])
+
+        # ── Step 3d: per-file impact scores, change_type, system_impact ─────────
+        # Downstream fanout: count graph edges originating from each changed file
+        _downstream_count: dict[str, int] = {f: 0 for f in changed_files}
+        for _edge in graph_edges:
+            if _edge["from"] in _downstream_count:
+                _downstream_count[_edge["from"]] += 1
+
+        impact_score_per_file: dict[str, float] = {}
+        all_change_types: set[str] = set()
+        for _path in changed_files:
+            _cls = classifications[_path]
+            _atype = _cls["artifact_type"]
+            _file_ctypes = _ARTIFACT_CHANGE_TYPES.get(_atype, [])
+            all_change_types.update(_file_ctypes)
+            _base = _ARTIFACT_SCORE.get(_atype, 0.45)
+            _sec_w = 0.20 if (_atype == "security" or "security" in _cls["risk_areas"]) else 0.0
+            _fw = (
+                0.15 if _atype in {"entrypoint", "spring_config"} else
+                0.08 if _atype in {"security", "controller"} else
+                0.0
+            )
+            _fanout = min(0.15, _downstream_count.get(_path, 0) * 0.05)
+            _ctw = (
+                0.10 if any(ct in ("behavioral_change", "security_change") for ct in _file_ctypes) else
+                0.05 if any(ct in ("structural_change", "dependency_change") for ct in _file_ctypes) else
+                0.02
+            )
+            impact_score_per_file[_path] = round(min(1.0, _base * 0.50 + _sec_w + _fw + _fanout + _ctw), 3)
+
+        _CT_ORDER = ["security_change", "behavioral_change", "structural_change",
+                     "configuration_change", "dependency_change", "ui_change"]
+        aggregate_change_type = [ct for ct in _CT_ORDER if ct in all_change_types]
+
+        # system_impact block
+        _IMPACT_AREA_TO_SUBSYSTEM = {
+            "api_surface":          "api_layer",
+            "security_layer":       "security_layer",
+            "dependency_injection": "spring_di_layer",
+            "persistence_layer":    "persistence_layer",
+            "transaction_boundary": "transaction_layer",
+            "configuration":        "configuration_layer",
+            "build_system":         "build_system",
+            "ui_layer":             "ui_layer",
+            "integration_layer":    "integration_layer",
+        }
+        _seen_subsys: set[str] = set()
+        changed_subsystems: list[str] = []
+        for _p, _cls in classifications.items():
+            if not _cls["is_noise"]:
+                _area = _classify_impact_area(_p, _cls["risk_areas"], _cls["artifact_type"])
+                _subsys = _IMPACT_AREA_TO_SUBSYSTEM.get(_area)
+                if _subsys and _subsys not in _seen_subsys:
+                    changed_subsystems.append(_subsys)
+                    _seen_subsys.add(_subsys)
+
+        behavioral_changes: list[str] = [
+            f"{Path(_p).name}: {_CHANGE_EFFECT[_cls['artifact_type']]}"
+            for _p, _cls in classifications.items()
+            if not _cls["is_noise"]
+            and any(ct in ("behavioral_change", "security_change")
+                    for ct in _ARTIFACT_CHANGE_TYPES.get(_cls["artifact_type"], []))
+        ]
+
+        def _runtime_impact(tc: dict[str, int]) -> list[str]:
+            _ri: list[str] = []
+            if "entrypoint" in tc:
+                _ri.append("Application bootstrap modified — full context restart required before deploy")
+            if "spring_config" in tc:
+                _ri.append("Spring ApplicationContext bean wiring modified — dependent beans rewired on restart")
+            if "security" in tc:
+                _ri.append("Security filter chain modified — all secured endpoints affected after restart")
+            if "db_migration" in tc:
+                _ri.append("Database schema migration pending — execute before deploying application")
+            _svc = tc.get("service", 0)
+            if _svc >= 2:
+                _ri.append(f"{_svc} service(s) modified — verify transaction scope and data consistency")
+            _repo = tc.get("repository", 0) + tc.get("mapper", 0)
+            if _repo > 0:
+                _ri.append(f"{_repo} persistence component(s) modified — verify data access queries")
+            if "build_manifest" in tc:
+                _ri.append("Build manifest modified — dependency resolution required before compile")
+            return _ri
+
+        _max_hop = max((e["hop"] for e in graph_edges), default=0)
+        dependency_graph_summary: dict = {
+            "edges": graph_edges[:30],
+            "propagation_depth": _max_hop,
+        }
 
         # ── Step 4: impact summary ─────────────────────────────────────────────
         type_counts: dict[str, int] = {}
@@ -1609,7 +2006,7 @@ class TaskContextBuilder:
             "domain_model":   "domain model(s)",
             "dto":            "DTO(s)",
             "test":           "test file(s)",
-            "generic_source": "source file(s)",
+            "source":         "source file(s)",
             "documentation":  "documentation file(s)",
         }
 
@@ -1648,9 +2045,18 @@ class TaskContextBuilder:
             key=lambda x: (-_SEV_ORDER.index(x["severity"]), x["area"]),
         )
 
+        # ── Build system_impact (needs risk_areas_out + type_counts) ─────────────
+        system_impact = {
+            "changed_subsystems": changed_subsystems,
+            "behavioral_changes": behavioral_changes,
+            "risk_areas": risk_areas_out,
+            "runtime_impact": _runtime_impact(type_counts),
+        }
+
         # ── Step 6: analysis gaps ──────────────────────────────────────────────
+        _hop_desc = f"+ hop-2 import propagation (propagation_depth={_max_hop})" if _max_hop >= 2 else ""
         analysis_gaps: list[str] = [
-            "Related file expansion uses type-aware propagation chains + module/directory heuristics — import graph not traced",
+            f"Related file expansion uses type-aware propagation chains + bounded import-link scanning {_hop_desc}+ module/directory heuristics".replace("  ", " ").strip(),
         ]
         if noise_count > 0 and meaningful > 0:
             analysis_gaps.append(
@@ -1681,6 +2087,10 @@ class TaskContextBuilder:
             risk_areas_out,
             why,
             analysis_gaps,
+            system_impact,
+            aggregate_change_type,
+            dependency_graph_summary,
+            impact_score_per_file,
         )
 
     def _get_git_changed_files(self, since: Optional[str] = None) -> list[str]:
