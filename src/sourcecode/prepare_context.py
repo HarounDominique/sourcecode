@@ -652,7 +652,31 @@ class TaskContextBuilder:
                             "line": getattr(_n, "line", None),
                             "text": getattr(_n, "text", ""),
                         })
-                # Re-rank relevant_files: boost files whose path matches keywords
+                # Secondary pass: inject files whose path matches symptom keywords
+                # but weren't in the candidate pool (no structural/git signals).
+                _existing_paths = {rf.path for rf in relevant_files}
+                for _p in all_paths:
+                    if _p in _existing_paths:
+                        continue
+                    if Path(_p).suffix.lower() not in _ALL_EXTENSIONS:
+                        continue
+                    _p_lower = _p.lower()
+                    _matching_kws = [kw for kw in symptom_keywords if kw in _p_lower]
+                    if not _matching_kws:
+                        continue
+                    _boost = 0.2 * len(_matching_kws)
+                    _injected_score = round(min(0.5 + _boost, 1.0), 2)
+                    _first_kw = _matching_kws[0]
+                    relevant_files.append(RelevantFile(
+                        path=_p,
+                        role="symptom_match",
+                        score=_injected_score,
+                        reason=f"path matches symptom keyword: {_first_kw}",
+                        why=f"symptom injection: {', '.join(_matching_kws)}",
+                    ))
+                    _existing_paths.add(_p)
+
+                # Re-rank all relevant_files: boost files whose path matches keywords
                 def _symptom_score(rf: "RelevantFile") -> float:
                     path_lower = rf.path.lower()
                     return rf.score + 0.2 * sum(1.0 for kw in symptom_keywords if kw in path_lower)

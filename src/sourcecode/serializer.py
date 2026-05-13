@@ -383,16 +383,27 @@ def _spring_profiles_context(sm: "SourceMap") -> "Optional[dict[str, Any]]":
     if not profiles:
         return None
 
-    # Per-profile variants: Java files whose name contains a profile name (case-insensitive)
+    # Per-profile variants: Java/XML files whose stem or path contains the profile name.
+    # Portal profiles (e.g. "ingesa-portal") use dash in directory/resource names but
+    # never in Java class names — match on full path instead of stem only.
     per_profile: dict[str, list[str]] = {}
     for profile in profiles:
         pfx = profile.lower()
-        matches = [
-            p for p in sm.file_paths
-            if pfx in Path(p).stem.lower() and p.endswith(".java")
-        ]
+        is_portal = "-" in profile
+        if is_portal:
+            matches = [
+                p for p in sm.file_paths
+                if pfx in p.lower() and (p.endswith(".java") or p.endswith(".xml"))
+            ]
+        else:
+            matches = [
+                p for p in sm.file_paths
+                if pfx in Path(p).stem.lower() and p.endswith(".java")
+            ]
         if matches:
             per_profile[profile] = [Path(p).name for p in matches[:5]]
+        elif is_portal:
+            per_profile[profile] = []
 
     result: dict[str, Any] = {"detected": profiles}
     if per_profile:
@@ -420,16 +431,53 @@ def _transactional_summary(sm: "SourceMap", *, full: bool = False) -> "Optional[
             if total > 10 and not full:
                 result["classes"] = classes[:10]
                 result["truncated"] = True
-                result["note"] = f"showing 10 of {total}; use --full for complete list"
+                result["note"] = f"showing 10 of {total}; use --full to see all {total}"
             return result
     return None
 
 
-def _security_surface_from_eps(eps: list) -> "Optional[dict[str, Any]]":
+def _resolve_java_constant(symbol: str, root: "Optional[Path]", file_paths: "Optional[list[str]]") -> str:
+    """Resolve a Java constant reference like ClassName.FIELD_NAME to its string value."""
+    import re as _re
+    if not root or not file_paths or "." not in symbol:
+        return symbol
+    parts = symbol.rsplit(".", 1)
+    if len(parts) != 2:
+        return symbol
+    class_name, field_name = parts
+    if not class_name or not field_name or not field_name.isupper():
+        return symbol
+    target_file = f"{class_name}.java"
+    candidates = [p for p in file_paths if Path(p).name == target_file]
+    if not candidates:
+        return symbol
+    _CONST_RE = _re.compile(
+        r'\b' + _re.escape(field_name) + r'\s*=\s*"([^"]+)"'
+    )
+    for rel_path in candidates:
+        try:
+            abs_path = root / rel_path
+            content = abs_path.read_text(encoding="utf-8", errors="replace")
+            m = _CONST_RE.search(content)
+            if m:
+                return m.group(1)
+        except OSError:
+            continue
+    return symbol
+
+
+def _security_surface_from_eps(
+    eps: list,
+    *,
+    root: "Optional[Path]" = None,
+    file_paths: "Optional[list[str]]" = None,
+) -> "Optional[dict[str, Any]]":
     """Extract @M3FiltroSeguridad resource names from entry point evidence strings."""
     import re as _re
     _NOMBRE_RE = _re.compile(r"nombreRecurso=[\"']([^\"']+)[\"']")
+    _CONST_SYMBOL_RE = _re.compile(r'^[\w]+\.[\w]+$')
     resource_names: list[str] = []
+    unresolved: list[str] = []
     seen: set[str] = set()
     for ep in eps:
         evidence = getattr(ep, "evidence", None)
@@ -437,18 +485,30 @@ def _security_surface_from_eps(eps: list) -> "Optional[dict[str, Any]]":
             continue
         for m in _NOMBRE_RE.finditer(evidence):
             nm = m.group(1)
-            if nm and nm not in seen:
-                seen.add(nm)
+            if not nm or nm in seen:
+                continue
+            seen.add(nm)
+            if _CONST_SYMBOL_RE.match(nm):
+                resolved = _resolve_java_constant(nm, root, file_paths)
+                if resolved != nm:
+                    resource_names.append(resolved)
+                else:
+                    resource_names.append(nm)
+                    unresolved.append(nm)
+            else:
                 resource_names.append(nm)
     if not resource_names:
         return None
-    return {
+    result: dict[str, Any] = {
         "schema": (
             "Values used in @M3FiltroSeguridad(nombreRecurso=VALUE) on REST controller "
             "methods. Each value names a permission resource checked at runtime."
         ),
         "resource_names": resource_names,
     }
+    if unresolved:
+        result["resource_names_unresolved"] = unresolved
+    return result
 
 
 def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
@@ -712,6 +772,7 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
             "category": file_class.category if file_class else "source",
             "confidence": file_class.confidence if file_class else "low",
             "relevance": relevance_val,
+            "score": relevance_val,
             "reason": file_class.reason if file_class else (fs.reasons[0] if fs.reasons else "source file"),
             "evidence": file_class.evidence if file_class else [],
         }
@@ -721,6 +782,18 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
             ranking_reasons.append("call graph hub")
         if ranking_reasons:
             item["ranking_reasons"] = ranking_reasons
+
+        # Override metadata for known M3 base controller classes
+        if any(k in stem for k in ("GenericRestController", "GenericCRUDRestController")):
+            item["category"] = "runtime_core"
+            item["relevance"] = 0.95
+            item["score"] = 0.95
+            item["reason"] = (
+                "base class for all REST controllers — extends this to get "
+                "centralized exception handling via handlerException()"
+            )
+            item["evidence"] = ["base_rest_controller"]
+            item["ranking_reasons"] = ["universal base class", "exception handling contract"]
 
         scored.append((combined, item))
 
@@ -970,7 +1043,12 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False, full: bool = False) ->
     conf_dict: Any = None
     if sm.confidence_summary is not None:
         cs = sm.confidence_summary
-        conf_dict = {"overall": cs.overall, "stack": cs.stack_confidence, "entry_points": cs.entry_point_confidence}
+        conf_dict = {
+            "overall": cs.overall,
+            "stack": cs.stack_confidence,
+            "entry_points": cs.entry_point_confidence,
+            "sections": _section_confidence(sm),
+        }
         if cs.anomalies:
             conf_dict["anomalies"] = cs.anomalies
 
@@ -997,7 +1075,8 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False, full: bool = False) ->
         if _app_server:
             _deployment["app_server_hint"] = _app_server
     _deploy_risks = _project_deployment_risks(sm)
-    _security_surface = _security_surface_from_eps(sm.entry_points)
+    _sec_root = Path(sm.metadata.analyzed_path) if sm.metadata.analyzed_path else None
+    _security_surface = _security_surface_from_eps(sm.entry_points, root=_sec_root, file_paths=sm.file_paths)
     _mybatis = _mybatis_pairing(sm, full=full)
     _transactional = _transactional_summary(sm, full=full)
     _git_ctx = _compact_git_context(sm)
@@ -1515,7 +1594,8 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
         signals["semantic_graph"] = sem_info
 
     # Java/Spring: security surface, ORM structure, transactional boundaries
-    _sec_surf = _security_surface_from_eps(sm.entry_points)
+    _av_root = Path(sm.metadata.analyzed_path) if sm.metadata.analyzed_path else None
+    _sec_surf = _security_surface_from_eps(sm.entry_points, root=_av_root, file_paths=sm.file_paths)
     if _sec_surf:
         signals["security_surface"] = _sec_surf
     _mb = _mybatis_pairing(sm, full=full)
