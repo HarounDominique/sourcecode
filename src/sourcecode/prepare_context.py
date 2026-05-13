@@ -637,8 +637,10 @@ class TaskContextBuilder:
         related_notes: list[dict] = []
         if task_name == "fix-bug" and symptom:
             import re as _re
+            _camel_expanded = _re.sub(r'([a-z])([A-Z])', r'\1 \2', symptom)
+            _camel_expanded = _re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', _camel_expanded)
             symptom_keywords = [
-                w.lower() for w in _re.split(r"[\s\W]+", symptom)
+                w.lower() for w in _re.split(r"[\s\W]+", _camel_expanded)
                 if len(w) > 2
             ]
             if symptom_keywords:
@@ -681,6 +683,30 @@ class TaskContextBuilder:
                     path_lower = rf.path.lower()
                     return rf.score + 0.2 * sum(1.0 for kw in symptom_keywords if kw in path_lower)
                 relevant_files = sorted(relevant_files, key=lambda rf: -_symptom_score(rf))
+
+                # Content scan boost: read file body for symptom keywords
+                _src_exts = frozenset({".java", ".py", ".ts", ".js", ".kt", ".go"})
+                _content_boosted: list[RelevantFile] = []
+                for _rf in relevant_files:
+                    _extra = 0.0
+                    if Path(_rf.path).suffix.lower() in _src_exts:
+                        try:
+                            _lines = (self.root / _rf.path).read_text(
+                                encoding="utf-8", errors="replace"
+                            ).splitlines()[:300]
+                            _body = "\n".join(_lines).lower()
+                            _hits = sum(_body.count(kw) for kw in symptom_keywords)
+                            _extra = min(0.30, _hits * 0.02)
+                        except OSError:
+                            pass
+                    _content_boosted.append(RelevantFile(
+                        path=_rf.path,
+                        role=_rf.role,
+                        score=round(min(_rf.score + _extra, 1.0), 2),
+                        reason=_rf.reason + (f", content-match symptom (+{_extra:.2f})" if _extra > 0 else ""),
+                        why=_rf.why,
+                    ))
+                relevant_files = sorted(_content_boosted, key=lambda rf: -rf.score)
 
         # ── 7. Test gaps (generate-tests only) ────────────────────────────
         test_gaps: list[str] = []
@@ -863,7 +889,7 @@ class TaskContextBuilder:
         _dominant_stack = ""
         _recently_changed_stacks: set[str] = set()
         if task_name == "fix-bug":
-            _bug_kinds = {"FIXME", "BUG"}
+            _bug_kinds = {"FIXME", "BUG", "HACK", "XXX"}
             for _n in (code_notes or []):
                 if getattr(_n, "kind", "").upper() in _bug_kinds:
                     _annotated_files.add(getattr(_n, "path", ""))
@@ -1020,7 +1046,16 @@ class TaskContextBuilder:
                 )
                 for total, path, rf in scored
             }
-            _selected = _ctx.select_subgraph(_ns, contracts=[], budget=15, min_score=0.15)
+            _repo_size = len(all_paths)
+            _task_budget = {
+                "fix-bug": max(20, min(40, _repo_size // 80)),
+                "onboard": max(15, min(25, _repo_size // 150)),
+                "explain": max(10, min(20, _repo_size // 200)),
+                "generate-tests": max(20, min(35, _repo_size // 100)),
+                "refactor": max(15, min(30, _repo_size // 120)),
+            }
+            _budget = _task_budget.get(task_name, 15)
+            _selected = _ctx.select_subgraph(_ns, contracts=[], budget=_budget, min_score=0.15)
             _rf_map = {path: rf for _, path, rf in scored}
             return [_rf_map[p] for p in _selected if p in _rf_map]
         except Exception:
@@ -1036,6 +1071,9 @@ class TaskContextBuilder:
             or "/tests/" in path
             or "/test/" in path
             or "/spec/" in path
+            or (name.endswith("test.java") and name != "test.java")
+            or name.endswith("tests.java")
+            or (name.startswith("test") and name.endswith(".java") and len(name) > 9)
         )
 
     def _is_source(self, path: str) -> bool:
