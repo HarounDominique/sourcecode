@@ -1777,6 +1777,7 @@ def prepare_context_cmd(
             # Hard error — emit structured error JSON and exit, skip normal delta fields
             _err_out: dict[str, Any] = {
                 "task": output.task,
+                "ci_decision": output.ci_decision or "git_ref_error",
                 "error": output.error_code,
                 "since": output.since,
                 "message": output.error_message,
@@ -1792,6 +1793,8 @@ def prepare_context_cmd(
                 _sys.stdout.buffer.write(b"\n")
                 _sys.stdout.buffer.flush()
             raise typer.Exit(code=1)
+        if output.ci_decision:
+            out["ci_decision"] = output.ci_decision
         if output.since:
             out["since"] = output.since
         if output.impact_summary:

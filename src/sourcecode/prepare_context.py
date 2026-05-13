@@ -337,6 +337,12 @@ class TaskOutput:
     error_code: Optional[str] = None
     error_message: Optional[str] = None
     error_hints: list[str] = field(default_factory=list)
+    # CI decision state machine — machine-decidable signal
+    ci_decision: Optional[str] = None  # "no_changes" | "analysis_success" | "git_ref_error"
+    # git baseline resolution metadata
+    resolved_since_ref: Optional[str] = None   # actual ref/hash used for the diff
+    resolution_path: Optional[str] = None      # "exact_local_ref"|"remote_tracking_ref"|"symbolic_ref"|"head_minus_1_fallback"|"uncommitted_changes"|"unresolvable"
+    diff_validation_status: Optional[str] = None  # "valid_non_empty"|"valid_empty"|"invalid_ref"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -648,6 +654,7 @@ class TaskContextBuilder:
                     error_message=f"Git reference '{since}' does not exist in this repository.",
                     error_hints=_hints,
                     gaps=[f"Cannot compute delta: git ref '{since}' not found."] + _hints,
+                    ci_decision="git_ref_error",
                 )
             elif _delta_raw:
                 _delta_files = set(_delta_raw)
@@ -937,6 +944,11 @@ class TaskContextBuilder:
             change_type=_delta_change_type,
             dependency_graph_summary=_delta_dep_graph_summary,
             impact_score_per_file=_delta_impact_score_per_file,
+            ci_decision=(
+                "no_changes" if task_name == "delta" and not changed_files
+                else "analysis_success" if task_name == "delta"
+                else None
+            ),
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
@@ -2117,6 +2129,124 @@ class TaskContextBuilder:
             dependency_graph_summary,
             impact_score_per_file,
         )
+
+    def _resolve_git_baseline(self, since: Optional[str]) -> dict[str, Any]:
+        """Resolve git baseline for delta diff using a 4-stage fallback chain.
+
+        Resolution order when `since` is provided:
+          1. exact local ref (git rev-parse --verify <since>)
+          2. remote-tracking ref  (origin/<since>)
+          3. symbolic ref         (git symbolic-ref refs/remotes/origin/HEAD)
+          4. HEAD~1 fallback
+
+        When `since` is None:
+          1. uncommitted changes  (git diff --name-only --relative)
+          2. HEAD~1 fallback
+
+        Returns dict with keys:
+            files: list[str]           — changed paths (empty = confirmed no changes)
+            resolved_ref: str          — ref actually used for the diff
+            resolution_path: str       — which strategy resolved it
+            diff_validation_status: str — "valid_non_empty"|"valid_empty"|"invalid_ref"
+            error: bool                — True only when ALL strategies failed
+        """
+        import subprocess
+
+        def _run(*args: str, timeout: int = 5) -> tuple[bool, str]:
+            try:
+                r = subprocess.run(
+                    ["git", *args], cwd=str(self.root),
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=timeout,
+                )
+                return r.returncode == 0, (r.stdout or "").strip()
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                return False, ""
+
+        def _verify(ref: str) -> bool:
+            ok, _ = _run("rev-parse", "--verify", ref)
+            return ok
+
+        def _diff(ref: str) -> Optional[list[str]]:
+            ok, out = _run("diff", "--name-only", "--relative", ref, "HEAD", timeout=10)
+            if not ok:
+                return None
+            return [line.strip() for line in out.splitlines() if line.strip()]
+
+        def _make(files: list[str], ref: str, path: str) -> dict[str, Any]:
+            return {
+                "files": files,
+                "resolved_ref": ref,
+                "resolution_path": path,
+                "diff_validation_status": "valid_non_empty" if files else "valid_empty",
+                "error": False,
+            }
+
+        if since:
+            # Stage 1: exact local ref
+            if _verify(since):
+                files = _diff(since)
+                if files is not None:
+                    return _make(files, since, "exact_local_ref")
+
+            # Stage 2: remote-tracking ref (origin/<since>)
+            remote_ref = f"origin/{since}"
+            if _verify(remote_ref):
+                files = _diff(remote_ref)
+                if files is not None:
+                    return _make(files, remote_ref, "remote_tracking_ref")
+
+            # Stage 3: symbolic ref (origin/HEAD → e.g. origin/main)
+            ok, symref = _run("symbolic-ref", "refs/remotes/origin/HEAD")
+            if ok and symref:
+                short = symref.removeprefix("refs/remotes/")
+                if _verify(short):
+                    files = _diff(short)
+                    if files is not None:
+                        return _make(files, short, "symbolic_ref")
+
+            # Stage 4: HEAD~1 fallback — original ref was invalid
+            if _verify("HEAD~1"):
+                files = _diff("HEAD~1")
+                if files is not None:
+                    return {
+                        "files": files,
+                        "resolved_ref": "HEAD~1",
+                        "resolution_path": "head_minus_1_fallback",
+                        "diff_validation_status": "invalid_ref",  # original ref unresolved
+                        "error": False,
+                    }
+
+            # All stages failed
+            return {
+                "files": [],
+                "resolved_ref": since,
+                "resolution_path": "unresolvable",
+                "diff_validation_status": "invalid_ref",
+                "error": True,
+            }
+
+        else:
+            # No since: uncommitted changes first
+            ok, out = _run("diff", "--name-only", "--relative", timeout=10)
+            if ok:
+                files = [line.strip() for line in out.splitlines() if line.strip()]
+                if files:
+                    return _make(files, "HEAD", "uncommitted_changes")
+
+            # HEAD~1 fallback
+            if _verify("HEAD~1"):
+                files = _diff("HEAD~1")
+                if files is not None:
+                    return _make(files or [], "HEAD~1", "head_minus_1_fallback")
+
+            return {
+                "files": [],
+                "resolved_ref": "HEAD",
+                "resolution_path": "unresolvable",
+                "diff_validation_status": "invalid_ref",
+                "error": True,
+            }
 
     def _get_git_changed_files(self, since: Optional[str] = None) -> Optional[list[str]]:
         """Get files changed since a git ref (default: HEAD~1) relative to self.root.
