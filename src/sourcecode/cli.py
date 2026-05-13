@@ -1777,6 +1777,8 @@ def prepare_context_cmd(
         out["symptom"] = output.symptom
     if output.related_notes:
         out["related_notes"] = output.related_notes
+    if output.symptom_note:
+        out["symptom_note"] = output.symptom_note
     if llm_prompt:
         out["llm_prompt"] = builder.render_prompt(output)
 

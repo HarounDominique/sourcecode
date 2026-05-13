@@ -323,6 +323,7 @@ class TaskOutput:
     affected_entry_points: list[str] = field(default_factory=list) # delta task only
     symptom: Optional[str] = None                                  # fix-bug only
     related_notes: list[dict] = field(default_factory=list)        # fix-bug + symptom only
+    symptom_note: Optional[str] = None                             # fix-bug: cross-layer synonym note
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -381,6 +382,22 @@ def _java_why(path: str, file_class: "Optional[object]") -> str:
 _ALL_EXTENSIONS: frozenset[str] = _SOURCE_EXTENSIONS | frozenset({
     ".md", ".toml", ".yaml", ".yml", ".json", ".xml",
 })
+
+# Maps frontend symptom keywords → backend terms likely to contain the root cause.
+# Used to boost service/interceptor files when the symptom is UI-only.
+_FRONTEND_SYMPTOM_MAP: dict[str, list[str]] = {
+    "spinner":  ["loading", "setloading", "finalize", "httpinterceptor", "interceptor", "service"],
+    "loading":  ["loading", "setloading", "finalize", "httpinterceptor", "interceptor", "service"],
+    "login":    ["authcontroller", "securityconfig", "filterconfig", "jwtfilter", "auth", "authentication"],
+    "logout":   ["authcontroller", "securityconfig", "jwtfilter", "auth", "session"],
+    "dropdown": ["getmapping", "findall", "obtenertodos", "listall", "findby"],
+    "modal":    ["controller", "getmapping", "findby", "search"],
+    "popup":    ["controller", "getmapping", "findby", "search"],
+    "table":    ["paginated", "findby", "search", "getmapping", "listall"],
+    "grid":     ["paginated", "findby", "search", "getmapping"],
+    "button":   ["postmapping", "putmapping", "deletemapping", "controller", "service"],
+    "form":     ["postmapping", "putmapping", "controller", "service", "dto"],
+}
 
 
 class TaskContextBuilder:
@@ -635,6 +652,7 @@ class TaskContextBuilder:
         # ── 6b. Symptom keyword boost + related notes (fix-bug + --symptom) ──
         symptom_keywords: list[str] = []
         related_notes: list[dict] = []
+        symptom_note: Optional[str] = None
         if task_name == "fix-bug" and symptom:
             import re as _re
             _camel_expanded = _re.sub(r'([a-z])([A-Z])', r'\1 \2', symptom)
@@ -707,6 +725,41 @@ class TaskContextBuilder:
                         why=_rf.why,
                     ))
                 relevant_files = sorted(_content_boosted, key=lambda rf: -rf.score)
+
+                # Cross-layer synonym boost: frontend keywords → backend equivalents
+                _synonym_note: Optional[str] = None
+                _frontend_kws = [kw for kw in symptom_keywords if kw in _FRONTEND_SYMPTOM_MAP]
+                if _frontend_kws:
+                    _backend_terms: list[str] = []
+                    for _fkw in _frontend_kws:
+                        _backend_terms.extend(_FRONTEND_SYMPTOM_MAP[_fkw])
+                    _backend_terms_set = list(dict.fromkeys(_backend_terms))  # dedup, preserve order
+                    _synonym_boosted: list[RelevantFile] = []
+                    for _rf in relevant_files:
+                        _extra_syn = 0.0
+                        if Path(_rf.path).suffix.lower() in _src_exts:
+                            try:
+                                _lines_syn = (self.root / _rf.path).read_text(
+                                    encoding="utf-8", errors="replace"
+                                ).splitlines()[:300]
+                                _body_syn = "\n".join(_lines_syn).lower()
+                                _hits_syn = sum(_body_syn.count(t) for t in _backend_terms_set)
+                                _extra_syn = min(0.20, _hits_syn * 0.02)
+                            except OSError:
+                                pass
+                        _synonym_boosted.append(RelevantFile(
+                            path=_rf.path,
+                            role=_rf.role,
+                            score=round(min(_rf.score + _extra_syn, 1.0), 2),
+                            reason=_rf.reason + (f", synonym-match backend (+{_extra_syn:.2f})" if _extra_syn > 0 else ""),
+                            why=_rf.why,
+                        ))
+                    relevant_files = sorted(_synonym_boosted, key=lambda rf: -rf.score)
+                    _synonym_note = (
+                        f"Frontend concept detected ({', '.join(_frontend_kws)}). "
+                        "Boosted backend service-layer and interceptor files as likely root cause."
+                    )
+                    symptom_note = _synonym_note
 
         # ── 7. Test gaps (generate-tests only) ────────────────────────────
         test_gaps: list[str] = []
@@ -788,6 +841,7 @@ class TaskContextBuilder:
             affected_entry_points=affected_entry_points,
             symptom=symptom if task_name == "fix-bug" and symptom else None,
             related_notes=related_notes,
+            symptom_note=symptom_note,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:

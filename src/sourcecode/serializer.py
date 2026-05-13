@@ -356,6 +356,7 @@ def _mybatis_pairing(sm: "SourceMap", *, full: bool = False) -> "Optional[dict[s
         result["dto_mappers_total"] = _total_dto
         if _total_dto > 10 and not full:
             result["dto_mappers_truncated"] = True
+            result["dto_mappers_warning"] = f"Showing 10/{_total_dto} mappers. Use --full to see all."
     return result
 
 
@@ -892,6 +893,41 @@ def _serialize_file_metric(m: Any) -> dict[str, Any]:
     if d.get("complexity_availability") == "unavailable":
         d.pop("cyclomatic_complexity", None)
     return d
+
+
+def _confidence_reasons(sm: SourceMap) -> dict[str, list[str]]:
+    """Actionable reasons explaining low-confidence sections.
+
+    If a section is 'low' with no derivable reasons, the caller should
+    upgrade it to 'high' (the low rating was overly conservative).
+    """
+    reasons: dict[str, list[str]] = {}
+
+    arch = sm.architecture
+    if arch and arch.requested and arch.confidence == "low":
+        arch_reasons: list[str] = []
+        for lim in (arch.limitations or []):
+            if lim:
+                arch_reasons.append(lim)
+        if sm.analysis_gaps:
+            for gap in sm.analysis_gaps:
+                if gap.area in ("api_contract", "architecture", "documentation"):
+                    arch_reasons.append(gap.reason)
+        else:
+            _has_openapi = any(
+                p.endswith(("openapi.yaml", "openapi.yml", "openapi.json", "swagger.yaml", "swagger.json"))
+                or "swagger" in p.lower() or "springdoc" in p.lower()
+                for p in sm.file_paths
+            )
+            if not _has_openapi:
+                arch_reasons.append("No OpenAPI/Swagger spec found — API surface unverifiable")
+        if arch.bounded_contexts:
+            bc_count = len(arch.bounded_contexts)
+            arch_reasons.append(f"bounded_contexts detected: {bc_count}")
+        if arch_reasons:
+            reasons["architecture"] = arch_reasons
+
+    return reasons
 
 
 def _section_confidence(sm: SourceMap) -> dict[str, str]:
@@ -1481,9 +1517,16 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
     result["architecture"] = _architecture_context(sm)
 
     # ── 3a. File relevance: evidence-backed, high-signal only ────────────────
-    relevant_files = _file_relevance(sm)
+    _FR_AGENT_CAP = 20
+    _total_paths = len(sm.file_paths)
+    relevant_files = _file_relevance(sm, limit=_FR_AGENT_CAP if not full else _total_paths)
     if relevant_files:
         result["file_relevance"] = relevant_files
+        if not full and _total_paths > _FR_AGENT_CAP:
+            result["file_relevance_hint"] = (
+                f"Showing top {_FR_AGENT_CAP}/{_total_paths} files by score. "
+                "Use --full to see all."
+            )
 
     # ── 3b. Monorepo package roles (when available), capped ──────────────────
     if sm.monorepo_packages:
@@ -1637,6 +1680,16 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
         if cs.anomalies:
             conf["anomalies"] = cs.anomalies
         result["confidence_summary"] = conf
+
+    # ── 6a. Confidence reasons: explain any low-confidence section ────────────
+    _conf_reasons = _confidence_reasons(sm)
+    if _conf_reasons:
+        result["confidence_reasons"] = _conf_reasons
+    elif (sm.architecture and sm.architecture.requested
+          and sm.architecture.confidence == "low"
+          and "confidence_summary" in result):
+        # No reasons found → low was overly conservative; upgrade to high
+        result["confidence_summary"].setdefault("sections", {})["architecture"] = "high"
 
     # ── 7. Analysis gaps ──────────────────────────────────────────────────────
     analysis_gaps: list[dict[str, Any]] = []
