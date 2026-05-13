@@ -193,6 +193,60 @@ class ConfidenceAnalyzer:
                 impact="low",
             ))
 
+        # ── Documentation / process gaps (L1) ────────────────────────────────
+        _path_set = set(sm.file_paths)
+        _all_dirs = {p.replace("\\", "/").split("/")[0].lower() for p in sm.file_paths if "/" in p}
+
+        # ADRs / architecture docs
+        _has_adr = any(
+            d in _all_dirs for d in ("adr", "adrs", "decisions", "architecture")
+        ) or any("adr" in p.lower() or "decision" in p.lower() for p in sm.file_paths)
+        if not _has_adr:
+            gaps.append(AnalysisGap(
+                area="documentation",
+                reason="No Architecture Decision Records (ADRs) detected — missing docs/ or adr/ directory",
+                impact="low",
+            ))
+
+        # OpenAPI / Swagger contract
+        _has_openapi = any(
+            p.endswith(("openapi.yaml", "openapi.yml", "openapi.json", "swagger.yaml", "swagger.json"))
+            or "swagger" in p.lower() or "springdoc" in p.lower()
+            for p in sm.file_paths
+        )
+        if not _has_openapi:
+            gaps.append(AnalysisGap(
+                area="api_contract",
+                reason="No OpenAPI/Swagger contract detected — agents cannot auto-discover API surface without it",
+                impact="medium",
+            ))
+
+        # Spring profile documentation (comments in application-{profile}.yml)
+        _profile_ymls = [
+            p for p in sm.file_paths
+            if "application-" in p.rsplit("/", 1)[-1] and p.endswith((".yml", ".yaml", ".properties"))
+        ]
+        if _profile_ymls:
+            # Check for at least one comment line (# ...) across profile files
+            _root = Path(sm.metadata.analyzed_path) if sm.metadata.analyzed_path else None
+            _has_profile_docs = False
+            if _root:
+                for _pf in _profile_ymls[:5]:
+                    try:
+                        from sourcecode.tree_utils import safe_read_text
+                        _c = safe_read_text(_root / _pf)
+                        if any(ln.strip().startswith("#") for ln in _c.splitlines()):
+                            _has_profile_docs = True
+                            break
+                    except OSError:
+                        pass
+            if not _has_profile_docs:
+                gaps.append(AnalysisGap(
+                    area="documentation",
+                    reason="Spring profile YAML files lack inline comments — profile purpose and activation not documented",
+                    impact="low",
+                ))
+
         # ── Java test coverage gap check (P2-A) ──────────────────────────────
         _java_all = [p for p in sm.file_paths if p.endswith(".java")]
         _java_tests = [

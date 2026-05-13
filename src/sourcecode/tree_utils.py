@@ -1,6 +1,25 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+
+
+def safe_read_text(path: Path) -> str:
+    """Read a text file with encoding fallback to handle Latin-1 / UTF-8 ambiguity.
+
+    Fallback chain: UTF-8 (strict) → ISO-8859-1 → UTF-8 with errors='replace'.
+    This prevents double-encoding artefacts that arise when a Latin-1 file is
+    read as UTF-8 with replace mode and then re-serialised as UTF-8.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return path.read_text(encoding="iso-8859-1")
+    except (UnicodeDecodeError, OSError):
+        pass
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def flatten_file_tree(file_tree: dict[str, Any], prefix: str = "") -> list[str]:

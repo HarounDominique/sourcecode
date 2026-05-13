@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from sourcecode.detectors.parsers import load_json_file, load_toml_file
+from sourcecode.tree_utils import safe_read_text
 from sourcecode.entrypoint_classifier import is_production_entry_point
 from sourcecode.schema import MonorepoPackageInfo, SourceMap
 
@@ -179,13 +180,28 @@ class ProjectSummarizer:
         for name in ("README.md", "README.rst", "README.txt"):
             path = self.root / name
             try:
-                content = path.read_text(encoding="utf-8", errors="replace")
+                content = safe_read_text(path)
             except OSError:
                 continue
             paragraph = self._extract_first_useful_paragraph(content)
             if paragraph:
                 return paragraph
         return None
+
+    # Patterns that indicate startup/setup instructions rather than domain description
+    _STARTUP_RE = __import__("re").compile(
+        r"-D[a-zA-Z]"           # JVM -Dspring.profiles.active=...
+        r"|--[a-z]"             # CLI flags like --spring.profiles
+        r"|mvn |gradle |java -jar"
+        r"|npm run|pip install|pip3"
+        r"|docker |kubectl "
+        r"|export [A-Z_]+=|\.sh\b|\.bat\b|\.cmd\b"
+        r"|VM options|profiles\.active"
+        r"|localhost:\d{4}|\d{4}/tcp"
+        r"|spring\.profiles|application\.(properties|yml|yaml)"
+        r"|@[a-zA-Z]+\(",      # Java annotations look like code, not description
+        __import__("re").IGNORECASE,
+    )
 
     def _extract_first_useful_paragraph(self, content: str) -> str | None:
         import re as _re
@@ -208,7 +224,13 @@ class ProjectSummarizer:
             lines.append(line)
         if not lines:
             return None
-        return " ".join(lines).strip()
+        paragraph = " ".join(lines).strip()
+        # Reject paragraphs that are startup/setup snippets, not domain descriptions.
+        # Count how many startup signals appear; >1 means the paragraph is instructions.
+        _startup_hits = len(self._STARTUP_RE.findall(paragraph))
+        if _startup_hits >= 2:
+            return None
+        return paragraph
 
     _TYPE_LABELS: dict[str, str] = {
         "cli": "CLI",

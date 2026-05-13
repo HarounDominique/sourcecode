@@ -423,6 +423,9 @@ class ArchitectureAnalysis:
     # Agents must not treat tentative patterns as confirmed facts.
     tentative: bool = False
     ddd_layers_detected: list[str] = field(default_factory=list)  # e.g. ["application", "domain", "infrastructure"]
+    # Java-specific: custom annotation declarations and heavily-subclassed base classes
+    custom_annotations: list[dict] = field(default_factory=list)
+    base_classes: list[dict] = field(default_factory=list)
 
 
 # --- Env Map ---
@@ -598,6 +601,8 @@ class GitContext:
     # "ok": hotspot analysis ran (change_hotspots may still be empty if no changes in window)
     # "failed": hotspot analysis threw an exception (see limitations for hotspots_error:...)
     hotspots_status: str = "ok"
+    # Strategy used: "base_branch_diff" (date-windowed) | "absolute_log_fallback" (top-100) | "failed"
+    hotspot_method: str = "base_branch_diff"
     uncommitted_changes: Optional[UncommittedChanges] = None
     contributors: list[str] = field(default_factory=list)
     git_summary: Optional[str] = None

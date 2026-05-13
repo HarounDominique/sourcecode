@@ -9,6 +9,7 @@ from typing import Optional
 # a stale .pyc / editable-install mismatch is caught at import time rather than
 # silently dropping notes mid-scan on the first failed late-import.
 from sourcecode.schema import AdrRecord, CodeNote, CodeNotesSummary
+from sourcecode.tree_utils import safe_read_text
 
 _MAX_NOTES = 500
 _MAX_NOTES_PER_FILE = 30
@@ -87,7 +88,7 @@ def _scan_source_file(
     try:
         if path.stat().st_size > _MAX_FILE_SIZE:
             return
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = safe_read_text(path)
     except OSError:
         return
 
@@ -121,7 +122,7 @@ def _scan_source_file(
 
 def _parse_adr(path: Path, rel_path: str) -> Optional[object]:
     try:
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = safe_read_text(path)
     except OSError:
         return None
 

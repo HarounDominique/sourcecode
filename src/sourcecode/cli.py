@@ -371,9 +371,10 @@ def main(
         False,
         "--compact",
         help=(
-            "High-signal summary (~600–800 tokens): stacks, entry points, "
-            "dependency summary, confidence, and gaps. "
-            "Optimized for agent context windows."
+            "High-signal summary (typically 1000–3000 tokens depending on repo size): "
+            "stacks, entry points, dependency summary, confidence, and gaps. "
+            "Includes security_surface, mybatis, and transactional_boundaries for Java projects. "
+            "Use --agent for maximum signal or --slim (when available) for minimal token footprint."
         ),
     ),
     dependencies: bool = typer.Option(
@@ -790,6 +791,7 @@ def main(
         env_map = True
         code_notes = True
         no_tree = True  # agents never need the raw file tree
+        architecture = True  # agents need full architectural signal (M4)
 
     _progress = Progress()
     _progress.start("scanning files")
@@ -1673,31 +1675,85 @@ def prepare_context_cmd(
     builder = TaskContextBuilder(target)
     output = builder.build(task, since=since)
 
+    # Task-specific content-filter: each task emphasizes different output fields.
+    # Fields marked False are suppressed from this task's output to reduce noise.
+    _TASK_CONTENT_MAP: dict[str, dict[str, bool]] = {
+        "onboard": {
+            "project_summary": True, "architecture_summary": True,
+            "relevant_files": True, "key_dependencies": True,
+            "gaps": True, "confidence": True,
+            "suspected_areas": False, "improvement_opportunities": False,
+            "test_gaps": False, "code_notes_summary": False,
+            "changed_files": False, "affected_entry_points": False,
+        },
+        "explain": {
+            "project_summary": True, "architecture_summary": True,
+            "relevant_files": True, "key_dependencies": True,
+            "gaps": True, "confidence": True,
+            "suspected_areas": False, "improvement_opportunities": False,
+            "test_gaps": False, "code_notes_summary": False,
+            "changed_files": False, "affected_entry_points": False,
+        },
+        "fix-bug": {
+            "project_summary": True, "architecture_summary": False,
+            "relevant_files": True, "key_dependencies": False,
+            "gaps": False, "confidence": True,
+            "suspected_areas": True, "improvement_opportunities": False,
+            "test_gaps": False, "code_notes_summary": True,
+            "changed_files": False, "affected_entry_points": False,
+        },
+        "generate-tests": {
+            "project_summary": True, "architecture_summary": False,
+            "relevant_files": True, "key_dependencies": True,
+            "gaps": True, "confidence": True,
+            "suspected_areas": False, "improvement_opportunities": False,
+            "test_gaps": True, "code_notes_summary": False,
+            "changed_files": False, "affected_entry_points": False,
+        },
+        "delta": {
+            "project_summary": True, "architecture_summary": False,
+            "relevant_files": True, "key_dependencies": False,
+            "gaps": False, "confidence": True,
+            "suspected_areas": False, "improvement_opportunities": False,
+            "test_gaps": False, "code_notes_summary": False,
+            "changed_files": True, "affected_entry_points": True,
+        },
+    }
+    _content_filter = _TASK_CONTENT_MAP.get(task, {})
+
+    def _task_include(field: str) -> bool:
+        return _content_filter.get(field, True)
+
     out: dict[str, Any] = {
         "task": output.task,
         "goal": output.goal,
-        "project_summary": output.project_summary,
-        "architecture_summary": output.architecture_summary,
-        "confidence": output.confidence,
-        "relevant_files": [
+    }
+    if _task_include("project_summary"):
+        out["project_summary"] = output.project_summary
+    if _task_include("architecture_summary"):
+        out["architecture_summary"] = output.architecture_summary
+    if _task_include("confidence"):
+        out["confidence"] = output.confidence
+    if _task_include("relevant_files"):
+        out["relevant_files"] = [
             {k: v for k, v in asdict(f).items() if v != ""}
             for f in output.relevant_files
-        ],
-        "key_dependencies": output.key_dependencies,
-    }
-    if output.gaps:
+        ]
+    if _task_include("key_dependencies") and output.key_dependencies:
+        out["key_dependencies"] = output.key_dependencies
+    if _task_include("gaps") and output.gaps:
         out["gaps"] = output.gaps
-    if output.suspected_areas:
+    if _task_include("suspected_areas") and output.suspected_areas:
         out["suspected_areas"] = output.suspected_areas
-    if output.improvement_opportunities:
+    if _task_include("improvement_opportunities") and output.improvement_opportunities:
         out["improvement_opportunities"] = output.improvement_opportunities
-    if output.test_gaps:
+    if _task_include("test_gaps") and output.test_gaps:
         out["test_gaps"] = output.test_gaps
-    if output.code_notes_summary:
+    if _task_include("code_notes_summary") and output.code_notes_summary:
         out["code_notes_summary"] = output.code_notes_summary
-    if output.changed_files:
+    if _task_include("changed_files") and output.changed_files:
         out["changed_files"] = output.changed_files
-    if output.affected_entry_points:
+    if _task_include("affected_entry_points") and output.affected_entry_points:
         out["affected_entry_points"] = output.affected_entry_points
     if output.limitations:
         out["limitations"] = output.limitations

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from sourcecode.schema import DocRecord, DocsDepth, DocSummary
-from sourcecode.tree_utils import flatten_file_tree
+from sourcecode.tree_utils import flatten_file_tree, safe_read_text
 
 # ---------------------------------------------------------------------------
 # Language helpers
@@ -153,7 +153,7 @@ class DocAnalyzer:
 
             # Read content
             try:
-                content = abs_path.read_text(encoding="utf-8", errors="replace")
+                content = safe_read_text(abs_path)
             except OSError:
                 limitations.append(f"read_error:{norm_path}")
                 continue

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -199,6 +200,14 @@ class ArchitectureAnalyzer:
                 BoundedContext(name=n, modules=module_files.get(n, []), confidence="high")
                 for n in ddd_contexts
             ]
+            # Secondary pass: scan Java files for custom annotations and base classes.
+            java_paths = [p for p in sm.file_paths if p.endswith(".java")]
+            _custom_ann, _base_cls = self._scan_java_patterns(root, java_paths)
+            _method = (
+                "filesystem_heuristic+annotation_scan"
+                if (_custom_ann or _base_cls)
+                else "filesystem_inference"
+            )
             return ArchitectureAnalysis(
                 requested=True,
                 pattern=ddd_pattern,
@@ -207,7 +216,7 @@ class ArchitectureAnalyzer:
                 bounded_contexts=bc_list,
                 ddd_layers_detected=ddd_layer_names,
                 confidence="high",
-                method="filesystem_inference",
+                method=_method,
                 limitations=[],
                 evidence=[{
                     "type": "filesystem_naming",
@@ -219,6 +228,8 @@ class ArchitectureAnalyzer:
                     "confidence": "high",
                 }],
                 tentative=False,
+                custom_annotations=_custom_ann,
+                base_classes=_base_cls,
             )
 
         if len(filtered) < 2:
@@ -795,3 +806,137 @@ class ArchitectureAnalyzer:
                     sccs.append(comp)
 
         return sccs
+
+    # ------------------------------------------------------------------
+    # Java annotation / base-class secondary scanner (C4)
+    # ------------------------------------------------------------------
+
+    _ANNOTATION_DECL_RE = re.compile(
+        r"@interface\s+([A-Z][A-Za-z0-9_]+)", re.MULTILINE
+    )
+    _ANNOTATION_USAGE_RE = re.compile(
+        r"@([A-Z][A-Za-z0-9_]+)(?:\s*\(([^)]*)\))?", re.MULTILINE
+    )
+    _EXTENDS_RE = re.compile(
+        r"class\s+\w+\s+extends\s+([A-Z][A-Za-z0-9_]+)", re.MULTILINE
+    )
+    _ANNOTATION_PARAM_RE = re.compile(r"(\w+)\s*=\s*[\"']?([^,\"')]+)[\"']?")
+    _MAX_JAVA_SCAN = 2000  # cap files to avoid runaway scanning
+
+    def _scan_java_patterns(
+        self,
+        root: Path,
+        java_paths: list[str],
+    ) -> tuple[list[dict], list[dict]]:
+        """Scan Java source files for custom @interface annotations and common base classes.
+
+        Returns (custom_annotations, base_classes) lists for ArchitectureAnalysis.
+        """
+        from sourcecode.tree_utils import safe_read_text
+
+        annotation_decls: dict[str, dict] = {}  # name → {params, files, usage_count}
+        annotation_usage: dict[str, int] = {}    # name → total usages across codebase
+        extends_counts: dict[str, int] = {}      # base_class_name → subclass count
+
+        for path_str in java_paths[:self._MAX_JAVA_SCAN]:
+            abs_path = root / path_str
+            try:
+                content = safe_read_text(abs_path)
+            except OSError:
+                continue
+
+            # Custom annotation declarations: `public @interface FooAnnotation`
+            for m in self._ANNOTATION_DECL_RE.finditer(content):
+                ann_name = m.group(1)
+                if ann_name not in annotation_decls:
+                    # Extract parameters from the annotation body (next ~500 chars)
+                    body_start = m.end()
+                    body = content[body_start:body_start + 500]
+                    params = re.findall(r"(?:String|int|boolean|Class)\s+(\w+)\s*\(\)", body)
+                    annotation_decls[ann_name] = {
+                        "name": ann_name,
+                        "parameters": params,
+                        "usage_count": 0,
+                        "purpose": "",
+                    }
+
+            # Annotation usage frequency
+            for m in self._ANNOTATION_USAGE_RE.finditer(content):
+                ann_name = m.group(1)
+                # Skip common Java built-ins
+                if ann_name in {
+                    "Override", "SuppressWarnings", "Deprecated", "FunctionalInterface",
+                    "SafeVarargs", "Retention", "Target", "Documented", "Inherited",
+                    "RestController", "Service", "Repository", "Component", "Controller",
+                    "Autowired", "Value", "Bean", "Configuration", "SpringBootApplication",
+                    "EnableAutoConfiguration", "Transactional", "RequestMapping",
+                    "GetMapping", "PostMapping", "PutMapping", "DeleteMapping",
+                    "PathVariable", "RequestBody", "RequestParam", "ResponseBody",
+                    "NotNull", "NotBlank", "Size", "Min", "Max", "Valid",
+                }:
+                    continue
+                annotation_usage[ann_name] = annotation_usage.get(ann_name, 0) + 1
+
+            # extends BaseClass — count subclasses per base
+            for m in self._EXTENDS_RE.finditer(content):
+                base = m.group(1)
+                extends_counts[base] = extends_counts.get(base, 0) + 1
+
+        # Merge usage counts into annotation_decls
+        for ann_name, info in annotation_decls.items():
+            info["usage_count"] = annotation_usage.get(ann_name, 0)
+            # Infer purpose from name heuristic
+            name_lower = ann_name.lower()
+            if "security" in name_lower or "filtro" in name_lower or "auth" in name_lower:
+                info["purpose"] = "security filter / access control on REST endpoints"
+            elif "valid" in name_lower or "constraint" in name_lower:
+                info["purpose"] = "bean validation constraint"
+            elif "cache" in name_lower:
+                info["purpose"] = "caching hint"
+
+        # Also include heavily-used annotations not declared in this repo (usage ≥ 50)
+        # that were NOT already captured as custom declarations
+        for ann_name, count in annotation_usage.items():
+            if ann_name not in annotation_decls and count >= 50:
+                annotation_decls[ann_name] = {
+                    "name": ann_name,
+                    "parameters": [],
+                    "usage_count": count,
+                    "purpose": "",
+                }
+
+        custom_annotations = sorted(
+            annotation_decls.values(),
+            key=lambda x: x["usage_count"],
+            reverse=True,
+        )
+
+        # Base classes with > 10 subclasses
+        base_classes = [
+            {
+                "name": base,
+                "subclass_count": count,
+                "role": self._infer_base_role(base),
+            }
+            for base, count in sorted(extends_counts.items(), key=lambda x: -x[1])
+            if count > 10
+        ]
+
+        return custom_annotations, base_classes
+
+    @staticmethod
+    def _infer_base_role(class_name: str) -> str:
+        name_lower = class_name.lower()
+        if "restcontroller" in name_lower or "controller" in name_lower:
+            return "shared exception handler / base REST controller"
+        if "service" in name_lower:
+            return "base service with common business-logic utilities"
+        if "repository" in name_lower or "dao" in name_lower:
+            return "base data access object"
+        if "entity" in name_lower or "model" in name_lower:
+            return "base JPA entity"
+        if "dto" in name_lower or "mapper" in name_lower:
+            return "base DTO / bean mapper"
+        if "test" in name_lower:
+            return "base test class"
+        return "shared base class"

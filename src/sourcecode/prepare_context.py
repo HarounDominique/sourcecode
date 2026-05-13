@@ -596,8 +596,12 @@ class TaskContextBuilder:
         # ── 5c. review-pr suspected_areas (needs git uncommitted_files) ──────
         if task_name == "review-pr" and spec.enable_code_notes:
             pr_areas: dict[str, int] = {}
+            _all_paths_set = set(all_paths)
             for path in uncommitted_files:
-                pr_areas[path] = pr_areas.get(path, 0) + 10
+                # Only count uncommitted files that belong to the scanned root —
+                # git status may return repo-level paths from a parent directory.
+                if path in _all_paths_set:
+                    pr_areas[path] = pr_areas.get(path, 0) + 10
             review_kinds = {"FIXME", "TODO", "BUG", "HACK"}
             for note in cn_notes_for_ranking:
                 if note.kind in review_kinds:

@@ -128,6 +128,7 @@ class GitAnalyzer:
         except Exception as exc:
             limitations.append(f"commits_error:{exc}")
 
+        hotspot_method = "base_branch_diff"
         try:
             stdout, _ = _run_git(
                 [
@@ -143,9 +144,36 @@ class GitAnalyzer:
         except subprocess.TimeoutExpired:
             limitations.append("hotspots_timeout")
             hotspots_status = "failed"
+            hotspot_method = "failed"
         except Exception as exc:
             limitations.append(f"hotspots_error:{exc}")
             hotspots_status = "failed"
+            hotspot_method = "failed"
+
+        # Fallback: if date-windowed scan returned nothing (e.g. branch just created,
+        # all commits pre-date the window, or non-main branch with old history),
+        # use absolute log -n 100 unconditionally.
+        if not change_hotspots and hotspots_status != "failed":
+            try:
+                stdout, _ = _run_git(
+                    [
+                        "log",
+                        "-n", "100",
+                        "--name-only",
+                        "--pretty=format:__HOTSPOT__|%aI|%s",
+                    ],
+                    path,
+                    timeout=30,
+                )
+                change_hotspots = _parse_hotspots(stdout)
+                if change_hotspots:
+                    hotspot_method = "absolute_log_fallback"
+                    limitations.append(
+                        f"hotspots_fallback: no commits in last {days} days; "
+                        "using top-100 commits unconditionally"
+                    )
+            except Exception:
+                pass
 
         try:
             stdout, _ = _run_git(["status", "--porcelain"], path, timeout=10)
@@ -174,6 +202,7 @@ class GitAnalyzer:
             recent_commits=recent_commits,
             change_hotspots=change_hotspots,
             hotspots_status=hotspots_status,
+            hotspot_method=hotspot_method,
             uncommitted_changes=uncommitted,
             contributors=contributors,
             git_summary=git_summary,

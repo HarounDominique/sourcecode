@@ -271,8 +271,42 @@ def _project_deployment_risks(sm: "SourceMap") -> list[str]:
     return risks
 
 
+_DTO_MAPPER_STEMS = frozenset({"DtoMapper", "GenericDtoMapper", "BaseMapper", "AbstractMapper"})
+
+def _is_dto_mapper(path: str, root: Optional[Path] = None) -> bool:
+    """True when a *Mapper.java is a bean-mapping class, not a MyBatis @Mapper interface.
+
+    Heuristic 1: stem contains "Dto" (e.g. CotizacionDtoMapper).
+    Heuristic 2: file content extends a known bean-mapper base class.
+    Heuristic 3: NO @Mapper (org.apache.ibatis.annotations.Mapper) annotation found in file.
+    """
+    from pathlib import Path as _Path
+    stem = _Path(path).stem
+    if "Dto" in stem or stem in _DTO_MAPPER_STEMS:
+        return True
+    if root is not None:
+        try:
+            from sourcecode.tree_utils import safe_read_text
+            content = safe_read_text(root / path)
+            # Explicit @Mapper annotation → real MyBatis mapper
+            if "org.apache.ibatis.annotations.Mapper" in content or "@Mapper" in content[:2000]:
+                return False
+            # Extends bean-mapping base → dto mapper
+            if any(f"extends {base}" in content for base in _DTO_MAPPER_STEMS):
+                return True
+            # No @Mapper and no XML → likely dto mapper
+            return True
+        except OSError:
+            pass
+    return False
+
+
 def _mybatis_pairing(sm: "SourceMap") -> "Optional[dict[str, Any]]":
-    """Lightweight MyBatis mapper interface <-> XML file pairing from file_paths."""
+    """Lightweight MyBatis mapper interface <-> XML file pairing from file_paths.
+
+    Separates genuine @Mapper interfaces (need XML) from DtoMapper bean-mapping
+    classes (no XML needed) to eliminate false-positive missing_xml reports.
+    """
     from pathlib import Path as _Path
     has_mybatis = any(
         any(f.name.lower() == "mybatis" for f in s.frameworks)
@@ -280,21 +314,36 @@ def _mybatis_pairing(sm: "SourceMap") -> "Optional[dict[str, Any]]":
     )
     if not has_mybatis:
         return None
+
+    root = Path(sm.metadata.analyzed_path) if sm.metadata.analyzed_path else None
     non_test = [p for p in sm.file_paths if "/test/" not in p and "/tests/" not in p]
-    mapper_interfaces = [p for p in non_test if p.endswith("Mapper.java")]
+    all_mapper_java = [p for p in non_test if p.endswith("Mapper.java")]
+
+    # Separate @Mapper interfaces from DtoMapper bean-mapping classes
+    mybatis_interfaces: list[str] = []
+    dto_mappers: list[str] = []
+    for p in all_mapper_java:
+        if _is_dto_mapper(p, root):
+            dto_mappers.append(p)
+        else:
+            mybatis_interfaces.append(p)
+
     xml_files = [p for p in sm.file_paths if p.endswith("Mapper.xml")]
-    interface_index = {_Path(p).stem: p for p in mapper_interfaces}
+    interface_index = {_Path(p).stem: p for p in mybatis_interfaces}
     xml_index = {_Path(p).stem: p for p in xml_files}
     orphan_xml = [xml_index[s] for s in xml_index if s not in interface_index]
     missing_xml = [s for s in interface_index if s not in xml_index]
+
     result: dict[str, Any] = {
-        "mapper_interfaces": len(mapper_interfaces),
+        "mapper_interfaces": len(mybatis_interfaces),
         "xml_files": len(xml_files),
     }
     if orphan_xml:
         result["orphan_xml"] = orphan_xml[:5]
     if missing_xml:
         result["missing_xml"] = missing_xml[:5]
+    if dto_mappers:
+        result["dto_mappers"] = dto_mappers[:10]
     return result
 
 
@@ -307,12 +356,60 @@ def _spring_boot_version(sm: "SourceMap") -> "Optional[str]":
     return None
 
 
+def _spring_profiles_context(sm: "SourceMap") -> "Optional[dict[str, Any]]":
+    """Build structured spring_profiles block: detected names + per-profile file variants."""
+    # Gather profile names from env_summary (populated by env_analyzer scanning
+    # application-{profile}.yml files) or the top-level spring_profiles list.
+    profiles: list[str] = []
+    if sm.env_summary is not None:
+        _sp = sm.env_summary.spring_profiles or sm.env_summary.profiles_scanned
+        if _sp:
+            profiles = sorted(set(_sp))
+    if not profiles:
+        _top = getattr(sm, "spring_profiles", [])
+        profiles = sorted(set(_top)) if _top else []
+    if not profiles:
+        return None
+
+    # Per-profile variants: Java files whose name contains a profile name (case-insensitive)
+    per_profile: dict[str, list[str]] = {}
+    for profile in profiles:
+        pfx = profile.lower()
+        matches = [
+            p for p in sm.file_paths
+            if pfx in Path(p).stem.lower() and p.endswith(".java")
+        ]
+        if matches:
+            per_profile[profile] = [Path(p).name for p in matches[:5]]
+
+    result: dict[str, Any] = {"detected": profiles}
+    if per_profile:
+        result["per_profile_variants"] = per_profile
+        # Heuristic note when security strategy variants detected
+        has_security = any(
+            "security" in v.lower() or "strategy" in v.lower()
+            for vlist in per_profile.values()
+            for v in vlist
+        )
+        if has_security:
+            result["note"] = (
+                "Each profile activates a different SecurityStrategy implementation"
+            )
+    return result
+
+
 def _transactional_summary(sm: "SourceMap") -> "Optional[dict[str, Any]]":
     """Surface @Transactional class boundaries from the Java stack detection."""
     for s in sm.stacks:
         classes = getattr(s, "transactional_classes", [])
         if classes:
-            return {"count": len(classes), "classes": classes[:10]}
+            total = len(classes)
+            result: dict[str, Any] = {"count": total, "classes": classes}
+            if total > 10:
+                result["classes"] = classes[:10]
+                result["truncated"] = True
+                result["note"] = f"showing 10 of {total}; use --full for complete list"
+            return result
     return None
 
 
@@ -331,7 +428,17 @@ def _security_surface_from_eps(eps: list) -> "Optional[dict[str, Any]]":
             if nm and nm not in seen:
                 seen.add(nm)
                 resource_names.append(nm)
-    return {"resource_names": resource_names} if resource_names else None
+    if not resource_names:
+        return None
+    return {
+        "schema": (
+            "Values used in @M3FiltroSeguridad(nombreRecurso=VALUE) on REST controller "
+            "methods. Each value names a permission resource checked at runtime."
+        ),
+        # resource_names kept for backward compatibility; resources is the canonical key
+        "resource_names": resource_names,
+        "resources": resource_names,
+    }
 
 
 def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
@@ -375,10 +482,51 @@ def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
     if security:
         result["security"] = security
     if controllers:
-        result["controllers"] = {
-            "count": len(controllers),
-            "sample": [{"path": c["path"]} for c in controllers[:5]],
-        }
+        # Extract all DDD module names from controller paths and group by domain area.
+        # Path pattern: .../ddd/{module}/infrastructure/rest/*Controller.java
+        _DDD_LAYERS = {"application", "domain", "infrastructure"}
+        module_names: list[str] = []
+        seen_modules: set[str] = set()
+        for c in controllers:
+            parts = c["path"].replace("\\", "/").split("/")
+            module = ""
+            for i, part in enumerate(parts):
+                if part in _DDD_LAYERS and i >= 1:
+                    module = parts[i - 1]
+                    break
+            if not module:
+                # fallback: penultimate directory
+                module = parts[-2] if len(parts) >= 2 else ""
+            if module and module not in seen_modules:
+                seen_modules.add(module)
+                module_names.append(module)
+
+        if len(module_names) > 30:
+            # Group by first path segment under ddd/ (inferred domain area)
+            domain_groups: dict[str, list[str]] = {}
+            for c in controllers:
+                parts = c["path"].replace("\\", "/").split("/")
+                module = ""
+                domain_prefix = ""
+                for i, part in enumerate(parts):
+                    if part in _DDD_LAYERS and i >= 1:
+                        module = parts[i - 1]
+                        # the segment before the module is the domain area
+                        domain_prefix = parts[i - 2] if i >= 2 else ""
+                        break
+                if module:
+                    domain_groups.setdefault(domain_prefix or "other", [])
+                    if module not in domain_groups[domain_prefix or "other"]:
+                        domain_groups[domain_prefix or "other"].append(module)
+            result["controllers"] = {
+                "count": len(controllers),
+                "modules": {k: sorted(v) for k, v in sorted(domain_groups.items())},
+            }
+        else:
+            result["controllers"] = {
+                "count": len(controllers),
+                "modules": sorted(module_names),
+            }
     return result
 
 
@@ -408,6 +556,37 @@ def _lightweight_arch_pattern(sm: "SourceMap") -> "Optional[dict[str, Any]]":
     if has_controller and has_service:
         return {"pattern": "layered", "confidence": 0.42}
     return None
+
+
+def _jndi_datasources(sm: "SourceMap") -> "Optional[list[dict[str, Any]]]":
+    """Scan application.yml and persistence.xml for JNDI datasource names."""
+    import re as _re
+    _JNDI_YML_RE = _re.compile(r"jndi-name\s*:\s*(.+)")
+    _JNDI_XML_RE = _re.compile(r"<jta-data-source>\s*([^<]+)\s*</jta-data-source>")
+    root = Path(sm.metadata.analyzed_path) if sm.metadata.analyzed_path else Path(".")
+    datasources: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for path_str in sm.file_paths:
+        fname = path_str.rsplit("/", 1)[-1]
+        if fname not in {"application.yml", "application.yaml", "persistence.xml"}:
+            continue
+        abs_path = root / path_str
+        try:
+            from sourcecode.tree_utils import safe_read_text
+            content = safe_read_text(abs_path)
+        except OSError:
+            continue
+        pattern = _JNDI_YML_RE if fname.endswith((".yml", ".yaml")) else _JNDI_XML_RE
+        for m in pattern.finditer(content):
+            name = m.group(1).strip().strip('"\'')
+            if name and name not in seen:
+                seen.add(name)
+                datasources.append({"name": name, "source": path_str})
+
+    if not datasources:
+        return None
+    return datasources
 
 
 def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> list[dict[str, Any]]:
@@ -467,6 +646,31 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
         combined = fs.score + content_rel + sem_hub
         # REST controller boost: surface above @Transactional service files
         if path in _rest_ctrl_paths:
+            combined += 2.0
+
+        # M3: Structural importance scoring — priority over alphabetical ordering.
+        stem = Path(path).stem
+        stem_lower = stem.lower()
+        path_lower = path.lower()
+        # +10 application entry points
+        if path in entry_paths and any(
+            k in stem for k in ("Application", "Main", "Initializer", "Bootstrap", "Startup")
+        ):
+            combined += 10.0
+        # +8 known base/infrastructure classes
+        elif any(k in stem for k in (
+            "GenericRestController", "GenericCRUDRestController", "GenericController",
+            "AkitaBaseService", "BaseService", "FilterConfig", "AbstractController",
+        )):
+            combined += 8.0
+        # +6 security configuration
+        elif any(k in stem for k in (
+            "SecurityConfig", "SecurityStrategy", "WebSecurityConfig", "SecurityFilter",
+            "JwtFilter", "AuthConfig", "SecurityConfiguration",
+        )):
+            combined += 6.0
+        # +2 shared utilities
+        elif any(k in path_lower for k in ("util", "shared", "common", "helper", "constant")):
             combined += 2.0
 
         # Visibility threshold: require meaningful combined signal.
@@ -787,6 +991,7 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
     _mybatis = _mybatis_pairing(sm)
     _transactional = _transactional_summary(sm)
     _git_ctx = _compact_git_context(sm)
+    _spring_profiles = _spring_profiles_context(sm)
 
     # Suppress empty optional sections (no signal value)
     _effective_env_summary = env_summary_dict if (env_summary_dict and env_summary_dict.get("total", 0) > 0) else None
@@ -810,9 +1015,17 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
         "confidence_summary": conf_dict,
         "analysis_gaps": gaps_list,
     }
+    _jndi = _jndi_datasources(sm)
     if _language_version:
         result["language_version"] = _language_version
-    if _deployment:
+    if _deployment or _jndi:
+        _deployment = _deployment or {}
+        if _jndi:
+            _deployment["jndi_datasources"] = _jndi
+            _deployment["jndi_note"] = (
+                "JNDI datasources require WebLogic/WildFly binding; "
+                "spring.datasource.* properties only apply to embedded Tomcat"
+            )
         result["deployment"] = _deployment
     if _deploy_risks:
         result["deployment_risks"] = _deploy_risks
@@ -824,6 +1037,8 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
         result["transactional_boundaries"] = _transactional
     if _git_ctx:
         result["git_context"] = _git_ctx
+    if _spring_profiles:
+        result["spring_profiles"] = _spring_profiles
     _always_include = {"project_type", "project_summary", "architecture_summary", "dependency_summary"}
     return {k: v for k, v in result.items() if v is not None or k in _always_include}
 
@@ -1227,10 +1442,12 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
         }
         if sm.env_summary.categories:
             signals["env_vars"]["categories"] = sm.env_summary.categories
-        _spring_profiles = (sm.env_summary.spring_profiles
-                            or sm.env_summary.profiles_scanned)
-        if _spring_profiles:
-            signals["env_vars"]["spring_profiles"] = sorted(set(_spring_profiles))
+        _sp_ctx = _spring_profiles_context(sm)
+        if _sp_ctx:
+            signals["spring_profiles"] = _sp_ctx
+        elif (sm.env_summary.spring_profiles or sm.env_summary.profiles_scanned):
+            _raw_profiles = sm.env_summary.spring_profiles or sm.env_summary.profiles_scanned
+            signals["env_vars"]["spring_profiles"] = sorted(set(_raw_profiles))
         if sm.env_map:
             _sorted_env = sorted(
                 sm.env_map,
