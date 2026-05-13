@@ -2,7 +2,7 @@
 
 **Compressed AI-ready context for Java/Spring enterprise codebases.**
 
-![Version](https://img.shields.io/badge/version-1.24.0-blue)
+![Version](https://img.shields.io/badge/version-1.25.0-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
@@ -36,7 +36,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.24.0
+# sourcecode 1.25.0
 ```
 
 ---
@@ -44,7 +44,7 @@ sourcecode version
 ## Quickstart
 
 ```bash
-# High-signal summary (~600-800 tokens) — recommended starting point
+# High-signal summary (1000–3000 tokens depending on repo size) — recommended starting point
 sourcecode --compact
 
 # Add git hotspots and uncommitted file count
@@ -92,8 +92,9 @@ Example output for a Spring Boot project (`--compact`):
 
 | Flag | Alias | Default | Description |
 |------|-------|---------|-------------|
-| `--compact` | | off | **Recommended.** ~600-800 token summary: stack, entry points, dependencies, risk flags, confidence, gaps. Optimized for agent context windows. |
+| `--compact` | | off | High-signal summary (1000–3000 tokens): stacks, entry points, dependencies, risk flags, confidence, gaps. Includes `security_surface`, `mybatis`, and `transactional_boundaries` for Java projects. |
 | `--agent` | | off | Structured noise-free JSON for AI agents: identity, entry points, dependencies, confidence, gaps. Auto-enables dependency, env-var, and code-notes analysis. |
+| `--full` | | off | Remove truncation limits on `transactional_boundaries`, `mybatis.dto_mappers`, and other capped lists. |
 | `--git-context` | `-g` | off | Include git activity: recent commits, change hotspots, and uncommitted changes. |
 | `--changed-only` | | off | Limit output to git-modified files (staged, unstaged, untracked). Forces compact output. |
 | `--depth` | | `4` | File tree traversal depth (1–20). Java/Maven projects auto-adjust to 12. |
@@ -123,16 +124,18 @@ sourcecode prepare-context TASK [PATH] [OPTIONS]
 | `refactor` | Structural problems, improvement opportunities, high-annotation files | Code quality review |
 | `generate-tests` | Source files without test pairs, coverage gap analysis | Writing missing tests |
 | `review-pr` | Uncommitted/changed files + architectural impact | Pre-merge review |
-| `delta` | Only files changed in a git range (`--since`), affected entry points | Incremental CI context |
+| `delta` | Changed files with multi-hop impact analysis, structural import graph, system-level impact summary | Incremental CI/review context |
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
 | `--since REF` | Git ref for `delta` task (e.g. `HEAD~3`, `main`, `v1.2.0`). Required for `delta`; ignored for other tasks. |
+| `--symptom TEXT` | *(fix-bug only)* Keyword hint for the bug — boosts matching files and surfaces related code notes. |
 | `--llm-prompt` | Append a ready-to-use LLM prompt to the output. |
 | `--dry-run` | Show what would be analyzed without running it. |
 | `--copy` / `-c` | Copy output to clipboard after a successful run. |
+| `--output` / `-o` | Write output to a file. |
 | `--task-help` | List all tasks with descriptions and exit. |
 
 ### Examples
@@ -141,11 +144,8 @@ sourcecode prepare-context TASK [PATH] [OPTIONS]
 # Explain the current repo
 sourcecode prepare-context explain
 
-# Analyze a specific repo path
-sourcecode prepare-context explain /path/to/repo
-
-# Focus on bug-prone files
-sourcecode prepare-context fix-bug
+# Focus on bug-prone files, with a symptom hint
+sourcecode prepare-context fix-bug --symptom "NullPointerException in OrderService"
 
 # Incremental context: files changed since branch diverged from main
 sourcecode prepare-context delta . --since main
@@ -155,6 +155,51 @@ sourcecode prepare-context onboard --llm-prompt
 
 # List all tasks
 sourcecode prepare-context --task-help
+```
+
+---
+
+## `delta` — incremental impact analysis
+
+The `delta` task is the recommended mode for CI pipelines and PR reviews. It goes beyond listing changed files: it builds a structural import graph and propagates impact transitively up to 3 hops.
+
+```bash
+sourcecode prepare-context delta [PATH] --since REF
+```
+
+**Output fields:**
+
+| Field | Description |
+|-------|-------------|
+| `changed_files` | Files modified in the git range |
+| `relevant_files` | Changed files + files pulled in by the import graph (scored by artifact type and hop distance) |
+| `impact_summary` | Human-readable summary: artifact types changed and active risk areas |
+| `affected_modules` | DDD domain modules touched by the change |
+| `risk_areas` | Per-area severity breakdown (`security`, `api`, `persistence`, etc.) |
+| `change_type` | Closed taxonomy: `behavioral_change`, `structural_change`, `configuration_change`, `dependency_change`, `security_change` |
+| `system_impact` | Subsystems affected, behavioral changes, runtime impact notes |
+| `dependency_graph_summary` | Verified structural import edges (hop 1–3) and `propagation_depth`. **Only real imports — no heuristics, no test files.** |
+| `impact_score_per_file` | Per-file numeric impact score (0–1) |
+| `since` | The git ref used |
+| `gaps` | What the analysis could not determine |
+
+**How the import graph works:**
+
+1. Each changed file is classified by artifact type (`controller`, `service`, `repository`, `security`, `spring_config`, etc.).
+2. A BFS traversal walks the import graph **repo-wide** (not restricted to the same module), up to 3 hops deep.
+3. `dependency_graph_summary.edges` only contains verified `import` / `@Autowired` / constructor-injection relationships. Test files and heuristic proximity matches are excluded from edges (they appear in `relevant_files` only if they have real imports of changed files).
+4. Score decays 30% per hop: a directly-changed `SecurityConfig.java` scores 0.90; its direct importer scores 0.63; a transitive importer scores 0.44.
+
+```bash
+# Changed service → controller → facade (3 hops)
+sourcecode prepare-context delta . --since main
+
+# Output includes:
+# dependency_graph_summary.edges:
+#   hop-1: OrderService.java → OrderRepository.java
+#   hop-2: OrderRepository.java → OrderController.java
+#   hop-3: OrderController.java → OrderFacade.java
+# propagation_depth: 3
 ```
 
 ---
