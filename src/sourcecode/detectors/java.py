@@ -272,6 +272,16 @@ class JavaDetector(AbstractDetector):
             frameworks.append(FrameworkDetection(name="Jakarta EE", source=source))
         if "mybatis" in text:
             frameworks.append(FrameworkDetection(name="MyBatis", source=source))
+        if "spring-boot-starter-security" in text or "spring-security-core" in text:
+            frameworks.append(FrameworkDetection(name="Spring Security", source=source))
+        if "spring-boot-starter-data-jpa" in text or "spring-data-jpa" in text:
+            frameworks.append(FrameworkDetection(name="Spring Data JPA", source=source))
+        if "spring-ldap-core" in text or "spring-security-ldap" in text:
+            frameworks.append(FrameworkDetection(name="Spring LDAP", source=source))
+        if "spring-aspects" in text or "spring-aop" in text:
+            frameworks.append(FrameworkDetection(name="Spring AOP", source=source))
+        if "spring-boot-starter-activemq" in text or "activemq-broker" in text or "activemq-client" in text:
+            frameworks.append(FrameworkDetection(name="ActiveMQ", source=source))
         return frameworks
 
     def _collect_entry_points(self, context: DetectionContext) -> list[EntryPoint]:

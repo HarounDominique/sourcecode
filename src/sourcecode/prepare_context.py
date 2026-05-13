@@ -321,6 +321,8 @@ class TaskOutput:
     why_these_files: dict[str, str] = field(default_factory=dict)  # path → why relevant
     changed_files: list[str] = field(default_factory=list)         # delta task only
     affected_entry_points: list[str] = field(default_factory=list) # delta task only
+    symptom: Optional[str] = None                                  # fix-bug only
+    related_notes: list[dict] = field(default_factory=list)        # fix-bug + symptom only
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -385,7 +387,7 @@ class TaskContextBuilder:
     def __init__(self, root: Path) -> None:
         self.root = root
 
-    def build(self, task_name: str, *, since: Optional[str] = None) -> TaskOutput:
+    def build(self, task_name: str, *, since: Optional[str] = None, symptom: Optional[str] = None) -> TaskOutput:
         if task_name not in TASKS:
             raise ValueError(
                 f"Unknown task '{task_name}'. Available: {', '.join(TASKS)}"
@@ -630,6 +632,32 @@ class TaskContextBuilder:
             delta_files=_delta_files,
         )
 
+        # ── 6b. Symptom keyword boost + related notes (fix-bug + --symptom) ──
+        symptom_keywords: list[str] = []
+        related_notes: list[dict] = []
+        if task_name == "fix-bug" and symptom:
+            import re as _re
+            symptom_keywords = [
+                w.lower() for w in _re.split(r"[\s\W]+", symptom)
+                if len(w) > 2
+            ]
+            if symptom_keywords:
+                # Surface code notes whose text contains any keyword
+                for _n in cn_notes_for_ranking:
+                    _text = (getattr(_n, "text", "") or "").lower()
+                    if any(kw in _text for kw in symptom_keywords):
+                        related_notes.append({
+                            "kind": getattr(_n, "kind", ""),
+                            "path": getattr(_n, "path", ""),
+                            "line": getattr(_n, "line", None),
+                            "text": getattr(_n, "text", ""),
+                        })
+                # Re-rank relevant_files: boost files whose path matches keywords
+                def _symptom_score(rf: "RelevantFile") -> float:
+                    path_lower = rf.path.lower()
+                    return rf.score + 0.2 * sum(1.0 for kw in symptom_keywords if kw in path_lower)
+                relevant_files = sorted(relevant_files, key=lambda rf: -_symptom_score(rf))
+
         # ── 7. Test gaps (generate-tests only) ────────────────────────────
         test_gaps: list[str] = []
         if task_name == "generate-tests":
@@ -708,6 +736,8 @@ class TaskContextBuilder:
             why_these_files=why_these_files,
             changed_files=changed_files,
             affected_entry_points=affected_entry_points,
+            symptom=symptom if task_name == "fix-bug" and symptom else None,
+            related_notes=related_notes,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
@@ -988,12 +1018,18 @@ class TaskContextBuilder:
         return Path(path).suffix.lower() in _SOURCE_EXTENSIONS
 
     def _get_git_changed_files(self, since: Optional[str] = None) -> list[str]:
-        """Get files changed since a git ref (default: HEAD~1) relative to root."""
+        """Get files changed since a git ref (default: HEAD~1) relative to self.root.
+
+        Uses --relative so paths are relative to cwd (self.root), not the git repo
+        root. This is critical for monorepos where self.root is a subpath of the
+        git root and git diff would otherwise return prefixed paths that don't match
+        the scanned file tree.
+        """
         import subprocess
         ref = since or "HEAD~1"
         try:
             result = subprocess.run(
-                ["git", "diff", "--name-only", ref, "HEAD"],
+                ["git", "diff", "--name-only", "--relative", ref, "HEAD"],
                 cwd=str(self.root),
                 capture_output=True,
                 text=True,
@@ -1011,7 +1047,7 @@ class TaskContextBuilder:
         # Fallback: uncommitted changes
         try:
             result = subprocess.run(
-                ["git", "diff", "--name-only"],
+                ["git", "diff", "--name-only", "--relative"],
                 cwd=str(self.root),
                 capture_output=True,
                 text=True,

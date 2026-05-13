@@ -42,6 +42,14 @@ _MAX_DEFAULT_CONTRACTS = 20  # max contracts in default/standard contract output
 _MAX_HARD_SIGNALS_DEFAULT = 20  # max hard_signals entries in default output
 
 
+def _truncate_note(text: str, limit: int) -> str:
+    """Truncate note text at word boundary, appending … when cut."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0]
+    return cut.rstrip(".,;") + "…"
+
+
 def _cap_contracts_for_output(
     contracts: list[Any],
     max_count: int = _MAX_DEFAULT_CONTRACTS,
@@ -301,7 +309,7 @@ def _is_dto_mapper(path: str, root: Optional[Path] = None) -> bool:
     return False
 
 
-def _mybatis_pairing(sm: "SourceMap") -> "Optional[dict[str, Any]]":
+def _mybatis_pairing(sm: "SourceMap", *, full: bool = False) -> "Optional[dict[str, Any]]":
     """Lightweight MyBatis mapper interface <-> XML file pairing from file_paths.
 
     Separates genuine @Mapper interfaces (need XML) from DtoMapper bean-mapping
@@ -343,7 +351,11 @@ def _mybatis_pairing(sm: "SourceMap") -> "Optional[dict[str, Any]]":
     if missing_xml:
         result["missing_xml"] = missing_xml[:5]
     if dto_mappers:
-        result["dto_mappers"] = dto_mappers[:10]
+        _total_dto = len(dto_mappers)
+        result["dto_mappers"] = dto_mappers if full else dto_mappers[:10]
+        result["dto_mappers_total"] = _total_dto
+        if _total_dto > 10 and not full:
+            result["dto_mappers_truncated"] = True
     return result
 
 
@@ -398,14 +410,14 @@ def _spring_profiles_context(sm: "SourceMap") -> "Optional[dict[str, Any]]":
     return result
 
 
-def _transactional_summary(sm: "SourceMap") -> "Optional[dict[str, Any]]":
+def _transactional_summary(sm: "SourceMap", *, full: bool = False) -> "Optional[dict[str, Any]]":
     """Surface @Transactional class boundaries from the Java stack detection."""
     for s in sm.stacks:
         classes = getattr(s, "transactional_classes", [])
         if classes:
             total = len(classes)
             result: dict[str, Any] = {"count": total, "classes": classes}
-            if total > 10:
+            if total > 10 and not full:
                 result["classes"] = classes[:10]
                 result["truncated"] = True
                 result["note"] = f"showing 10 of {total}; use --full for complete list"
@@ -435,9 +447,7 @@ def _security_surface_from_eps(eps: list) -> "Optional[dict[str, Any]]":
             "Values used in @M3FiltroSeguridad(nombreRecurso=VALUE) on REST controller "
             "methods. Each value names a permission resource checked at runtime."
         ),
-        # resource_names kept for backward compatibility; resources is the canonical key
         "resource_names": resource_names,
-        "resources": resource_names,
     }
 
 
@@ -831,7 +841,7 @@ def _section_confidence(sm: SourceMap) -> dict[str, str]:
     }
 
 
-def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
+def compact_view(sm: SourceMap, *, no_tree: bool = False, full: bool = False) -> dict[str, Any]:
     """Context package ready for prompt or handoff (~300-500 tokens).
 
     Answers: what it is, where it enters, what depends on what,
@@ -914,7 +924,7 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
                     "kind": getattr(n, "kind", ""),
                     "path": getattr(n, "path", ""),
                     "line": getattr(n, "line", None),
-                    **({"text": getattr(n, "text", "")[:60]} if getattr(n, "text", "") else {}),
+                    **({"text": _truncate_note(getattr(n, "text", ""), 120)} if getattr(n, "text", "") else {}),
                 }
                 for n in _sorted_notes[:_CODE_NOTES_CAP]
             ]
@@ -988,8 +998,8 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False) -> dict[str, Any]:
             _deployment["app_server_hint"] = _app_server
     _deploy_risks = _project_deployment_risks(sm)
     _security_surface = _security_surface_from_eps(sm.entry_points)
-    _mybatis = _mybatis_pairing(sm)
-    _transactional = _transactional_summary(sm)
+    _mybatis = _mybatis_pairing(sm, full=full)
+    _transactional = _transactional_summary(sm, full=full)
     _git_ctx = _compact_git_context(sm)
     _spring_profiles = _spring_profiles_context(sm)
 
@@ -1321,7 +1331,7 @@ def validate_cross_analyzer_consistency(
     return findings
 
 
-def agent_view(sm: SourceMap) -> dict[str, Any]:
+def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
     """Opinionated output for AI agents — structured, noise-free, gap-aware.
 
     Output order:
@@ -1508,10 +1518,10 @@ def agent_view(sm: SourceMap) -> dict[str, Any]:
     _sec_surf = _security_surface_from_eps(sm.entry_points)
     if _sec_surf:
         signals["security_surface"] = _sec_surf
-    _mb = _mybatis_pairing(sm)
+    _mb = _mybatis_pairing(sm, full=full)
     if _mb:
         signals["mybatis"] = _mb
-    _txn = _transactional_summary(sm)
+    _txn = _transactional_summary(sm, full=full)
     if _txn:
         signals["transactional_boundaries"] = _txn
 

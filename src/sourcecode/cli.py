@@ -511,6 +511,11 @@ def main(
         "--agent",
         help="Structured noise-free JSON for AI agents: identity, entry points, dependencies, confidence, gaps.",
     ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="Remove truncation limits on transactional_boundaries, mybatis.dto_mappers, and other capped lists.",
+    ),
     trace_pipeline: bool = typer.Option(
         False,
         "--trace-pipeline",
@@ -1504,12 +1509,12 @@ def main(
         else:
             content = json.dumps(data, indent=2, ensure_ascii=False)
     elif agent:
-        data = agent_view(sm)
+        data = agent_view(sm, full=full)
         if not no_redact:
             data = redact_dict(data)
         content = json.dumps(data, indent=2, ensure_ascii=False)
     elif compact:
-        data = compact_view(sm, no_tree=no_tree)
+        data = compact_view(sm, no_tree=no_tree, full=full)
         if not no_redact:
             data = redact_dict(data)
         content = json.dumps(data, indent=2, ensure_ascii=False)
@@ -1607,6 +1612,17 @@ def prepare_context_cmd(
         "-c",
         help="Copy output to system clipboard after a successful run. No-op when clipboard is unavailable.",
     ),
+    output_path: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Write output to a file instead of stdout (UTF-8, avoids PowerShell BOM on Windows).",
+    ),
+    symptom: Optional[str] = typer.Option(
+        None,
+        "--symptom",
+        help="(fix-bug) Keyword hint for the bug: boosts matching files and surfaces related code notes.",
+    ),
 ) -> None:
     """Task-specific context for AI coding agents.
 
@@ -1673,7 +1689,7 @@ def prepare_context_cmd(
     from dataclasses import asdict
 
     builder = TaskContextBuilder(target)
-    output = builder.build(task, since=since)
+    output = builder.build(task, since=since, symptom=symptom)
 
     # Task-specific content-filter: each task emphasizes different output fields.
     # Fields marked False are suppressed from this task's output to reduce noise.
@@ -1757,16 +1773,23 @@ def prepare_context_cmd(
         out["affected_entry_points"] = output.affected_entry_points
     if output.limitations:
         out["limitations"] = output.limitations
+    if output.symptom:
+        out["symptom"] = output.symptom
+    if output.related_notes:
+        out["related_notes"] = output.related_notes
     if llm_prompt:
         out["llm_prompt"] = builder.render_prompt(output)
 
-    import sys as _sys
     _pc_content = json.dumps(out, indent=2, ensure_ascii=False)
-    _pc_bytes = _pc_content.encode("utf-8")
-    _sys.stdout.buffer.write(_pc_bytes)
-    if not _pc_content.endswith("\n"):
-        _sys.stdout.buffer.write(b"\n")
-    _sys.stdout.buffer.flush()
+    if output_path is not None:
+        output_path.write_text(_pc_content, encoding="utf-8")
+    else:
+        import sys as _sys
+        _pc_bytes = _pc_content.encode("utf-8")
+        _sys.stdout.buffer.write(_pc_bytes)
+        if not _pc_content.endswith("\n"):
+            _sys.stdout.buffer.write(b"\n")
+        _sys.stdout.buffer.flush()
 
     if copy:
         _trimmed = _pc_content.strip()
