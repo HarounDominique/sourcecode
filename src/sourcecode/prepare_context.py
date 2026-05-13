@@ -1777,118 +1777,108 @@ class TaskContextBuilder:
                 path=path, role=role, score=rel_score, reason=reason, why=why_str
             )))
             why[path] = why_str
-            for trigger_name in triggers[:3]:
-                trigger_full = next((f for f in changed_files if Path(f).name == trigger_name), None)
-                if trigger_full:
-                    graph_edges.append({"from": trigger_full, "to": path, "edge_type": "module_proximity", "hop": 1})
+            # module_proximity is heuristic (not a verified import) — excluded from structural graph
 
         related.sort(key=lambda x: (-x[0], x[1]))
         relevant.extend(rf for _, _, rf in related[:10])
 
-        # ── Step 3b: import-link expansion (bounded file scan) ────────────────
-        # Find files in the same module that import/reference a changed file.
-        # More precise than directory proximity: based on actual import statements.
-        _import_candidates = [
+        # ── Steps 3b–3c: BFS multi-hop import propagation (repo-wide, 3 hops max) ─
+        # Each hop expands from whatever was found in the previous hop into ALL
+        # remaining source files — not restricted to original module/dir.
+        # This enables A→B→C discovery even when B and C are in different modules.
+        _BFS_SCANNABLE = frozenset({".py", ".java", ".kt", ".ts", ".js", ".tsx", ".jsx", ".mjs"})
+        _bfs_all_sources = [
             p for p in all_paths
-            if p not in existing_paths and Path(p).suffix.lower() in {
-                ".py", ".java", ".kt", ".ts", ".js", ".tsx", ".jsx", ".mjs"
-            }
-            and (
-                _extract_ddd_domain(p) in affected_modules_set
-                or str(Path(p).parent).replace("\\", "/") in changed_dirs
-            )
+            if Path(p).suffix.lower() in _BFS_SCANNABLE
         ]
-        if _import_candidates:
-            _import_dep_map = self._scan_import_dependents(
-                changed_paths=changed_files,
-                candidate_paths=_import_candidates,
-            )
-            _import_seen = {rf.path for rf in relevant}
-            _import_extra: list[tuple[float, str, RelevantFile]] = []
-            for changed_path, dep_paths in _import_dep_map.items():
-                changed_atype = classifications[changed_path]["artifact_type"]
-                for dep_path in dep_paths:
-                    if dep_path in _import_seen:
-                        continue
-                    dep_cls = self._classify_changed_file(dep_path)
-                    if dep_cls["is_noise"]:
-                        continue
-                    dep_atype = dep_cls["artifact_type"]
-                    dep_base = _ARTIFACT_SCORE.get(dep_atype, 0.45)
-                    dep_score = round(dep_base * 0.70, 2)
-                    dep_role = _role_in_system(dep_path, dep_atype, dep_path in ep_paths)
-                    why_str = (
-                        f"artifact_type: {dep_atype} | role_in_system: {dep_role}"
-                        f" | impact_area: {_classify_impact_area(dep_path, dep_cls['risk_areas'], dep_atype)}"
-                        f" | propagation_risk: {_PROPAGATION_RISK.get(dep_atype, 'low')}"
-                        f" | change_effect: {_CHANGE_EFFECT.get(dep_atype, 'modifies application logic')}"
-                        f" | pulled_by: import-link from {Path(changed_path).name}"
-                    )
-                    reason = f"import-dependent of {Path(changed_path).name} ({changed_atype}) | score: {dep_score:.2f}"
-                    _import_extra.append((dep_score, dep_path, RelevantFile(
-                        path=dep_path, role=dep_role, score=dep_score,
-                        reason=reason, why=why_str,
-                    )))
-                    why[dep_path] = why_str
-                    _import_seen.add(dep_path)
-                    graph_edges.append({"from": changed_path, "to": dep_path, "edge_type": "import_dependency", "hop": 1})
-            _import_extra.sort(key=lambda x: (-x[0], x[1]))
-            relevant.extend(rf for _, _, rf in _import_extra[:8])
 
-        # ── Step 3c: hop-2 import propagation (callers of hop-1 dependents) ────
-        _hop1_seeds = list(dict.fromkeys(
-            dep_path
-            for dep_paths in (_import_dep_map.values() if _import_candidates else [])
-            for dep_path in dep_paths
-        ))
-        if _hop1_seeds:
-            _hop2_seen = {rf.path for rf in relevant}
-            _hop2_candidates = [
-                p for p in all_paths
-                if p not in _hop2_seen
-                and Path(p).suffix.lower() in {".py", ".java", ".kt", ".ts", ".js", ".tsx", ".jsx", ".mjs"}
-                and (
-                    _extract_ddd_domain(p) in affected_modules_set
-                    or str(Path(p).parent).replace("\\", "/") in changed_dirs
+        _bfs_seen: set[str] = {rf.path for rf in relevant}
+        _bfs_frontier: list[str] = [
+            f for f in changed_files
+            if Path(f).suffix.lower() in _BFS_SCANNABLE
+        ]
+
+        # (max results added from this hop, max_candidates scanned per seed)
+        _BFS_HOP_BUDGET = [
+            (8, 60),   # hop 1 — broad: callers of changed files
+            (6, 50),   # hop 2 — transitives: callers of hop-1 files
+            (4, 30),   # hop 3 — deep transitives: callers of hop-2 files
+        ]
+
+        # (hop_num, score, path, RelevantFile) — merged across all hops then added to relevant
+        _bfs_collected: list[tuple[int, float, str, RelevantFile]] = []
+
+        for _hop_num, (_max_results, _max_cands) in enumerate(_BFS_HOP_BUDGET, start=1):
+            if not _bfs_frontier:
+                break
+
+            _bfs_candidates = [p for p in _bfs_all_sources if p not in _bfs_seen]
+            if not _bfs_candidates:
+                break
+
+            _hop_dep_map = self._scan_import_dependents(
+                changed_paths=_bfs_frontier,
+                candidate_paths=_bfs_candidates,
+                max_candidates=_max_cands,
+            )
+
+            # collect (score, path) pairs for this hop to build the next frontier
+            _hop_scored: list[tuple[float, str]] = []
+
+            for _seed_path, _dep_paths in _hop_dep_map.items():
+                _seed_atype = (
+                    classifications[_seed_path]["artifact_type"]
+                    if _seed_path in classifications
+                    else self._classify_changed_file(_seed_path)["artifact_type"]
                 )
-            ]
-            if _hop2_candidates:
-                _hop2_dep_map = self._scan_import_dependents(
-                    changed_paths=_hop1_seeds,
-                    candidate_paths=_hop2_candidates,
-                    max_candidates=20,
-                )
-                _hop2_extra: list[tuple[float, str, RelevantFile]] = []
-                for hop1_path, dep_paths in _hop2_dep_map.items():
-                    hop1_cls = self._classify_changed_file(hop1_path)
-                    hop1_atype = hop1_cls["artifact_type"]
-                    for dep_path in dep_paths:
-                        if dep_path in _hop2_seen:
-                            continue
-                        dep_cls = self._classify_changed_file(dep_path)
-                        if dep_cls["is_noise"]:
-                            continue
-                        dep_atype = dep_cls["artifact_type"]
-                        dep_base = _ARTIFACT_SCORE.get(dep_atype, 0.45)
-                        dep_score = round(dep_base * 0.50, 2)
-                        dep_role = _role_in_system(dep_path, dep_atype, dep_path in ep_paths)
-                        why_str = (
-                            f"artifact_type: {dep_atype} | role_in_system: {dep_role}"
-                            f" | impact_area: {_classify_impact_area(dep_path, dep_cls['risk_areas'], dep_atype)}"
-                            f" | propagation_risk: {_PROPAGATION_RISK.get(dep_atype, 'low')}"
-                            f" | change_effect: {_CHANGE_EFFECT.get(dep_atype, 'modifies application logic')}"
-                            f" | pulled_by: hop-2 import from {Path(hop1_path).name}"
-                        )
-                        reason = f"hop-2 import-dependent of {Path(hop1_path).name} ({hop1_atype}) | score: {dep_score:.2f}"
-                        _hop2_extra.append((dep_score, dep_path, RelevantFile(
-                            path=dep_path, role=dep_role, score=dep_score,
-                            reason=reason, why=why_str,
-                        )))
-                        why[dep_path] = why_str
-                        _hop2_seen.add(dep_path)
-                        graph_edges.append({"from": hop1_path, "to": dep_path, "edge_type": "import_dependency", "hop": 2})
-                _hop2_extra.sort(key=lambda x: (-x[0], x[1]))
-                relevant.extend(rf for _, _, rf in _hop2_extra[:5])
+                for _dep_path in _dep_paths:
+                    if _dep_path in _bfs_seen:
+                        continue
+                    _bfs_seen.add(_dep_path)
+
+                    _dep_cls = self._classify_changed_file(_dep_path)
+                    if _dep_cls["is_noise"]:
+                        continue
+
+                    _dep_atype = _dep_cls["artifact_type"]
+                    _dep_score_base = _ARTIFACT_SCORE.get(_dep_atype, 0.45)
+                    # score decays 30% per hop so transitives rank below direct dependents
+                    _dep_score = round(_dep_score_base * (0.70 ** _hop_num), 2)
+                    _dep_role = _role_in_system(_dep_path, _dep_atype, _dep_path in ep_paths)
+
+                    _why_str = (
+                        f"artifact_type: {_dep_atype} | role_in_system: {_dep_role}"
+                        f" | impact_area: {_classify_impact_area(_dep_path, _dep_cls['risk_areas'], _dep_atype)}"
+                        f" | propagation_risk: {_PROPAGATION_RISK.get(_dep_atype, 'low')}"
+                        f" | change_effect: {_CHANGE_EFFECT.get(_dep_atype, 'modifies application logic')}"
+                        f" | pulled_by: hop-{_hop_num} import from {Path(_seed_path).name}"
+                    )
+                    _reason = (
+                        f"hop-{_hop_num} import-dependent of {Path(_seed_path).name}"
+                        f" ({_seed_atype}) | score: {_dep_score:.2f}"
+                    )
+                    why[_dep_path] = _why_str
+                    # Tests are consumers, not structural dependencies — exclude from import graph.
+                    # They remain in relevant_files but must not seed further BFS hops.
+                    _is_test = _dep_atype == "test"
+                    if not _is_test:
+                        graph_edges.append({
+                            "from": _seed_path, "to": _dep_path,
+                            "edge_type": "import_dependency", "hop": _hop_num,
+                        })
+                        _hop_scored.append((_dep_score, _dep_path))
+                    _bfs_collected.append((_hop_num, _dep_score, _dep_path, RelevantFile(
+                        path=_dep_path, role=_dep_role, score=_dep_score,
+                        reason=_reason, why=_why_str,
+                    )))
+
+            # next frontier = top-N files by score from this hop
+            _hop_scored.sort(key=lambda x: -x[0])
+            _bfs_frontier = [p for _, p in _hop_scored[:_max_results]]
+
+        # merge into relevant: closer hops first, then higher score; cap total at 20
+        _bfs_collected.sort(key=lambda x: (x[0], -x[1], x[2]))
+        relevant.extend(rf for _, _, _, rf in _bfs_collected[:20])
 
         # ── Step 3d: per-file impact scores, change_type, system_impact ─────────
         # Downstream fanout: count graph edges originating from each changed file
@@ -2054,9 +2044,13 @@ class TaskContextBuilder:
         }
 
         # ── Step 6: analysis gaps ──────────────────────────────────────────────
-        _hop_desc = f"+ hop-2 import propagation (propagation_depth={_max_hop})" if _max_hop >= 2 else ""
+        _bfs_note = (
+            f"BFS multi-hop import propagation repo-wide (propagation_depth={_max_hop})"
+            if _max_hop >= 1
+            else "no import-link propagation (no scannable changed files)"
+        )
         analysis_gaps: list[str] = [
-            f"Related file expansion uses type-aware propagation chains + bounded import-link scanning {_hop_desc}+ module/directory heuristics".replace("  ", " ").strip(),
+            f"Related file expansion: type-aware chain expansion + {_bfs_note} + module/directory heuristics",
         ]
         if noise_count > 0 and meaningful > 0:
             analysis_gaps.append(
