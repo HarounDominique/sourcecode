@@ -324,6 +324,11 @@ class TaskOutput:
     symptom: Optional[str] = None                                  # fix-bug only
     related_notes: list[dict] = field(default_factory=list)        # fix-bug + symptom only
     symptom_note: Optional[str] = None                             # fix-bug: cross-layer synonym note
+    # delta-specific impact fields
+    impact_summary: Optional[str] = None
+    affected_modules: list[str] = field(default_factory=list)
+    risk_areas: list[dict] = field(default_factory=list)
+    since: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -640,14 +645,37 @@ class TaskContextBuilder:
         test_set = {p for p in all_paths if self._is_test(p)}
         source_set = {p for p in all_paths if not self._is_test(p) and self._is_source(p)}
 
-        relevant_files = self._rank_files(
-            task_name, spec, all_paths, entry_set, test_set,
-            monorepo_packages=sm.monorepo_packages if sm.monorepo_packages else None,
-            git_hotspots=git_hotspots,
-            uncommitted_files=uncommitted_files,
-            code_notes=cn_notes_for_ranking if cn_notes_for_ranking else None,
-            delta_files=_delta_files,
-        )
+        # Delta uses a dedicated impact-analysis path — never the generic ranker.
+        _delta_impact_summary: Optional[str] = None
+        _delta_affected_modules: list[str] = []
+        _delta_risk_areas: list[dict] = []
+        _delta_why: dict[str, str] = {}
+        _delta_analysis_gaps: list[str] = []
+
+        if task_name == "delta":
+            _delta_changed_list: list[str] = sorted(_delta_files) if _delta_files else []
+            (
+                relevant_files,
+                _delta_impact_summary,
+                _delta_affected_modules,
+                _delta_risk_areas,
+                _delta_why,
+                _delta_analysis_gaps,
+            ) = self._build_delta_impact(
+                changed_files=_delta_changed_list,
+                all_paths=all_paths,
+                entry_points=entry_points,
+                since=since,
+            )
+        else:
+            relevant_files = self._rank_files(
+                task_name, spec, all_paths, entry_set, test_set,
+                monorepo_packages=sm.monorepo_packages if sm.monorepo_packages else None,
+                git_hotspots=git_hotspots,
+                uncommitted_files=uncommitted_files,
+                code_notes=cn_notes_for_ranking if cn_notes_for_ranking else None,
+                delta_files=None,
+            )
 
         # ── 6b. Symptom keyword boost + related notes (fix-bug + --symptom) ──
         symptom_keywords: list[str] = []
@@ -805,22 +833,30 @@ class TaskContextBuilder:
 
         conf_summary, analysis_gaps = ConfidenceAnalyzer().analyze(sm_for_conf)
         confidence = conf_summary.overall
-        gaps = [g.reason for g in analysis_gaps]
-        if _mybatis_warning:
-            gaps.append(_mybatis_warning["reason"])
+        if task_name == "delta":
+            # Use delta-specific gaps; ConfidenceAnalyzer gaps are about full-repo
+            # detection quality and are not meaningful for an incremental diff.
+            gaps = _delta_analysis_gaps
+            if _mybatis_warning:
+                gaps.append(_mybatis_warning["reason"])
+        else:
+            gaps = [g.reason for g in analysis_gaps]
+            if _mybatis_warning:
+                gaps.append(_mybatis_warning["reason"])
 
         # ── 9. why_these_files ────────────────────────────────────────────────
-        why_these_files: dict[str, str] = {
-            rf.path: rf.reason for rf in relevant_files
-        }
+        if task_name == "delta":
+            why_these_files = _delta_why
+        else:
+            why_these_files = {rf.path: rf.reason for rf in relevant_files}
 
-        # ── 10. Delta: git changed files (reuse pre-computed set from step 5c) ──
+        # ── 10. Delta: git changed files + entry points ───────────────────────
         changed_files: list[str] = []
         affected_entry_points: list[str] = []
         if task_name == "delta":
             changed_files = sorted(_delta_files) if _delta_files else self._get_git_changed_files(since=since)
-            ep_set = {ep.path for ep in entry_points}
-            affected_entry_points = [f for f in changed_files if f in ep_set]
+            _ep_set = {ep.path for ep in entry_points}
+            affected_entry_points = [f for f in changed_files if f in _ep_set]
 
         return TaskOutput(
             task=task_name,
@@ -842,6 +878,10 @@ class TaskContextBuilder:
             symptom=symptom if task_name == "fix-bug" and symptom else None,
             related_notes=related_notes,
             symptom_note=symptom_note,
+            impact_summary=_delta_impact_summary,
+            affected_modules=_delta_affected_modules,
+            risk_areas=_delta_risk_areas,
+            since=since if task_name == "delta" else None,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
@@ -1132,6 +1172,384 @@ class TaskContextBuilder:
 
     def _is_source(self, path: str) -> bool:
         return Path(path).suffix.lower() in _SOURCE_EXTENSIONS
+
+    # ── Delta impact analysis ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _classify_changed_file(path: str) -> dict[str, Any]:
+        """Classify a changed file by artifact type, risk areas, and impact level.
+
+        Returns dict: artifact_type, risk_areas, impact_level, is_noise, module.
+        Pure path/name heuristics — no file reads, fully deterministic.
+        """
+        norm = path.replace("\\", "/")
+        name = Path(path).name
+        stem = Path(path).stem
+        suffix = Path(path).suffix.lower()
+        norm_lower = norm.lower()
+        stem_lower = stem.lower()
+        name_lower = name.lower()
+
+        _CODE_EXTS = frozenset({
+            ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".kt", ".go",
+            ".rs", ".rb", ".php", ".cs", ".dart", ".mjs", ".cjs", ".scala",
+        })
+        _CONFIG_EXTS = frozenset({
+            ".yml", ".yaml", ".json", ".xml", ".toml", ".properties",
+            ".env", ".cfg", ".ini", ".conf",
+        })
+
+        # IDE/hidden-tool directories → noise, skip impact analysis
+        _IDE_DIR_NAMES = frozenset({
+            ".idea", ".vscode", ".eclipse", ".fleet", ".git", ".github",
+            ".circleci", ".travis", ".teamcity", ".gradle", ".mvn",
+        })
+        path_dir_parts = norm_lower.split("/")[:-1]  # all components except filename
+        if any(part in _IDE_DIR_NAMES for part in path_dir_parts):
+            return {
+                "artifact_type": "ide_noise",
+                "risk_areas": [],
+                "impact_level": "noise",
+                "is_noise": True,
+                "module": "",
+            }
+
+        module = _extract_ddd_domain(path)
+
+        # Tests (before other checks to avoid misclassifying TestFoo as service etc.)
+        _is_test = (
+            (stem_lower.startswith("test") and len(stem_lower) > 4)
+            or (stem_lower.endswith("test") and len(stem_lower) > 4)
+            or stem_lower.endswith("tests")
+            or stem_lower.endswith("spec")
+            or any(t in f"/{norm_lower}/" for t in (
+                "/test/", "/tests/", "/spec/", "/specs/", "/__tests__/", "/it/",
+            ))
+        )
+        if _is_test:
+            return {"artifact_type": "test", "risk_areas": ["tests"], "impact_level": "low", "is_noise": False, "module": module}
+
+        # Security surface
+        _SECURITY_KW = ("security", "auth", "jwt", "token", "permission", "role",
+                         "credential", "encrypt", "decrypt", "oauth", "saml", "ldap",
+                         "password", "secret")
+        if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _SECURITY_KW):
+            impact = "critical" if any(kw in stem_lower for kw in ("security", "auth", "jwt")) else "high"
+            return {"artifact_type": "security", "risk_areas": ["security"], "impact_level": impact, "is_noise": False, "module": module}
+
+        # API / controller layer
+        _API_KW = ("controller", "restcontroller", "resource", "handler",
+                   "router", "route", "endpoint", "servlet")
+        if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _API_KW):
+            return {"artifact_type": "api_endpoint", "risk_areas": ["api"], "impact_level": "high", "is_noise": False, "module": module}
+
+        # Business logic / services
+        if suffix in _CODE_EXTS and "service" in stem_lower:
+            return {"artifact_type": "business_logic", "risk_areas": ["transactions", "business_logic"], "impact_level": "high", "is_noise": False, "module": module}
+
+        # Data access
+        _DAO_KW = ("repository", "repositoryimpl", "dao", "daoimpl", "store")
+        if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _DAO_KW):
+            return {"artifact_type": "data_access", "risk_areas": ["persistence"], "impact_level": "high", "is_noise": False, "module": module}
+        if "mapper" in stem_lower:
+            atype = "mybatis_mapper" if suffix == ".xml" else "data_access"
+            return {"artifact_type": atype, "risk_areas": ["persistence"], "impact_level": "high", "is_noise": False, "module": module}
+
+        # Spring / app config files (by canonical name)
+        if name_lower in ("application.yml", "application.yaml", "application.properties",
+                           "bootstrap.yml", "bootstrap.yaml", "bootstrap.properties"):
+            return {"artifact_type": "spring_config", "risk_areas": ["config"], "impact_level": "high", "is_noise": False, "module": module}
+        if name_lower.startswith("application-") and suffix in (".yml", ".yaml", ".properties"):
+            return {"artifact_type": "spring_profile", "risk_areas": ["config"], "impact_level": "medium", "is_noise": False, "module": module}
+        if name_lower in ("pom.xml", "build.gradle", "build.gradle.kts",
+                           "settings.gradle", "settings.gradle.kts"):
+            return {"artifact_type": "build_manifest", "risk_areas": ["config", "dependencies"], "impact_level": "medium", "is_noise": False, "module": module}
+
+        # Configuration classes / files
+        _CONFIG_STEM_KW = ("config", "configuration", "properties", "settings")
+        if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _CONFIG_STEM_KW):
+            return {"artifact_type": "configuration", "risk_areas": ["config"], "impact_level": "medium", "is_noise": False, "module": module}
+
+        # DB migrations / SQL
+        if suffix == ".sql" or any(kw in norm_lower for kw in ("migration", "flyway", "liquibase", "changelog")):
+            return {"artifact_type": "db_migration", "risk_areas": ["persistence"], "impact_level": "high", "is_noise": False, "module": module}
+
+        # Domain models / entities
+        _ENTITY_KW = ("entity", "model", "domain", "aggregate", "valueobject")
+        if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _ENTITY_KW):
+            return {"artifact_type": "domain_model", "risk_areas": ["persistence"], "impact_level": "medium", "is_noise": False, "module": module}
+
+        # DTOs / request-response objects
+        _DTO_KW = ("dto", "request", "response", "payload", "command", "query", "event")
+        if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _DTO_KW):
+            return {"artifact_type": "dto", "risk_areas": [], "impact_level": "low", "is_noise": False, "module": module}
+
+        # Generic source code
+        if suffix in _CODE_EXTS:
+            return {"artifact_type": "unknown_source", "risk_areas": [], "impact_level": "medium", "is_noise": False, "module": module}
+
+        # Config / data files
+        if suffix in _CONFIG_EXTS:
+            return {"artifact_type": "unknown_config", "risk_areas": ["config"], "impact_level": "low", "is_noise": False, "module": module}
+
+        # Docs
+        if suffix in (".md", ".rst", ".txt", ".adoc"):
+            return {"artifact_type": "documentation", "risk_areas": [], "impact_level": "low", "is_noise": False, "module": module}
+
+        return {"artifact_type": "binary_or_unknown", "risk_areas": [], "impact_level": "noise", "is_noise": True, "module": module}
+
+    def _build_delta_impact(
+        self,
+        changed_files: list[str],
+        all_paths: list[str],
+        entry_points: list,
+        since: Optional[str],
+    ) -> tuple[list[RelevantFile], str, list[str], list[dict[str, Any]], dict[str, str], list[str]]:
+        """Build incremental impact analysis for changed files.
+
+        Returns:
+            (relevant_files, impact_summary, affected_modules, risk_areas,
+             why_these_files, analysis_gaps)
+
+        Changed files are always included in relevant_files (never dropped by score).
+        Related files from the same module/directory are appended with lower scores.
+        """
+        _IMPACT_SCORE: dict[str, float] = {
+            "critical": 1.00,
+            "high":     0.85,
+            "medium":   0.65,
+            "low":      0.40,
+            "noise":    0.10,
+        }
+        _SEV_ORDER = ["noise", "low", "medium", "high", "critical"]
+
+        if not changed_files:
+            return (
+                [],
+                "No changes detected — verify the git ref passed to --since",
+                [],
+                [],
+                {},
+                ["No changed files found. Check that --since ref exists and the diff is non-empty."],
+            )
+
+        ep_paths = {ep.path for ep in entry_points}
+
+        # ── Step 1: classify every changed file ───────────────────────────────
+        classifications: dict[str, dict[str, Any]] = {
+            f: self._classify_changed_file(f) for f in changed_files
+        }
+
+        # ── Step 2: build relevant_files from the changed set ─────────────────
+        relevant: list[RelevantFile] = []
+        why: dict[str, str] = {}
+        affected_modules_set: set[str] = set()
+        changed_dirs: set[str] = set()
+        risk_acc: dict[str, dict[str, Any]] = {}  # area → {files, severity}
+        ref_label = since or "HEAD~1"
+
+        for path, cls in classifications.items():
+            score = _IMPACT_SCORE.get(cls["impact_level"], 0.50)
+            module = cls["module"]
+
+            if module:
+                affected_modules_set.add(module)
+            if not cls["is_noise"]:
+                parent = str(Path(path).parent).replace("\\", "/")
+                if parent and parent != ".":
+                    changed_dirs.add(parent)
+
+            for area in cls["risk_areas"]:
+                if area not in risk_acc:
+                    risk_acc[area] = {"files": [], "severity": "noise"}
+                risk_acc[area]["files"].append(path)
+                cur_idx = _SEV_ORDER.index(risk_acc[area]["severity"])
+                new_idx = _SEV_ORDER.index(cls["impact_level"])
+                if new_idx > cur_idx:
+                    risk_acc[area]["severity"] = cls["impact_level"]
+
+            artifact_display = cls["artifact_type"].replace("_", " ")
+            reason_parts = [f"changed since {ref_label}", f"artifact: {cls['artifact_type']}"]
+            if cls["risk_areas"]:
+                reason_parts.append(f"risk: {', '.join(cls['risk_areas'])}")
+            reason = ", ".join(reason_parts)
+
+            why_parts = [f"Changed {artifact_display}"]
+            if module:
+                why_parts.append(f"in module '{module}'")
+            if cls["risk_areas"]:
+                why_parts.append(f"Risk: {', '.join(cls['risk_areas'])}")
+            why_str = ". ".join(why_parts) + "."
+
+            role = "entrypoint" if path in ep_paths else ("source" if not cls["is_noise"] else "noise")
+            relevant.append(RelevantFile(path=path, role=role, score=round(score, 2), reason=reason, why=why_str))
+            why[path] = why_str
+
+        relevant.sort(key=lambda f: (-f.score, f.path))
+
+        # ── Step 3: expand to related files (same module or same directory) ───
+        existing_paths = {rf.path for rf in relevant}
+
+        _HIGH_IMPACT_STEMS = frozenset({
+            "controller", "restcontroller", "resource", "handler",
+            "service", "serviceimpl", "servicefacade",
+            "repository", "repositoryimpl", "dao", "daoimpl",
+            "mapper", "security", "securityconfig",
+            "config", "configuration", "filter", "authcontroller",
+        })
+
+        related: list[tuple[float, str, RelevantFile]] = []
+        for path in all_paths:
+            if path in existing_paths:
+                continue
+            suffix = Path(path).suffix.lower()
+            if suffix not in _ALL_EXTENSIONS:
+                continue
+            stem_lower = Path(path).stem.lower()
+            if not any(s in stem_lower for s in _HIGH_IMPACT_STEMS):
+                continue
+
+            parent = str(Path(path).parent).replace("\\", "/")
+            path_module = _extract_ddd_domain(path)
+
+            in_same_module = bool(path_module and path_module in affected_modules_set)
+            in_same_dir = parent in changed_dirs
+
+            if not (in_same_module or in_same_dir):
+                continue
+
+            rel_cls = self._classify_changed_file(path)
+            if rel_cls["is_noise"]:
+                continue
+
+            rel_score = _IMPACT_SCORE.get(rel_cls["impact_level"], 0.50) * 0.50
+            ctx_type = "module" if in_same_module else "directory"
+            ctx_val = path_module if in_same_module else parent
+
+            triggers = [
+                Path(f).name for f in changed_files
+                if (
+                    (_extract_ddd_domain(f) == path_module if in_same_module
+                     else str(Path(f).parent).replace("\\", "/") == parent)
+                )
+            ]
+            reason = f"related: same {ctx_type} '{ctx_val}', artifact: {rel_cls['artifact_type']}"
+            why_str = (
+                f"In changed {ctx_type} '{ctx_val}'. "
+                f"May be affected by: {', '.join(triggers[:3])}"
+            )
+            role = "entrypoint" if path in ep_paths else "source"
+            related.append((rel_score, path, RelevantFile(
+                path=path, role=role, score=round(rel_score, 2), reason=reason, why=why_str
+            )))
+            why[path] = why_str
+
+        related.sort(key=lambda x: (-x[0], x[1]))
+        relevant.extend(rf for _, _, rf in related[:10])
+
+        # ── Step 4: impact summary ─────────────────────────────────────────────
+        type_counts: dict[str, int] = {}
+        all_risk_areas: set[str] = set()
+        noise_count = 0
+        for cls in classifications.values():
+            t = cls["artifact_type"]
+            type_counts[t] = type_counts.get(t, 0) + 1
+            all_risk_areas.update(cls["risk_areas"])
+            if cls["is_noise"]:
+                noise_count += 1
+        meaningful = len(changed_files) - noise_count
+
+        _SUMMARY_LABELS: dict[str, str] = {
+            "security":       "security file(s)",
+            "api_endpoint":   "API endpoint(s)",
+            "business_logic": "service(s)",
+            "data_access":    "data access file(s)",
+            "mybatis_mapper": "MyBatis mapper(s)",
+            "spring_config":  "Spring config file(s)",
+            "spring_profile": "Spring profile config(s)",
+            "configuration":  "configuration file(s)",
+            "build_manifest": "build manifest(s)",
+            "db_migration":   "database migration(s)",
+            "domain_model":   "domain model(s)",
+            "dto":            "DTO(s)",
+            "test":           "test file(s)",
+            "unknown_source": "source file(s)",
+            "unknown_config": "config file(s)",
+            "documentation":  "documentation file(s)",
+        }
+
+        if meaningful == 0:
+            impact_summary = (
+                f"{noise_count} IDE/tooling file(s) changed"
+                " — no semantic impact on application logic"
+            )
+        else:
+            _sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "noise": 0}
+            parts = []
+            for atype, count in sorted(
+                type_counts.items(),
+                key=lambda kv: -_sev_rank.get(
+                    classifications[next(
+                        (f for f in changed_files if classifications[f]["artifact_type"] == kv[0]),
+                        changed_files[0],
+                    )]["impact_level"], 0,
+                ),
+            ):
+                if atype in ("ide_noise", "binary_or_unknown"):
+                    continue
+                label = _SUMMARY_LABELS.get(atype, f"source file(s) ({atype})")
+                parts.append(f"{count} {label}")
+            impact_summary = "; ".join(parts) if parts else f"{meaningful} source file(s) changed"
+            if all_risk_areas:
+                impact_summary += f" — risk areas: {', '.join(sorted(all_risk_areas))}"
+            if noise_count > 0:
+                impact_summary += f" ({noise_count} IDE/tooling file(s) excluded)"
+
+        # ── Step 5: risk_areas output list ─────────────────────────────────────
+        risk_areas_out: list[dict[str, Any]] = sorted(
+            [
+                {
+                    "area": area,
+                    "severity": info["severity"],
+                    "affected_files": sorted(info["files"])[:5],
+                }
+                for area, info in risk_acc.items()
+            ],
+            key=lambda x: (-_SEV_ORDER.index(x["severity"]), x["area"]),
+        )
+
+        # ── Step 6: analysis gaps ──────────────────────────────────────────────
+        analysis_gaps: list[str] = [
+            "Related file expansion uses module/package and directory heuristics — import graph not traced",
+        ]
+        if noise_count > 0 and meaningful > 0:
+            analysis_gaps.append(
+                f"{noise_count} IDE/tooling file(s) in diff excluded from impact analysis"
+            )
+        elif noise_count > 0 and meaningful == 0:
+            analysis_gaps.append(
+                "All changed files are IDE/tooling — no actionable semantic impact detected"
+            )
+        unknown_sources = [f for f, cls in classifications.items() if cls["artifact_type"] == "unknown_source"]
+        if unknown_sources:
+            analysis_gaps.append(
+                f"{len(unknown_sources)} source file(s) could not be classified by artifact type: "
+                + ", ".join(Path(f).name for f in unknown_sources[:3])
+            )
+        if not affected_modules_set and any(not cls["is_noise"] for cls in classifications.values()):
+            analysis_gaps.append(
+                "DDD module/package structure not detected in changed paths"
+                " — related file expansion uses directory proximity only"
+            )
+
+        return (
+            relevant,
+            impact_summary,
+            sorted(affected_modules_set),
+            risk_areas_out,
+            why,
+            analysis_gaps,
+        )
 
     def _get_git_changed_files(self, since: Optional[str] = None) -> list[str]:
         """Get files changed since a git ref (default: HEAD~1) relative to self.root.

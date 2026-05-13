@@ -488,9 +488,11 @@ class TestDeltaTask:
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert data["task"] == "delta"
-        assert "project_summary" in data
+        # delta is change-focused: no project_summary, has impact fields instead
+        assert "project_summary" not in data
         assert "relevant_files" in data
         assert "confidence" in data
+        assert "impact_summary" in data
 
     def test_delta_task_returns_changed_files_field(self, tmp_project: Path) -> None:
         result = runner.invoke(

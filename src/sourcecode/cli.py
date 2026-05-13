@@ -1727,9 +1727,9 @@ def prepare_context_cmd(
             "changed_files": False, "affected_entry_points": False,
         },
         "delta": {
-            "project_summary": True, "architecture_summary": False,
+            "project_summary": False, "architecture_summary": False,
             "relevant_files": True, "key_dependencies": False,
-            "gaps": False, "confidence": True,
+            "gaps": True, "confidence": True,
             "suspected_areas": False, "improvement_opportunities": False,
             "test_gaps": False, "code_notes_summary": False,
             "changed_files": True, "affected_entry_points": True,
@@ -1771,6 +1771,18 @@ def prepare_context_cmd(
         out["changed_files"] = output.changed_files
     if _task_include("affected_entry_points") and output.affected_entry_points:
         out["affected_entry_points"] = output.affected_entry_points
+    # Delta-specific impact fields
+    if task == "delta":
+        if output.since:
+            out["since"] = output.since
+        if output.impact_summary:
+            out["impact_summary"] = output.impact_summary
+        if output.affected_modules:
+            out["affected_modules"] = output.affected_modules
+        if output.risk_areas:
+            out["risk_areas"] = output.risk_areas
+        if output.why_these_files:
+            out["reasoning"] = output.why_these_files
     if output.limitations:
         out["limitations"] = output.limitations
     if output.symptom:
