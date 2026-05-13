@@ -1773,6 +1773,25 @@ def prepare_context_cmd(
         out["affected_entry_points"] = output.affected_entry_points
     # Delta-specific impact fields
     if task == "delta":
+        if output.error_code:
+            # Hard error — emit structured error JSON and exit, skip normal delta fields
+            _err_out: dict[str, Any] = {
+                "task": output.task,
+                "error": output.error_code,
+                "since": output.since,
+                "message": output.error_message,
+            }
+            if output.error_hints:
+                _err_out["hint"] = output.error_hints
+            _err_json = json.dumps(_err_out, indent=2, ensure_ascii=False)
+            if output_path is not None:
+                output_path.write_text(_err_json, encoding="utf-8")
+            else:
+                import sys as _sys
+                _sys.stdout.buffer.write(_err_json.encode("utf-8"))
+                _sys.stdout.buffer.write(b"\n")
+                _sys.stdout.buffer.flush()
+            raise typer.Exit(code=1)
         if output.since:
             out["since"] = output.since
         if output.impact_summary:

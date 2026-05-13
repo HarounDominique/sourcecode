@@ -333,6 +333,10 @@ class TaskOutput:
     change_type: list[str] = field(default_factory=list)
     dependency_graph_summary: dict = field(default_factory=dict)
     impact_score_per_file: dict = field(default_factory=dict)
+    # error state (git ref not found, etc.)
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    error_hints: list[str] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -618,7 +622,34 @@ class TaskContextBuilder:
         _delta_files: Optional[set[str]] = None
         if task_name == "delta":
             _delta_raw = self._get_git_changed_files(since=since)
-            if _delta_raw:
+            if _delta_raw is None:
+                # Explicit --since ref couldn't be resolved — hard error, no fallback
+                _avail_branches, _suggested = self._get_available_refs(since or "")
+                _hints: list[str] = []
+                if _suggested:
+                    _hints.append(f"Did you mean '{_suggested}'?")
+                if _avail_branches:
+                    _hints.append(f"Available refs: {', '.join(_avail_branches[:8])}")
+                return TaskOutput(
+                    task="delta",
+                    goal="Produce incremental context for changed files — avoids re-reading the full repo.",
+                    project_summary=None,
+                    architecture_summary=None,
+                    relevant_files=[],
+                    suspected_areas=[],
+                    improvement_opportunities=[],
+                    test_gaps=[],
+                    key_dependencies=[],
+                    code_notes_summary=None,
+                    limitations=[],
+                    confidence="low",
+                    since=since,
+                    error_code="git_ref_not_found",
+                    error_message=f"Git reference '{since}' does not exist in this repository.",
+                    error_hints=_hints,
+                    gaps=[f"Cannot compute delta: git ref '{since}' not found."] + _hints,
+                )
+            elif _delta_raw:
                 _delta_files = set(_delta_raw)
 
         # ── 5c. review-pr suspected_areas (needs git uncommitted_files) ──────
@@ -2087,8 +2118,12 @@ class TaskContextBuilder:
             impact_score_per_file,
         )
 
-    def _get_git_changed_files(self, since: Optional[str] = None) -> list[str]:
+    def _get_git_changed_files(self, since: Optional[str] = None) -> Optional[list[str]]:
         """Get files changed since a git ref (default: HEAD~1) relative to self.root.
+
+        Returns None when `since` is explicitly provided but cannot be resolved —
+        this is an error state, not "no changes". Callers must distinguish None
+        (ref invalid) from [] (ref valid, no changes).
 
         Uses --relative so paths are relative to cwd (self.root), not the git repo
         root. This is critical for monorepos where self.root is a subpath of the
@@ -2112,9 +2147,13 @@ class TaskContextBuilder:
                     line.strip() for line in (result.stdout or "").splitlines()
                     if line.strip()
                 ]
+            # Non-zero exit with explicit ref = ref doesn't exist — no silent fallback
+            if since:
+                return None
         except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-        # Fallback: uncommitted changes
+            if since:
+                return None
+        # No explicit since: fall back to uncommitted changes
         try:
             result = subprocess.run(
                 ["git", "diff", "--name-only", "--relative"],
@@ -2130,3 +2169,26 @@ class TaskContextBuilder:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
         return []
+
+    def _get_available_refs(self, invalid_ref: str) -> tuple[list[str], Optional[str]]:
+        """Return (available_branch_names, suggested_alternative) for error hints."""
+        import subprocess
+        branches: list[str] = []
+        suggested: Optional[str] = None
+        try:
+            r = subprocess.run(
+                ["git", "branch", "-a", "--format=%(refname:short)"],
+                cwd=str(self.root),
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                all_refs = [b.strip() for b in r.stdout.splitlines() if b.strip()]
+                branches = [b for b in all_refs if "HEAD" not in b][:10]
+                ref_lower = invalid_ref.lower()
+                if ref_lower == "master" and any(b.rstrip("/").endswith("main") for b in all_refs):
+                    suggested = "main"
+                elif ref_lower == "main" and any(b.rstrip("/").endswith("master") for b in all_refs):
+                    suggested = "master"
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        return branches, suggested
