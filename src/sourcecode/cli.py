@@ -1952,6 +1952,89 @@ def telemetry_disable() -> None:
     typer.echo("Re-enable at any time: sourcecode telemetry enable")
 
 
+# ── repo-ir ───────────────────────────────────────────────────────────────────
+
+@app.command("repo-ir")
+def repo_ir_cmd(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository root to analyze (default: current directory)",
+    ),
+    since: Optional[str] = typer.Option(
+        None,
+        "--since",
+        help="Git ref for symbol-level diff (e.g. HEAD~1, main)",
+    ),
+    files: Optional[str] = typer.Option(
+        None,
+        "--files",
+        help="Comma-separated list of Java files (relative to path) to analyze",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Write output to a file instead of stdout",
+    ),
+    include_tests: bool = typer.Option(
+        False,
+        "--include-tests",
+        help="Include test files in analysis (excluded by default)",
+    ),
+) -> None:
+    """Deterministic symbol-level IR for Java repositories.
+
+    \b
+    Extracts symbols, relations, Spring roles, and (with --since) symbol-level diffs.
+    Output is JSON: symbols[], relations[], changed_symbols[], spring_summary, graph_metadata.
+
+    \b
+    Examples:
+      sourcecode repo-ir
+      sourcecode repo-ir /path/to/repo --since HEAD~1
+      sourcecode repo-ir --files src/main/java/UserService.java
+      sourcecode repo-ir --since main --output ir.json
+    """
+    import json as _json
+    import sys as _sys
+
+    from sourcecode.repository_ir import build_repo_ir, find_java_files
+
+    root = path.resolve()
+    if not root.is_dir():
+        typer.echo(f"Error: {root} is not a directory", err=True)
+        raise typer.Exit(1)
+
+    if files:
+        file_list = [f.strip() for f in files.split(",") if f.strip()]
+    else:
+        file_list = find_java_files(root)
+        if not include_tests:
+            file_list = [f for f in file_list if "/test/" not in f and "/tests/" not in f]
+
+    if not file_list:
+        typer.echo(
+            _json.dumps({
+                "symbols": [],
+                "relations": [],
+                "changed_symbols": [],
+                "spring_summary": {},
+                "graph_metadata": {"node_count": 0, "edge_count": 0, "has_call_graph": False},
+            }, indent=2)
+        )
+        return
+
+    ir = build_repo_ir(file_list, root, since=since)
+    output = _json.dumps(ir, indent=2, ensure_ascii=False)
+
+    if output_path:
+        output_path.write_text(output, encoding="utf-8")
+        typer.echo(f"IR written to {output_path}", err=True)
+    else:
+        _sys.stdout.write(output)
+        _sys.stdout.write("\n")
+
+
 # ── version ───────────────────────────────────────────────────────────────────
 
 @app.command("version")

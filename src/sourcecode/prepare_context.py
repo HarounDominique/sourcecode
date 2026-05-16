@@ -1037,7 +1037,7 @@ class TaskContextBuilder:
             _pr_review_hotspots = sorted(
                 [f for f, cls in _pr_changed_cls.items()
                  if not cls["is_noise"] and cls["artifact_type"] != "build_manifest"],
-                key=lambda f: _delta_impact_score_per_file.get(f, 0.0),
+                key=lambda f: (_delta_impact_score_per_file.get(f) or {}).get("score", 0.0),
                 reverse=True,
             )[:8]
 
@@ -1130,9 +1130,9 @@ class TaskContextBuilder:
                     "basis": _role_basis,
                 }
 
-                # File confidence: replaces numeric score
-                _impact_s = _delta_impact_score_per_file.get(_f, 0.45)
-                _f_conf = "high" if _impact_s >= 0.60 else ("medium" if _impact_s >= 0.40 else "low")
+                # File confidence: from structured impact entry
+                _impact_entry = _delta_impact_score_per_file.get(_f) or {}
+                _f_conf = _impact_entry.get("confidence", "low")
                 _diff_source = (
                     DiffSourceType.GIT_RANGE.value if _f in _committed_set
                     else DiffSourceType.WORKTREE_UNSTAGED.value if _f in _uncommitted_set
@@ -2237,14 +2237,17 @@ class TaskContextBuilder:
         # use module-level constant (single source of truth)
         _CHANGE_EFFECT = _ARTIFACT_CHANGE_EFFECT
 
-        # change_type taxonomy — closed set, derived from artifact type
+        # change_type taxonomy — evidence-gated.
+        # "source" → no change_type: unclassified file has no confirmed executable role.
+        # behavioral_change requires semantic diff evidence (api_change/security_change),
+        # not just artifact type — gate applied in Step 3d using diff_severities.
         _ARTIFACT_CHANGE_TYPES: dict[str, list[str]] = {
-            "entrypoint":      ["behavioral_change", "structural_change"],
-            "security":        ["behavioral_change", "security_change"],
-            "controller":      ["behavioral_change", "structural_change"],
-            "service":         ["behavioral_change"],
-            "repository":      ["behavioral_change"],
-            "mapper":          ["behavioral_change"],
+            "entrypoint":      ["structural_change"],   # behavioral only if diff confirms
+            "security":        ["security_change"],
+            "controller":      ["structural_change"],   # behavioral only if diff confirms
+            "service":         [],                      # behavioral only if @Transactional or diff confirms
+            "repository":      [],                      # behavioral only if query/ORM diff confirms
+            "mapper":          [],
             "spring_config":   ["configuration_change"],
             "spring_profile":  ["configuration_change"],
             "config":          ["configuration_change"],
@@ -2252,22 +2255,34 @@ class TaskContextBuilder:
             "db_migration":    ["structural_change"],
             "domain_model":    ["structural_change"],
             "dto":             ["structural_change"],
-            "source":          ["behavioral_change"],
+            "source":          [],   # no claim without content evidence
             "test":            [],
             "documentation":   [],
             "ide_noise":       [],
         }
 
+        # Semantic diff → change_type supplement (gated on actual diff content)
+        # applied per-file in Step 3d alongside diff_severities
+        _DIFF_SEVERITY_CHANGE_TYPES: dict[str, list[str]] = {
+            "api_change":      ["behavioral_change"],
+            "security_change": ["behavioral_change", "security_change"],
+            "field_change":    ["structural_change"],
+            "trivial":         [],
+            "unknown":         [],   # no claim — unknown diff content
+        }
+
         _SEV_ORDER = ["noise", "low", "medium", "high", "critical"]
 
-        # Closed impact_area taxonomy — 9 categories, no "unknown"
+        # impact_area taxonomy — evidence-gated.
+        # "source" → "application_layer" (neutral). transaction_boundary only for
+        # evidence-confirmed service/transactional artifacts.
         _ATYPE_IMPACT_AREA: dict[str, str] = {
             "entrypoint":     "api_surface",
             "controller":     "api_surface",
             "dto":            "api_surface",
             "security":       "security_layer",
             "spring_config":  "dependency_injection",
-            "service":        "transaction_boundary",
+            "service":        "application_layer",     # transaction_boundary only if @Transactional evidence
             "repository":     "persistence_layer",
             "mapper":         "persistence_layer",
             "db_migration":   "persistence_layer",
@@ -2275,7 +2290,7 @@ class TaskContextBuilder:
             "config":         "configuration",
             "spring_profile": "configuration",
             "build_manifest": "build_system",
-            "source":         "transaction_boundary",
+            "source":         "application_layer",     # neutral — no transaction claim without evidence
             "test":           "configuration",
             "documentation":  "configuration",
             "ide_noise":      "configuration",
@@ -2287,18 +2302,18 @@ class TaskContextBuilder:
             path_lower = path.lower()
             suffix = Path(path).suffix.lower()
             path_segs = set(path_lower.replace("\\", "/").split("/"))
-            # UI layer: frontend file extensions or frontend directory segments
             if suffix in (".tsx", ".jsx", ".vue") or (
                 suffix in (".ts", ".js") and bool(path_segs & _UI_PATH_SEGS)
             ):
                 return "ui_layer"
-            # Integration layer: external service clients and adapters
             stem_lower = Path(path).stem.lower()
             if any(kw in stem_lower for kw in _INTEGRATION_STEMS):
                 return "integration_layer"
-            return _ATYPE_IMPACT_AREA.get(atype, "transaction_boundary")
+            return _ATYPE_IMPACT_AREA.get(atype, "application_layer")
 
-        # Closed role_in_system taxonomy — 8 roles, no "leaf"/"dependency"
+        # role_in_system — evidence-gated.
+        # Default is "unclassified" not "core_service": unclassified source files
+        # have no confirmed architectural role.
         def _role_in_system(path: str, atype: str, in_ep_paths: bool) -> str:
             if atype == "build_manifest":
                 return "build_artifact"
@@ -2317,19 +2332,30 @@ class TaskContextBuilder:
                 return "configuration"
             if atype in ("repository", "mapper", "db_migration"):
                 return "data_access"
-            return "core_service"
+            if atype == "service":
+                return "service"   # annotation-confirmed — not "core_service" (overclaim)
+            return "unclassified"   # no role claim without evidence
 
-        def _structured_why(path: str, atype: str, module: str, role: str, risk_areas: list[str]) -> str:
+        def _score_to_confidence(score: float) -> str:
+            if score >= 0.60:
+                return "high"
+            if score >= 0.40:
+                return "medium"
+            return "low"
+
+        def _structured_why(path: str, atype: str, module: str, role: str, risk_areas: list[str], cls_confidence: str = "low") -> str:
             area = _classify_impact_area(path, risk_areas, atype)
-            prop = _PROPAGATION_RISK.get(atype, "low")
-            effect = _CHANGE_EFFECT.get(atype, "modifies application logic")
-            parts = [
-                f"artifact_type: {atype}",
-                f"role_in_system: {role}",
-                f"impact_area: {area}",
-                f"propagation_risk: {prop}",
-                f"change_effect: {effect}",
-            ]
+            prop = _PROPAGATION_RISK.get(atype, "low") if atype != "source" else "unknown"
+            effect = _CHANGE_EFFECT.get(atype, "may modify application logic (role unconfirmed)")
+            parts = [f"artifact_type: {atype}", f"classification_confidence: {cls_confidence}"]
+            # Only emit role/area/propagation when there is confirmed evidence (not source/unclassified)
+            if role not in ("unclassified",):
+                parts.append(f"role_in_system: {role}")
+            if area not in ("application_layer",):
+                parts.append(f"impact_area: {area}")
+            if atype not in ("source",) and prop != "unknown":
+                parts.append(f"propagation_risk: {prop}")
+            parts.append(f"change_effect: {effect}")
             if module:
                 parts.append(f"module: {module}")
             return " | ".join(parts)
@@ -2403,8 +2429,10 @@ class TaskContextBuilder:
 
             in_ep = path in ep_paths
             role = _role_in_system(path, atype, in_ep)
-            why_str = _structured_why(path, atype, module, role, cls["risk_areas"])
-            reason = f"changed since {ref_label} | artifact: {atype} | score: {score:.2f}"
+            cls_conf = cls.get("confidence", "low")
+            why_str = _structured_why(path, atype, module, role, cls["risk_areas"], cls_conf)
+            confidence = _score_to_confidence(score)
+            reason = f"changed since {ref_label} | artifact: {atype} | confidence: {confidence}"
 
             relevant.append(RelevantFile(path=path, role=role, score=round(score, 2), reason=reason, why=why_str))
             why[path] = why_str
@@ -2453,15 +2481,11 @@ class TaskContextBuilder:
             ]
             in_ep = path in ep_paths
             role = _role_in_system(path, rel_atype, in_ep)
-            why_str = (
-                f"artifact_type: {rel_atype} | role_in_system: {role}"
-                f" | impact_area: {_classify_impact_area(path, rel_cls['risk_areas'], rel_atype)}"
-                f" | propagation_risk: {_PROPAGATION_RISK.get(rel_atype, 'low')}"
-                f" | change_effect: {_CHANGE_EFFECT.get(rel_atype, 'modifies application logic')}"
-                f" | pulled_by: type-aware expansion from {ctx_type} '{ctx_val}'"
-                f" | triggered_by: {', '.join(triggers[:3])}"
-            )
-            reason = f"expansion: {ctx_type} '{ctx_val}' | artifact: {rel_atype} | score: {rel_score:.2f}"
+            rel_conf = rel_cls.get("confidence", "low")
+            why_str = _structured_why(path, rel_atype, _extract_ddd_domain(path), role, rel_cls["risk_areas"], rel_conf)
+            why_str += f" | pulled_by: type-aware expansion from {ctx_type} '{ctx_val}'"
+            why_str += f" | triggered_by: {', '.join(triggers[:3])}"
+            reason = f"expansion: {ctx_type} '{ctx_val}' | artifact: {rel_atype} | confidence: {_score_to_confidence(rel_score)}"
             related.append((rel_score, path, RelevantFile(
                 path=path, role=role, score=rel_score, reason=reason, why=why_str
             )))
@@ -2563,16 +2587,15 @@ class TaskContextBuilder:
                     _dep_score = round(_dep_score_base * (0.70 ** _hop_num) * _cross_module_factor, 2)
                     _dep_role = _role_in_system(_dep_path, _dep_atype, _dep_path in ep_paths)
 
-                    _why_str = (
-                        f"artifact_type: {_dep_atype} | role_in_system: {_dep_role}"
-                        f" | impact_area: {_classify_impact_area(_dep_path, _dep_cls['risk_areas'], _dep_atype)}"
-                        f" | propagation_risk: {_PROPAGATION_RISK.get(_dep_atype, 'low')}"
-                        f" | change_effect: {_CHANGE_EFFECT.get(_dep_atype, 'modifies application logic')}"
-                        f" | pulled_by: hop-{_hop_num} import from {Path(_seed_path).name}"
+                    _dep_conf = _dep_cls.get("confidence", "low")
+                    _why_str = _structured_why(
+                        _dep_path, _dep_atype, _dep_module, _dep_role,
+                        _dep_cls["risk_areas"], _dep_conf
                     )
+                    _why_str += f" | pulled_by: hop-{_hop_num} import from {Path(_seed_path).name}"
                     _reason = (
                         f"hop-{_hop_num} import-dependent of {Path(_seed_path).name}"
-                        f" ({_seed_atype}) | score: {_dep_score:.2f}"
+                        f" ({_seed_atype}) | confidence: {_score_to_confidence(_dep_score)}"
                     )
                     why[_dep_path] = _why_str
                     # Tests import production code but are not structural dependencies —
@@ -2621,13 +2644,18 @@ class TaskContextBuilder:
             if _edge["from"] in _downstream_count:
                 _downstream_count[_edge["from"]] += 1
 
-        impact_score_per_file: dict[str, float] = {}
+        impact_score_per_file: dict[str, Any] = {}
         all_change_types: set[str] = set()
         for _path in changed_files:
             _cls = classifications[_path]
             _atype = _cls["artifact_type"]
-            _file_ctypes = _ARTIFACT_CHANGE_TYPES.get(_atype, [])
+            # Base change types from artifact classification
+            _file_ctypes: set[str] = set(_ARTIFACT_CHANGE_TYPES.get(_atype, []))
+            # Supplement with semantic diff evidence — behavioral_change ONLY from diff
+            _diff_sev = diff_severities.get(_path, "unknown")
+            _file_ctypes.update(_DIFF_SEVERITY_CHANGE_TYPES.get(_diff_sev, []))
             all_change_types.update(_file_ctypes)
+
             _base = _ARTIFACT_SCORE.get(_atype, 0.45)
             _sec_w = 0.20 if (_atype == "security" or "security" in _cls["risk_areas"]) else 0.0
             _fw = (
@@ -2641,58 +2669,78 @@ class TaskContextBuilder:
                 0.05 if any(ct in ("structural_change", "dependency_change") for ct in _file_ctypes) else
                 0.02
             )
-            impact_score_per_file[_path] = round(min(1.0, _base * 0.50 + _sec_w + _fw + _fanout + _ctw), 3)
+            _raw_score = round(min(1.0, _base * 0.50 + _sec_w + _fw + _fanout + _ctw), 3)
+            impact_score_per_file[_path] = {
+                "score": _raw_score,
+                "confidence": _score_to_confidence(_raw_score),
+                "score_breakdown": {
+                    "artifact_base": round(_base * 0.50, 3),
+                    "security_weight": _sec_w,
+                    "framework_weight": _fw,
+                    "fanout_weight": round(_fanout, 3),
+                    "change_type_weight": _ctw,
+                },
+                "change_types": sorted(_file_ctypes),
+                "diff_severity": _diff_sev,
+            }
 
         _CT_ORDER = ["security_change", "behavioral_change", "structural_change",
                      "configuration_change", "dependency_change", "ui_change"]
         aggregate_change_type = [ct for ct in _CT_ORDER if ct in all_change_types]
 
-        # system_impact block
+        # system_impact: only evidence-backed subsystems.
+        # application_layer → not emitted as subsystem (no architectural claim without evidence).
+        # transaction_layer → removed: transaction_boundary no longer mapped to source/service.
         _IMPACT_AREA_TO_SUBSYSTEM = {
             "api_surface":          "api_layer",
             "security_layer":       "security_layer",
             "dependency_injection": "spring_di_layer",
             "persistence_layer":    "persistence_layer",
-            "transaction_boundary": "transaction_layer",
             "configuration":        "configuration_layer",
             "build_system":         "build_system",
             "ui_layer":             "ui_layer",
             "integration_layer":    "integration_layer",
+            # application_layer intentionally omitted — no subsystem claim for unclassified files
         }
         _seen_subsys: set[str] = set()
         changed_subsystems: list[str] = []
         for _p, _cls in classifications.items():
-            if not _cls["is_noise"]:
-                _area = _classify_impact_area(_p, _cls["risk_areas"], _cls["artifact_type"])
+            _p_atype = _cls["artifact_type"]
+            # Only emit subsystem for evidence-backed classifications (not source/unclassified)
+            if not _cls["is_noise"] and _p_atype not in ("source", "ide_noise"):
+                _area = _classify_impact_area(_p, _cls["risk_areas"], _p_atype)
                 _subsys = _IMPACT_AREA_TO_SUBSYSTEM.get(_area)
                 if _subsys and _subsys not in _seen_subsys:
                     changed_subsystems.append(_subsys)
                     _seen_subsys.add(_subsys)
 
+        # behavioral_changes: gated on semantic diff evidence (api_change/security_change),
+        # NOT on artifact type alone. Avoids false behavioral claims for validator/util files.
         behavioral_changes: list[str] = [
-            f"{Path(_p).name}: {_CHANGE_EFFECT[_cls['artifact_type']]}"
+            f"{Path(_p).name}: {_CHANGE_EFFECT.get(_cls['artifact_type'], 'may modify application logic')}"
             for _p, _cls in classifications.items()
             if not _cls["is_noise"]
-            and any(ct in ("behavioral_change", "security_change")
-                    for ct in _ARTIFACT_CHANGE_TYPES.get(_cls["artifact_type"], []))
+            and diff_severities.get(_p, "unknown") in ("api_change", "security_change")
         ]
 
         def _runtime_impact(tc: dict[str, int]) -> list[str]:
             _ri: list[str] = []
+            # Only emit claims that are evidence-backed (annotation-confirmed roles)
             if "entrypoint" in tc:
-                _ri.append("Entrypoint-classified file modified — may require full context restart before deploy (role inferred from path)")
+                _ri.append("Entrypoint-classified file modified — may require full context restart before deploy")
             if "spring_config" in tc:
-                _ri.append("Spring config-classified file modified — wired beans may be rewired on restart (role inferred from path)")
+                _ri.append("Spring config-classified file modified — wired beans may be rewired on restart")
             if "security" in tc:
-                _ri.append("Security-classified file modified — secured endpoints may be affected after restart (role inferred from path)")
+                _ri.append("Security-classified file modified — secured endpoints may be affected after restart")
             if "db_migration" in tc:
                 _ri.append("Database schema migration pending — execute before deploying application")
+            # service transactional claim: only if @Service annotation confirmed (not source/unclassified)
             _svc = tc.get("service", 0)
             if _svc >= 2:
-                _ri.append(f"{_svc} service-classified file(s) modified — verify transaction scope and data consistency (role inferred from path)")
+                _ri.append(f"{_svc} @Service-annotated file(s) modified — verify business logic consistency")
             _repo = tc.get("repository", 0) + tc.get("mapper", 0)
             if _repo > 0:
-                _ri.append(f"{_repo} persistence-classified component(s) modified — verify data access queries (role inferred from path)")
+                _ri.append(f"{_repo} persistence-classified component(s) modified — verify data access queries")
             if "build_manifest" in tc:
                 _ri.append("Build manifest modified — dependency resolution required before compile")
             return _ri
@@ -2700,7 +2748,9 @@ class TaskContextBuilder:
         _max_hop = max((e["hop"] for e in graph_edges), default=0)
         dependency_graph_summary: dict = {
             "edges": graph_edges[:30],
-            "propagation_depth": _max_hop,
+            # propagation_depth is unknown when no graph edges exist — not 0
+            "propagation_depth": _max_hop if graph_edges else None,
+            "has_graph_evidence": bool(graph_edges),
         }
 
         # ── Step 4: impact summary ─────────────────────────────────────────────
