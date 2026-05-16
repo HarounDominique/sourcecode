@@ -419,6 +419,108 @@ _ALL_EXTENSIONS: frozenset[str] = _SOURCE_EXTENSIONS | frozenset({
     ".md", ".toml", ".yaml", ".yml", ".json", ".xml",
 })
 
+# ── Evidence admission helpers (valid types: git_diff, annotation, import, symbol, config) ──
+
+_CLASS_SUFFIX_EVIDENCE: list[tuple[tuple[str, ...], str, str]] = [
+    (("Repository", "Dao", "DAO"),                  "repository pattern",   "medium"),
+    (("Mapper",),                                   "mapper pattern",       "medium"),
+    (("Service", "Manager", "Handler", "Facade"),   "service pattern",      "medium"),
+    (("Controller", "Resource", "Endpoint"),        "controller pattern",   "medium"),
+    (("Config", "Configuration"),                   "config class",         "medium"),
+    (("Test", "Tests", "IT", "Spec"),               "test class",           "strong"),
+    (("DTO", "Dto"),                                "DTO pattern",          "medium"),
+    (("Entity",),                                   "entity pattern",       "medium"),
+]
+
+
+def _symbol_evidence_from_class(class_name: str) -> "dict | None":
+    for suffixes, label, strength in _CLASS_SUFFIX_EVIDENCE:
+        for suffix in suffixes:
+            if class_name.endswith(suffix) and class_name != suffix:
+                return {
+                    "type": "symbol",
+                    "strength": strength,
+                    "signal": f"class name suffix '{suffix}' — {label}",
+                }
+    return None
+
+
+_PERSISTENCE_ANNOTATION_SIGNALS = frozenset({
+    "@Repository", "@Entity", "@Table", "@MappedSuperclass",
+    "@NamedQuery", "@SqlResultSetMapping", "@Embeddable",
+})
+_PERSISTENCE_IMPORT_PREFIXES = (
+    "javax.persistence", "jakarta.persistence",
+    "org.hibernate", "org.springframework.data.jpa",
+)
+_PERSISTENCE_ORM_SYMBOLS = ("EntityManager", "JpaRepository", "CrudRepository", "HibernateTemplate", "SessionFactory")
+
+
+def _read_persistence_evidence(root: Path, file_path: str) -> "list[dict]":
+    evidence: list[dict] = []
+    try:
+        with open(root / file_path, encoding="utf-8", errors="replace") as _fp:
+            content = _fp.read(8000)
+    except OSError:
+        return evidence
+    for ann in _PERSISTENCE_ANNOTATION_SIGNALS:
+        if ann in content:
+            evidence.append({"type": "annotation", "strength": "strong", "signal": f"{ann} found in file content"})
+            break
+    for imp in _PERSISTENCE_IMPORT_PREFIXES:
+        if imp in content:
+            evidence.append({"type": "import", "strength": "strong", "signal": f"import {imp}.* found in file content"})
+            break
+    for sym in _PERSISTENCE_ORM_SYMBOLS:
+        if sym in content:
+            evidence.append({"type": "symbol", "strength": "medium", "signal": f"{sym} usage found in file content"})
+            break
+    return evidence
+
+
+# Code signal rules for non-persistence classifiable types.
+# Path/module/suffix are explicitly excluded — only code-grounded signals.
+_CODE_SIGNAL_RULES: dict[str, list[str]] = {
+    "service":        ["@Service", "@Component(", "@Transactional\n", "@Transactional("],
+    "controller":     ["@RestController", "@Controller", "@RequestMapping",
+                       "@GetMapping", "@PostMapping", "@PutMapping", "@DeleteMapping", "@PatchMapping"],
+    "entrypoint":     ["@SpringBootApplication", "public static void main", "if __name__ == '__main__'"],
+    "security":       ["@EnableWebSecurity", "SecurityFilterChain", "WebSecurityConfigurerAdapter",
+                       "extends OncePerRequestFilter"],
+    "spring_config":  ["@Configuration", "@Bean\n", "@Bean("],
+    "spring_profile": ["@Profile(", "@ConditionalOnProperty"],
+    "dto":            ["@Data\n", "@Data(", "@Value\n", "@JsonProperty", "@Schema(", "@XmlRootElement",
+                       "@Builder\n", "@Builder(", "@Getter", "@Setter"],
+    "test":           ["@Test\n", "@Test(", "import org.junit", "import org.testng",
+                       "import org.mockito", "import org.springframework.boot.test",
+                       "@BeforeEach", "@BeforeAll", "@Before\n", "@Before("],
+}
+
+
+def _read_code_signal_evidence(root: Path, file_path: str, artifact_type: str) -> "list[dict]":
+    """Verify artifact_type with code signals from file content (first 8KB).
+    Returns single-item list on first match, empty list if no signal found.
+    Path segments, module names, and class suffixes are excluded — per evidence firewall rules.
+    """
+    signals = _CODE_SIGNAL_RULES.get(artifact_type, [])
+    if not signals:
+        return []
+    try:
+        with open(root / file_path, encoding="utf-8", errors="replace") as _fp:
+            content = _fp.read(8000)
+    except OSError:
+        return []
+    for signal in signals:
+        if signal in content:
+            ev_type = (
+                "annotation" if signal.startswith("@")
+                else "import" if signal.startswith("import ")
+                else "symbol"
+            )
+            return [{"type": ev_type, "strength": "strong", "signal": f"{signal.strip()} found in file content"}]
+    return []
+
+
 _ARTIFACT_CHANGE_EFFECT: dict[str, str] = {
     "entrypoint":     "may affect application startup, CLI entry, or framework bootstrap — all request flows may be affected (inferred from role)",
     "controller":     "may alter HTTP routing, API contract, or response shape — API consumers may be affected (inferred from role)",
@@ -953,21 +1055,55 @@ class TaskContextBuilder:
                 if _f_atype == "build_manifest":
                     _build_artifact_files.append(_f)
                     continue
-                # role: always "inferred" — no runtime evidence for role classification
-                _cls_conf = _f_cls["confidence"]  # "high"|"medium"|"low" from _classify_changed_file
-                _role_basis = "naming" if _cls_conf == "high" else ("path" if _cls_conf == "medium" else "extension")
+                # ── Evidence: only admitted types [git_diff, annotation, import, symbol, config] ──
+                _evidence: list[dict] = [
+                    {"type": "git_diff", "strength": "weak", "signal": "file present in commit diff"}
+                ]
+                # Symbol evidence from class name (path segments are rejected — not a valid type)
+                _class_name = Path(_f).stem
+                _sym_ev = _symbol_evidence_from_class(_class_name)
+                if _sym_ev:
+                    _evidence.append(_sym_ev)
+
+                # All classifiable types require at least one code signal from content.
+                # Path segments and module names are rejected evidence — not a valid type.
+                _PERSISTENCE_SENSITIVE = frozenset({"repository", "mapper", "domain_model"})
+                _CONTENT_VERIFIABLE = frozenset({
+                    "service", "controller", "entrypoint", "security",
+                    "spring_config", "spring_profile", "dto",
+                })
+                if _f_atype in _PERSISTENCE_SENSITIVE:
+                    _content_ev = _read_persistence_evidence(self.root, _f)
+                    if _content_ev:
+                        _evidence.extend(_content_ev)
+                    else:
+                        _f_atype = "source"
+                elif _f_atype in _CONTENT_VERIFIABLE:
+                    _content_ev = _read_code_signal_evidence(self.root, _f, _f_atype)
+                    if _content_ev:
+                        _evidence.extend(_content_ev)
+                    else:
+                        _f_atype = "source"
+                elif _f_atype == "test":
+                    # test: class name suffix is valid per gate (naming rule)
+                    # additionally verify with test framework signals for stronger evidence
+                    _test_ev = _read_code_signal_evidence(self.root, _f, "test")
+                    if _test_ev:
+                        _evidence.extend(_test_ev)
+                    # no downgrade — naming is a valid gate signal for test
+
+                # Role basis: derived from strongest admitted evidence
+                _has_code_ev = any(e["type"] in ("annotation", "import") for e in _evidence)
+                _has_symbol_ev = any(e["type"] == "symbol" for e in _evidence)
+                _role_basis = "annotation" if _has_code_ev else ("symbol" if _has_symbol_ev else "git_diff_only")
+                _cls_conf = _f_cls["confidence"]
                 _role_obj = {
                     "type": "inferred",
-                    "confidence": "medium" if _cls_conf == "high" else "low",
+                    "confidence": "medium" if (_has_code_ev or (_has_symbol_ev and _cls_conf == "high")) else "low",
                     "basis": _role_basis,
                 }
-                # evidence: list what we actually know
-                _evidence: list[str] = ["changed in git diff"]
-                _f_module = _f_cls.get("module", "")
-                if _f_module:
-                    _evidence.append(f"matched module path: {_f_module}")
-                _evidence.append("NO call graph evidence")
-                # file confidence: replaces numeric score
+
+                # File confidence: replaces numeric score
                 _impact_s = _delta_impact_score_per_file.get(_f, 0.45)
                 _f_conf = "high" if _impact_s >= 0.60 else ("medium" if _impact_s >= 0.40 else "low")
                 _pr_runtime_changes.append({
