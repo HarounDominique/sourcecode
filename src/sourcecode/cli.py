@@ -2015,11 +2015,18 @@ def repo_ir_cmd(
     if not file_list:
         typer.echo(
             _json.dumps({
-                "symbols": [],
-                "relations": [],
-                "changed_symbols": [],
-                "spring_summary": {},
-                "graph_metadata": {"node_count": 0, "edge_count": 0, "has_call_graph": False},
+                "schema_version": "final-v1",
+                "graph": {"nodes": [], "edges": []},
+                "analysis": {
+                    "changed_entities": [],
+                    "impacted_entities": [],
+                    "isolated_changes": [],
+                    "validated_changes": [],
+                },
+                "impact": {"global_score": 0, "ranked_nodes": []},
+                "subsystems": [],
+                "change_set": [],
+                "audit": {"dropped_fields": []},
             }, indent=2)
         )
         return
