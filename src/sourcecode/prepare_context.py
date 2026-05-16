@@ -1605,6 +1605,78 @@ class TaskContextBuilder:
         # Binaries, images, lock files — treat as noise (closed taxonomy: no unknown_*)
         return {"artifact_type": "ide_noise", "risk_areas": [], "impact_level": "noise", "is_noise": True, "module": module, "confidence": "low"}
 
+    def _classify_diff_severity(self, path: str, since: Optional[str]) -> str:
+        """Classify the semantic severity of a file's diff to gate BFS expansion.
+
+        Returns: 'trivial' | 'field_change' | 'api_change' | 'security_change' | 'unknown'
+
+        - trivial: only comments/whitespace changed — no BFS expansion seeded
+        - field_change: field/attribute declarations changed — hop-1 only, no hop-2+ frontier
+        - api_change: method signatures or class structure changed — full BFS
+        - security_change: auth/security keywords in changed lines — full BFS + security chain
+        - unknown: diff unreadable — treated as api_change (safe default)
+        """
+        import subprocess as _subprocess
+        import re as _re
+
+        try:
+            if since:
+                cmd = ["git", "diff", since, "HEAD", "--", path]
+            else:
+                cmd = ["git", "diff", "HEAD", "--", path]
+            result = _subprocess.run(
+                cmd, capture_output=True, text=True, timeout=5,
+                cwd=str(self.root), encoding="utf-8", errors="ignore",
+            )
+            diff_text = result.stdout
+        except Exception:
+            return "unknown"
+
+        if not diff_text.strip():
+            return "unknown"
+
+        changed_lines = [
+            line[1:] for line in diff_text.splitlines()
+            if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+        ]
+        if not changed_lines:
+            return "trivial"
+
+        suffix = Path(path).suffix.lower()
+        if suffix in (".java", ".kt"):
+            _TRIVIAL  = _re.compile(r'^\s*(?://|/\*|\*)')
+            _FIELD    = _re.compile(r'^\s*(?:private|protected|public|final|static)\s+\w[\w<>, ]*\s+\w+\s*[;=]')
+            _API      = _re.compile(r'^\s*(?:public|protected)\s+\S.*\(')
+            # Exclude 'password', 'role', 'permission' — these are common field names
+            # in domain models and don't indicate auth logic changes. Keep mechanism
+            # keywords: jwt, auth (as class prefix), token, credential, encrypt, decrypt, oauth.
+            _SECURITY = _re.compile(r'\b(?:jwt|auth|token|credential|encrypt|decrypt|oauth|saml|ldap|principal|Security)\b')
+            _STRUCT   = _re.compile(r'^\s*(?:class|interface|enum|record|import|package)\s')
+        elif suffix == ".py":
+            _TRIVIAL  = _re.compile(r'^\s*#')
+            _FIELD    = _re.compile(r'^\s*(?:self\.\w+\s*=|\w+:\s*\w)')
+            _API      = _re.compile(r'^\s*def\s+\w')
+            _SECURITY = _re.compile(r'\b(?:jwt|auth|token|credential|encrypt|decrypt|oauth|saml|ldap|principal|security)\b', _re.IGNORECASE)
+            _STRUCT   = _re.compile(r'^\s*(?:class|import|from)\s')
+        elif suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs"):
+            _TRIVIAL  = _re.compile(r'^\s*(?://|/\*|\*)')
+            _FIELD    = _re.compile(r'^\s*(?:private|readonly|public)?\s*\w+[?!]?\s*[=:]')
+            _API      = _re.compile(r'^\s*(?:(?:public|private|protected|async|export)\s+)*(?:function\s+\w|\w+\s*\()')
+            _SECURITY = _re.compile(r'\b(?:jwt|auth|token|credential|encrypt|decrypt|oauth|saml|ldap|principal|security)\b', _re.IGNORECASE)
+            _STRUCT   = _re.compile(r'^\s*(?:class|interface|import|export\s+(?:class|interface|type))\s')
+        else:
+            return "unknown"
+
+        if any(_SECURITY.search(line) for line in changed_lines):
+            return "security_change"
+        if any(_API.match(line) or _STRUCT.match(line) for line in changed_lines):
+            return "api_change"
+        if any(_FIELD.match(line) for line in changed_lines):
+            return "field_change"
+        if all(_TRIVIAL.match(line) or not line.strip() for line in changed_lines):
+            return "trivial"
+        return "field_change"  # safe default: treat unknown non-trivial as field-level
+
     def _scan_import_dependents(
         self,
         changed_paths: list[str],
@@ -1888,6 +1960,16 @@ class TaskContextBuilder:
             f: self._classify_changed_file(f) for f in changed_files
         }
 
+        # ── Step 1b: classify diff severity to gate BFS expansion ─────────────
+        # trivial   → no BFS seeding (comments/whitespace only)
+        # field_change → hop-1 BFS only, deps excluded from hop-2+ frontier
+        # api_change   → full BFS (method signature or class structure changed)
+        # security_change → full BFS + security chain allowed cross-module
+        # unknown   → treated as api_change (safe default)
+        diff_severities: dict[str, str] = {
+            f: self._classify_diff_severity(f, since) for f in changed_files
+        }
+
         # ── Step 2: build relevant_files from the changed set ─────────────────
         relevant: list[RelevantFile] = []
         why: dict[str, str] = {}
@@ -2004,9 +2086,12 @@ class TaskContextBuilder:
         ]
 
         _bfs_seen: set[str] = {rf.path for rf in relevant}
+        # trivial changes (comments/whitespace only) don't seed BFS — nothing structural
+        # to propagate, so excluding them prevents false expansion on cosmetic commits
         _bfs_frontier: list[str] = [
             f for f in changed_files
             if Path(f).suffix.lower() in _BFS_SCANNABLE
+            and diff_severities.get(f, "unknown") != "trivial"
         ]
 
         # (max results added from this hop, max_candidates scanned per seed)
@@ -2035,6 +2120,8 @@ class TaskContextBuilder:
 
             # collect (score, path) pairs for this hop to build the next frontier
             _hop_scored: list[tuple[float, str]] = []
+            # per-hop staging list — capped at _max_results before merging into _bfs_collected
+            _hop_bfs_staged: list[tuple[int, float, str, RelevantFile]] = []
 
             for _seed_path, _dep_paths in _hop_dep_map.items():
                 _seed_atype = (
@@ -2042,6 +2129,9 @@ class TaskContextBuilder:
                     if _seed_path in classifications
                     else self._classify_changed_file(_seed_path)["artifact_type"]
                 )
+                # diff severity for original changed files only (hop-1 seeds);
+                # hop-2+ seeds are dep files not in diff_severities → "unknown"
+                _seed_severity = diff_severities.get(_seed_path, "unknown")
                 for _dep_path in _dep_paths:
                     if _dep_path in _bfs_seen:
                         continue
@@ -2052,9 +2142,29 @@ class TaskContextBuilder:
                         continue
 
                     _dep_atype = _dep_cls["artifact_type"]
+                    _dep_module = _dep_cls["module"]
+
+                    # Cross-module gating: if dep lives in a different domain module,
+                    # only allow it if:
+                    #   hop-1 AND dep_atype is explicitly in seed's _EXPANSION_TARGETS
+                    # For hop-2+, cross-module deps are always excluded — transitives
+                    # must stay within the changed modules to avoid system-wide explosion.
+                    _is_cross_module = bool(_dep_module) and _dep_module not in affected_modules_set
+                    if _is_cross_module:
+                        _seed_expansion = _EXPANSION_TARGETS.get(_seed_atype, frozenset())
+                        # security_change seeds are allowed to cross into the security chain
+                        # even when their base expansion targets don't include those types
+                        if _seed_severity == "security_change":
+                            _seed_expansion = _seed_expansion | frozenset({"security", "spring_config", "config"})
+                        if _hop_num >= 2 or _dep_atype not in _seed_expansion:
+                            continue
+
                     _dep_score_base = _ARTIFACT_SCORE.get(_dep_atype, 0.45)
                     # score decays 30% per hop so transitives rank below direct dependents
-                    _dep_score = round(_dep_score_base * (0.70 ** _hop_num), 2)
+                    # cross-module deps get additional 40% penalty so same-module files
+                    # always rank higher in the per-hop cap
+                    _cross_module_factor = 0.60 if _is_cross_module else 1.0
+                    _dep_score = round(_dep_score_base * (0.70 ** _hop_num) * _cross_module_factor, 2)
                     _dep_role = _role_in_system(_dep_path, _dep_atype, _dep_path in ep_paths)
 
                     _why_str = (
@@ -2069,27 +2179,44 @@ class TaskContextBuilder:
                         f" ({_seed_atype}) | score: {_dep_score:.2f}"
                     )
                     why[_dep_path] = _why_str
-                    # Tests are consumers, not structural dependencies — exclude from import graph.
-                    # They remain in relevant_files but must not seed further BFS hops.
+                    # Tests import production code but are not structural dependencies —
+                    # exclude from graph, frontier, and bfs_collected entirely.
                     _is_test = _dep_atype == "test"
                     if not _is_test:
                         graph_edges.append({
                             "from": _seed_path, "to": _dep_path,
                             "edge_type": "import_dependency", "hop": _hop_num,
                         })
-                        _hop_scored.append((_dep_score, _dep_path))
-                    _bfs_collected.append((_hop_num, _dep_score, _dep_path, RelevantFile(
-                        path=_dep_path, role=_dep_role, score=_dep_score,
-                        reason=_reason, why=_why_str,
-                    )))
+                        # field_change seeds don't propagate to hop-2+ frontier:
+                        # a field-level change (getter, attribute) is collected at hop-1
+                        # but its callers are not recursively expanded further
+                        if _seed_severity != "field_change":
+                            _hop_scored.append((_dep_score, _dep_path))
+                        _hop_bfs_staged.append((_hop_num, _dep_score, _dep_path, RelevantFile(
+                            path=_dep_path, role=_dep_role, score=_dep_score,
+                            reason=_reason, why=_why_str,
+                        )))
+
+            # Per-hop cap: keep only the top-_max_results by score before merging.
+            # Prevents a single high-fanout seed (e.g. User.java imported by every
+            # controller) from flooding _bfs_collected and pushing out hop-2/3 results.
+            _hop_bfs_staged.sort(key=lambda x: (-x[1], x[2]))
+            _bfs_collected.extend(_hop_bfs_staged[:_max_results])
 
             # next frontier = top-N files by score from this hop
             _hop_scored.sort(key=lambda x: -x[0])
             _bfs_frontier = [p for _, p in _hop_scored[:_max_results]]
 
-        # merge into relevant: closer hops first, then higher score; cap total at 20
+        # merge into relevant: closer hops first, then higher score; cap total at 18
         _bfs_collected.sort(key=lambda x: (x[0], -x[1], x[2]))
-        relevant.extend(rf for _, _, _, rf in _bfs_collected[:20])
+        _bfs_cap = sum(budget[0] for budget in _BFS_HOP_BUDGET)  # 8+6+4 = 18
+        relevant.extend(rf for _, _, _, rf in _bfs_collected[:_bfs_cap])
+
+        # Truncation guard: flag excess expansion — gap message added in Step 6.
+        _EXPANSION_HARD_LIMIT = 40
+        _expansion_truncated = len(relevant) > _EXPANSION_HARD_LIMIT
+        if _expansion_truncated:
+            relevant = relevant[:_EXPANSION_HARD_LIMIT]
 
         # ── Step 3d: per-file impact scores, change_type, system_impact ─────────
         # Downstream fanout: count graph edges originating from each changed file
@@ -2263,6 +2390,11 @@ class TaskContextBuilder:
         analysis_gaps: list[str] = [
             f"Related file expansion: type-aware chain expansion + {_bfs_note} + module/directory heuristics",
         ]
+        if _expansion_truncated:
+            analysis_gaps.insert(0,
+                f"truncated_dependency_graph: expansion exceeded {_EXPANSION_HARD_LIMIT} nodes"
+                " — lower-priority files omitted. Narrow scope with --since <ref> for precision."
+            )
         if noise_count > 0 and meaningful > 0:
             analysis_gaps.append(
                 f"{noise_count} IDE/tooling file(s) in diff excluded from impact analysis"
