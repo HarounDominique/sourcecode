@@ -1874,6 +1874,12 @@ def prepare_context_cmd(
             out["impact_summary"] = output.impact_summary
         if output.why_these_files:
             out["reasoning"] = output.why_these_files
+        # git-first scope metadata
+        out["scope"] = {
+            "source": output.scope_source or "git_diff",
+            "files": output.scope_files,
+            "repo_root": output.repo_root or "",
+        }
     if output.limitations:
         out["limitations"] = output.limitations
     if output.symptom:

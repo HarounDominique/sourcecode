@@ -353,6 +353,10 @@ class TaskOutput:
     suggested_review_order: list[str] = field(default_factory=list)
     execution_paths: list[dict] = field(default_factory=list)
     behavioral_impact: list[dict] = field(default_factory=list)
+    # git-first scope metadata (review-pr only)
+    scope_source: Optional[str] = None   # "git_diff" | "staged" | "untracked" | "full_scan_fallback"
+    scope_files: list[str] = field(default_factory=list)
+    repo_root: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -440,23 +444,81 @@ class TaskContextBuilder:
             )
         spec = TASKS[task_name]
 
+        # ── 0. review-pr: git-first scope resolution (before any filesystem scan) ─
+        _pr_git_root: Optional[Path] = None
+        _pr_scope_files: Optional[list[str]] = None
+        _pr_scope_source: str = "full_scan_fallback"
+
+        if task_name == "review-pr":
+            _pr_git_root = self._resolve_git_root()
+            if _pr_git_root is None:
+                return TaskOutput(
+                    task="review-pr", goal=spec.goal,
+                    project_summary=None, architecture_summary=None,
+                    relevant_files=[], suspected_areas=[],
+                    improvement_opportunities=[], test_gaps=[],
+                    key_dependencies=[], code_notes_summary=None,
+                    limitations=[], confidence="low",
+                    error_code="no_git_repo",
+                    error_message="review-pr requires a git repository.",
+                    ci_decision="no_git_repo",
+                    scope_source="full_scan_fallback",
+                    repo_root=str(self.root),
+                )
+            _raw_scope, _pr_scope_source = self._get_pr_scope_files(since=since)
+            if _raw_scope is None:
+                # Explicit --since ref is invalid
+                _avail_pr, _sug_pr = self._get_available_refs(since or "")
+                _pr_hints: list[str] = []
+                if _sug_pr:
+                    _pr_hints.append(f"Did you mean '{_sug_pr}'?")
+                if _avail_pr:
+                    _pr_hints.append(f"Available refs: {', '.join(_avail_pr[:8])}")
+                return TaskOutput(
+                    task="review-pr", goal=spec.goal,
+                    project_summary=None, architecture_summary=None,
+                    relevant_files=[], suspected_areas=[],
+                    improvement_opportunities=[], test_gaps=[],
+                    key_dependencies=[], code_notes_summary=None,
+                    limitations=[], confidence="low",
+                    since=since,
+                    error_code="git_ref_not_found",
+                    error_message=f"Base ref '{since}' not found in this repository.",
+                    error_hints=_pr_hints,
+                    gaps=[f"Cannot compute PR diff: git ref '{since}' not found."] + _pr_hints,
+                    ci_decision="git_ref_error",
+                    scope_source="git_diff",
+                    repo_root=str(_pr_git_root),
+                )
+            _pr_scope_files = _raw_scope
+            # _pr_scope_files == [] means no diff; handled in step 5d
+
+        _use_git_first = task_name == "review-pr"
+
         # ── 1. Scan ────────────────────────────────────────────────────────
         from sourcecode.adaptive_scanner import AdaptiveScanner
         from sourcecode.repo_classifier import RepoClassifier
         from sourcecode.tree_utils import flatten_file_tree
-
-        _topology = RepoClassifier().classify(self.root)
-        # Shallow pre-scan to detect Java manifests before choosing depth.
         from sourcecode.scanner import FileScanner as _FileScanner
-        _pre = _FileScanner(self.root, max_depth=1)
-        _pre_manifests = _pre.find_manifests()
+
+        _pre_manifests = _FileScanner(self.root, max_depth=1).find_manifests()
         _java_names = {"pom.xml", "build.gradle", "build.gradle.kts"}
         _is_java = any(Path(m).name in _java_names for m in _pre_manifests)
-        _base_depth = 12 if _is_java else 6
-        scanner = AdaptiveScanner(self.root, topology=_topology, base_depth=_base_depth)
-        file_tree = scanner.scan_tree()
-        manifests = scanner.find_manifests()
-        all_paths = [p.replace("\\", "/") for p in flatten_file_tree(file_tree)]
+        manifests = _pre_manifests
+
+        if _use_git_first:
+            # Git-first: no full filesystem traversal — skip AdaptiveScanner.
+            # all_paths = scope files + siblings in same directories (bounded context
+            # for behavioral_impact reverse lookups without scanning the whole repo).
+            file_tree: dict = {}
+            all_paths = self._expand_scope_for_analysis(_pr_scope_files or [])
+        else:
+            _topology = RepoClassifier().classify(self.root)
+            _base_depth = 12 if _is_java else 6
+            scanner = AdaptiveScanner(self.root, topology=_topology, base_depth=_base_depth)
+            file_tree = scanner.scan_tree()
+            manifests = scanner.find_manifests()
+            all_paths = [p.replace("\\", "/") for p in flatten_file_tree(file_tree)]
 
         # Warn when Java project has no Mapper.xml — suggests files below scan depth.
         _mybatis_warning: dict | None = None
@@ -487,25 +549,26 @@ class TaskContextBuilder:
         else:
             stacks, entry_points, _ = detector.detect(self.root, file_tree, _detection_manifests)
 
-        # Iterate workspaces to collect per-workspace stacks and entry points —
-        # same approach as the main CLI (cli.py lines 971-1041).
-        for workspace in workspace_analysis.workspaces:
-            ws_root = self.root / workspace.path
-            if not ws_root.exists() or not ws_root.is_dir():
-                continue
-            _ws_topology = RepoClassifier().classify(ws_root)
-            _ws_scanner = AdaptiveScanner(ws_root, topology=_ws_topology, base_depth=6)
-            _ws_tree = _ws_scanner.scan_tree()
-            _ws_manifests = _ws_scanner.find_manifests()
-            _ws_stacks, _ws_eps, _ = detector.detect(ws_root, _ws_tree, _ws_manifests)
-            stacks.extend(
-                _replace(s, root=workspace.path, workspace=workspace.path, primary=False)
-                for s in _ws_stacks
-            )
-            entry_points.extend(
-                _replace(ep, path=f"{workspace.path}/{ep.path}")
-                for ep in _ws_eps
-            )
+        if not _use_git_first:
+            # Workspace sub-scans: each runs AdaptiveScanner on a workspace root.
+            # Skipped for review-pr — would re-trigger full traversal per workspace.
+            for workspace in workspace_analysis.workspaces:
+                ws_root = self.root / workspace.path
+                if not ws_root.exists() or not ws_root.is_dir():
+                    continue
+                _ws_topology = RepoClassifier().classify(ws_root)
+                _ws_scanner = AdaptiveScanner(ws_root, topology=_ws_topology, base_depth=6)
+                _ws_tree = _ws_scanner.scan_tree()
+                _ws_manifests = _ws_scanner.find_manifests()
+                _ws_stacks, _ws_eps, _ = detector.detect(ws_root, _ws_tree, _ws_manifests)
+                stacks.extend(
+                    _replace(s, root=workspace.path, workspace=workspace.path, primary=False)
+                    for s in _ws_stacks
+                )
+                entry_points.extend(
+                    _replace(ep, path=f"{workspace.path}/{ep.path}")
+                    for ep in _ws_eps
+                )
 
         stacks, project_type = detector.classify_results(
             file_tree, stacks, entry_points,
@@ -669,49 +732,10 @@ class TaskContextBuilder:
             elif _delta_raw:
                 _delta_files = set(_delta_raw)
 
-        # ── 5d. review-pr: git-first gate ──────────────────────────────────────
+        # ── 5d. review-pr: set _delta_files from pre-resolved git scope ──────────
+        # No-git and invalid-ref cases were already handled in step 0 (early returns).
         if task_name == "review-pr":
-            if not self._is_git_repo():
-                return TaskOutput(
-                    task="review-pr", goal=spec.goal,
-                    project_summary=None, architecture_summary=None,
-                    relevant_files=[], suspected_areas=[],
-                    improvement_opportunities=[], test_gaps=[],
-                    key_dependencies=[], code_notes_summary=None,
-                    limitations=[], confidence="low",
-                    error_code="no_git_repo",
-                    error_message="review-pr requires a git repository.",
-                    ci_decision="no_git_repo",
-                )
-            if since is None:
-                # review-pr with no --since: check only uncommitted changes.
-                # _get_git_changed_files(since=None) defaults to HEAD~1 which
-                # returns the last *committed* diff — a false positive here.
-                _pr_raw: Optional[list[str]] = self._get_uncommitted_changed_files()
-            else:
-                _pr_raw = self._get_git_changed_files(since=since)
-            if _pr_raw is None:
-                _avail_pr, _sug_pr = self._get_available_refs(since or "")
-                _pr_hints: list[str] = []
-                if _sug_pr:
-                    _pr_hints.append(f"Did you mean '{_sug_pr}'?")
-                if _avail_pr:
-                    _pr_hints.append(f"Available refs: {', '.join(_avail_pr[:8])}")
-                return TaskOutput(
-                    task="review-pr", goal=spec.goal,
-                    project_summary=None, architecture_summary=None,
-                    relevant_files=[], suspected_areas=[],
-                    improvement_opportunities=[], test_gaps=[],
-                    key_dependencies=[], code_notes_summary=None,
-                    limitations=[], confidence="low",
-                    since=since,
-                    error_code="git_ref_not_found",
-                    error_message=f"Base ref '{since}' not found in this repository.",
-                    error_hints=_pr_hints,
-                    gaps=[f"Cannot compute PR diff: git ref '{since}' not found."] + _pr_hints,
-                    ci_decision="git_ref_error",
-                )
-            if not _pr_raw:
+            if not _pr_scope_files:
                 _no_diff_hint = "review-pr requires changed files or --since <ref>."
                 return TaskOutput(
                     task="review-pr", goal=spec.goal,
@@ -724,8 +748,11 @@ class TaskContextBuilder:
                     error_message=f"No PR diff detected. {_no_diff_hint}",
                     gaps=[f"No PR diff detected. {_no_diff_hint}"],
                     ci_decision="no_changes",
+                    scope_source=_pr_scope_source,
+                    scope_files=[],
+                    repo_root=str(_pr_git_root),
                 )
-            _delta_files = set(_pr_raw)
+            _delta_files = set(_pr_scope_files)
 
         # ── 5c. review-pr suspected_areas (needs git uncommitted_files) ──────
         if task_name == "review-pr" and spec.enable_code_notes:
@@ -1127,6 +1154,10 @@ class TaskContextBuilder:
             suggested_review_order=_pr_suggested_review_order,
             execution_paths=_execution_paths,
             behavioral_impact=_behavioral_impact,
+            # git-first scope metadata
+            scope_source=_pr_scope_source if task_name == "review-pr" else None,
+            scope_files=list(_pr_scope_files) if task_name == "review-pr" and _pr_scope_files else [],
+            repo_root=str(_pr_git_root) if task_name == "review-pr" and _pr_git_root else None,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
@@ -1417,6 +1448,122 @@ class TaskContextBuilder:
 
     def _is_source(self, path: str) -> bool:
         return Path(path).suffix.lower() in _SOURCE_EXTENSIONS
+
+    def _resolve_git_root(self) -> Optional[Path]:
+        """Return the absolute git repo root, or None if not in a git repo."""
+        import subprocess
+        try:
+            r = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=str(self.root),
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=5,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return Path(r.stdout.strip())
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        return None
+
+    def _get_pr_scope_files(self, since: Optional[str] = None) -> tuple[Optional[list[str]], str]:
+        """Return (files, scope_source) for review-pr scope resolution.
+
+        Returns (None, _) only when since is explicitly provided but the ref is invalid.
+        Returns ([], _) when git is available but no changes are found.
+        scope_source is a comma-separated list of active sources (git_diff, staged, untracked).
+        """
+        import subprocess
+
+        def _run(*cmd: str) -> Optional[list[str]]:
+            try:
+                r = subprocess.run(
+                    list(cmd), cwd=str(self.root),
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=10,
+                )
+                return (
+                    [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+                    if r.returncode == 0 else None
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                return None
+
+        files: set[str] = set()
+        sources: list[str] = []
+
+        if since is not None:
+            committed = _run("git", "diff", "--name-only", "--relative", since, "HEAD")
+            if committed is None:
+                return None, "git_diff"  # invalid ref — hard error
+            if committed:
+                files.update(committed)
+                sources.append("git_diff")
+        else:
+            # Working tree vs HEAD~1: covers last commit + all uncommitted changes
+            h1_diff = _run("git", "diff", "--name-only", "--relative", "HEAD~1")
+            if h1_diff:
+                files.update(h1_diff)
+                sources.append("git_diff")
+            # Working tree vs HEAD: uncommitted only (may add new unstaged files)
+            h_diff = _run("git", "diff", "--name-only", "--relative", "HEAD")
+            if h_diff:
+                new = set(h_diff) - files
+                if new:
+                    files.update(new)
+                    if "git_diff" not in sources:
+                        sources.append("git_diff")
+            # Staged changes not yet committed
+            staged = _run("git", "diff", "--name-only", "--cached", "--relative")
+            if staged:
+                new = set(staged) - files
+                if new:
+                    files.update(new)
+                    sources.append("staged")
+
+        # Untracked files (both cases)
+        status = _run("git", "status", "--porcelain", "--short")
+        if status:
+            for line in status:
+                if line.startswith("??") and len(line) > 3:
+                    f = line[3:].strip()
+                    if f and not f.endswith("/") and f not in files:
+                        files.add(f)
+                        if "untracked" not in sources:
+                            sources.append("untracked")
+
+        # Drop paths outside self.root (../… prefix means above cwd — occurs when
+        # self.root is a subdirectory of the git repo and git status shows repo-level files).
+        files = {f for f in files if not f.startswith("../") and not f.startswith("..\\")}
+
+        scope_source = ",".join(sources) if sources else "git_diff"
+        return sorted(files), scope_source
+
+    def _expand_scope_for_analysis(self, scope_files: list[str]) -> list[str]:
+        """Add sibling files in the same directories as scope_files (depth=1 expansion).
+
+        Gives behavioral_impact engine context for reverse lookups (e.g. controllers
+        in the same package as changed services) without traversing the full repo.
+        """
+        expanded: set[str] = set(scope_files)
+        seen_dirs: set[Path] = set()
+
+        for f in scope_files:
+            parent = Path(f).parent
+            if parent in seen_dirs:
+                continue
+            seen_dirs.add(parent)
+            full_parent = self.root / parent
+            if not full_parent.is_dir():
+                continue
+            try:
+                for entry in full_parent.iterdir():
+                    if entry.is_file():
+                        rel = str(entry.relative_to(self.root)).replace("\\", "/")
+                        expanded.add(rel)
+            except OSError:
+                pass
+
+        return sorted(f for f in expanded if (self.root / f).exists())
 
     def _is_git_repo(self) -> bool:
         import subprocess
