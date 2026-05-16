@@ -357,6 +357,9 @@ class TaskOutput:
     scope_source: Optional[str] = None   # "git_diff" | "staged" | "untracked" | "full_scan_fallback"
     scope_files: list[str] = field(default_factory=list)
     repo_root: Optional[str] = None
+    # honest output schema (review-pr only): runtime vs build split
+    runtime_changes: list[dict] = field(default_factory=list)
+    build_changes: dict = field(default_factory=dict)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -415,6 +418,26 @@ def _java_why(path: str, file_class: "Optional[object]") -> str:
 _ALL_EXTENSIONS: frozenset[str] = _SOURCE_EXTENSIONS | frozenset({
     ".md", ".toml", ".yaml", ".yml", ".json", ".xml",
 })
+
+_ARTIFACT_CHANGE_EFFECT: dict[str, str] = {
+    "entrypoint":     "modifies application startup, CLI entry, or framework bootstrap — all request flows may be affected",
+    "controller":     "alters HTTP routing, API contract, or response shape — API consumers are affected",
+    "service":        "changes business rules, transaction scope, or orchestration logic — callers and dependents affected",
+    "repository":     "modifies persistence queries or data access patterns — data consistency and service layer affected",
+    "mapper":         "alters SQL-to-object binding or query templates — data shape and repositories affected",
+    "security":       "changes authentication flow, access control rules, or session handling — all secured endpoints affected",
+    "spring_config":  "modifies bean wiring, datasource, or framework-wide settings — all wired beans potentially affected",
+    "spring_profile": "changes environment-specific overrides — behavior differs per active profile",
+    "config":         "adjusts configuration values — all modules reading this config are affected",
+    "build_manifest": "changes dependencies, plugins, or project structure — compile-time and runtime classpath affected",
+    "db_migration":   "modifies database schema — existing queries, mappings, and constraints may break",
+    "domain_model":   "alters entity structure — cascades to repositories, DTOs, serializers, and mappers",
+    "dto":            "changes data transfer contract — serialization and API consumers may break",
+    "test":           "modifies test coverage or test behavior — no production code affected",
+    "documentation":  "updates documentation only — no runtime impact",
+    "ide_noise":      "IDE/tooling artifact — no application impact",
+    "source":         "modifies application source — artifact role derived from file path structure",
+}
 
 # Maps frontend symptom keywords → backend terms likely to contain the root cause.
 # Used to boost service/interceptor files when the symptom is UI-only.
@@ -830,6 +853,8 @@ class TaskContextBuilder:
         _pr_review_hotspots: list[str] = []
         _pr_suggested_review_order: list[str] = []
         _pr_base_ref: Optional[str] = None
+        _pr_runtime_changes: list[dict] = []
+        _pr_build_changes: dict = {}
 
         if task_name == "review-pr":
             _pr_base_ref = since or "HEAD"
@@ -879,14 +904,21 @@ class TaskContextBuilder:
                 "risk_level": _test_risk_level,
             }
 
-            # Review hotspots: top changed files ranked by impact score
+            # Pre-classify changed files once — reused for hotspots, order, and runtime/build split
+            _pr_changed_cls: dict[str, dict] = {
+                f: self._classify_changed_file(f) for f in (_delta_files or set())
+            }
+
+            # Review hotspots: top changed RUNTIME files ranked by impact score — no build artifacts
             _pr_review_hotspots = sorted(
-                _delta_files or set(),
+                [f for f, cls in _pr_changed_cls.items()
+                 if not cls["is_noise"] and cls["artifact_type"] != "build_manifest"],
                 key=lambda f: _delta_impact_score_per_file.get(f, 0.0),
                 reverse=True,
             )[:8]
 
             # Suggested review order: security first, then api → service → persistence → config
+            # build_manifest is intentionally absent from _ORDER_TYPES
             _ORDER_TYPES = ["security", "controller", "service", "repository", "mapper",
                             "spring_config", "config", "domain_model", "dto"]
             _seen_order: set[str] = set()
@@ -894,7 +926,7 @@ class TaskContextBuilder:
                 for _ra in _delta_risk_areas:
                     for _f in _ra.get("affected_files", []):
                         if _f not in _seen_order:
-                            _cls = self._classify_changed_file(_f)
+                            _cls = _pr_changed_cls.get(_f) or self._classify_changed_file(_f)
                             if _cls["artifact_type"] == _otype:
                                 _pr_suggested_review_order.append(_f)
                                 _seen_order.add(_f)
@@ -902,6 +934,56 @@ class TaskContextBuilder:
                 if _f not in _seen_order:
                     _pr_suggested_review_order.append(_f)
                     _seen_order.add(_f)
+
+            # Build runtime_changes and build_changes — honest split, no score numbers
+            _pr_runtime_changes: list[dict] = []
+            _pr_build_changes: dict = {}
+            _build_artifact_files: list[str] = []
+
+            _SCORE_TO_CONFIDENCE = {
+                "high":   lambda s: s >= 0.60,
+                "medium": lambda s: 0.40 <= s < 0.60,
+            }
+
+            for _f in sorted(_delta_files or set()):
+                _f_cls = _pr_changed_cls.get(_f) or self._classify_changed_file(_f)
+                _f_atype = _f_cls["artifact_type"]
+                if _f_cls["is_noise"]:
+                    continue
+                if _f_atype == "build_manifest":
+                    _build_artifact_files.append(_f)
+                    continue
+                # role: always "inferred" — no runtime evidence for role classification
+                _cls_conf = _f_cls["confidence"]  # "high"|"medium"|"low" from _classify_changed_file
+                _role_basis = "naming" if _cls_conf == "high" else ("path" if _cls_conf == "medium" else "extension")
+                _role_obj = {
+                    "type": "inferred",
+                    "confidence": "medium" if _cls_conf == "high" else "low",
+                    "basis": _role_basis,
+                }
+                # evidence: list what we actually know
+                _evidence: list[str] = ["changed in git diff"]
+                _f_module = _f_cls.get("module", "")
+                if _f_module:
+                    _evidence.append(f"matched module path: {_f_module}")
+                _evidence.append("NO call graph evidence")
+                # file confidence: replaces numeric score
+                _impact_s = _delta_impact_score_per_file.get(_f, 0.45)
+                _f_conf = "high" if _impact_s >= 0.60 else ("medium" if _impact_s >= 0.40 else "low")
+                _pr_runtime_changes.append({
+                    "path": _f,
+                    "role": _role_obj,
+                    "confidence": _f_conf,
+                    "artifact_type": _f_atype,
+                    "evidence": _evidence,
+                    "change_effect": _ARTIFACT_CHANGE_EFFECT.get(_f_atype, "modifies application logic"),
+                })
+
+            if _build_artifact_files:
+                _pr_build_changes = {
+                    "files": _build_artifact_files,
+                    "impact": "dependency/configuration only",
+                }
 
         # ── 6d. review-pr: execution paths + behavioral impact ──────────────
         _execution_paths: list[dict] = []
@@ -1158,6 +1240,9 @@ class TaskContextBuilder:
             scope_source=_pr_scope_source if task_name == "review-pr" else None,
             scope_files=list(_pr_scope_files) if task_name == "review-pr" and _pr_scope_files else [],
             repo_root=str(_pr_git_root) if task_name == "review-pr" and _pr_git_root else None,
+            # honest output schema: runtime vs build split (review-pr only)
+            runtime_changes=_pr_runtime_changes,
+            build_changes=_pr_build_changes,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
@@ -1990,26 +2075,8 @@ class TaskContextBuilder:
             "build_manifest": frozenset(),
         }
 
-        # deterministic change_effect descriptions per artifact type
-        _CHANGE_EFFECT: dict[str, str] = {
-            "entrypoint":     "modifies application startup, CLI entry, or framework bootstrap — all request flows may be affected",
-            "controller":     "alters HTTP routing, API contract, or response shape — API consumers are affected",
-            "service":        "changes business rules, transaction scope, or orchestration logic — callers and dependents affected",
-            "repository":     "modifies persistence queries or data access patterns — data consistency and service layer affected",
-            "mapper":         "alters SQL-to-object binding or query templates — data shape and repositories affected",
-            "security":       "changes authentication flow, access control rules, or session handling — all secured endpoints affected",
-            "spring_config":  "modifies bean wiring, datasource, or framework-wide settings — all wired beans potentially affected",
-            "spring_profile": "changes environment-specific overrides — behavior differs per active profile",
-            "config":         "adjusts configuration values — all modules reading this config are affected",
-            "build_manifest": "changes dependencies, plugins, or project structure — compile-time and runtime classpath affected",
-            "db_migration":   "modifies database schema — existing queries, mappings, and constraints may break",
-            "domain_model":   "alters entity structure — cascades to repositories, DTOs, serializers, and mappers",
-            "dto":            "changes data transfer contract — serialization and API consumers may break",
-            "test":           "modifies test coverage or test behavior — no production code affected",
-            "documentation":  "updates documentation only — no runtime impact",
-            "ide_noise":      "IDE/tooling artifact — no application impact",
-            "source":         "modifies application source — artifact role derived from file path structure",
-        }
+        # use module-level constant (single source of truth)
+        _CHANGE_EFFECT = _ARTIFACT_CHANGE_EFFECT
 
         # change_type taxonomy — closed set, derived from artifact type
         _ARTIFACT_CHANGE_TYPES: dict[str, list[str]] = {

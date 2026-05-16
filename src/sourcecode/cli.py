@@ -1760,7 +1760,7 @@ def prepare_context_cmd(
         out["architecture_summary"] = output.architecture_summary
     if _task_include("confidence"):
         out["confidence"] = output.confidence
-    if _task_include("relevant_files"):
+    if task != "review-pr" and _task_include("relevant_files"):
         out["relevant_files"] = [
             {k: v for k, v in asdict(f).items() if v != ""}
             for f in output.relevant_files
@@ -1862,6 +1862,11 @@ def prepare_context_cmd(
             out["configuration_impact"] = output.configuration_impact
         if output.test_coverage_risk:
             out["test_coverage_risk"] = output.test_coverage_risk
+        # honest split: runtime files vs build artifacts — no mixed ranking
+        if output.runtime_changes:
+            out["runtime_changes"] = output.runtime_changes
+        if output.build_changes:
+            out["build_changes"] = output.build_changes
         if output.review_hotspots:
             out["review_hotspots"] = output.review_hotspots
         if output.suggested_review_order:
