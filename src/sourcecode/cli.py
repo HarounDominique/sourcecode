@@ -1400,9 +1400,8 @@ def main(
             if _gc_early and not (_bad_gc & set(_gc_early.limitations)):
                 _uc = _gc_early.uncommitted_changes
                 if _uc:
-                    _allowed_changed_files = (
-                        set(_uc.staged) | set(_uc.unstaged) | set(_uc.untracked)
-                    )
+                    # WORKTREE_UNSTAGED + WORKTREE_STAGED only; untracked excluded
+                    _allowed_changed_files = set(_uc.staged) | set(_uc.unstaged)
             if not _allowed_changed_files:
                 typer.echo(
                     "[changed-only] git unavailable or no uncommitted changes — falling back to full scan.",

@@ -14,8 +14,17 @@ Each task produces a focused context bundle:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
+
+
+class DiffSourceType(str, Enum):
+    """Explicit diff scope — never auto-merged, never implicit."""
+    WORKTREE_UNSTAGED = "WORKTREE_UNSTAGED"   # git diff (no ref)
+    WORKTREE_STAGED   = "WORKTREE_STAGED"     # git diff --cached
+    GIT_SINCE_REF     = "GIT_SINCE_REF"       # git diff ref HEAD
+    GIT_RANGE         = "GIT_RANGE"           # git diff refA refB
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -360,6 +369,11 @@ class TaskOutput:
     # honest output schema (review-pr only): runtime vs build split
     runtime_changes: list[dict] = field(default_factory=list)
     build_changes: dict = field(default_factory=dict)
+    # review-pr: committed vs uncommitted — never merged
+    committed_changes: list[dict] = field(default_factory=list)
+    uncommitted_changes: list[dict] = field(default_factory=list)
+    # transparency: explicit diff scope for every command
+    analysis_scope: dict = field(default_factory=dict)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -406,7 +420,10 @@ def _java_why(path: str, file_class: "Optional[object]") -> str:
     if category == "data_access":
         return f"SQL queries for {domain} data access" if domain else "Data access layer"
     if category == "domain_model":
-        return f"JPA entity for {class_name} persistence"
+        ev = _read_persistence_evidence(Path(path).parent.parent, path)
+        if ev:
+            return f"JPA entity for {class_name} persistence"
+        return f"Domain model — {class_name} (no persistence annotation detected)"
     if category == "configuration":
         return getattr(file_class, "reason", "Spring configuration class")
     if category == "security":
@@ -590,7 +607,8 @@ class TaskContextBuilder:
                     scope_source="full_scan_fallback",
                     repo_root=str(self.root),
                 )
-            _raw_scope, _pr_scope_source = self._get_pr_scope_files(since=since)
+            _raw_scope, _pr_scope_source, _pr_committed_files, _pr_uncommitted_files = \
+                self._get_pr_scope_files(since=since)
             if _raw_scope is None:
                 # Explicit --since ref is invalid
                 _avail_pr, _sug_pr = self._get_available_refs(since or "")
@@ -957,6 +975,10 @@ class TaskContextBuilder:
         _pr_base_ref: Optional[str] = None
         _pr_runtime_changes: list[dict] = []
         _pr_build_changes: dict = {}
+        _pr_committed_changes: list[dict] = []
+        _pr_uncommitted_changes: list[dict] = []
+        _pr_committed_files: list[str] = []
+        _pr_uncommitted_files: list[str] = []
 
         if task_name == "review-pr":
             _pr_base_ref = since or "HEAD"
@@ -1038,9 +1060,14 @@ class TaskContextBuilder:
                     _seen_order.add(_f)
 
             # Build runtime_changes and build_changes — honest split, no score numbers
+            # Also track committed vs uncommitted — NEVER merged
             _pr_runtime_changes: list[dict] = []
+            _pr_committed_changes: list[dict] = []
+            _pr_uncommitted_changes: list[dict] = []
             _pr_build_changes: dict = {}
             _build_artifact_files: list[str] = []
+            _committed_set: set[str] = set(_pr_committed_files) if task_name == "review-pr" else set()
+            _uncommitted_set: set[str] = set(_pr_uncommitted_files) if task_name == "review-pr" else set()
 
             _SCORE_TO_CONFIDENCE = {
                 "high":   lambda s: s >= 0.60,
@@ -1106,8 +1133,14 @@ class TaskContextBuilder:
                 # File confidence: replaces numeric score
                 _impact_s = _delta_impact_score_per_file.get(_f, 0.45)
                 _f_conf = "high" if _impact_s >= 0.60 else ("medium" if _impact_s >= 0.40 else "low")
-                _pr_runtime_changes.append({
+                _diff_source = (
+                    DiffSourceType.GIT_RANGE.value if _f in _committed_set
+                    else DiffSourceType.WORKTREE_UNSTAGED.value if _f in _uncommitted_set
+                    else "unknown"
+                )
+                _entry = {
                     "path": _f,
+                    "diff_source": _diff_source,
                     "role": _role_obj,
                     "confidence": _f_conf,
                     "artifact_type": _f_atype,
@@ -1117,7 +1150,13 @@ class TaskContextBuilder:
                         "truth_level": "inferred",
                         "confidence": _role_obj["confidence"],
                     },
-                })
+                }
+                _pr_runtime_changes.append(_entry)
+                # Split committed vs uncommitted — never merged
+                if _f in _committed_set:
+                    _pr_committed_changes.append(_entry)
+                elif _f in _uncommitted_set:
+                    _pr_uncommitted_changes.append(_entry)
 
             if _build_artifact_files:
                 _pr_build_changes = {
@@ -1383,6 +1422,25 @@ class TaskContextBuilder:
             # honest output schema: runtime vs build split (review-pr only)
             runtime_changes=_pr_runtime_changes,
             build_changes=_pr_build_changes,
+            # committed vs uncommitted — never merged
+            committed_changes=_pr_committed_changes,
+            uncommitted_changes=_pr_uncommitted_changes,
+            # transparency: explicit diff scope
+            analysis_scope={
+                "sources_used": _pr_scope_source.split(",") if task_name == "review-pr" and _pr_scope_source else (
+                    [DiffSourceType.GIT_SINCE_REF.value] if task_name == "delta" and since else
+                    [DiffSourceType.WORKTREE_UNSTAGED.value] if task_name == "delta" else
+                    []
+                ),
+                "git_equivalent_command": (
+                    f"git diff --name-only {since} HEAD" if since else
+                    "git diff --name-only"
+                ) if task_name in ("delta", "review-pr") else None,
+                "includes_uncommitted": bool(
+                    (task_name == "review-pr" and _pr_uncommitted_files) or
+                    (task_name == "delta" and not since)
+                ),
+            } if task_name in ("delta", "review-pr") else {},
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
@@ -1690,12 +1748,19 @@ class TaskContextBuilder:
             pass
         return None
 
-    def _get_pr_scope_files(self, since: Optional[str] = None) -> tuple[Optional[list[str]], str]:
-        """Return (files, scope_source) for review-pr scope resolution.
+    def _get_pr_scope_files(
+        self, since: Optional[str] = None
+    ) -> "tuple[Optional[list[str]], str, list[str], list[str]]":
+        """Return (all_files, scope_source, committed_files, uncommitted_files).
 
-        Returns (None, _) only when since is explicitly provided but the ref is invalid.
-        Returns ([], _) when git is available but no changes are found.
-        scope_source is a comma-separated list of active sources (git_diff, staged, untracked).
+        Scopes are NEVER mixed — committed and uncommitted tracked separately.
+        Returns (None, _, _, _) only when since is explicitly provided but invalid.
+        Returns ([], _, [], []) when git is available but no changes found.
+
+        DiffSourceType mapping:
+          since given  → committed: GIT_RANGE(since, HEAD)
+          no since     → committed: [] (no implicit HEAD~1 fallback)
+          always       → uncommitted: WORKTREE_UNSTAGED + WORKTREE_STAGED
         """
         import subprocess
 
@@ -1713,55 +1778,44 @@ class TaskContextBuilder:
             except (subprocess.TimeoutExpired, FileNotFoundError):
                 return None
 
-        files: set[str] = set()
+        committed_files: list[str] = []
+        uncommitted_files: list[str] = []
         sources: list[str] = []
 
+        # ── Committed scope (GIT_RANGE) — only when explicit ref given ──────
         if since is not None:
             committed = _run("git", "diff", "--name-only", "--relative", since, "HEAD")
             if committed is None:
-                return None, "git_diff"  # invalid ref — hard error
-            if committed:
-                files.update(committed)
-                sources.append("git_diff")
-        else:
-            # Working tree vs HEAD~1: covers last commit + all uncommitted changes
-            h1_diff = _run("git", "diff", "--name-only", "--relative", "HEAD~1")
-            if h1_diff:
-                files.update(h1_diff)
-                sources.append("git_diff")
-            # Working tree vs HEAD: uncommitted only (may add new unstaged files)
-            h_diff = _run("git", "diff", "--name-only", "--relative", "HEAD")
-            if h_diff:
-                new = set(h_diff) - files
-                if new:
-                    files.update(new)
-                    if "git_diff" not in sources:
-                        sources.append("git_diff")
-            # Staged changes not yet committed
-            staged = _run("git", "diff", "--name-only", "--cached", "--relative")
-            if staged:
-                new = set(staged) - files
-                if new:
-                    files.update(new)
-                    sources.append("staged")
+                return None, "git_diff", [], []  # invalid ref — hard error
+            committed_files = committed
+            if committed_files:
+                sources.append(DiffSourceType.GIT_RANGE.value)
 
-        # Untracked files (both cases)
-        status = _run("git", "status", "--porcelain", "--short")
-        if status:
-            for line in status:
-                if line.startswith("??") and len(line) > 3:
-                    f = line[3:].strip()
-                    if f and not f.endswith("/") and f not in files:
-                        files.add(f)
-                        if "untracked" not in sources:
-                            sources.append("untracked")
+        # ── Uncommitted scope — ALWAYS separate, never implicit ──────────────
+        # WORKTREE_UNSTAGED: modified but not staged
+        unstaged = _run("git", "diff", "--name-only", "--relative")
+        if unstaged:
+            uncommitted_files.extend(f for f in unstaged if f not in uncommitted_files)
+            if DiffSourceType.WORKTREE_UNSTAGED.value not in sources:
+                sources.append(DiffSourceType.WORKTREE_UNSTAGED.value)
 
-        # Drop paths outside self.root (../… prefix means above cwd — occurs when
-        # self.root is a subdirectory of the git repo and git status shows repo-level files).
-        files = {f for f in files if not f.startswith("../") and not f.startswith("..\\")}
+        # WORKTREE_STAGED: staged, not yet committed
+        staged = _run("git", "diff", "--name-only", "--cached", "--relative")
+        if staged:
+            uncommitted_files.extend(f for f in staged if f not in uncommitted_files)
+            if DiffSourceType.WORKTREE_STAGED.value not in sources:
+                sources.append(DiffSourceType.WORKTREE_STAGED.value)
 
-        scope_source = ",".join(sources) if sources else "git_diff"
-        return sorted(files), scope_source
+        # ── Drop paths outside self.root ──────────────────────────────────────
+        def _drop_outside(lst: list[str]) -> list[str]:
+            return [f for f in lst if not f.startswith("../") and not f.startswith("..\\")]
+
+        committed_files = _drop_outside(committed_files)
+        uncommitted_files = _drop_outside(uncommitted_files)
+
+        all_files_set: set[str] = set(committed_files) | set(uncommitted_files)
+        scope_source = ",".join(sources) if sources else "no_changes"
+        return sorted(all_files_set), scope_source, committed_files, uncommitted_files
 
     def _expand_scope_for_analysis(self, scope_files: list[str]) -> list[str]:
         """Add sibling files in the same directories as scope_files (depth=1 expansion).
@@ -1949,44 +2003,9 @@ class TaskContextBuilder:
         if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _DTO_KW):
             return {"artifact_type": "dto", "risk_areas": [], "impact_level": "low", "is_noise": False, "module": module, "confidence": "high"}
 
-        # Folder-based disambiguation: check directory path components for layer hints
-        # (innermost directory first) before falling back to unclassified source
-        _FOLDER_TYPE_MAP: dict[str, tuple[str, list[str], str]] = {
-            "controller":    ("controller",   ["api"],                          "high"),
-            "controllers":   ("controller",   ["api"],                          "high"),
-            "api":           ("controller",   ["api"],                          "high"),
-            "web":           ("controller",   ["api"],                          "high"),
-            "rest":          ("controller",   ["api"],                          "high"),
-            "resource":      ("controller",   ["api"],                          "high"),
-            "resources":     ("controller",   ["api"],                          "high"),
-            "service":       ("service",      ["transactions", "business_logic"],"high"),
-            "services":      ("service",      ["transactions", "business_logic"],"high"),
-            "business":      ("service",      ["transactions", "business_logic"],"high"),
-            "usecase":       ("service",      ["business_logic"],               "high"),
-            "usecases":      ("service",      ["business_logic"],               "high"),
-            "repository":    ("repository",   ["persistence"],                  "high"),
-            "repositories":  ("repository",   ["persistence"],                  "high"),
-            "dao":           ("repository",   ["persistence"],                  "high"),
-            "persistence":   ("repository",   ["persistence"],                  "high"),
-            "mapper":        ("mapper",       ["persistence"],                  "high"),
-            "mappers":       ("mapper",       ["persistence"],                  "high"),
-            "security":      ("security",     ["security"],                     "high"),
-            "auth":          ("security",     ["security"],                     "high"),
-            "config":        ("config",       ["config"],                       "medium"),
-            "configuration": ("config",       ["config"],                       "medium"),
-            "configs":       ("config",       ["config"],                       "medium"),
-            "domain":        ("domain_model", ["persistence"],                  "medium"),
-            "model":         ("domain_model", ["persistence"],                  "medium"),
-            "models":        ("domain_model", ["persistence"],                  "medium"),
-            "entity":        ("domain_model", ["persistence"],                  "medium"),
-            "entities":      ("domain_model", ["persistence"],                  "medium"),
-        }
+        # No stem hint matched — path/folder components are NOT valid evidence.
+        # Fall through to unclassified source (extension-only, low confidence).
         if suffix in _CODE_EXTS:
-            for part in reversed(path_dir_parts):  # innermost directory first
-                if part in _FOLDER_TYPE_MAP:
-                    atype, risk_areas, impact_level = _FOLDER_TYPE_MAP[part]
-                    return {"artifact_type": atype, "risk_areas": risk_areas, "impact_level": impact_level, "is_noise": False, "module": module, "confidence": "medium"}
-            # No stem or folder hint matched — last-resort source type (extension-only classification)
             return {"artifact_type": "source", "risk_areas": [], "impact_level": "medium", "is_noise": False, "module": module, "confidence": "low"}
 
         # Generic config / data files — fold into config type
@@ -2957,10 +2976,26 @@ class TaskContextBuilder:
         the scanned file tree.
         """
         import subprocess
-        ref = since or "HEAD~1"
+
+        if since is None:
+            # No implicit HEAD~1 fallback — map to WORKTREE_UNSTAGED
+            try:
+                result = subprocess.run(
+                    ["git", "diff", "--name-only", "--relative"],
+                    cwd=str(self.root),
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=10,
+                )
+                if result.returncode == 0:
+                    return [ln.strip() for ln in (result.stdout or "").splitlines() if ln.strip()]
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
+            return []
+
+        # Explicit since: GIT_SINCE_REF — committed range only, no silent fallback
         try:
             result = subprocess.run(
-                ["git", "diff", "--name-only", "--relative", ref, "HEAD"],
+                ["git", "diff", "--name-only", "--relative", since, "HEAD"],
                 cwd=str(self.root),
                 capture_output=True,
                 text=True,
@@ -2973,28 +3008,9 @@ class TaskContextBuilder:
                     line.strip() for line in (result.stdout or "").splitlines()
                     if line.strip()
                 ]
-            # Non-zero exit with explicit ref = ref doesn't exist — no silent fallback
-            if since:
-                return None
+            return None  # ref doesn't exist — caller must fail fast
         except (subprocess.TimeoutExpired, FileNotFoundError):
-            if since:
-                return None
-        # No explicit since: fall back to uncommitted changes
-        try:
-            result = subprocess.run(
-                ["git", "diff", "--name-only", "--relative"],
-                cwd=str(self.root),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=10,
-            )
-            if result.returncode == 0:
-                return [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-        return []
+            return None
 
     def _get_available_refs(self, invalid_ref: str) -> tuple[list[str], Optional[str]]:
         """Return (available_branch_names, suggested_alternative) for error hints."""

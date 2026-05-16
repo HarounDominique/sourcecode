@@ -556,7 +556,7 @@ class TestReviewPrSuspectedAreas:
         from pathlib import Path as _Path
         from sourcecode import prepare_context as _pc
         monkeypatch.setattr(_pc.TaskContextBuilder, "_resolve_git_root", lambda self: _Path(str(FIXTURE)))
-        monkeypatch.setattr(_pc.TaskContextBuilder, "_get_pr_scope_files", lambda self, since=None: ([], "git_diff"))
+        monkeypatch.setattr(_pc.TaskContextBuilder, "_get_pr_scope_files", lambda self, since=None: ([], "git_diff", [], []))
         result = _invoke("prepare-context", "review-pr", str(FIXTURE))
         assert result.exit_code == 1
         data = _json(result)
@@ -571,7 +571,7 @@ class TestReviewPrSuspectedAreas:
         monkeypatch.setattr(_pc.TaskContextBuilder, "_resolve_git_root", lambda self: _Path(str(FIXTURE)))
         monkeypatch.setattr(
             _pc.TaskContextBuilder, "_get_pr_scope_files",
-            lambda self, since=None: (_changed, "git_diff"),
+            lambda self, since=None: (_changed, "git_diff", _changed, []),
         )
         result = _invoke("prepare-context", "review-pr", str(FIXTURE))
         assert result.exit_code == 0, result.output
