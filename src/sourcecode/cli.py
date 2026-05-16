@@ -1866,6 +1866,8 @@ def prepare_context_cmd(
             out["review_hotspots"] = output.review_hotspots
         if output.suggested_review_order:
             out["suggested_review_order"] = output.suggested_review_order
+        if output.execution_paths:
+            out["execution_paths"] = output.execution_paths
         if output.impact_summary:
             out["impact_summary"] = output.impact_summary
         if output.why_these_files:

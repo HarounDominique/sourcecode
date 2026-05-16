@@ -351,6 +351,7 @@ class TaskOutput:
     test_coverage_risk: dict = field(default_factory=dict)
     review_hotspots: list[str] = field(default_factory=list)
     suggested_review_order: list[str] = field(default_factory=list)
+    execution_paths: list[dict] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -874,6 +875,17 @@ class TaskContextBuilder:
                     _pr_suggested_review_order.append(_f)
                     _seen_order.add(_f)
 
+        # ── 6d. review-pr: execution paths ──────────────────────────────────
+        _execution_paths: list[dict] = []
+        if task_name == "review-pr" and _delta_files:
+            from sourcecode.flow_analyzer import analyze_execution_paths
+            _execution_paths = analyze_execution_paths(
+                changed_files=sorted(_delta_files),
+                all_paths=all_paths,
+                root=self.root,
+                classify_fn=self._classify_changed_file,
+            )
+
         # ── 6c. Symptom keyword boost + related notes (fix-bug + --symptom) ──
         symptom_keywords: list[str] = []
         related_notes: list[dict] = []
@@ -1104,6 +1116,7 @@ class TaskContextBuilder:
             test_coverage_risk=_pr_test_coverage_risk,
             review_hotspots=_pr_review_hotspots,
             suggested_review_order=_pr_suggested_review_order,
+            execution_paths=_execution_paths,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
