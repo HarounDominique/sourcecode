@@ -60,3 +60,79 @@ class TestCodeNotesEncoding:
             assert "â" not in text, f"Double-encoded byte found in TODO text: {text!r}"
             assert "Ã" not in text, f"Double-encoded char in TODO text: {text!r}"
             assert "�" not in text, f"Replacement char in TODO text: {text!r}"
+
+
+class TestGetAvailableRefsWindowsEncoding:
+    """Regression: _get_available_refs crashed on Windows due to cp1252 encoding and None stdout.
+
+    Bug: subprocess.run(text=True) without encoding= uses the OS default (cp1252 on Windows).
+    Git output containing byte 0x8d raises UnicodeDecodeError (not caught). If stdout is None,
+    r.stdout.splitlines() raises AttributeError. Both cause unhandled tracebacks.
+    Fix: encoding="utf-8", errors="replace", and (r.stdout or "").splitlines().
+    """
+
+    def _make_builder(self) -> "TaskContextBuilder":
+        from sourcecode.prepare_context import TaskContextBuilder
+        return TaskContextBuilder(FIXTURES)
+
+    def test_case_a_stdout_none_does_not_crash(self, monkeypatch):
+        """stdout=None must not raise AttributeError on splitlines()."""
+        import subprocess
+        import types
+
+        fake = types.SimpleNamespace(returncode=0, stdout=None, stderr="")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake)
+
+        builder = self._make_builder()
+        refs, suggested = builder._get_available_refs("main")
+        assert refs == []
+        assert suggested is None
+
+    def test_case_b_non_utf8_bytes_no_unicode_error(self, monkeypatch):
+        """Bytes invalid in cp1252 (e.g. 0x8d) must not raise UnicodeDecodeError.
+
+        With encoding='utf-8' + errors='replace', replacement chars appear instead.
+        """
+        import subprocess
+        import types
+
+        # Simulate git returning a branch name that survived errors="replace" decoding
+        # (the replacement char � stands in for the bad byte)
+        replaced = "develop\nfeature/caf�\n"
+        fake = types.SimpleNamespace(returncode=0, stdout=replaced, stderr="")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake)
+
+        builder = self._make_builder()
+        refs, _ = builder._get_available_refs("main")
+        assert "develop" in refs
+
+    def test_case_c_nonexistent_ref_returns_available_refs(self, monkeypatch):
+        """Non-existent --since ref must yield a list of available branches, not a crash."""
+        import subprocess
+        import types
+
+        fake = types.SimpleNamespace(
+            returncode=0,
+            stdout="develop\norigin/develop\nrelease/1.2\n",
+            stderr="",
+        )
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake)
+
+        builder = self._make_builder()
+        refs, suggested = builder._get_available_refs("main")
+        assert "develop" in refs
+        # invalid_ref="main", all_refs contains no "master" → no suggestion
+        assert suggested is None
+
+    def test_case_d_nonzero_returncode_returns_empty(self, monkeypatch):
+        """returncode != 0 must not parse stdout — returns empty list silently."""
+        import subprocess
+        import types
+
+        fake = types.SimpleNamespace(returncode=128, stdout="fatal: not a git repo\n", stderr="")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake)
+
+        builder = self._make_builder()
+        refs, suggested = builder._get_available_refs("main")
+        assert refs == []
+        assert suggested is None

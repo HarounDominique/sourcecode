@@ -2309,10 +2309,11 @@ class TaskContextBuilder:
             r = subprocess.run(
                 ["git", "branch", "-a", "--format=%(refname:short)"],
                 cwd=str(self.root),
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=5,
             )
             if r.returncode == 0:
-                all_refs = [b.strip() for b in r.stdout.splitlines() if b.strip()]
+                all_refs = [b.strip() for b in (r.stdout or "").splitlines() if b.strip()]
                 branches = [b for b in all_refs if "HEAD" not in b][:10]
                 ref_lower = invalid_ref.lower()
                 if ref_lower == "master" and any(b.rstrip("/").endswith("main") for b in all_refs):
