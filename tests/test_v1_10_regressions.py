@@ -552,10 +552,10 @@ class TestReviewPrSuspectedAreas:
         assert "ci_decision" in data
 
     def test_review_pr_no_diff_error_when_git_but_no_changes(self, monkeypatch):
-        # Simulate: is_git_repo=True but no changed files
+        # Simulate: is_git_repo=True but no uncommitted changes
         from sourcecode import prepare_context as _pc
         monkeypatch.setattr(_pc.TaskContextBuilder, "_is_git_repo", lambda self: True)
-        monkeypatch.setattr(_pc.TaskContextBuilder, "_get_git_changed_files", lambda self, since=None: [])
+        monkeypatch.setattr(_pc.TaskContextBuilder, "_get_uncommitted_changed_files", lambda self: [])
         result = _invoke("prepare-context", "review-pr", str(FIXTURE))
         assert result.exit_code == 1
         data = _json(result)
@@ -563,12 +563,12 @@ class TestReviewPrSuspectedAreas:
         assert data.get("ci_decision") == "no_changes"
 
     def test_review_pr_with_mocked_diff_returns_pr_fields(self, monkeypatch):
-        # Simulate: valid git repo with one changed controller file
+        # Simulate: valid git repo with one changed controller file (no --since → uncommitted path)
         from sourcecode import prepare_context as _pc
         monkeypatch.setattr(_pc.TaskContextBuilder, "_is_git_repo", lambda self: True)
         monkeypatch.setattr(
-            _pc.TaskContextBuilder, "_get_git_changed_files",
-            lambda self, since=None: ["src/main/java/com/example/UserController.java"],
+            _pc.TaskContextBuilder, "_get_uncommitted_changed_files",
+            lambda self: ["src/main/java/com/example/UserController.java"],
         )
         result = _invoke("prepare-context", "review-pr", str(FIXTURE))
         assert result.exit_code == 0, result.output

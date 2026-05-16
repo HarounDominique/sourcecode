@@ -681,7 +681,13 @@ class TaskContextBuilder:
                     error_message="review-pr requires a git repository.",
                     ci_decision="no_git_repo",
                 )
-            _pr_raw = self._get_git_changed_files(since=since)
+            if since is None:
+                # review-pr with no --since: check only uncommitted changes.
+                # _get_git_changed_files(since=None) defaults to HEAD~1 which
+                # returns the last *committed* diff — a false positive here.
+                _pr_raw: Optional[list[str]] = self._get_uncommitted_changed_files()
+            else:
+                _pr_raw = self._get_git_changed_files(since=since)
             if _pr_raw is None:
                 _avail_pr, _sug_pr = self._get_available_refs(since or "")
                 _pr_hints: list[str] = []
@@ -2409,6 +2415,25 @@ class TaskContextBuilder:
                 "diff_validation_status": "invalid_ref",
                 "error": True,
             }
+
+    def _get_uncommitted_changed_files(self) -> list[str]:
+        """Return files with uncommitted working-tree changes (unstaged only).
+
+        Used by review-pr when no --since ref is given, so we don't confuse
+        the last *committed* diff (HEAD~1 vs HEAD) with an actual PR diff.
+        """
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "--relative"],
+                cwd=str(self.root), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=10,
+            )
+            if result.returncode == 0:
+                return [l.strip() for l in (result.stdout or "").splitlines() if l.strip()]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        return []
 
     def _get_git_changed_files(self, since: Optional[str] = None) -> Optional[list[str]]:
         """Get files changed since a git ref (default: HEAD~1) relative to self.root.
