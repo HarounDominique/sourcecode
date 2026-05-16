@@ -1,8 +1,8 @@
 # sourcecode
 
-**Compressed AI-ready context for Java/Spring enterprise codebases.**
+**Deterministic, behavior-aware codebase context for AI agents and PR review.**
 
-![Version](https://img.shields.io/badge/version-1.30.2-blue)
+![Version](https://img.shields.io/badge/version-1.30.4-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
@@ -10,6 +10,8 @@
 ## What is it?
 
 `sourcecode` analyzes a repository and produces structured JSON or YAML designed to be fed directly to AI agents or language models. It solves the "stuff the whole repo into the prompt" problem by extracting a deterministic, high-signal summary: stack detection, entry points, dependencies, git hotspots, inline annotations, and confidence metadata.
+
+For PR review specifically, `sourcecode` extracts **execution paths**: ordered chains from entry point through service to data access, with runtime signals (auth guards, cache short-circuits, async execution) anchored to the specific step where they affect behavior. A reviewer sees _what the system does_ under this change, not just which files changed.
 
 Optimized for Java/Spring Boot monorepos. Works on any codebase.
 
@@ -36,7 +38,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.30.2
+# sourcecode 1.30.4
 ```
 
 ---
@@ -123,7 +125,7 @@ sourcecode prepare-context TASK [PATH] [OPTIONS]
 | `fix-bug` | Files ranked by risk (annotations, churn, uncommitted changes), suspected areas | Debugging session |
 | `refactor` | Structural problems, improvement opportunities, high-annotation files | Code quality review |
 | `generate-tests` | Source files without test pairs, coverage gap analysis | Writing missing tests |
-| `review-pr` | Uncommitted/changed files + architectural impact | Pre-merge review |
+| `review-pr` | Execution paths with per-step runtime signals, security/transactional impact, test coverage gaps | Pre-merge behavior review |
 | `delta` | Changed files with multi-hop impact analysis, structural import graph, system-level impact summary | Incremental CI/review context |
 
 ### Options
@@ -201,6 +203,80 @@ sourcecode prepare-context delta . --since main
 #   hop-3: OrderController.java → OrderFacade.java
 # propagation_depth: 3
 ```
+
+---
+
+## `review-pr` — behavior-aware PR analysis
+
+Extracts **execution paths**: ordered chains from entry point through service to data access layer, with runtime signals anchored to the specific step where they affect behavior.
+
+```bash
+sourcecode prepare-context review-pr [PATH] --since REF
+# or against uncommitted working-tree changes:
+sourcecode prepare-context review-pr
+```
+
+**`execution_paths` schema:**
+
+```json
+{
+  "execution_paths": [
+    {
+      "name": "Order",
+      "entry_point": {
+        "step": "OrderController.createOrder",
+        "notes": ["condition: authorization check present (@PreAuthorize / @Secured)"]
+      },
+      "path": [
+        {
+          "step": "ShippingService.process",
+          "notes": [
+            "branch: Spring cache may short-circuit downstream call",
+            "async: runs in separate thread (@Async)"
+          ]
+        },
+        {
+          "step": "OrderRepository.save",
+          "notes": []
+        }
+      ],
+      "end_state": "DB write"
+    }
+  ]
+}
+```
+
+**Path rules:**
+
+- One path per changed entry point — most-evident downstream call, not all branches
+- Each step requires direct code evidence: field injection, constructor param, method call, or type annotation
+- `notes` are scanned from that step's own source file — no cross-contamination between steps
+- Path terminates where evidence ends; no gap-filling by naming convention or module similarity
+
+**Runtime signals detected per step:**
+
+| Signal | Example code | Note emitted |
+|--------|-------------|--------------|
+| Auth guard | `@PreAuthorize`, `@Secured`, `isAuthenticated()` | `condition: authorization check present` |
+| Feature flag | `featureFlag.isEnabled()`, `FeatureToggle` | `condition: feature flag gates execution` |
+| Null/empty guard | `if (x == null) return` | `condition: null/empty guard with early return` |
+| Spring cache | `@Cacheable`, `@CacheEvict` | `branch: Spring cache may short-circuit downstream call` |
+| Optional absence | `Optional<>`, `.orElseThrow()` | `branch: result may be absent (Optional)` |
+| Async thread | `@Async`, `CompletableFuture` | `async: runs in separate thread (@Async)` |
+| Event publishing | `publishEvent()`, `applicationEventPublisher` | `async: Spring application event emitted` |
+| Kafka | `kafkaTemplate.send()` | `async: Kafka message produced` |
+| RabbitMQ | `rabbitTemplate.send()` | `async: RabbitMQ message sent` |
+
+**Other `review-pr` output fields:**
+
+| Field | Description |
+|-------|-------------|
+| `review_hotspots` | Top changed files ranked by impact score |
+| `suggested_review_order` | Security → API → Service → Persistence → Config |
+| `security_impact` | Changed files touching the security surface |
+| `transactional_impact` | Files crossing transaction boundaries |
+| `test_coverage_risk` | Changed source files with no corresponding test |
+| `affected_modules` | DDD domain modules touched by the change |
 
 ---
 

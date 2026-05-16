@@ -1633,7 +1633,7 @@ def prepare_context_cmd(
       refactor       Structural issues, improvement opportunities
       generate-tests Untested source files, test gap analysis
       onboard        Full project context for new agents/developers
-      review-pr      PR diff: changed files, security/transactional impact, test gaps (requires git diff or --since)
+      review-pr      PR diff: execution paths with per-step runtime signals, security/transactional impact, test gaps (requires git diff or --since)
       delta          Incremental context: git-changed files only
 
     \b
