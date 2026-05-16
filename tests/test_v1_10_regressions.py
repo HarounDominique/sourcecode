@@ -530,27 +530,53 @@ class TestArchitecturePatternHeuristic:
 # ===========================================================================
 
 class TestReviewPrSuspectedAreas:
+    """review-pr now requires a git diff — generic fallback removed."""
 
-    def test_review_pr_runs_without_error(self):
+    def test_review_pr_requires_git_diff(self):
+        # FIXTURE has no uncommitted changes (or no git repo) — must exit 1 with structured error.
+        # When running inside the atlas-cli git tree with no staged changes, error is "no_diff".
+        # When running outside any git repo, error is "no_git_repo". Both are valid.
         result = _invoke("prepare-context", "review-pr", str(FIXTURE))
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
+        data = _json(result)
+        _git_errors = {"no_git_repo", "no_diff", "git_ref_not_found"}
+        assert data.get("error") in _git_errors, f"Expected git error, got: {data}"
+        assert "ci_decision" in data
 
-    def test_review_pr_json_has_suspected_areas_when_files_exist(self):
+    def test_review_pr_error_json_is_machine_readable(self):
+        result = _invoke("prepare-context", "review-pr", str(FIXTURE))
+        assert result.exit_code == 1
+        data = _json(result)
+        assert "error" in data
+        assert "message" in data
+        assert "ci_decision" in data
+
+    def test_review_pr_no_diff_error_when_git_but_no_changes(self, monkeypatch):
+        # Simulate: is_git_repo=True but no changed files
+        from sourcecode import prepare_context as _pc
+        monkeypatch.setattr(_pc.TaskContextBuilder, "_is_git_repo", lambda self: True)
+        monkeypatch.setattr(_pc.TaskContextBuilder, "_get_git_changed_files", lambda self, since=None: [])
+        result = _invoke("prepare-context", "review-pr", str(FIXTURE))
+        assert result.exit_code == 1
+        data = _json(result)
+        assert data.get("error") == "no_diff"
+        assert data.get("ci_decision") == "no_changes"
+
+    def test_review_pr_with_mocked_diff_returns_pr_fields(self, monkeypatch):
+        # Simulate: valid git repo with one changed controller file
+        from sourcecode import prepare_context as _pc
+        monkeypatch.setattr(_pc.TaskContextBuilder, "_is_git_repo", lambda self: True)
+        monkeypatch.setattr(
+            _pc.TaskContextBuilder, "_get_git_changed_files",
+            lambda self, since=None: ["src/main/java/com/example/UserController.java"],
+        )
         result = _invoke("prepare-context", "review-pr", str(FIXTURE))
         assert result.exit_code == 0, result.output
         data = _json(result)
-        # suspected_areas is populated from controller/service/repository adjacency
-        # Even with no uncommitted files, boosted stems drive the list
-        assert "suspected_areas" in data, \
-            f"review-pr must include suspected_areas. Keys: {list(data.keys())}"
-
-    def test_review_pr_suspected_areas_contain_controllers(self):
-        result = _invoke("prepare-context", "review-pr", str(FIXTURE))
-        assert result.exit_code == 0, result.output
-        data = _json(result)
-        areas = data.get("suspected_areas", [])
-        has_controller = any("Controller" in a or "Service" in a or "Mapper" in a for a in areas)
-        assert has_controller, f"Expected controller/service/mapper in suspected_areas: {areas}"
+        assert data.get("review_type") == "pull_request"
+        assert "changed_files" in data
+        assert "test_coverage_risk" in data
+        assert data.get("ci_decision") == "analysis_success"
 
     def test_fix_bug_still_uses_annotation_density(self):
         result = _invoke("prepare-context", "fix-bug", str(FIXTURE))

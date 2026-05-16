@@ -1633,7 +1633,7 @@ def prepare_context_cmd(
       refactor       Structural issues, improvement opportunities
       generate-tests Untested source files, test gap analysis
       onboard        Full project context for new agents/developers
-      review-pr      Changed files + architectural impact
+      review-pr      PR diff: changed files, security/transactional impact, test gaps (requires git diff or --since)
       delta          Incremental context: git-changed files only
 
     \b
@@ -1642,6 +1642,8 @@ def prepare_context_cmd(
       sourcecode prepare-context explain /path/to/repo
       sourcecode prepare-context fix-bug
       sourcecode prepare-context delta --since main
+      sourcecode prepare-context review-pr --since origin/main
+      sourcecode prepare-context review-pr . --since main --output review.json
       sourcecode prepare-context onboard --llm-prompt
       sourcecode prepare-context --task-help
     """
@@ -1734,6 +1736,14 @@ def prepare_context_cmd(
             "test_gaps": False, "code_notes_summary": False,
             "changed_files": True, "affected_entry_points": True,
         },
+        "review-pr": {
+            "project_summary": False, "architecture_summary": False,
+            "relevant_files": True, "key_dependencies": False,
+            "gaps": True, "confidence": False,
+            "suspected_areas": False, "improvement_opportunities": False,
+            "test_gaps": False, "code_notes_summary": False,
+            "changed_files": True, "affected_entry_points": True,
+        },
     }
     _content_filter = _TASK_CONTENT_MAP.get(task, {})
 
@@ -1813,6 +1823,53 @@ def prepare_context_cmd(
             out["dependency_graph_summary"] = output.dependency_graph_summary
         if output.impact_score_per_file:
             out["impact_score_per_file"] = output.impact_score_per_file
+    # review-pr specific fields
+    if task == "review-pr":
+        if output.error_code:
+            _err_out: dict[str, Any] = {
+                "task": output.task,
+                "ci_decision": output.ci_decision or "error",
+                "error": output.error_code,
+                "message": output.error_message,
+            }
+            if output.since:
+                _err_out["since"] = output.since
+            if output.error_hints:
+                _err_out["hint"] = output.error_hints
+            _err_json = json.dumps(_err_out, indent=2, ensure_ascii=False)
+            if output_path is not None:
+                output_path.write_text(_err_json, encoding="utf-8")
+            else:
+                import sys as _sys
+                _sys.stdout.buffer.write(_err_json.encode("utf-8"))
+                _sys.stdout.buffer.write(b"\n")
+                _sys.stdout.buffer.flush()
+            raise typer.Exit(code=1)
+        out["review_type"] = "pull_request"
+        if output.ci_decision:
+            out["ci_decision"] = output.ci_decision
+        if output.base_ref:
+            out["base_ref"] = output.base_ref
+        if output.since:
+            out["since"] = output.since
+        if output.affected_modules:
+            out["affected_modules"] = output.affected_modules
+        if output.security_impact:
+            out["security_impact"] = output.security_impact
+        if output.transactional_impact:
+            out["transactional_impact"] = output.transactional_impact
+        if output.configuration_impact:
+            out["configuration_impact"] = output.configuration_impact
+        if output.test_coverage_risk:
+            out["test_coverage_risk"] = output.test_coverage_risk
+        if output.review_hotspots:
+            out["review_hotspots"] = output.review_hotspots
+        if output.suggested_review_order:
+            out["suggested_review_order"] = output.suggested_review_order
+        if output.impact_summary:
+            out["impact_summary"] = output.impact_summary
+        if output.why_these_files:
+            out["reasoning"] = output.why_these_files
     if output.limitations:
         out["limitations"] = output.limitations
     if output.symptom:

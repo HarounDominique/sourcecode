@@ -338,11 +338,19 @@ class TaskOutput:
     error_message: Optional[str] = None
     error_hints: list[str] = field(default_factory=list)
     # CI decision state machine — machine-decidable signal
-    ci_decision: Optional[str] = None  # "no_changes" | "analysis_success" | "git_ref_error"
+    ci_decision: Optional[str] = None  # "no_changes" | "analysis_success" | "git_ref_error" | "no_git_repo"
     # git baseline resolution metadata
     resolved_since_ref: Optional[str] = None   # actual ref/hash used for the diff
     resolution_path: Optional[str] = None      # "exact_local_ref"|"remote_tracking_ref"|"symbolic_ref"|"head_minus_1_fallback"|"uncommitted_changes"|"unresolvable"
     diff_validation_status: Optional[str] = None  # "valid_non_empty"|"valid_empty"|"invalid_ref"
+    # review-pr specific impact sections
+    base_ref: Optional[str] = None
+    security_impact: dict = field(default_factory=dict)
+    transactional_impact: dict = field(default_factory=dict)
+    configuration_impact: dict = field(default_factory=dict)
+    test_coverage_risk: dict = field(default_factory=dict)
+    review_hotspots: list[str] = field(default_factory=list)
+    suggested_review_order: list[str] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -659,6 +667,58 @@ class TaskContextBuilder:
             elif _delta_raw:
                 _delta_files = set(_delta_raw)
 
+        # ── 5d. review-pr: git-first gate ──────────────────────────────────────
+        if task_name == "review-pr":
+            if not self._is_git_repo():
+                return TaskOutput(
+                    task="review-pr", goal=spec.goal,
+                    project_summary=None, architecture_summary=None,
+                    relevant_files=[], suspected_areas=[],
+                    improvement_opportunities=[], test_gaps=[],
+                    key_dependencies=[], code_notes_summary=None,
+                    limitations=[], confidence="low",
+                    error_code="no_git_repo",
+                    error_message="review-pr requires a git repository.",
+                    ci_decision="no_git_repo",
+                )
+            _pr_raw = self._get_git_changed_files(since=since)
+            if _pr_raw is None:
+                _avail_pr, _sug_pr = self._get_available_refs(since or "")
+                _pr_hints: list[str] = []
+                if _sug_pr:
+                    _pr_hints.append(f"Did you mean '{_sug_pr}'?")
+                if _avail_pr:
+                    _pr_hints.append(f"Available refs: {', '.join(_avail_pr[:8])}")
+                return TaskOutput(
+                    task="review-pr", goal=spec.goal,
+                    project_summary=None, architecture_summary=None,
+                    relevant_files=[], suspected_areas=[],
+                    improvement_opportunities=[], test_gaps=[],
+                    key_dependencies=[], code_notes_summary=None,
+                    limitations=[], confidence="low",
+                    since=since,
+                    error_code="git_ref_not_found",
+                    error_message=f"Base ref '{since}' not found in this repository.",
+                    error_hints=_pr_hints,
+                    gaps=[f"Cannot compute PR diff: git ref '{since}' not found."] + _pr_hints,
+                    ci_decision="git_ref_error",
+                )
+            if not _pr_raw:
+                _no_diff_hint = "review-pr requires changed files or --since <ref>."
+                return TaskOutput(
+                    task="review-pr", goal=spec.goal,
+                    project_summary=None, architecture_summary=None,
+                    relevant_files=[], suspected_areas=[],
+                    improvement_opportunities=[], test_gaps=[],
+                    key_dependencies=[], code_notes_summary=None,
+                    limitations=[], confidence="low",
+                    error_code="no_diff",
+                    error_message=f"No PR diff detected. {_no_diff_hint}",
+                    gaps=[f"No PR diff detected. {_no_diff_hint}"],
+                    ci_decision="no_changes",
+                )
+            _delta_files = set(_pr_raw)
+
         # ── 5c. review-pr suspected_areas (needs git uncommitted_files) ──────
         if task_name == "review-pr" and spec.enable_code_notes:
             pr_areas: dict[str, int] = {}
@@ -698,7 +758,7 @@ class TaskContextBuilder:
         _delta_dep_graph_summary: dict = {}
         _delta_impact_score_per_file: dict = {}
 
-        if task_name == "delta":
+        if task_name in ("delta", "review-pr"):
             _delta_changed_list: list[str] = sorted(_delta_files) if _delta_files else []
             (
                 relevant_files,
@@ -727,7 +787,88 @@ class TaskContextBuilder:
                 delta_files=None,
             )
 
-        # ── 6b. Symptom keyword boost + related notes (fix-bug + --symptom) ──
+        # ── 6b. review-pr: derive PR-specific impact sections from delta analysis ──
+        _pr_security_impact: dict = {}
+        _pr_transactional_impact: dict = {}
+        _pr_configuration_impact: dict = {}
+        _pr_test_coverage_risk: dict = {}
+        _pr_review_hotspots: list[str] = []
+        _pr_suggested_review_order: list[str] = []
+        _pr_base_ref: Optional[str] = None
+
+        if task_name == "review-pr":
+            _pr_base_ref = since or "HEAD"
+            _sys_risk_areas = _delta_system_impact.get("risk_areas", [])
+
+            _security_files = [
+                f for ra in _sys_risk_areas if ra["area"] == "security"
+                for f in ra["affected_files"]
+            ]
+            _transaction_files = [
+                f for ra in _sys_risk_areas if ra["area"] in ("transactions", "business_logic")
+                for f in ra["affected_files"]
+            ]
+            _config_files = [
+                f for ra in _sys_risk_areas if ra["area"] in ("api", "config")
+                for f in ra["affected_files"]
+                if any(kw in f.lower() for kw in ("config", "properties", "yml", "yaml", "xml", "spring"))
+            ]
+
+            if _security_files:
+                _pr_security_impact = {
+                    "affected_resources": _security_files,
+                    "risk_level": "high",
+                }
+            if _transaction_files:
+                _pr_transactional_impact = {
+                    "affected_transactions": _transaction_files,
+                    "risk": "possible transaction boundary change",
+                }
+            if _config_files:
+                _pr_configuration_impact = {"changed_configs": _config_files}
+
+            # Test coverage risk scoped to changed source files only
+            _changed_src = [
+                f for f in sorted(_delta_files or set())
+                if not self._is_test(f) and self._is_source(f)
+            ]
+            _test_stems = {Path(p).stem for p in test_set}
+            _untested_changed = [f for f in _changed_src if Path(f).stem not in _test_stems]
+            _test_risk_level = (
+                "high" if len(_untested_changed) > 3
+                else "medium" if _untested_changed
+                else "low"
+            )
+            _pr_test_coverage_risk = {
+                "changed_files_without_tests": _untested_changed[:10],
+                "risk_level": _test_risk_level,
+            }
+
+            # Review hotspots: top changed files ranked by impact score
+            _pr_review_hotspots = sorted(
+                _delta_files or set(),
+                key=lambda f: _delta_impact_score_per_file.get(f, 0.0),
+                reverse=True,
+            )[:8]
+
+            # Suggested review order: security first, then api → service → persistence → config
+            _ORDER_TYPES = ["security", "controller", "service", "repository", "mapper",
+                            "spring_config", "config", "domain_model", "dto"]
+            _seen_order: set[str] = set()
+            for _otype in _ORDER_TYPES:
+                for _ra in _delta_risk_areas:
+                    for _f in _ra.get("affected_files", []):
+                        if _f not in _seen_order:
+                            _cls = self._classify_changed_file(_f)
+                            if _cls["artifact_type"] == _otype:
+                                _pr_suggested_review_order.append(_f)
+                                _seen_order.add(_f)
+            for _f in _pr_review_hotspots:
+                if _f not in _seen_order:
+                    _pr_suggested_review_order.append(_f)
+                    _seen_order.add(_f)
+
+        # ── 6c. Symptom keyword boost + related notes (fix-bug + --symptom) ──
         symptom_keywords: list[str] = []
         related_notes: list[dict] = []
         symptom_note: Optional[str] = None
@@ -883,7 +1024,7 @@ class TaskContextBuilder:
 
         conf_summary, analysis_gaps = ConfidenceAnalyzer().analyze(sm_for_conf)
         confidence = conf_summary.overall
-        if task_name == "delta":
+        if task_name in ("delta", "review-pr"):
             # Use delta-specific gaps; ConfidenceAnalyzer gaps are about full-repo
             # detection quality and are not meaningful for an incremental diff.
             gaps = _delta_analysis_gaps
@@ -895,16 +1036,16 @@ class TaskContextBuilder:
                 gaps.append(_mybatis_warning["reason"])
 
         # ── 9. why_these_files ────────────────────────────────────────────────
-        if task_name == "delta":
+        if task_name in ("delta", "review-pr"):
             why_these_files = _delta_why
         else:
             why_these_files = {rf.path: rf.reason for rf in relevant_files}
 
-        # ── 10. Delta: git changed files + entry points ───────────────────────
+        # ── 10. Delta / review-pr: git changed files + entry points ──────────
         changed_files: list[str] = []
         affected_entry_points: list[str] = []
-        if task_name == "delta":
-            changed_files = sorted(_delta_files) if _delta_files else self._get_git_changed_files(since=since)
+        if task_name in ("delta", "review-pr"):
+            changed_files = sorted(_delta_files) if _delta_files else (self._get_git_changed_files(since=since) or [])
             _ep_set = {ep.path for ep in entry_points}
             # include framework-detected entry points AND files classified as
             # entrypoint/controller/security by artifact taxonomy
@@ -939,16 +1080,24 @@ class TaskContextBuilder:
             impact_summary=_delta_impact_summary,
             affected_modules=_delta_affected_modules,
             risk_areas=_delta_risk_areas,
-            since=since if task_name == "delta" else None,
+            since=since if task_name in ("delta", "review-pr") else None,
             system_impact=_delta_system_impact,
             change_type=_delta_change_type,
             dependency_graph_summary=_delta_dep_graph_summary,
             impact_score_per_file=_delta_impact_score_per_file,
             ci_decision=(
                 "no_changes" if task_name == "delta" and not changed_files
-                else "analysis_success" if task_name == "delta"
+                else "analysis_success" if task_name in ("delta", "review-pr")
                 else None
             ),
+            # review-pr specific
+            base_ref=_pr_base_ref,
+            security_impact=_pr_security_impact,
+            transactional_impact=_pr_transactional_impact,
+            configuration_impact=_pr_configuration_impact,
+            test_coverage_risk=_pr_test_coverage_risk,
+            review_hotspots=_pr_review_hotspots,
+            suggested_review_order=_pr_suggested_review_order,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
@@ -1239,6 +1388,19 @@ class TaskContextBuilder:
 
     def _is_source(self, path: str) -> bool:
         return Path(path).suffix.lower() in _SOURCE_EXTENSIONS
+
+    def _is_git_repo(self) -> bool:
+        import subprocess
+        try:
+            r = subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=str(self.root),
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=5,
+            )
+            return r.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return False
 
     # ── Delta impact analysis ─────────────────────────────────────────────────
 

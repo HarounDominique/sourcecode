@@ -2,7 +2,7 @@
 
 **Compressed AI-ready context for Java/Spring enterprise codebases.**
 
-![Version](https://img.shields.io/badge/version-1.28.0-blue)
+![Version](https://img.shields.io/badge/version-1.29.0-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
@@ -36,7 +36,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.28.0
+# sourcecode 1.29.0
 ```
 
 ---
