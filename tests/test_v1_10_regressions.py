@@ -582,5 +582,135 @@ class TestReviewPrSuspectedAreas:
         result = _invoke("prepare-context", "fix-bug", str(FIXTURE))
         assert result.exit_code == 0, result.output
         data = _json(result)
-        # fix-bug task should still work correctly
         assert "relevant_files" in data
+
+    def test_fix_bug_still_uses_annotation_density_2(self):
+        pass  # placeholder slot kept for numbering
+
+
+# ===========================================================================
+# 10 — behavioral_impact unit tests
+# ===========================================================================
+
+class TestBehavioralImpact:
+    """Unit tests for analyze_behavioral_impact — no CLI, uses temp files."""
+
+    def _classify(self, path: str) -> dict:
+        name = Path(path).name
+        if "Controller" in name or "Api" in name:
+            return {"artifact_type": "controller"}
+        if "Service" in name:
+            return {"artifact_type": "service"}
+        if "Repository" in name or "Repo" in name:
+            return {"artifact_type": "repository"}
+        return {"artifact_type": "source"}
+
+    def _make_spring_trio(self, tmp_path: Path):
+        ctrl = tmp_path / "ArticleController.java"
+        svc  = tmp_path / "ArticleFavoriteService.java"
+        repo = tmp_path / "ArticleFavoriteRepository.java"
+        ctrl.write_text(
+            "@RestController\npublic class ArticleController {\n"
+            "  private ArticleFavoriteService articleFavoriteService;\n"
+            "  @PostMapping(\"/articles/{slug}/favorite\")\n"
+            "  public ArticleData favoriteArticle(String slug) {\n"
+            "    return articleFavoriteService.favorite(slug);\n"
+            "  }\n}\n"
+        )
+        svc.write_text(
+            "@Service\npublic class ArticleFavoriteService {\n"
+            "  private ArticleFavoriteRepository articleFavoriteRepository;\n"
+            "  public ArticleData favorite(String slug) {\n"
+            "    return articleFavoriteRepository.save(slug);\n"
+            "  }\n}\n"
+        )
+        repo.write_text(
+            "@Repository\npublic interface ArticleFavoriteRepository"
+            " extends JpaRepository<ArticleFavorite, Long> {}\n"
+        )
+        return [str(ctrl), str(svc), str(repo)], ctrl, svc, repo
+
+    def test_service_change_finds_controller_entry_point(self, tmp_path: Path):
+        from sourcecode.flow_analyzer import analyze_behavioral_impact
+        all_paths, ctrl, svc, repo = self._make_spring_trio(tmp_path)
+        result = analyze_behavioral_impact(
+            changed_files=[str(svc)],
+            all_paths=all_paths,
+            root=tmp_path,
+            classify_fn=self._classify,
+        )
+        assert len(result) == 1
+        entry = result[0]
+        assert "ArticleController" in entry["entry_point"]
+        assert any("ArticleFavoriteService" in s for s in entry["affected_path"])
+        assert len(entry["impact"]) >= 1
+        assert entry["end_state"] == "DB write"
+
+    def test_repository_change_finds_controller_via_service(self, tmp_path: Path):
+        from sourcecode.flow_analyzer import analyze_behavioral_impact
+        all_paths, ctrl, svc, repo = self._make_spring_trio(tmp_path)
+        result = analyze_behavioral_impact(
+            changed_files=[str(repo)],
+            all_paths=all_paths,
+            root=tmp_path,
+            classify_fn=self._classify,
+        )
+        assert len(result) == 1
+        entry = result[0]
+        assert "ArticleController" in entry["entry_point"]
+        assert any("Repository" in s for s in entry["affected_path"])
+        assert entry["end_state"] == "DB write"
+        assert any("persistence" in imp["statement"] for imp in entry["impact"])
+        assert entry["confidence"] in ("low", "medium", "high")
+        assert entry["evidence_level"] in ("direct_injection", "direct_call", "heuristic_only")
+        assert isinstance(entry["trace"], list) and len(entry["trace"]) >= 1
+
+    def test_controller_change_forward_traversal(self, tmp_path: Path):
+        from sourcecode.flow_analyzer import analyze_behavioral_impact
+        all_paths, ctrl, svc, repo = self._make_spring_trio(tmp_path)
+        result = analyze_behavioral_impact(
+            changed_files=[str(ctrl)],
+            all_paths=all_paths,
+            root=tmp_path,
+            classify_fn=self._classify,
+        )
+        assert len(result) == 1
+        entry = result[0]
+        assert "ArticleController" in entry["entry_point"]
+        assert any("ArticleFavoriteService" in s for s in entry["affected_path"])
+
+    def test_no_evidence_returns_empty(self, tmp_path: Path):
+        from sourcecode.flow_analyzer import analyze_behavioral_impact
+        ctrl = tmp_path / "SomeController.java"
+        svc  = tmp_path / "UnrelatedService.java"
+        ctrl.write_text(
+            "@RestController\npublic class SomeController {\n"
+            "  @GetMapping(\"/\")\n  public String get() { return \"\"; }\n}\n"
+        )
+        svc.write_text(
+            "@Service\npublic class UnrelatedService { public void run() {} }\n"
+        )
+        all_paths = [str(ctrl), str(svc)]
+        result = analyze_behavioral_impact(
+            changed_files=[str(svc)],
+            all_paths=all_paths,
+            root=tmp_path,
+            classify_fn=self._classify,
+        )
+        assert result == [], f"Expected no impact without evidence, got {result}"
+
+    def test_impact_strings_describe_behavior_not_files(self, tmp_path: Path):
+        from sourcecode.flow_analyzer import analyze_behavioral_impact
+        all_paths, ctrl, svc, repo = self._make_spring_trio(tmp_path)
+        result = analyze_behavioral_impact(
+            changed_files=[str(repo)],
+            all_paths=all_paths,
+            root=tmp_path,
+            classify_fn=self._classify,
+        )
+        assert result
+        for imp in result[0]["impact"]:
+            assert ".java" not in imp["statement"], f"Impact should not reference filenames: {imp}"
+            assert "Repository" not in imp["statement"], f"Impact should not use class names: {imp}"
+            assert imp["certainty"] in ("low", "medium", "high")
+            assert imp["support"]

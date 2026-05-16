@@ -352,6 +352,7 @@ class TaskOutput:
     review_hotspots: list[str] = field(default_factory=list)
     suggested_review_order: list[str] = field(default_factory=list)
     execution_paths: list[dict] = field(default_factory=list)
+    behavioral_impact: list[dict] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -875,12 +876,20 @@ class TaskContextBuilder:
                     _pr_suggested_review_order.append(_f)
                     _seen_order.add(_f)
 
-        # ── 6d. review-pr: execution paths ──────────────────────────────────
+        # ── 6d. review-pr: execution paths + behavioral impact ──────────────
         _execution_paths: list[dict] = []
+        _behavioral_impact: list[dict] = []
         if task_name == "review-pr" and _delta_files:
-            from sourcecode.flow_analyzer import analyze_execution_paths
+            from sourcecode.flow_analyzer import analyze_execution_paths, analyze_behavioral_impact
+            _changed_sorted = sorted(_delta_files)
             _execution_paths = analyze_execution_paths(
-                changed_files=sorted(_delta_files),
+                changed_files=_changed_sorted,
+                all_paths=all_paths,
+                root=self.root,
+                classify_fn=self._classify_changed_file,
+            )
+            _behavioral_impact = analyze_behavioral_impact(
+                changed_files=_changed_sorted,
                 all_paths=all_paths,
                 root=self.root,
                 classify_fn=self._classify_changed_file,
@@ -1117,6 +1126,7 @@ class TaskContextBuilder:
             review_hotspots=_pr_review_hotspots,
             suggested_review_order=_pr_suggested_review_order,
             execution_paths=_execution_paths,
+            behavioral_impact=_behavioral_impact,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:

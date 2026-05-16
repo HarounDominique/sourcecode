@@ -177,6 +177,49 @@ def _has_code_evidence(clean: str, class_name: str) -> bool:
     return False
 
 
+_EVIDENCE_PRIORITY: dict[str, int] = {
+    "none": 0, "heuristic_only": 1, "direct_call": 2, "direct_injection": 3,
+}
+_EVIDENCE_STRONG = frozenset({"direct_call", "direct_injection"})
+
+
+def _classify_evidence_type(clean: str, class_name: str) -> str:
+    """Return how class_name is referenced in pre-stripped content."""
+    esc = re.escape(class_name)
+    if re.search(rf"\b(?:private|protected)\s+{esc}\b", clean, re.IGNORECASE):
+        return "direct_injection"
+    if re.search(rf"[,(]\s*{esc}\s+\w+", clean, re.IGNORECASE):
+        return "direct_injection"
+    if re.search(rf":\s*{esc}\b", clean, re.IGNORECASE):
+        return "direct_injection"
+    if re.search(rf"\bnew\s+{esc}\s*\(", clean, re.IGNORECASE):
+        return "direct_call"
+    if re.search(rf"\b{esc}\s*\(", clean):
+        return "direct_call"
+    non_import = re.search(
+        rf"^(?!\s*(?:import|require|from|//|#|\*)\b).*\b{esc}\b",
+        clean, re.IGNORECASE | re.MULTILINE,
+    )
+    if non_import:
+        return "heuristic_only"
+    return "none"
+
+
+def _worst_evidence(levels: list[str]) -> str:
+    return min(levels, key=lambda x: _EVIDENCE_PRIORITY.get(x, 0)) if levels else "none"
+
+
+def _compute_confidence(evidence_level: str, trace_len: int) -> str:
+    if evidence_level not in _EVIDENCE_STRONG:
+        return "low"
+    return "high" if trace_len >= 2 else "medium"
+
+
+def _build_trace_step(source_class: str, target_class: str, evidence_type: str) -> str:
+    verb = "injects" if evidence_type == "direct_injection" else "calls"
+    return f"{source_class} {verb} {target_class}"
+
+
 def _find_evidenced_ordered(
     root: Path,
     source_path: str,
@@ -306,5 +349,297 @@ def analyze_execution_paths(
             "path": path_items,
             "end_state": _detect_end_state([item["step"] for item in path_items]),
         })
+
+
+# ── Behavioral impact helpers ─────────────────────────────────────────────────
+
+def _domain_from_class(class_name: str) -> str:
+    """Extract human-readable domain noun from a class name."""
+    stripped = re.sub(
+        r"(?i)(?:repository|repo|dao|mapper|store|service|manager|handler|helper|"
+        r"impl|controller|api|resource|endpoint|facade)$",
+        "", class_name,
+    )
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", stripped).strip().lower()
+
+
+def _impact_item(statement: str, support: str, certainty: str) -> dict:
+    return {"statement": statement, "support": support, "certainty": certainty}
+
+
+def _impact_descriptions(
+    changed_class: str,
+    changed_type: str,
+    end_state: str,
+    ctrl_clean: str,
+    evidence_level: str,
+) -> list[dict]:
+    domain = _domain_from_class(changed_class)
+    certainty = "medium" if evidence_level in _EVIDENCE_STRONG else "low"
+    items: list[dict] = []
+
+    if changed_type in _REPO_ARTIFACT_TYPES:
+        items.append(_impact_item(
+            f"{domain} persistence affected" if domain else "persistence affected",
+            f"{changed_class} is a repository in path",
+            certainty,
+        ))
+    elif changed_type in _SERVICE_ARTIFACT_TYPES:
+        if end_state == "DB write":
+            items.append(_impact_item(
+                f"{domain} persistence affected" if domain else "persistence affected",
+                f"{changed_class} delegates to repository with DB write",
+                certainty,
+            ))
+        else:
+            items.append(_impact_item(
+                f"{domain} behavior may change" if domain else "behavior may change",
+                f"{changed_class} is a service in path",
+                certainty,
+            ))
+    else:
+        items.append(_impact_item(
+            f"{domain} behavior may change" if domain else "behavior may change",
+            f"{changed_class} is in path",
+            certainty,
+        ))
+
+    if re.search(r"@PreAuthorize|@Secured|@RolesAllowed|hasRole\(|isAuthenticated", ctrl_clean, re.IGNORECASE):
+        items.append(_impact_item(
+            "authorization check present on entry point",
+            "security annotation detected on controller",
+            "high",
+        ))
+
+    if re.search(r"@Transactional\b", ctrl_clean):
+        items.append(_impact_item(
+            "transactional boundary in path",
+            "@Transactional detected on entry point",
+            "high",
+        ))
+
+    return items[:3]
+
+
+def _impact_descriptions_for_controller(
+    affected_path: list[str],
+    end_state: str,
+    ctrl_clean: str,
+    evidence_level: str,
+) -> list[dict]:
+    certainty = "medium" if evidence_level in _EVIDENCE_STRONG else "low"
+    items: list[dict] = []
+
+    if end_state == "DB write":
+        domain = ""
+        for step in reversed(affected_path):
+            base = step.split(".")[0]
+            d = _domain_from_class(base)
+            if d:
+                domain = d
+                break
+        items.append(_impact_item(
+            f"{domain} persistence affected" if domain else "data persistence affected",
+            "repository with DB write detected in path",
+            certainty,
+        ))
+    else:
+        items.append(_impact_item(
+            "request handler behavior may change",
+            "controller entry point modified",
+            certainty,
+        ))
+
+    if re.search(r"@PreAuthorize|@Secured|@RolesAllowed|hasRole\(|isAuthenticated", ctrl_clean, re.IGNORECASE):
+        items.append(_impact_item(
+            "authorization check present on entry point",
+            "security annotation detected on controller",
+            "high",
+        ))
+
+    if re.search(r"@Transactional\b", ctrl_clean):
+        items.append(_impact_item(
+            "transactional boundary in path",
+            "@Transactional detected on controller",
+            "high",
+        ))
+
+    return items[:3]
+
+
+def analyze_behavioral_impact(
+    changed_files: list[str],
+    all_paths: list[str],
+    root: Path,
+    classify_fn: Callable[[str], dict],
+    max_impacts: int = 3,
+) -> list[dict]:
+    """Build behavioral impact entries for PR review.
+
+    For changed controllers: forward traversal → service → repository.
+    For changed services/repos/domain: reverse lookup → find callers → build causal path.
+
+    Each entry: {entry_point, affected_path, impact, end_state}
+    All paths require direct code evidence — no naming/module inference.
+    Returns [] when no verifiable causal path exists.
+    """
+    entry_changed = [f for f in changed_files if classify_fn(f)["artifact_type"] in _ENTRY_ARTIFACT_TYPES]
+    non_entry_changed = [f for f in changed_files if classify_fn(f)["artifact_type"] not in _ENTRY_ARTIFACT_TYPES]
+
+    all_entries = [p for p in all_paths if classify_fn(p)["artifact_type"] in _ENTRY_ARTIFACT_TYPES]
+    all_services = [p for p in all_paths if classify_fn(p)["artifact_type"] in _SERVICE_ARTIFACT_TYPES]
+    all_repos = [p for p in all_paths if classify_fn(p)["artifact_type"] in _REPO_ARTIFACT_TYPES]
+
+    result: list[dict] = []
+    seen_entries: set[str] = set()
+
+    # Case 1: changed controllers — forward traversal
+    for entry_path in entry_changed:
+        if len(result) >= max_impacts:
+            break
+        entry_class = Path(entry_path).stem
+        if entry_class in seen_entries:
+            continue
+        lang = _detect_lang(entry_path)
+        ctrl_content = _read_safe(root, entry_path)
+        if not ctrl_content:
+            continue
+        ctrl_clean = _strip_comments(ctrl_content, lang)
+        entry_method = _find_entry_method(ctrl_clean)
+        entry_str = _step_label(entry_class, entry_method)
+
+        evidenced_svcs = _find_evidenced_ordered(root, entry_path, all_services)
+        if not evidenced_svcs:
+            continue
+
+        svc_class, svc_method = evidenced_svcs[0]
+        svc_evidence = _classify_evidence_type(ctrl_clean, svc_class)
+        affected_path = [_step_label(svc_class, svc_method)]
+        trace = [_build_trace_step(entry_class, svc_class, svc_evidence)]
+        evidence_levels = [svc_evidence]
+
+        svc_path = next((p for p in all_services if Path(p).stem == svc_class), None)
+        if svc_path:
+            svc_content_raw = _read_safe(root, svc_path)
+            if svc_content_raw:
+                svc_clean_raw = _strip_comments(svc_content_raw, _detect_lang(svc_path))
+                evidenced_repos = _find_evidenced_ordered(root, svc_path, all_repos)
+                if evidenced_repos:
+                    repo_class, repo_method = evidenced_repos[0]
+                    repo_evidence = _classify_evidence_type(svc_clean_raw, repo_class)
+                    affected_path.append(_step_label(repo_class, repo_method))
+                    trace.append(_build_trace_step(svc_class, repo_class, repo_evidence))
+                    evidence_levels.append(repo_evidence)
+
+        end_state = _detect_end_state(affected_path)
+        evidence_level = _worst_evidence(evidence_levels)
+        confidence = _compute_confidence(evidence_level, len(trace))
+        seen_entries.add(entry_class)
+        result.append({
+            "entry_point": entry_str,
+            "affected_path": affected_path,
+            "impact": _impact_descriptions_for_controller(affected_path, end_state, ctrl_clean, evidence_level),
+            "end_state": end_state,
+            "confidence": confidence,
+            "evidence_level": evidence_level,
+            "trace": trace,
+        })
+
+    # Case 2: changed non-controllers — reverse lookup
+    for changed_path in non_entry_changed:
+        if len(result) >= max_impacts:
+            break
+        changed_class = Path(changed_path).stem
+        changed_type = classify_fn(changed_path)["artifact_type"]
+
+        for ctrl_path in all_entries:
+            if len(result) >= max_impacts:
+                break
+            ctrl_class = Path(ctrl_path).stem
+            if ctrl_class in seen_entries:
+                continue
+            ctrl_content = _read_safe(root, ctrl_path)
+            if not ctrl_content:
+                continue
+            ctrl_lang = _detect_lang(ctrl_path)
+            ctrl_clean = _strip_comments(ctrl_content, ctrl_lang)
+
+            affected_path: list[str] = []
+            trace: list[str] = []
+            evidence_levels: list[str] = []
+
+            if _has_code_evidence(ctrl_clean, changed_class):
+                # Direct: controller → changed class
+                ctrl_to_changed = _classify_evidence_type(ctrl_clean, changed_class)
+                fmap = _build_field_map(ctrl_clean)
+                method = _find_called_method(ctrl_clean, changed_class, fmap)
+                affected_path.append(_step_label(changed_class, method))
+                trace.append(_build_trace_step(ctrl_class, changed_class, ctrl_to_changed))
+                evidence_levels.append(ctrl_to_changed)
+
+                if changed_type in _SERVICE_ARTIFACT_TYPES:
+                    changed_content = _read_safe(root, changed_path)
+                    changed_clean = _strip_comments(changed_content, _detect_lang(changed_path)) if changed_content else ""
+                    evidenced_repos = _find_evidenced_ordered(root, changed_path, all_repos)
+                    if evidenced_repos:
+                        rclass, rmethod = evidenced_repos[0]
+                        repo_evidence = _classify_evidence_type(changed_clean, rclass)
+                        affected_path.append(_step_label(rclass, rmethod))
+                        trace.append(_build_trace_step(changed_class, rclass, repo_evidence))
+                        evidence_levels.append(repo_evidence)
+            else:
+                # Indirect: controller → mediating service → changed class
+                for svc_class, svc_method in _find_evidenced_ordered(root, ctrl_path, all_services):
+                    svc_p = next((p for p in all_services if Path(p).stem == svc_class), None)
+                    if not svc_p:
+                        continue
+                    svc_content = _read_safe(root, svc_p)
+                    if not svc_content:
+                        continue
+                    svc_lang = _detect_lang(svc_p)
+                    svc_clean = _strip_comments(svc_content, svc_lang)
+                    if not _has_code_evidence(svc_clean, changed_class):
+                        continue
+
+                    ctrl_to_svc = _classify_evidence_type(ctrl_clean, svc_class)
+                    svc_to_changed = _classify_evidence_type(svc_clean, changed_class)
+                    fmap = _build_field_map(svc_clean)
+                    method = _find_called_method(svc_clean, changed_class, fmap)
+                    affected_path = [_step_label(svc_class, svc_method), _step_label(changed_class, method)]
+                    trace = [
+                        _build_trace_step(ctrl_class, svc_class, ctrl_to_svc),
+                        _build_trace_step(svc_class, changed_class, svc_to_changed),
+                    ]
+                    evidence_levels = [ctrl_to_svc, svc_to_changed]
+
+                    if changed_type in _SERVICE_ARTIFACT_TYPES:
+                        changed_content = _read_safe(root, changed_path)
+                        changed_clean = _strip_comments(changed_content, _detect_lang(changed_path)) if changed_content else ""
+                        evidenced_repos = _find_evidenced_ordered(root, changed_path, all_repos)
+                        if evidenced_repos:
+                            rclass, rmethod = evidenced_repos[0]
+                            repo_evidence = _classify_evidence_type(changed_clean, rclass)
+                            affected_path.append(_step_label(rclass, rmethod))
+                            trace.append(_build_trace_step(changed_class, rclass, repo_evidence))
+                            evidence_levels.append(repo_evidence)
+                    break
+
+            if not affected_path:
+                continue
+
+            entry_method = _find_entry_method(ctrl_clean)
+            end_state = _detect_end_state(affected_path)
+            evidence_level = _worst_evidence(evidence_levels)
+            confidence = _compute_confidence(evidence_level, len(trace))
+            seen_entries.add(ctrl_class)
+            result.append({
+                "entry_point": _step_label(ctrl_class, entry_method),
+                "affected_path": affected_path,
+                "impact": _impact_descriptions(changed_class, changed_type, end_state, ctrl_clean, evidence_level),
+                "end_state": end_state,
+                "confidence": confidence,
+                "evidence_level": evidence_level,
+                "trace": trace,
+            })
 
     return result

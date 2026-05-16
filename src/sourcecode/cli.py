@@ -1868,6 +1868,8 @@ def prepare_context_cmd(
             out["suggested_review_order"] = output.suggested_review_order
         if output.execution_paths:
             out["execution_paths"] = output.execution_paths
+        if output.behavioral_impact:
+            out["behavioral_impact"] = output.behavioral_impact
         if output.impact_summary:
             out["impact_summary"] = output.impact_summary
         if output.why_these_files:

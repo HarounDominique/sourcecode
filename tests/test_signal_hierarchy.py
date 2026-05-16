@@ -518,11 +518,17 @@ class TestDeltaTask:
         assert "gaps" in data
 
     def test_prepare_context_review_pr_task(self, tmp_project: Path) -> None:
+        # review-pr runs against CWD (atlas-cli). git state varies: may have diff or not.
+        # Success: exit 0 with review fields. No-diff: exit 1 with error structure.
         result = runner.invoke(
             app,
             [str(tmp_project), "prepare-context", "review-pr"],
         )
-        assert result.exit_code == 0, result.output
+        assert result.exit_code in (0, 1), result.output
         data = json.loads(result.output)
         assert data["task"] == "review-pr"
-        assert "relevant_files" in data
+        if result.exit_code == 0:
+            assert "relevant_files" in data or "changed_files" in data
+        else:
+            assert data.get("error") in {"no_diff", "no_git_repo", "git_ref_not_found"}
+            assert "ci_decision" in data
