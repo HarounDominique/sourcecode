@@ -1450,17 +1450,26 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
     """Opinionated output for AI agents — structured, noise-free, gap-aware.
 
     Output order:
-        1. project          → identity: type, summary, primary stack, frameworks
-        2. entry_points     → where execution starts (with reason/evidence)
-        3. architecture     → how it's structured (flow description)
-        4. key_dependencies → runtime dependencies that matter (when analyzed)
-        5. signals          → compact operational context (env, notes, tests)
-        6. confidence_summary → detection quality and hard/soft signals
-        7. analysis_gaps    → what's uncertain or missing
+        1. project             → identity: type, summary, primary stack, frameworks
+        2. entry_points        → where execution starts (path+kind+confidence)
+        3. architecture        → pattern, layers (capped at 5)
+        4. file_relevance      → top-20 scored files — primary agent value-add
+        5. runtime_packages    → monorepo package roles (when available)
+        6. key_dependencies    → production deps: name+version+role+risk_flags (cap 20)
+        7. suspicious_dependencies → declared but never imported (cap 5)
+        8. signals             → env summary, top-5 code notes, tests, Spring/JVM context
+        9. git_context         → top-5 hotspots, branch, uncommitted count
+        10. confidence_summary → overall quality + anomalies (no internal signals)
+        11. confidence_reasons → actionable reasons for low-confidence sections
+        12. analysis_gaps      → what's uncertain or missing
 
-    Never includes: file_tree, file_paths, schema internals, empty sections,
-    null fields, raw dependency lists, metrics, docs, or low-signal metadata.
+    Never includes: file_tree, file_paths, raw dep lists, dep_groups detail,
+    hard/soft/ignored signals, env var key list, metrics, docs, agent_mode meta.
     """
+    _AGENT_KEY_DEPS_CAP = 20
+    _AGENT_LAYERS_CAP = 5
+    _AGENT_CODE_NOTES_CAP = 5
+
     # ── 1. Identity ──────────────────────────────────────────────────────────
     primary = next((s for s in sm.stacks if s.primary), sm.stacks[0] if sm.stacks else None)
 
@@ -1509,14 +1518,23 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
         result["entry_points"] = _bs
     else:
         ep_groups = _entry_point_groups(sm.entry_points)
-        result["entry_points"] = ep_groups["production"][:_EP_PRODUCTION_CAP]
-        if ep_groups["development"]:
-            result["development_entry_points"] = ep_groups["development"][:_EP_DEV_CAP]
+        result["entry_points"] = [
+            {
+                "path": ep["path"],
+                **({"kind": ep["kind"]} if ep.get("kind") else {}),
+                **({"confidence": ep["confidence"]} if ep.get("confidence") else {}),
+            }
+            for ep in ep_groups["production"][:_EP_PRODUCTION_CAP]
+        ]
 
-    # ── 3. Architecture ───────────────────────────────────────────────────────
-    result["architecture"] = _architecture_context(sm)
+    # ── 3. Architecture — pattern + layers (capped) ───────────────────────────
+    _arch_ctx = _architecture_context(sm)
+    if "layers" in _arch_ctx and len(_arch_ctx["layers"]) > _AGENT_LAYERS_CAP:
+        _arch_ctx = dict(_arch_ctx)
+        _arch_ctx["layers"] = _arch_ctx["layers"][:_AGENT_LAYERS_CAP]
+    result["architecture"] = _arch_ctx
 
-    # ── 3a. File relevance: evidence-backed, high-signal only ────────────────
+    # ── 4. File relevance: top-scored files — primary agent value-add ────────
     _FR_AGENT_CAP = 20
     _total_paths = len(sm.file_paths)
     relevant_files = _file_relevance(sm, limit=_FR_AGENT_CAP if not full else _total_paths)
@@ -1528,7 +1546,7 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
                 "Use --full to see all."
             )
 
-    # ── 3b. Monorepo package roles (when available), capped ──────────────────
+    # ── 5. Monorepo package roles (when available), capped ───────────────────
     if sm.monorepo_packages:
         _noise_roles = {"benchmark_layer", "tooling_layer", "docs_layer", "test_layer"}
         operational_pkgs = [
@@ -1539,32 +1557,36 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
         if operational_pkgs:
             result["runtime_packages"] = operational_pkgs[:_MONOREPO_PKGS_CAP]
 
-    # ── 4. Dependencies: separated by operational role, capped ───────────────
-    # noise_dependencies intentionally excluded — not actionable.
-    dep_groups = _dependency_groups(sm)
-    if dep_groups["production_dependencies"]:
-        result["production_dependencies"] = dep_groups["production_dependencies"][:_PROD_DEPS_CAP]
-    for dep_key in ("dev_tools", "test_utilities", "build_tooling", "suspicious_dependencies"):
-        if dep_groups[dep_key]:
-            result[dep_key] = dep_groups[dep_key][:_SECONDARY_DEPS_CAP]
-
-    # Backward-compatible compact list, now production-only, with risk_flags.
+    # ── 6. Key dependencies: name+version+role+risk_flags only, cap 20 ───────
+    # dep_groups verbose detail (production_dependencies, dev_tools, etc.) excluded —
+    # fully overlaps key_dependencies with added noise from full asdict fields.
     production_key_deps = [
         d for d in sm.key_dependencies
         if (d.role or "unknown") in _PRODUCTION_DEP_ROLES and d.scope not in {"dev"}
     ]
     if sm.dependency_summary and sm.dependency_summary.requested and production_key_deps:
-        _dep_skip = {"parent", "manifest_path", "workspace", "source", "ecosystem"}
         _kd_list = []
-        for d in production_key_deps[:_KEY_DEPS_CAP]:
-            item = {k: v for k, v in asdict(d).items() if v is not None and k not in _dep_skip}
+        for d in production_key_deps[:_AGENT_KEY_DEPS_CAP]:
+            entry: dict[str, Any] = {"name": d.name}
+            if d.declared_version:
+                entry["version"] = d.declared_version
+            if d.role and d.role != "runtime":
+                entry["role"] = d.role
             flags = _dep_risk_flags(d.name, d.declared_version)
             if flags:
-                item["risk_flags"] = flags
-            _kd_list.append(item)
+                entry["risk_flags"] = flags
+            _kd_list.append(entry)
         result["key_dependencies"] = _kd_list
 
-    # ── 5. Signals — compact operational context ─────────────────────────────
+    # ── 7. Suspicious dependencies: declared but no static import observed ────
+    dep_groups = _dependency_groups(sm)
+    if dep_groups["suspicious_dependencies"]:
+        result["suspicious_dependencies"] = [
+            {"name": d.get("name", ""), "reason": d.get("reason", "")}
+            for d in dep_groups["suspicious_dependencies"][:_SECONDARY_DEPS_CAP]
+        ]
+
+    # ── 8. Signals — compact operational context ─────────────────────────────
     signals: dict[str, Any] = {}
 
     if sm.env_summary and sm.env_summary.requested and sm.env_summary.total > 0:
@@ -1580,15 +1602,6 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
         elif (sm.env_summary.spring_profiles or sm.env_summary.profiles_scanned):
             _raw_profiles = sm.env_summary.spring_profiles or sm.env_summary.profiles_scanned
             signals["env_vars"]["spring_profiles"] = sorted(set(_raw_profiles))
-        if sm.env_map:
-            _sorted_env = sorted(
-                sm.env_map,
-                key=lambda e: (not getattr(e, "required", False), getattr(e, "key", "")),
-            )
-            signals["env_vars"]["keys"] = [
-                {k: v for k, v in asdict(e).items() if v is not None and v != "" and v != []}
-                for e in _sorted_env[:10]
-            ]
 
     if sm.code_notes_summary and sm.code_notes_summary.requested and sm.code_notes_summary.total > 0:
         by_kind = {k: v for k, v in sm.code_notes_summary.by_kind.items() if v > 0}
@@ -1602,8 +1615,14 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
                 key=lambda n: (_SEVERITY_ORDER.get(getattr(n, "kind", "").upper(), 9), getattr(n, "path", "")),
             )
             _code_notes_signal["top"] = [
-                {k: v for k, v in asdict(n).items() if v is not None}
-                for n in _sorted_notes[:10]
+                {
+                    "kind": getattr(n, "kind", ""),
+                    "path": getattr(n, "path", ""),
+                    "line": getattr(n, "line", None),
+                    **({"text": _truncate_note(getattr(n, "text", ""), 120)} if getattr(n, "text", "") else {}),
+                }
+                for n in _sorted_notes[:_AGENT_CODE_NOTES_CAP]
+                if getattr(n, "kind", "").upper() in _SEVERITY_ORDER
             ]
         if _code_notes_signal:
             signals["code_notes"] = _code_notes_signal
@@ -1651,12 +1670,13 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
     if signals:
         result["signals"] = signals
 
-    # Git context — lightweight (top-5 hotspots, branch, uncommitted count)
+    # ── 9. Git context — lightweight (top-5 hotspots, branch, uncommitted count)
     _gc = _compact_git_context(sm)
     if _gc:
         result["git_context"] = _gc
 
-    # ── 6. Confidence summary ─────────────────────────────────────────────────
+    # ── 10. Confidence summary — overall quality + anomalies only ─────────────
+    # hard_signals/soft_signals/ignored_signals are detection internals — excluded.
     if sm.confidence_summary is not None:
         cs = sm.confidence_summary
         conf: dict[str, Any] = {
@@ -1665,23 +1685,11 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
             "entry_points": cs.entry_point_confidence,
             "sections": _section_confidence(sm),
         }
-        if cs.hard_signals:
-            _MAX_HARD_SIGNALS = 20
-            _hs = cs.hard_signals
-            _hs_total = len(_hs)
-            conf["hard_signals"] = _hs[:_MAX_HARD_SIGNALS]
-            if _hs_total > _MAX_HARD_SIGNALS:
-                conf["hard_signals_truncated"] = True
-                conf["hard_signals_total"] = _hs_total
-        if cs.soft_signals:
-            conf["soft_signals"] = cs.soft_signals
-        if cs.ignored_signals:
-            conf["ignored_signals"] = cs.ignored_signals
         if cs.anomalies:
             conf["anomalies"] = cs.anomalies
         result["confidence_summary"] = conf
 
-    # ── 6a. Confidence reasons: explain any low-confidence section ────────────
+    # ── 11. Confidence reasons: actionable explanation of low-confidence sections
     _conf_reasons = _confidence_reasons(sm)
     if _conf_reasons:
         result["confidence_reasons"] = _conf_reasons
@@ -1691,7 +1699,7 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
         # No reasons found → low was overly conservative; upgrade to high
         result["confidence_summary"].setdefault("sections", {})["architecture"] = "high"
 
-    # ── 7. Analysis gaps ──────────────────────────────────────────────────────
+    # ── 12. Analysis gaps ─────────────────────────────────────────────────────
     analysis_gaps: list[dict[str, Any]] = []
 
     if sm.analysis_gaps:
@@ -1726,23 +1734,6 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
 
     if analysis_gaps:
         result["analysis_gaps"] = analysis_gaps
-
-    # ── 8. Agent mode metadata — explicit transparency about auto-enabled/suppressed flags ──
-    _auto_enabled: list[str] = ["--dependencies", "--env-map", "--code-notes"]
-    _suppressed: list[str] = []
-    if sm.metrics_summary is not None and sm.metrics_summary.requested:
-        _suppressed.append("--full-metrics")
-    if sm.module_graph is not None and sm.module_graph.summary.requested:
-        _suppressed.append("--graph-modules")
-    if sm.doc_summary is not None and sm.doc_summary.requested:
-        _suppressed.append("--docs")
-    agent_mode_meta: dict[str, Any] = {
-        "auto_enabled": _auto_enabled,
-    }
-    if _suppressed:
-        agent_mode_meta["suppressed_flags"] = _suppressed
-        agent_mode_meta["suppressed_note"] = "computed but excluded from agent_view"
-    result["agent_mode"] = agent_mode_meta
 
     return result
 

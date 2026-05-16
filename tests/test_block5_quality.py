@@ -117,59 +117,57 @@ def test_symbol_definers_not_truncated() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. agent_view suppressed flags metadata
+# 4. agent_view noise exclusions
 # ---------------------------------------------------------------------------
 
-def test_agent_view_suppressed_flags_detected() -> None:
-    """When metrics_summary.requested=True, agent_view includes it in suppressed_flags."""
-    sm = _make_sm(
-        metrics_summary=MetricsSummary(requested=True, file_count=5),
+def test_agent_view_no_agent_mode_block() -> None:
+    """agent_mode metadata block removed — static content with no signal value."""
+    sm = _make_sm(metrics_summary=MetricsSummary(requested=True, file_count=5))
+    result = agent_view(sm)
+    assert "agent_mode" not in result
+
+
+def test_agent_view_no_hard_signals() -> None:
+    """confidence_summary excludes hard/soft/ignored signals — detection internals."""
+    from sourcecode.schema import ConfidenceSummary
+    cs = ConfidenceSummary(
+        overall="high",
+        stack_confidence="high",
+        entry_point_confidence="high",
+        hard_signals=["pom.xml found", "spring-boot-starter-web in deps"],
+        soft_signals=["src/main/java present"],
+        ignored_signals=["README.md"],
     )
+    sm = _make_sm(confidence_summary=cs)
     result = agent_view(sm)
 
-    assert "agent_mode" in result
-    am = result["agent_mode"]
-    assert "--full-metrics" in am.get("suppressed_flags", [])
-    assert am.get("suppressed_note") == "computed but excluded from agent_view"
+    conf = result.get("confidence_summary", {})
+    assert "hard_signals" not in conf
+    assert "soft_signals" not in conf
+    assert "ignored_signals" not in conf
 
 
-def test_agent_view_suppressed_graph_modules() -> None:
-    """When module_graph.summary.requested=True, --graph-modules appears in suppressed_flags."""
-    mg = ModuleGraph(summary=ModuleGraphSummary(requested=True))
-    sm = _make_sm(module_graph=mg)
+def test_agent_view_no_env_keys_list() -> None:
+    """signals.env_vars excludes the keys[] list — already present in compact env_map."""
+    from sourcecode.schema import EnvSummary, EnvVarRecord
+    env_map = [EnvVarRecord(key="DB_URL", required=True, category="database")]
+    env_summary = EnvSummary(requested=True, total=1, required_count=1)
+    sm = _make_sm(env_summary=env_summary, env_map=env_map)
     result = agent_view(sm)
 
-    am = result["agent_mode"]
-    assert "--graph-modules" in am.get("suppressed_flags", [])
+    env_vars = result.get("signals", {}).get("env_vars", {})
+    assert "keys" not in env_vars
 
 
-def test_agent_view_suppressed_docs() -> None:
-    """When doc_summary.requested=True, --docs appears in suppressed_flags."""
-    sm = _make_sm(doc_summary=DocSummary(requested=True))
-    result = agent_view(sm)
-
-    am = result["agent_mode"]
-    assert "--docs" in am.get("suppressed_flags", [])
-
-
-def test_agent_view_no_suppressed_flags() -> None:
-    """agent_view with no suppressed flags doesn't include suppressed_flags key."""
+def test_agent_view_no_dep_groups() -> None:
+    """Verbose dep group fields excluded — overlaps key_dependencies with noise."""
     sm = _make_sm()
     result = agent_view(sm)
 
-    assert "agent_mode" in result
-    am = result["agent_mode"]
-    assert "suppressed_flags" not in am
-    assert "--dependencies" in am.get("auto_enabled", [])
-
-
-def test_agent_view_auto_enabled_always_present() -> None:
-    """auto_enabled list always contains the three flags agent mode enables."""
-    sm = _make_sm()
-    result = agent_view(sm)
-
-    am = result["agent_mode"]
-    assert set(am["auto_enabled"]) == {"--dependencies", "--env-map", "--code-notes"}
+    assert "production_dependencies" not in result
+    assert "dev_tools" not in result
+    assert "test_utilities" not in result
+    assert "build_tooling" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -187,8 +185,8 @@ def test_agent_view_empty_ep_lists_omitted() -> None:
     assert "entry_points" in result
 
 
-def test_agent_view_dev_ep_present_when_nonempty() -> None:
-    """When a dev entry point exists, development_entry_points appears in agent_view."""
+def test_agent_view_dev_ep_excluded() -> None:
+    """development_entry_points excluded from agent_view — noise for production-focused agents."""
     dev_ep = EntryPoint(
         path="webpack.config.js",
         stack="nodejs",
@@ -199,7 +197,7 @@ def test_agent_view_dev_ep_present_when_nonempty() -> None:
     sm = _make_sm(entry_points=[dev_ep])
     result = agent_view(sm)
 
-    assert "development_entry_points" in result
+    assert "development_entry_points" not in result
 
 
 def test_standard_view_empty_ep_lists_omitted() -> None:

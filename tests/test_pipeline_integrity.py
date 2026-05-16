@@ -141,20 +141,21 @@ class TestBenchmarkContamination:
         data = _parse_agent(result.output)
         assert data.get("entry_points") == []
 
-    def test_agent_splits_development_and_auxiliary_eps(self, nocobase_like: Path) -> None:
+    def test_agent_excludes_development_and_auxiliary_eps(self, nocobase_like: Path) -> None:
+        """agent_view only surfaces production EPs — dev/aux excluded as noise."""
         result = runner.invoke(app, ["--agent", str(nocobase_like)])
         assert result.exit_code == 0, result.output
         data = _parse_agent(result.output)
 
-        dev_eps = data.get("development_entry_points", [])
-        aux_eps = data.get("auxiliary_entry_points", [])
+        assert "development_entry_points" not in data
+        assert "auxiliary_entry_points" not in data
 
-        assert any(ep.get("path") == "docs/rspress.mjs" for ep in dev_eps), dev_eps
-        assert all(ep.get("classification") == "development" for ep in dev_eps), dev_eps
-        assert all(ep.get("runtime_relevance") == "low" for ep in dev_eps), dev_eps
-        assert any(ep.get("path") == "benchmarks/run.js" for ep in aux_eps), aux_eps
-        assert any(ep.get("path") == "examples/demo.js" for ep in aux_eps), aux_eps
-        assert all(ep.get("classification") == "auxiliary" for ep in aux_eps), aux_eps
+        entry_points = data.get("entry_points", [])
+        dev_paths = {"docs/rspress.mjs"}
+        aux_paths = {"benchmarks/run.js", "examples/demo.js"}
+        ep_paths = {ep.get("path", "") for ep in entry_points} if isinstance(entry_points, list) else set()
+        assert not (ep_paths & dev_paths), f"Dev EP leaked into entry_points: {ep_paths & dev_paths}"
+        assert not (ep_paths & aux_paths), f"Aux EP leaked into entry_points: {ep_paths & aux_paths}"
 
     def test_production_server_survives_benchmark_coexistence(
         self, production_nodejs: Path
