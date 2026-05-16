@@ -364,7 +364,8 @@ def _domain_from_class(class_name: str) -> str:
 
 
 def _impact_item(statement: str, support: str, certainty: str) -> dict:
-    return {"statement": statement, "support": support, "certainty": certainty}
+    truth_level = "observed" if certainty == "high" else "inferred"
+    return {"statement": statement, "support": support, "certainty": certainty, "truth_level": truth_level}
 
 
 def _impact_descriptions(
@@ -380,14 +381,14 @@ def _impact_descriptions(
 
     if changed_type in _REPO_ARTIFACT_TYPES:
         items.append(_impact_item(
-            f"{domain} persistence affected" if domain else "persistence affected",
-            f"{changed_class} is a repository in path",
+            f"{domain} persistence may be affected (inferred from path)" if domain else "persistence may be affected (inferred from path)",
+            f"{changed_class} classified as repository from path",
             certainty,
         ))
     elif changed_type in _SERVICE_ARTIFACT_TYPES:
         if end_state == "DB write":
             items.append(_impact_item(
-                f"{domain} persistence affected" if domain else "persistence affected",
+                f"{domain} persistence may be affected (repository with DB write in path)" if domain else "persistence may be affected (repository with DB write in path)",
                 f"{changed_class} delegates to repository with DB write",
                 certainty,
             ))
@@ -439,7 +440,7 @@ def _impact_descriptions_for_controller(
                 domain = d
                 break
         items.append(_impact_item(
-            f"{domain} persistence affected" if domain else "data persistence affected",
+            f"{domain} persistence may be affected (repository with DB write in path)" if domain else "data persistence may be affected (repository with DB write in path)",
             "repository with DB write detected in path",
             certainty,
         ))

@@ -420,19 +420,19 @@ _ALL_EXTENSIONS: frozenset[str] = _SOURCE_EXTENSIONS | frozenset({
 })
 
 _ARTIFACT_CHANGE_EFFECT: dict[str, str] = {
-    "entrypoint":     "modifies application startup, CLI entry, or framework bootstrap — all request flows may be affected",
-    "controller":     "alters HTTP routing, API contract, or response shape — API consumers are affected",
-    "service":        "changes business rules, transaction scope, or orchestration logic — callers and dependents affected",
-    "repository":     "modifies persistence queries or data access patterns — data consistency and service layer affected",
-    "mapper":         "alters SQL-to-object binding or query templates — data shape and repositories affected",
-    "security":       "changes authentication flow, access control rules, or session handling — all secured endpoints affected",
-    "spring_config":  "modifies bean wiring, datasource, or framework-wide settings — all wired beans potentially affected",
-    "spring_profile": "changes environment-specific overrides — behavior differs per active profile",
-    "config":         "adjusts configuration values — all modules reading this config are affected",
+    "entrypoint":     "may affect application startup, CLI entry, or framework bootstrap — all request flows may be affected (inferred from role)",
+    "controller":     "may alter HTTP routing, API contract, or response shape — API consumers may be affected (inferred from role)",
+    "service":        "may change business rules, transaction scope, or orchestration logic — callers and dependents may be affected (inferred from role)",
+    "repository":     "may modify persistence queries or data access patterns — verify data consistency and service layer (inferred from role)",
+    "mapper":         "may alter SQL-to-object binding or query templates — data shape and repositories may be affected (inferred from role)",
+    "security":       "may change authentication flow, access control rules, or session handling — all secured endpoints may be affected (inferred from role)",
+    "spring_config":  "may modify bean wiring, datasource, or framework-wide settings — wired beans potentially affected (inferred from role)",
+    "spring_profile": "may change environment-specific overrides — behavior may differ per active profile (inferred from role)",
+    "config":         "may adjust configuration values — all modules reading this config may be affected (inferred from role)",
     "build_manifest": "changes dependencies, plugins, or project structure — compile-time and runtime classpath affected",
     "db_migration":   "modifies database schema — existing queries, mappings, and constraints may break",
-    "domain_model":   "alters entity structure — cascades to repositories, DTOs, serializers, and mappers",
-    "dto":            "changes data transfer contract — serialization and API consumers may break",
+    "domain_model":   "may alter entity structure — may cascade to repositories, DTOs, serializers, and mappers (inferred from role)",
+    "dto":            "may change data transfer contract — serialization and API consumers may break (inferred from role)",
     "test":           "modifies test coverage or test behavior — no production code affected",
     "documentation":  "updates documentation only — no runtime impact",
     "ide_noise":      "IDE/tooling artifact — no application impact",
@@ -976,7 +976,11 @@ class TaskContextBuilder:
                     "confidence": _f_conf,
                     "artifact_type": _f_atype,
                     "evidence": _evidence,
-                    "change_effect": _ARTIFACT_CHANGE_EFFECT.get(_f_atype, "modifies application logic"),
+                    "change_effect": {
+                        "statement": _ARTIFACT_CHANGE_EFFECT.get(_f_atype, "may modify application logic (role inferred from path)"),
+                        "truth_level": "inferred",
+                        "confidence": _role_obj["confidence"],
+                    },
                 })
 
             if _build_artifact_files:
@@ -2521,19 +2525,19 @@ class TaskContextBuilder:
         def _runtime_impact(tc: dict[str, int]) -> list[str]:
             _ri: list[str] = []
             if "entrypoint" in tc:
-                _ri.append("Application bootstrap modified — full context restart required before deploy")
+                _ri.append("Entrypoint-classified file modified — may require full context restart before deploy (role inferred from path)")
             if "spring_config" in tc:
-                _ri.append("Spring ApplicationContext bean wiring modified — dependent beans rewired on restart")
+                _ri.append("Spring config-classified file modified — wired beans may be rewired on restart (role inferred from path)")
             if "security" in tc:
-                _ri.append("Security filter chain modified — all secured endpoints affected after restart")
+                _ri.append("Security-classified file modified — secured endpoints may be affected after restart (role inferred from path)")
             if "db_migration" in tc:
                 _ri.append("Database schema migration pending — execute before deploying application")
             _svc = tc.get("service", 0)
             if _svc >= 2:
-                _ri.append(f"{_svc} service(s) modified — verify transaction scope and data consistency")
+                _ri.append(f"{_svc} service-classified file(s) modified — verify transaction scope and data consistency (role inferred from path)")
             _repo = tc.get("repository", 0) + tc.get("mapper", 0)
             if _repo > 0:
-                _ri.append(f"{_repo} persistence component(s) modified — verify data access queries")
+                _ri.append(f"{_repo} persistence-classified component(s) modified — verify data access queries (role inferred from path)")
             if "build_manifest" in tc:
                 _ri.append("Build manifest modified — dependency resolution required before compile")
             return _ri
