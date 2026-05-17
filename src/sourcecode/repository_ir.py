@@ -28,12 +28,21 @@ from typing import Optional
 @dataclass
 class SymbolRecord:
     symbol: str          # fully qualified: pkg.Class | pkg.Class#method | pkg.Class.field
-    type: str            # class | interface | method | field
+    type: str            # class | interface | method | field  (backward-compat values)
     modifiers: list[str] = field(default_factory=list)
     annotations: list[str] = field(default_factory=list)
     imports_used: list[str] = field(default_factory=list)
     declaring_file: str = ""
     confidence: str = "medium"  # high | medium | low
+    # Stable identity contract — populated by _extract_symbols
+    stable_id: str = ""         # deterministic across formatting/body changes
+    symbol_kind: str = ""       # class|interface|enum|annotation|method|constructor|field|endpoint|bean
+    canonical_name: str = ""    # pkg.Class#method(Type1,Type2) — human-readable
+    source_file: str = ""       # alias for declaring_file (IR output contract)
+    signature: str = ""         # (Type1,Type2)->ReturnType for methods; type for fields
+    param_types: list[str] = field(default_factory=list)
+    return_type: str = ""
+    annotation_values: dict[str, str] = field(default_factory=dict)  # ann_name → raw args string
 
 
 @dataclass
@@ -95,6 +104,7 @@ class EvidenceBundle:
 _PKG_RE = re.compile(r'^package\s+([\w.]+)\s*;', re.MULTILINE)
 _IMPORT_RE = re.compile(r'^import\s+(?:static\s+)?([\w.]+(?:\.\*)?)\s*;', re.MULTILINE)
 _ANN_RE = re.compile(r'^(@[\w.]+)')
+_ANN_WITH_ARGS_RE = re.compile(r'^(@[\w.]+)\s*(?:\(([^)]*)\))?')
 
 _CLASS_DECL_RE = re.compile(
     r'(?:^|(?<=\s))'
@@ -111,8 +121,14 @@ _METHOD_DECL_RE = re.compile(
     r'^(?P<modifiers>(?:(?:public|private|protected|static|final|synchronized'
     r'|abstract|default|native|strictfp|override)\s+)*)'
     r'(?:<[\w,\s?]+>\s+)?'
-    r'(?:(?:void|boolean|byte|char|short|int|long|float|double|String|[\w.<>\[\]?,]+)\s+)'
+    r'(?P<return_type>(?:void|boolean|byte|char|short|int|long|float|double|String|[\w.<>\[\]?,]+)\s+)'
     r'(?P<name>[a-z_]\w*)\s*\(',
+)
+
+_CONSTRUCTOR_DECL_RE = re.compile(
+    r'^(?P<modifiers>(?:(?:public|private|protected)\s+)*)'
+    r'(?P<name>[A-Z]\w*)\s*\('
+    r'(?P<params>[^)]*)',
 )
 
 _FIELD_DECL_RE = re.compile(
@@ -124,6 +140,11 @@ _FIELD_DECL_RE = re.compile(
 _REQUEST_MAPPING_RE = re.compile(
     r'@(?:Request|Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']'
 )
+
+_ENDPOINT_ANNOTATIONS: frozenset[str] = frozenset({
+    "@GetMapping", "@PostMapping", "@PutMapping", "@DeleteMapping",
+    "@PatchMapping", "@RequestMapping",
+})
 
 _MODIFIER_WORDS: frozenset[str] = frozenset({
     "public", "private", "protected", "static", "final", "abstract",
@@ -159,6 +180,14 @@ _SPRING_OTHER: frozenset[str] = frozenset({
     "@SpringBootApplication", "@EnableAutoConfiguration",
 })
 
+_HTTP_METHOD_MAP: dict[str, str] = {
+    "@GetMapping": "GET",
+    "@PostMapping": "POST",
+    "@PutMapping": "PUT",
+    "@DeleteMapping": "DELETE",
+    "@PatchMapping": "PATCH",
+}
+
 # ---------------------------------------------------------------------------
 # Phase 5 constants
 # ---------------------------------------------------------------------------
@@ -174,6 +203,7 @@ _IR_WEIGHT_DEFAULT: float = 0.3
 # diff_intensity: method change=1.0, field/annotation=0.6, formatting=0.1
 _DIFF_INTENSITY_MAP: dict[str, float] = {
     "signature_change": 1.0,
+    "route_surface_change": 1.0,
     "structural_change": 0.6,
     "annotation_change": 0.6,
     "unknown": 0.1,
@@ -181,6 +211,96 @@ _DIFF_INTENSITY_MAP: dict[str, float] = {
 
 _PROPAGATION_DECAY: float = 0.5
 _BFS_MAX_DEPTH: int = 3
+
+# Regex to strip leading annotations from a single parameter (e.g. @NotNull @Valid String name)
+_ANN_PREFIX_RE = re.compile(r'^(?:@\w+\s*(?:\([^)]*\))?\s*)+')
+
+
+# ---------------------------------------------------------------------------
+# Stable ID helpers
+# ---------------------------------------------------------------------------
+
+def _normalize_type_name(raw: str) -> str:
+    """Strip annotations, final modifier, and param name; return only type.
+
+    "(Long id)"    -> strip after parsing → "Long"
+    "@NotNull User user" → "User"
+    "List<String>" → "List<String>"
+    """
+    raw = _ANN_PREFIX_RE.sub("", raw).strip()
+    raw = re.sub(r'\bfinal\s+', "", raw).strip()
+    # "Type name" → extract Type (rightmost word is the param name)
+    m = re.match(r'^([\w<>\[\].,? ]+?)\s+\w+$', raw)
+    if m:
+        return m.group(1).strip()
+    return raw.strip()
+
+
+def _parse_param_types(params_str: str) -> list[str]:
+    """Parse "(Long id, @Valid String name)" → ["Long", "String"].
+
+    Handles simple param lists only (no nested generic commas).
+    For multi-line param lists callers receive an empty string → returns [].
+    """
+    if not params_str or not params_str.strip():
+        return []
+    result: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in params_str:
+        if ch in ("<", "("):
+            depth += 1
+            current.append(ch)
+        elif ch in (">", ")"):
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            part = "".join(current).strip()
+            if part:
+                t = _normalize_type_name(part)
+                if t:
+                    result.append(t)
+            current = []
+        else:
+            current.append(ch)
+    part = "".join(current).strip()
+    if part:
+        t = _normalize_type_name(part)
+        if t:
+            result.append(t)
+    return result
+
+
+def _normalize_return_type(raw: str) -> str:
+    """Normalize return type string: strip whitespace, keep generics."""
+    return raw.strip()
+
+
+def _compute_stable_id(
+    package: str,
+    class_simple: str,
+    kind: str,
+    symbol_name: str,
+    param_types: Optional[list[str]] = None,
+    return_type: str = "",
+) -> str:
+    """Compute deterministic stable symbol identity.
+
+    Format: {package}:{class_simple}:{kind}:{symbol_name}[:{params}[:{return_type}]]
+
+    Survives: formatting, comments, body changes, imports, nearby movement.
+    Changes on: rename, param type change, class package move, kind change.
+
+    Never uses line numbers, byte offsets, or content hashes.
+    """
+    pkg = package or "_"
+    cls = class_simple or "_"
+    parts = [pkg, cls, kind, symbol_name]
+    if param_types is not None:
+        parts.append(f"({','.join(param_types)})")
+    if return_type:
+        parts.append(_normalize_return_type(return_type))
+    return ":".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +382,7 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
     depth = 0
     class_stack: list[tuple[str, int]] = []
     pending_anns: list[str] = []
+    pending_ann_values: dict[str, str] = {}
     in_block_comment = False
 
     for line in source.splitlines():
@@ -281,11 +402,14 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
         net = _count_net_braces(stripped)
 
         if stripped.startswith("@"):
-            ann_m = _ANN_RE.match(stripped)
+            ann_m = _ANN_WITH_ARGS_RE.match(stripped)
             if ann_m:
                 ann = ann_m.group(1)
+                ann_args = ann_m.group(2) or ""
                 if ann not in pending_anns:
                     pending_anns.append(ann)
+                if ann_args and ann in _ENDPOINT_ANNOTATIONS:
+                    pending_ann_values[ann] = ann_args.strip()
             depth += net
             _pop_closed(class_stack, depth)
             continue
@@ -312,6 +436,23 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
 
             sym_type = "interface" if kind_kw == "interface" else "class"
 
+            # symbol_kind distinguishes enum/annotation from class/interface
+            if kind_kw == "enum":
+                sym_kind = "enum"
+            elif kind_kw == "@interface":
+                sym_kind = "annotation"
+            elif kind_kw == "interface":
+                sym_kind = "interface"
+            else:
+                sym_kind = "class"
+
+            _stable_id = _compute_stable_id(package, name, sym_kind, name)
+            _sig_parts = [kind_kw, name]
+            if extends_str:
+                _sig_parts.append(f"extends {extends_str}")
+            if implements_str:
+                _sig_parts.append(f"implements {implements_str}")
+
             symbols.append(SymbolRecord(
                 symbol=fqn,
                 type=sym_type,
@@ -320,38 +461,116 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
                 imports_used=used,
                 declaring_file=rel_path,
                 confidence="high",
+                stable_id=_stable_id,
+                symbol_kind=sym_kind,
+                canonical_name=fqn,
+                source_file=rel_path,
+                signature=" ".join(_sig_parts),
+                annotation_values=dict(pending_ann_values),
             ))
 
             class_stack.append((fqn, depth))
             pending_anns = []
+            pending_ann_values = {}
             depth += net
             _pop_closed(class_stack, depth)
             continue
 
         if class_stack:
+            class_fqn = class_stack[-1][0]
+            # simple name of enclosing class (last segment, strip inner class paths)
+            _class_simple = class_fqn.split(".")[-1]
+
             mth_m = _METHOD_DECL_RE.match(stripped)
             if mth_m:
                 mname = mth_m.group("name")
                 if mname not in _JAVA_KEYWORDS:
-                    class_fqn = class_stack[-1][0]
                     fqn = f"{class_fqn}#{mname}"
                     modifiers = _parse_modifier_str(mth_m.group("modifiers") or "")
                     used = _resolve_types_from_text(stripped, import_map)
                     conf = "high" if ("public" in modifiers or pending_anns) else "medium"
 
+                    # Extract return type and params from matched line
+                    _ret_raw = (mth_m.group("return_type") or "").strip()
+                    _after_paren = stripped[mth_m.end():]
+                    if ")" in _after_paren:
+                        _params_str = _after_paren[:_after_paren.index(")")]
+                        _param_types = _parse_param_types(_params_str)
+                    else:
+                        _param_types = []  # multi-line param list — deterministically empty
+
+                    # Determine symbol_kind from annotations
+                    _anns = sorted(set(pending_anns))
+                    if "@Bean" in _anns:
+                        _sym_kind = "bean"
+                    elif _anns and any(a in _ENDPOINT_ANNOTATIONS for a in _anns):
+                        _sym_kind = "endpoint"
+                    else:
+                        _sym_kind = "method"
+
+                    _stable_id = _compute_stable_id(
+                        package, _class_simple, _sym_kind, mname, _param_types, _ret_raw
+                    )
+                    _param_str = ",".join(_param_types)
+                    _canonical = f"{class_fqn}#{mname}({_param_str})"
+                    _signature = f"({_param_str})->{_ret_raw}"
+
                     symbols.append(SymbolRecord(
                         symbol=fqn,
                         type="method",
                         modifiers=modifiers,
-                        annotations=sorted(set(pending_anns)),
+                        annotations=_anns,
                         imports_used=used,
                         declaring_file=rel_path,
                         confidence=conf,
+                        stable_id=_stable_id,
+                        symbol_kind=_sym_kind,
+                        canonical_name=_canonical,
+                        source_file=rel_path,
+                        signature=_signature,
+                        param_types=_param_types,
+                        return_type=_ret_raw,
+                        annotation_values=dict(pending_ann_values),
                     ))
                     pending_anns = []
+                    pending_ann_values = {}
                     depth += net
                     _pop_closed(class_stack, depth)
                     continue
+
+            # Constructor detection: uppercase name matching enclosing class
+            ctor_m = _CONSTRUCTOR_DECL_RE.match(stripped)
+            if ctor_m and ctor_m.group("name") == _class_simple:
+                _ctor_params_str = ctor_m.group("params")
+                _ctor_param_types = _parse_param_types(_ctor_params_str)
+                _ctor_anns = sorted(set(pending_anns))
+                _ctor_modifiers = _parse_modifier_str(ctor_m.group("modifiers") or "")
+                _ctor_fqn = f"{class_fqn}#<init>"
+                _stable_id = _compute_stable_id(
+                    package, _class_simple, "constructor", _class_simple, _ctor_param_types
+                )
+                _param_str = ",".join(_ctor_param_types)
+                symbols.append(SymbolRecord(
+                    symbol=_ctor_fqn,
+                    type="method",
+                    modifiers=_ctor_modifiers,
+                    annotations=_ctor_anns,
+                    imports_used=[],
+                    declaring_file=rel_path,
+                    confidence="high" if ("public" in _ctor_modifiers or _ctor_anns) else "medium",
+                    stable_id=_stable_id,
+                    symbol_kind="constructor",
+                    canonical_name=f"{class_fqn}#{_class_simple}({_param_str})",
+                    source_file=rel_path,
+                    signature=f"({_param_str})->void",
+                    param_types=_ctor_param_types,
+                    return_type="void",
+                ))
+                pending_anns = []
+                pending_ann_values = {}
+                depth += net
+                _pop_closed(class_stack, depth)
+                continue
 
             if pending_anns and any(a in _INJECT_ANNOTATIONS for a in pending_anns):
                 fld_m = _FIELD_DECL_RE.match(stripped)
@@ -359,10 +578,12 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
                     fname = fld_m.group("name")
                     ftype = fld_m.group("type").strip()
                     if fname and ftype and fname not in _JAVA_KEYWORDS:
-                        class_fqn = class_stack[-1][0]
                         fqn = f"{class_fqn}.{fname}"
                         modifiers = _parse_modifier_str(fld_m.group("modifiers") or "")
                         used = _resolve_types_from_text(ftype, import_map)
+                        _stable_id = _compute_stable_id(
+                            package, _class_simple, "field", fname, None, ftype
+                        )
 
                         symbols.append(SymbolRecord(
                             symbol=fqn,
@@ -372,13 +593,20 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
                             imports_used=used,
                             declaring_file=rel_path,
                             confidence="high",
+                            stable_id=_stable_id,
+                            symbol_kind="field",
+                            canonical_name=fqn,
+                            source_file=rel_path,
+                            signature=f"{ftype} {fname}",
                         ))
                         pending_anns = []
+                        pending_ann_values = {}
                         depth += net
                         _pop_closed(class_stack, depth)
                         continue
 
         pending_anns = []
+        pending_ann_values = {}
         depth += net
         _pop_closed(class_stack, depth)
 
@@ -545,6 +773,20 @@ def _build_relations(
                     evidence={"type": "annotation", "value": f"@RequestMapping(\"{m_path}\")"},
                 ))
 
+    # contained_in edges: method/field → enclosing class (structural membership)
+    _local_classes = {s.symbol for s in symbols if s.type in ("class", "interface")}
+    for sym in symbols:
+        if sym.type in ("method", "field"):
+            enclosing = _enclosing_class(sym.symbol)
+            if enclosing != sym.symbol and enclosing in _local_classes:
+                edges.append(RelationEdge(
+                    from_symbol=sym.symbol,
+                    to_symbol=enclosing,
+                    type="contained_in",
+                    confidence="high",
+                    evidence={"type": "structural", "value": f"member of {enclosing}"},
+                ))
+
     seen: set[tuple[str, str, str]] = set()
     unique: list[RelationEdge] = []
     for e in edges:
@@ -560,8 +802,73 @@ def _build_relations(
 # Phase 4 — Symbol-level diff
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Route-surface helpers
+# ---------------------------------------------------------------------------
+
+def _parse_route_path(args_str: str) -> str:
+    """Extract path string from annotation args. Handles named and positional forms."""
+    if not args_str:
+        return ""
+    for key in ("value", "path"):
+        m = re.search(rf'\b{key}\s*=\s*"([^"]*)"', args_str)
+        if m:
+            return m.group(1)
+    m = re.search(r'"([^"]*)"', args_str)
+    return m.group(1) if m else ""
+
+
+def _parse_route_http_method(ann_name: str, args_str: str) -> str:
+    """Derive HTTP method from annotation name or explicit method= arg."""
+    explicit = _HTTP_METHOD_MAP.get(ann_name)
+    if explicit:
+        return explicit
+    m = re.search(r'method\s*=\s*(?:RequestMethod\.)?(\w+)', args_str or "")
+    return m.group(1).upper() if m else ""
+
+
+def _parse_route_extras(args_str: str) -> dict:
+    """Extract produces/consumes/params from annotation args."""
+    result: dict = {}
+    for key in ("produces", "consumes", "params"):
+        m = re.search(rf'\b{key}\s*=\s*(?:"([^"]*)"|{{([^}}]*)}})', args_str or "")
+        if m:
+            result[key] = m.group(1) or m.group(2) or ""
+    return result
+
+
+def _is_route_symbol(sym: SymbolRecord) -> bool:
+    return bool(sym.annotation_values) and any(
+        a in _ENDPOINT_ANNOTATIONS for a in sym.annotations
+    )
+
+
+def _route_annotation_name(sym: SymbolRecord) -> str:
+    for ann in sym.annotations:
+        if ann in _ENDPOINT_ANNOTATIONS:
+            return ann
+    return ""
+
+
+def _enclosing_class(fqn: str) -> str:
+    if "#" in fqn:
+        return fqn.split("#")[0]
+    if "." in fqn:
+        return fqn.rsplit(".", 1)[0]
+    return fqn
+
+
 def _symbol_fingerprint(sym: SymbolRecord) -> str:
-    return f"{sym.type}|{','.join(sym.modifiers)}|{','.join(sym.annotations)}|{','.join(sym.imports_used)}"
+    route_val_seg = "|".join(
+        f"{a}:{sym.annotation_values.get(a, '')}"
+        for a in sorted(sym.annotations)
+        if a in _ENDPOINT_ANNOTATIONS
+    )
+    return (
+        f"{sym.type}|{','.join(sym.modifiers)}"
+        f"|{','.join(sym.annotations)}|{','.join(sym.imports_used)}"
+        f"|{route_val_seg}"
+    )
 
 
 def _diff_symbols(
@@ -601,7 +908,11 @@ def _diff_symbols(
             continue
 
         diff_type = "unknown"
-        if set(old.annotations) != set(new.annotations):
+        old_rvals = {a: old.annotation_values.get(a, "") for a in old.annotations if a in _ENDPOINT_ANNOTATIONS}
+        new_rvals = {a: new.annotation_values.get(a, "") for a in new.annotations if a in _ENDPOINT_ANNOTATIONS}
+        if old_rvals != new_rvals:
+            diff_type = "route_surface_change"
+        elif set(old.annotations) != set(new.annotations):
             diff_type = "annotation_change"
         elif set(old.modifiers) != set(new.modifiers):
             diff_type = "structural_change"
@@ -616,6 +927,67 @@ def _diff_symbols(
         ))
 
     return changed
+
+
+def _diff_routes(
+    old_syms: list[SymbolRecord],
+    new_syms: list[SymbolRecord],
+) -> list[dict]:
+    """Detect route-surface changes between old and new symbol sets."""
+    old_map = {s.symbol: s for s in old_syms if _is_route_symbol(s)}
+    new_map = {s.symbol: s for s in new_syms if _is_route_symbol(s)}
+
+    route_diffs: list[dict] = []
+    for fqn in sorted(set(old_map) & set(new_map)):
+        old_sym = old_map[fqn]
+        new_sym = new_map[fqn]
+
+        old_ann = _route_annotation_name(old_sym)
+        new_ann = _route_annotation_name(new_sym)
+        old_args = old_sym.annotation_values.get(old_ann, "")
+        new_args = new_sym.annotation_values.get(new_ann, "")
+
+        old_path = _parse_route_path(old_args)
+        new_path = _parse_route_path(new_args)
+        old_http = _parse_route_http_method(old_ann, old_args)
+        new_http = _parse_route_http_method(new_ann, new_args)
+        old_extras = _parse_route_extras(old_args)
+        new_extras = _parse_route_extras(new_args)
+
+        if old_path == new_path and old_http == new_http and old_ann == new_ann and old_extras == new_extras:
+            continue
+
+        evidence: dict = {
+            "annotation_value_changed": old_path != new_path,
+            "mapping_annotation": new_ann.lstrip("@"),
+            "old_value": old_path,
+            "new_value": new_path,
+        }
+        if old_http != new_http:
+            evidence["http_method_changed"] = True
+            evidence["old_http_method"] = old_http
+            evidence["new_http_method"] = new_http
+        if old_ann != new_ann:
+            evidence["annotation_changed"] = True
+            evidence["old_annotation"] = old_ann
+            evidence["new_annotation"] = new_ann
+        for key in ("produces", "consumes", "params"):
+            if old_extras.get(key) != new_extras.get(key):
+                evidence[f"{key}_changed"] = True
+                evidence[f"old_{key}"] = old_extras.get(key, "")
+                evidence[f"new_{key}"] = new_extras.get(key, "")
+
+        route_diffs.append({
+            "symbol": fqn,
+            "controller": _enclosing_class(fqn),
+            "route_surface_changed": True,
+            "old_route": old_path,
+            "new_route": new_path,
+            "stable_id": new_sym.stable_id,
+            "evidence": evidence,
+        })
+
+    return sorted(route_diffs, key=lambda d: d["symbol"])
 
 
 def _get_git_old_content(git_root: Path, rel_path: str, since: str) -> Optional[str]:
@@ -746,38 +1118,101 @@ def _detect_subsystems(all_fqns: list[str], relations: list[RelationEdge]) -> li
     return [sorted(v) for v in sorted(components.values())]
 
 
-def _propagate_impact(
+_EDGE_REASON_TEMPLATES: dict[str, str] = {
+    "imports": "{from_sym} depends on {to_sym} (import)",
+    "injects": "{from_sym} injects {to_sym}",
+    "implements": "{from_sym} implements {to_sym}",
+    "extends": "{from_sym} extends {to_sym}",
+    "contained_in": "{from_sym} is a member of {to_sym}",
+    "annotated_with": "{from_sym} is annotated with {to_sym}",
+    "mapped_to": "Route {to_sym} depends on {from_sym}",
+}
+
+# Edge types to exclude from reverse impact traversal (too noisy / non-dependency semantics)
+_REVERSE_EXCLUDE: frozenset[str] = frozenset({"annotated_with", "mapped_to"})
+
+
+def _edge_reason(edge_type: str, from_sym: str, to_sym: str) -> str:
+    tmpl = _EDGE_REASON_TEMPLATES.get(
+        edge_type, "{from_sym} → {to_sym} [{edge_type}]"
+    )
+    return tmpl.format(from_sym=from_sym, to_sym=to_sym, edge_type=edge_type)
+
+
+def _build_reverse_adjacency(
+    relations: list[RelationEdge],
+    all_fqns: set[str],
+) -> dict[str, list[RelationEdge]]:
+    """Invert the relation graph: target → edges pointing to it (known symbols only)."""
+    reverse: dict[str, list[RelationEdge]] = {}
+    for edge in relations:
+        if edge.type in _REVERSE_EXCLUDE:
+            continue
+        if edge.to_symbol in all_fqns:
+            reverse.setdefault(edge.to_symbol, []).append(edge)
+    return reverse
+
+
+def _bfs_impact_with_paths(
     changed_fqns: set[str],
     changed_scores: dict[str, float],
-    adjacency: dict[str, set[str]],
+    reverse_adj: dict[str, list[RelationEdge]],
     all_fqns: set[str],
     max_depth: int = _BFS_MAX_DEPTH,
+    enclosing_seeds: set[str] | None = None,
 ) -> list[dict]:
-    """BFS impact propagation with decay per hop. No path → no impact."""
+    """BFS on reverse graph: propagates impact from changed symbols to dependents.
+
+    Each impacted entry carries included_because: explicit graph path explaining inclusion.
+    No graph path → no impact (deterministic guarantee).
+
+    enclosing_seeds: set of extra seeds that are enclosing classes (not directly changed).
+    contained_in edges are skipped when traversing FROM these seeds to avoid pulling in
+    sibling members of the actually-changed symbol.
+    """
+    _enclosing = enclosing_seeds or set()
     impacted: dict[str, dict] = {}
-    # (node, via, depth, score)
-    queue: deque[tuple[str, str, int, float]] = deque()
+    # (node, via_fqn, depth, score, path, reasons)
+    queue: deque[tuple[str, str, int, float, list[str], list[str]]] = deque()
 
     for fqn in sorted(changed_fqns):
         base = changed_scores.get(fqn, 0.0)
-        for neighbor in sorted(adjacency.get(fqn, set())):
+        skip_contained = fqn in _enclosing
+        for edge in sorted(reverse_adj.get(fqn, []), key=lambda e: e.from_symbol):
+            if skip_contained and edge.type == "contained_in":
+                continue
+            neighbor = edge.from_symbol
             if neighbor not in changed_fqns and neighbor in all_fqns:
                 score = round(base * _PROPAGATION_DECAY, 4)
                 if score > 0:
-                    queue.append((neighbor, fqn, 1, score))
+                    reason = _edge_reason(edge.type, neighbor, fqn)
+                    queue.append((neighbor, fqn, 1, score, [fqn, neighbor], [reason]))
 
     while queue:
-        node, via, depth, score = queue.popleft()
+        node, via, depth, score, path, reasons = queue.popleft()
         existing = impacted.get(node)
         if existing and existing["impact_score"] >= score:
             continue
-        impacted[node] = {"entity": node, "depth": depth, "impact_score": score, "via": via}
+        impacted[node] = {
+            "entity": node,
+            "depth": depth,
+            "impact_score": score,
+            "via": via,
+            "graph_path": path,
+            "included_because": reasons,
+        }
         if depth < max_depth:
-            for neighbor in sorted(adjacency.get(node, set())):
+            for edge in sorted(reverse_adj.get(node, []), key=lambda e: e.from_symbol):
+                neighbor = edge.from_symbol
                 if neighbor not in changed_fqns and neighbor in all_fqns:
                     next_score = round(score * _PROPAGATION_DECAY, 4)
                     if next_score > 0:
-                        queue.append((neighbor, node, depth + 1, next_score))
+                        reason = _edge_reason(edge.type, neighbor, node)
+                        queue.append((
+                            neighbor, node, depth + 1, next_score,
+                            path + [neighbor],
+                            reasons + [reason],
+                        ))
 
     return sorted(impacted.values(), key=lambda x: (-x["impact_score"], x["entity"]))
 
@@ -801,6 +1236,7 @@ def _assemble(
     relations: list[RelationEdge],
     changed_symbols: list[ChangedSymbol],
     spring_summary: dict,  # noqa: ARG001 — used internally via _spring_role on symbols
+    route_diffs: list[dict] | None = None,
 ) -> dict:
     """Phase 5: Final assembly — single deterministic output contract."""
     sorted_syms = sorted(symbols, key=lambda s: s.symbol)
@@ -912,11 +1348,29 @@ def _assemble(
             "evidence_bundle": bundle.to_dict() if bundle else None,
         })
 
-    # --- Impact propagation (BFS, graph-only) ---
+    # --- Reverse graph: target → dependents (for impact propagation + agent queries) ---
+    reverse_adj = _build_reverse_adjacency(sorted_rels, all_fqns_set)
+
+    # --- Impact propagation (BFS on reverse graph — finds who depends on changed symbol) ---
     changed_with_graph = {e["entity"] for e in changed_entities_out}
     changed_scores_map = {fqn: node_scores.get(fqn, 0.0) for fqn in changed_with_graph}
-    impacted_entities_out = _propagate_impact(
-        changed_with_graph, changed_scores_map, adjacency, all_fqns_set
+
+    # Method/field change → also propagate from enclosing class (class is effectively changed).
+    # These are "enclosing seeds" — contained_in edges are skipped from them to avoid
+    # pulling in sibling members of the actually-changed symbol.
+    _enclosing_seeds: set[str] = set()
+    _extra_seeds: dict[str, float] = {}
+    for fqn, score in list(changed_scores_map.items()):
+        enclosing = _enclosing_class(fqn)
+        if enclosing != fqn and enclosing in all_fqns_set and enclosing not in changed_scores_map:
+            _extra_seeds[enclosing] = max(_extra_seeds.get(enclosing, 0.0), score)
+            _enclosing_seeds.add(enclosing)
+    changed_with_graph.update(_extra_seeds)
+    changed_scores_map.update(_extra_seeds)
+
+    impacted_entities_out = _bfs_impact_with_paths(
+        changed_with_graph, changed_scores_map, reverse_adj, all_fqns_set,
+        enclosing_seeds=_enclosing_seeds,
     )
 
     # --- Subsystem detection (connected components, graph-only) ---
@@ -942,6 +1396,11 @@ def _assemble(
     graph_nodes = [
         {
             "fqn": s.symbol,
+            "stable_id": s.stable_id,
+            "symbol_kind": s.symbol_kind,
+            "canonical_name": s.canonical_name or s.symbol,
+            "source_file": s.declaring_file,
+            "signature": s.signature,
             "type": s.type,
             "role": spring_role_map.get(s.symbol, "other"),
             "in_degree": in_deg.get(s.symbol, 0),
@@ -951,12 +1410,21 @@ def _assemble(
     ]
     graph_edges = [_edge_to_dict(e) for e in sorted_rels]
 
+    # Reverse graph index: target_fqn → {edge_type → [from_fqn, ...]} for agent queries
+    reverse_graph_out: dict[str, dict[str, list[str]]] = {}
+    for target, edges_in in sorted(reverse_adj.items()):
+        by_type: dict[str, list[str]] = {}
+        for e in sorted(edges_in, key=lambda x: x.from_symbol):
+            by_type.setdefault(e.type, []).append(e.from_symbol)
+        reverse_graph_out[target] = by_type
+
     return {
         "schema_version": "final-v1",
         "graph": {
             "nodes": graph_nodes,
             "edges": graph_edges,
         },
+        "reverse_graph": reverse_graph_out,
         "analysis": {
             "changed_entities": changed_entities_out,
             "impacted_entities": impacted_entities_out,
@@ -969,6 +1437,7 @@ def _assemble(
         },
         "subsystems": subsystems,
         "change_set": change_set_out,
+        "route_surface": route_diffs or [],
         "audit": {
             "dropped_fields": dropped_fields,
         },
@@ -999,11 +1468,13 @@ def extract_file_ir(
     spring_summary = _build_spring_summary(symbols)
 
     changed_symbols: list[ChangedSymbol] = []
+    route_diffs: list[dict] = []
     if old_source is not None:
         _, old_symbols, _ = _extract_symbols(old_source, rel_path)
         changed_symbols = _diff_symbols(old_symbols, symbols)
+        route_diffs = _diff_routes(old_symbols, symbols)
 
-    return _assemble(symbols, relations, changed_symbols, spring_summary)
+    return _assemble(symbols, relations, changed_symbols, spring_summary, route_diffs)
 
 
 def build_repo_ir(
@@ -1024,6 +1495,7 @@ def build_repo_ir(
     all_symbols: list[SymbolRecord] = []
     all_relations: list[RelationEdge] = []
     all_changed: list[ChangedSymbol] = []
+    all_route_diffs: list[dict] = []
 
     for rel_path in sorted(file_paths):
         abs_path = root / rel_path
@@ -1042,6 +1514,7 @@ def build_repo_ir(
         if old_source is not None:
             _, old_symbols, _ = _extract_symbols(old_source, rel_path)
             all_changed.extend(_diff_symbols(old_symbols, symbols))
+            all_route_diffs.extend(_diff_routes(old_symbols, symbols))
         elif since:
             for sym in symbols:
                 all_changed.append(ChangedSymbol(
@@ -1065,7 +1538,8 @@ def build_repo_ir(
             seen.add(key)
             unique_relations.append(e)
 
-    return _assemble(all_symbols, unique_relations, all_changed, spring_summary)
+    all_route_diffs_sorted = sorted(all_route_diffs, key=lambda d: d["symbol"])
+    return _assemble(all_symbols, unique_relations, all_changed, spring_summary, all_route_diffs_sorted)
 
 
 # ---------------------------------------------------------------------------

@@ -381,27 +381,27 @@ def _impact_descriptions(
 
     if changed_type in _REPO_ARTIFACT_TYPES:
         items.append(_impact_item(
-            f"{domain} persistence may be affected (inferred from path)" if domain else "persistence may be affected (inferred from path)",
-            f"{changed_class} classified as repository from path",
+            f"{domain} persistence layer modified" if domain else "persistence layer modified",
+            f"{changed_class} classified as {changed_type} (artifact_type evidence)",
             certainty,
         ))
     elif changed_type in _SERVICE_ARTIFACT_TYPES:
         if end_state == "DB write":
             items.append(_impact_item(
-                f"{domain} persistence may be affected (repository with DB write in path)" if domain else "persistence may be affected (repository with DB write in path)",
-                f"{changed_class} delegates to repository with DB write",
+                f"{domain} service layer: DB write in call path" if domain else "service layer: DB write in call path",
+                f"{changed_class} delegates to repository with DB write (code evidence)",
                 certainty,
             ))
         else:
             items.append(_impact_item(
-                f"{domain} behavior may change" if domain else "behavior may change",
-                f"{changed_class} is a service in path",
+                f"{domain} service layer modified" if domain else "service layer modified",
+                f"{changed_class} is a service (artifact_type={changed_type})",
                 certainty,
             ))
     else:
         items.append(_impact_item(
-            f"{domain} behavior may change" if domain else "behavior may change",
-            f"{changed_class} is in path",
+            f"{domain} component modified" if domain else "component modified",
+            f"{changed_class} found in traced call path (artifact_type={changed_type})",
             certainty,
         ))
 
@@ -440,14 +440,14 @@ def _impact_descriptions_for_controller(
                 domain = d
                 break
         items.append(_impact_item(
-            f"{domain} persistence may be affected (repository with DB write in path)" if domain else "data persistence may be affected (repository with DB write in path)",
-            "repository with DB write detected in path",
+            f"{domain} persistence layer: repository with DB write in call path" if domain else "persistence layer: repository with DB write in call path",
+            "repository with DB write detected in traced call path (code evidence)",
             certainty,
         ))
     else:
         items.append(_impact_item(
-            "request handler behavior may change",
             "controller entry point modified",
+            "controller entry point is in changed files (direct diff evidence)",
             certainty,
         ))
 

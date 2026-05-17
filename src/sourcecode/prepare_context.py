@@ -539,23 +539,23 @@ def _read_code_signal_evidence(root: Path, file_path: str, artifact_type: str) -
 
 
 _ARTIFACT_CHANGE_EFFECT: dict[str, str] = {
-    "entrypoint":     "may affect application startup, CLI entry, or framework bootstrap — all request flows may be affected (inferred from role)",
-    "controller":     "may alter HTTP routing, API contract, or response shape — API consumers may be affected (inferred from role)",
-    "service":        "may change business rules, transaction scope, or orchestration logic — callers and dependents may be affected (inferred from role)",
-    "repository":     "may modify persistence queries or data access patterns — verify data consistency and service layer (inferred from role)",
-    "mapper":         "may alter SQL-to-object binding or query templates — data shape and repositories may be affected (inferred from role)",
-    "security":       "may change authentication flow, access control rules, or session handling — all secured endpoints may be affected (inferred from role)",
-    "spring_config":  "may modify bean wiring, datasource, or framework-wide settings — wired beans potentially affected (inferred from role)",
-    "spring_profile": "may change environment-specific overrides — behavior may differ per active profile (inferred from role)",
-    "config":         "may adjust configuration values — all modules reading this config may be affected (inferred from role)",
-    "build_manifest": "changes dependencies, plugins, or project structure — compile-time and runtime classpath affected",
-    "db_migration":   "modifies database schema — existing queries, mappings, and constraints may break",
-    "domain_model":   "may alter entity structure — may cascade to repositories, DTOs, serializers, and mappers (inferred from role)",
-    "dto":            "may change data transfer contract — serialization and API consumers may break (inferred from role)",
-    "test":           "modifies test coverage or test behavior — no production code affected",
-    "documentation":  "updates documentation only — no runtime impact",
-    "ide_noise":      "IDE/tooling artifact — no application impact",
-    "source":         "modifies application source — artifact role derived from file path structure",
+    "entrypoint":     "application entrypoint (framework bootstrap / CLI handler)",
+    "controller":     "HTTP routing layer (request-to-handler mapping)",
+    "service":        "business logic layer (@Service component)",
+    "repository":     "data access layer (persistence queries / ORM)",
+    "mapper":         "SQL-object mapping layer (MyBatis mapper / query template)",
+    "security":       "security component (authentication / access control configuration)",
+    "spring_config":  "Spring @Configuration class (bean definitions / datasource wiring)",
+    "spring_profile": "Spring profile override (environment-specific configuration)",
+    "config":         "configuration file (application properties / environment values)",
+    "build_manifest": "build manifest (dependency and plugin configuration)",
+    "db_migration":   "database schema migration (DDL change pending execution)",
+    "domain_model":   "domain entity (@Entity / value object)",
+    "dto":            "data transfer object (serialization contract)",
+    "test":           "test file (no production code modified)",
+    "documentation":  "documentation file (no runtime impact)",
+    "ide_noise":      "IDE/tooling artifact (no application impact)",
+    "source":         "application source (artifact role requires annotation inspection)",
 }
 
 # Maps frontend symptom keywords → backend terms likely to contain the root cause.
@@ -1037,7 +1037,7 @@ class TaskContextBuilder:
             _pr_review_hotspots = sorted(
                 [f for f, cls in _pr_changed_cls.items()
                  if not cls["is_noise"] and cls["artifact_type"] != "build_manifest"],
-                key=lambda f: (_delta_impact_score_per_file.get(f) or {}).get("score", 0.0),
+                key=lambda f: (_delta_impact_score_per_file.get(f) or {}).get("_rank_score", 0.0),
                 reverse=True,
             )[:8]
 
@@ -1123,33 +1123,29 @@ class TaskContextBuilder:
                 _has_code_ev = any(e["type"] in ("annotation", "import") for e in _evidence)
                 _has_symbol_ev = any(e["type"] == "symbol" for e in _evidence)
                 _role_basis = "annotation" if _has_code_ev else ("symbol" if _has_symbol_ev else "git_diff_only")
-                _cls_conf = _f_cls["confidence"]
                 _role_obj = {
-                    "type": "inferred",
-                    "confidence": "medium" if (_has_code_ev or (_has_symbol_ev and _cls_conf == "high")) else "low",
                     "basis": _role_basis,
+                    "has_annotation_signal": _has_code_ev,
+                    "has_symbol_signal": _has_symbol_ev,
                 }
 
-                # File confidence: from structured impact entry
-                _impact_entry = _delta_impact_score_per_file.get(_f) or {}
-                _f_conf = _impact_entry.get("confidence", "low")
                 _diff_source = (
                     DiffSourceType.GIT_RANGE.value if _f in _committed_set
                     else DiffSourceType.WORKTREE_UNSTAGED.value if _f in _uncommitted_set
                     else "unknown"
                 )
+                _impact_entry = _delta_impact_score_per_file.get(_f) or {}
                 _entry = {
                     "path": _f,
                     "diff_source": _diff_source,
                     "role": _role_obj,
-                    "confidence": _f_conf,
                     "artifact_type": _f_atype,
                     "evidence": _evidence,
                     "change_effect": {
-                        "statement": _ARTIFACT_CHANGE_EFFECT.get(_f_atype, "may modify application logic (role inferred from path)"),
-                        "truth_level": "inferred",
-                        "confidence": _role_obj["confidence"],
+                        "statement": _ARTIFACT_CHANGE_EFFECT.get(_f_atype, "application source (artifact role requires annotation inspection)"),
+                        "classification_method": _f_cls.get("confidence", "low"),
                     },
+                    "evidence_completeness": _impact_entry.get("evidence", {}),
                 }
                 _pr_runtime_changes.append(_entry)
                 # Split committed vs uncommitted — never merged
@@ -2336,17 +2332,10 @@ class TaskContextBuilder:
                 return "service"   # annotation-confirmed — not "core_service" (overclaim)
             return "unclassified"   # no role claim without evidence
 
-        def _score_to_confidence(score: float) -> str:
-            if score >= 0.60:
-                return "high"
-            if score >= 0.40:
-                return "medium"
-            return "low"
-
         def _structured_why(path: str, atype: str, module: str, role: str, risk_areas: list[str], cls_confidence: str = "low") -> str:
             area = _classify_impact_area(path, risk_areas, atype)
             prop = _PROPAGATION_RISK.get(atype, "low") if atype != "source" else "unknown"
-            effect = _CHANGE_EFFECT.get(atype, "may modify application logic (role unconfirmed)")
+            effect = _CHANGE_EFFECT.get(atype, "application source (artifact role requires annotation inspection)")
             parts = [f"artifact_type: {atype}", f"classification_confidence: {cls_confidence}"]
             # Only emit role/area/propagation when there is confirmed evidence (not source/unclassified)
             if role not in ("unclassified",):
@@ -2431,8 +2420,7 @@ class TaskContextBuilder:
             role = _role_in_system(path, atype, in_ep)
             cls_conf = cls.get("confidence", "low")
             why_str = _structured_why(path, atype, module, role, cls["risk_areas"], cls_conf)
-            confidence = _score_to_confidence(score)
-            reason = f"changed since {ref_label} | artifact: {atype} | confidence: {confidence}"
+            reason = f"changed since {ref_label} | artifact: {atype}"
 
             relevant.append(RelevantFile(path=path, role=role, score=round(score, 2), reason=reason, why=why_str))
             why[path] = why_str
@@ -2485,7 +2473,7 @@ class TaskContextBuilder:
             why_str = _structured_why(path, rel_atype, _extract_ddd_domain(path), role, rel_cls["risk_areas"], rel_conf)
             why_str += f" | pulled_by: type-aware expansion from {ctx_type} '{ctx_val}'"
             why_str += f" | triggered_by: {', '.join(triggers[:3])}"
-            reason = f"expansion: {ctx_type} '{ctx_val}' | artifact: {rel_atype} | confidence: {_score_to_confidence(rel_score)}"
+            reason = f"expansion: {ctx_type} '{ctx_val}' | artifact: {rel_atype}"
             related.append((rel_score, path, RelevantFile(
                 path=path, role=role, score=rel_score, reason=reason, why=why_str
             )))
@@ -2595,7 +2583,7 @@ class TaskContextBuilder:
                     _why_str += f" | pulled_by: hop-{_hop_num} import from {Path(_seed_path).name}"
                     _reason = (
                         f"hop-{_hop_num} import-dependent of {Path(_seed_path).name}"
-                        f" ({_seed_atype}) | confidence: {_score_to_confidence(_dep_score)}"
+                        f" ({_seed_atype})"
                     )
                     why[_dep_path] = _why_str
                     # Tests import production code but are not structural dependencies —
@@ -2670,18 +2658,18 @@ class TaskContextBuilder:
                 0.02
             )
             _raw_score = round(min(1.0, _base * 0.50 + _sec_w + _fw + _fanout + _ctw), 3)
+            _caller_count = _downstream_count.get(_path, 0)
             impact_score_per_file[_path] = {
-                "score": _raw_score,
-                "confidence": _score_to_confidence(_raw_score),
-                "score_breakdown": {
-                    "artifact_base": round(_base * 0.50, 3),
-                    "security_weight": _sec_w,
-                    "framework_weight": _fw,
-                    "fanout_weight": round(_fanout, 3),
-                    "change_type_weight": _ctw,
-                },
+                "_rank_score": _raw_score,  # internal ranking only — not a confidence claim
                 "change_types": sorted(_file_ctypes),
                 "diff_severity": _diff_sev,
+                "evidence": {
+                    "has_reverse_edges": _caller_count > 0,
+                    "reverse_edge_count": _caller_count,
+                    "has_route_diff": _diff_sev == "api_change",
+                    "has_security_diff": _diff_sev == "security_change",
+                    "has_wiring_evidence": _atype in {"spring_config", "security"} and _cls.get("confidence") == "high",
+                },
             }
 
         _CT_ORDER = ["security_change", "behavioral_change", "structural_change",
@@ -2714,24 +2702,29 @@ class TaskContextBuilder:
                     changed_subsystems.append(_subsys)
                     _seen_subsys.add(_subsys)
 
-        # behavioral_changes: gated on semantic diff evidence (api_change/security_change),
-        # NOT on artifact type alone. Avoids false behavioral claims for validator/util files.
-        behavioral_changes: list[str] = [
-            f"{Path(_p).name}: {_CHANGE_EFFECT.get(_cls['artifact_type'], 'may modify application logic')}"
-            for _p, _cls in classifications.items()
-            if not _cls["is_noise"]
-            and diff_severities.get(_p, "unknown") in ("api_change", "security_change")
-        ]
+        # behavioral_changes: only emitted when graph evidence exists (import edges found).
+        # Without reverse dependency graph, we cannot make traceable structural claims.
+        # Also gated on semantic diff evidence (api_change/security_change) per file.
+        _has_graph_ev = bool(graph_edges)
+        behavioral_changes: list[str] = (
+            [
+                f"{Path(_p).name}: {_CHANGE_EFFECT.get(_cls['artifact_type'], 'application source (artifact role requires annotation inspection)')} [diff_severity={diff_severities.get(_p)}]"
+                for _p, _cls in classifications.items()
+                if not _cls["is_noise"]
+                and diff_severities.get(_p, "unknown") in ("api_change", "security_change")
+            ]
+            if _has_graph_ev else []
+        )
 
         def _runtime_impact(tc: dict[str, int]) -> list[str]:
             _ri: list[str] = []
             # Only emit claims that are evidence-backed (annotation-confirmed roles)
             if "entrypoint" in tc:
-                _ri.append("Entrypoint-classified file modified — may require full context restart before deploy")
+                _ri.append("Entrypoint-classified file modified — restart required before deploying to production")
             if "spring_config" in tc:
-                _ri.append("Spring config-classified file modified — wired beans may be rewired on restart")
+                _ri.append("Spring @Configuration-classified file modified — bean context rebuild required on restart")
             if "security" in tc:
-                _ri.append("Security-classified file modified — secured endpoints may be affected after restart")
+                _ri.append("Security-classified file modified — inspect authentication and access control wiring")
             if "db_migration" in tc:
                 _ri.append("Database schema migration pending — execute before deploying application")
             # service transactional claim: only if @Service annotation confirmed (not source/unclassified)
