@@ -1622,6 +1622,11 @@ def prepare_context_cmd(
         "--symptom",
         help="(fix-bug) Keyword hint for the bug: boosts matching files and surfaces related code notes.",
     ),
+    format: Optional[str] = typer.Option(
+        None,
+        "--format",
+        help="Output format: json (default) | github-comment (Markdown PR comment for review-pr task)",
+    ),
 ) -> None:
     """Task-specific context for AI coding agents.
 
@@ -1895,7 +1900,12 @@ def prepare_context_cmd(
     if llm_prompt:
         out["llm_prompt"] = builder.render_prompt(output)
 
-    _pc_content = json.dumps(out, indent=2, ensure_ascii=False)
+    if format == "github-comment" and task == "review-pr":
+        from sourcecode.pr_comment_renderer import render_github_comment
+        _pc_content = render_github_comment(out)
+    else:
+        _pc_content = json.dumps(out, indent=2, ensure_ascii=False)
+
     if output_path is not None:
         output_path.write_text(_pc_content, encoding="utf-8")
     else:

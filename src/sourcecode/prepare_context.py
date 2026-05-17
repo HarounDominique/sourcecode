@@ -1001,15 +1001,25 @@ class TaskContextBuilder:
             if _security_files:
                 _pr_security_impact = {
                     "affected_resources": _security_files,
+                    "epistemic_level": "STRUCTURAL SIGNAL",
+                    "basis": "files classified as security artifact type (name/annotation pattern)",
                     "risk_level": "high",
+                    "risk_epistemic_level": "INFERRED (LOW CONFIDENCE)",
                 }
             if _transaction_files:
                 _pr_transactional_impact = {
                     "affected_transactions": _transaction_files,
+                    "epistemic_level": "STRUCTURAL SIGNAL",
+                    "basis": "files classified as service/business_logic artifact type",
                     "risk": "possible transaction boundary change",
+                    "risk_epistemic_level": "INFERRED (LOW CONFIDENCE)",
                 }
             if _config_files:
-                _pr_configuration_impact = {"changed_configs": _config_files}
+                _pr_configuration_impact = {
+                    "changed_configs": _config_files,
+                    "epistemic_level": "FACT",
+                    "basis": "files present in diff",
+                }
 
             # Test coverage risk scoped to changed source files only
             _changed_src = [
@@ -1026,6 +1036,8 @@ class TaskContextBuilder:
             _pr_test_coverage_risk = {
                 "changed_files_without_tests": _untested_changed[:10],
                 "risk_level": _test_risk_level,
+                "epistemic_level": "INFERRED (LOW CONFIDENCE)",
+                "basis": f"{len(_untested_changed)} changed source files have no matching test file by stem",
             }
 
             # Pre-classify changed files once — reused for hotspots, order, and runtime/build split
@@ -1144,6 +1156,10 @@ class TaskContextBuilder:
                     "change_effect": {
                         "statement": _ARTIFACT_CHANGE_EFFECT.get(_f_atype, "application source (artifact role requires annotation inspection)"),
                         "classification_method": _f_cls.get("confidence", "low"),
+                        "epistemic_level": (
+                            "STRUCTURAL SIGNAL" if _f_cls.get("confidence", "low") == "high"
+                            else "INFERRED (LOW CONFIDENCE)"
+                        ),
                     },
                     "evidence_completeness": _impact_entry.get("evidence", {}),
                 }
@@ -1287,7 +1303,8 @@ class TaskContextBuilder:
                     relevant_files = sorted(_synonym_boosted, key=lambda rf: -rf.score)
                     _synonym_note = (
                         f"Frontend concept detected ({', '.join(_frontend_kws)}). "
-                        "Boosted backend service-layer and interceptor files as likely root cause."
+                        "Backend service-layer and interceptor files boosted by symptom keyword match "
+                        "[INFERRED (LOW CONFIDENCE) — pattern heuristic, not structural proof]."
                     )
                     symptom_note = _synonym_note
 
@@ -2706,9 +2723,14 @@ class TaskContextBuilder:
         # Without reverse dependency graph, we cannot make traceable structural claims.
         # Also gated on semantic diff evidence (api_change/security_change) per file.
         _has_graph_ev = bool(graph_edges)
-        behavioral_changes: list[str] = (
+        behavioral_changes: list[dict] = (
             [
-                f"{Path(_p).name}: {_CHANGE_EFFECT.get(_cls['artifact_type'], 'application source (artifact role requires annotation inspection)')} [diff_severity={diff_severities.get(_p)}]"
+                {
+                    "statement": f"{Path(_p).name}: {_CHANGE_EFFECT.get(_cls['artifact_type'], 'application source')}",
+                    "diff_severity": diff_severities.get(_p),
+                    "epistemic_level": "STRUCTURAL SIGNAL",
+                    "basis": "diff_severity in (api_change, security_change) with import-graph evidence present",
+                }
                 for _p, _cls in classifications.items()
                 if not _cls["is_noise"]
                 and diff_severities.get(_p, "unknown") in ("api_change", "security_change")
@@ -2716,26 +2738,52 @@ class TaskContextBuilder:
             if _has_graph_ev else []
         )
 
-        def _runtime_impact(tc: dict[str, int]) -> list[str]:
-            _ri: list[str] = []
-            # Only emit claims that are evidence-backed (annotation-confirmed roles)
+        def _runtime_impact(tc: dict[str, int]) -> list[dict]:
+            _ri: list[dict] = []
             if "entrypoint" in tc:
-                _ri.append("Entrypoint-classified file modified — restart required before deploying to production")
+                _ri.append({
+                    "signal": "entrypoint-classified file modified",
+                    "epistemic_level": "STRUCTURAL SIGNAL",
+                    "basis": "artifact_type=entrypoint confirmed by annotation or naming evidence",
+                })
             if "spring_config" in tc:
-                _ri.append("Spring @Configuration-classified file modified — bean context rebuild required on restart")
+                _ri.append({
+                    "signal": "Spring @Configuration-classified file modified",
+                    "epistemic_level": "STRUCTURAL SIGNAL",
+                    "basis": "@Configuration annotation detected in file content",
+                })
             if "security" in tc:
-                _ri.append("Security-classified file modified — inspect authentication and access control wiring")
+                _ri.append({
+                    "signal": "security-classified file modified",
+                    "epistemic_level": "STRUCTURAL SIGNAL",
+                    "basis": "artifact_type=security confirmed by annotation or naming evidence",
+                })
             if "db_migration" in tc:
-                _ri.append("Database schema migration pending — execute before deploying application")
-            # service transactional claim: only if @Service annotation confirmed (not source/unclassified)
+                _ri.append({
+                    "signal": "database schema migration file present in diff",
+                    "epistemic_level": "FACT",
+                    "basis": "artifact_type=db_migration (file extension/naming convention)",
+                })
             _svc = tc.get("service", 0)
             if _svc >= 2:
-                _ri.append(f"{_svc} @Service-annotated file(s) modified — verify business logic consistency")
+                _ri.append({
+                    "signal": f"{_svc} @Service-annotated file(s) modified",
+                    "epistemic_level": "STRUCTURAL SIGNAL",
+                    "basis": "@Service annotation detected in file content",
+                })
             _repo = tc.get("repository", 0) + tc.get("mapper", 0)
             if _repo > 0:
-                _ri.append(f"{_repo} persistence-classified component(s) modified — verify data access queries")
+                _ri.append({
+                    "signal": f"{_repo} persistence-classified component(s) modified",
+                    "epistemic_level": "STRUCTURAL SIGNAL",
+                    "basis": "artifact_type in (repository, mapper) confirmed by annotation evidence",
+                })
             if "build_manifest" in tc:
-                _ri.append("Build manifest modified — dependency resolution required before compile")
+                _ri.append({
+                    "signal": "build manifest modified",
+                    "epistemic_level": "FACT",
+                    "basis": "artifact_type=build_manifest (pom.xml/build.gradle/package.json naming)",
+                })
             return _ri
 
         _max_hop = max((e["hop"] for e in graph_edges), default=0)

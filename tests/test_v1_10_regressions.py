@@ -715,5 +715,5 @@ class TestBehavioralImpact:
         for imp in result[0]["impact"]:
             assert ".java" not in imp["statement"], f"Impact should not reference filenames: {imp}"
             assert "Repository" not in imp["statement"], f"Impact should not use class names: {imp}"
-            assert imp["certainty"] in ("low", "medium", "high")
+            assert imp["epistemic_level"] in ("FACT", "STRUCTURAL SIGNAL", "INFERRED (LOW CONFIDENCE)", "OMITTED")
             assert imp["support"]

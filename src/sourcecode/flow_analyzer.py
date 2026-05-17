@@ -33,43 +33,57 @@ _METHOD_NAME_RE = re.compile(
     r'(\w+)\s*\(',
 )
 
-# Runtime signal patterns: (compiled_regex, note_text)
-# Only signals with explicit code evidence — no inference.
-# Three categories: condition | branch | async
-_RUNTIME_SIGNALS: list[tuple[re.Pattern, str]] = [
+# Runtime signal patterns: (compiled_regex, note_text, epistemic_level)
+# epistemic_level follows the 4-value contract:
+#   STRUCTURAL SIGNAL  — annotation or type-system evidence directly observed in source
+#   INFERRED (LOW CONFIDENCE) — heuristic code-pattern match; no full structural proof
+_RUNTIME_SIGNALS: list[tuple[re.Pattern, str, str]] = [
     # ── Conditional / auth guards ─────────────────────────────────────────────
     (re.compile(r'@PreAuthorize|@Secured|@RolesAllowed', re.IGNORECASE),
-     "condition: authorization check present (@PreAuthorize / @Secured)"),
+     "condition: authorization check present (@PreAuthorize / @Secured)",
+     "STRUCTURAL SIGNAL"),
     (re.compile(r'isAuthenticated\(\)|hasRole\(|hasAuthority\(|SecurityContextHolder', re.IGNORECASE),
-     "condition: reads authentication context"),
+     "condition: reads authentication context",
+     "STRUCTURAL SIGNAL"),
     (re.compile(r'featureFlag|FeatureToggle|\.isEnabled\s*\(|\.isActive\s*\(', re.IGNORECASE),
-     "condition: feature flag gates execution"),
+     "condition: feature flag gates execution",
+     "INFERRED (LOW CONFIDENCE)"),
     # Null/empty guard with early return — matches if (...null/empty...) return/throw on same line
     (re.compile(r'if\s*\([^)]*(?:==\s*null|!=\s*null|isEmpty\s*\(\)|isBlank\s*\(\))[^)]*\)'
                 r'\s*(?:\{?\s*)?(?:return|throw)\b', re.IGNORECASE),
-     "condition: null/empty guard with early return"),
+     "condition: null/empty guard with early return",
+     "STRUCTURAL SIGNAL"),
 
     # ── Optional execution / branching ────────────────────────────────────────
     (re.compile(r'@Cacheable|@CacheEvict|@CachePut', re.IGNORECASE),
-     "branch: Spring cache may short-circuit downstream call"),
+     "branch: Spring cache annotation present — downstream call may be short-circuited",
+     "STRUCTURAL SIGNAL"),
     (re.compile(r'\.getIfPresent\s*\(|cache\.get\s*\(|cacheManager\.', re.IGNORECASE),
-     "branch: manual cache lookup may short-circuit"),
+     "branch: manual cache lookup detected — downstream call may be short-circuited",
+     "INFERRED (LOW CONFIDENCE)"),
     (re.compile(r'Optional\s*<|\.orElseThrow\s*\(|\.orElseGet\s*\(|\.orElse\s*\(', re.IGNORECASE),
-     "branch: result may be absent (Optional)"),
+     "branch: Optional type in use — result may be absent",
+     "STRUCTURAL SIGNAL"),
 
     # ── Async / side effects ──────────────────────────────────────────────────
     (re.compile(r'@Async\b'),
-     "async: runs in separate thread (@Async)"),
+     "async: @Async annotation present — runs in separate thread",
+     "STRUCTURAL SIGNAL"),
     (re.compile(r'CompletableFuture|\.supplyAsync\s*\(|\.runAsync\s*\('),
-     "async: non-blocking future-based execution"),
+     "async: CompletableFuture detected — non-blocking execution",
+     "STRUCTURAL SIGNAL"),
     (re.compile(r'\basync\s+def\b|\bawait\b', re.IGNORECASE),
-     "async: non-blocking (async/await)"),
+     "async: async/await detected — non-blocking execution",
+     "STRUCTURAL SIGNAL"),
     (re.compile(r'publishEvent\s*\(|applicationEventPublisher|eventPublisher\.', re.IGNORECASE),
-     "async: Spring application event emitted"),
+     "async: Spring application event emitted",
+     "STRUCTURAL SIGNAL"),
     (re.compile(r'kafkaTemplate\.|KafkaProducer|@KafkaListener', re.IGNORECASE),
-     "async: Kafka message produced"),
+     "async: Kafka producer detected",
+     "STRUCTURAL SIGNAL"),
     (re.compile(r'rabbitTemplate\.|amqpTemplate\.|@RabbitListener', re.IGNORECASE),
-     "async: RabbitMQ message sent"),
+     "async: RabbitMQ producer detected",
+     "STRUCTURAL SIGNAL"),
 ]
 
 
@@ -98,18 +112,19 @@ def _read_safe(root: Path, rel_path: str) -> str:
         return ""
 
 
-def _collect_runtime_notes(content: str, lang: str) -> list[str]:
+def _collect_runtime_notes(content: str, lang: str) -> list[dict]:
     """Scan comment-stripped content for explicit runtime behavior signals.
 
     Returns only notes backed by a direct code pattern match.
+    Each entry: {note: str, epistemic_level: str}.
     Returns [] when no signals are found.
     """
     clean = _strip_comments(content, lang)
-    notes: list[str] = []
+    notes: list[dict] = []
     seen: set[str] = set()
-    for pattern, note in _RUNTIME_SIGNALS:
+    for pattern, note, epistemic_level in _RUNTIME_SIGNALS:
         if note not in seen and pattern.search(clean):
-            notes.append(note)
+            notes.append({"note": note, "epistemic_level": epistemic_level})
             seen.add(note)
     return notes
 
@@ -348,7 +363,10 @@ def analyze_execution_paths(
             "entry_point": {"step": entry_point_str, "notes": entry_notes},
             "path": path_items,
             "end_state": _detect_end_state([item["step"] for item in path_items]),
+            "end_state_epistemic_level": "INFERRED (LOW CONFIDENCE)",
         })
+
+    return result
 
 
 # ── Behavioral impact helpers ─────────────────────────────────────────────────
@@ -363,9 +381,13 @@ def _domain_from_class(class_name: str) -> str:
     return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", stripped).strip().lower()
 
 
-def _impact_item(statement: str, support: str, certainty: str) -> dict:
-    truth_level = "observed" if certainty == "high" else "inferred"
-    return {"statement": statement, "support": support, "certainty": certainty, "truth_level": truth_level}
+def _impact_item(statement: str, support: str, certainty: str, *, epistemic_level: Optional[str] = None) -> dict:
+    if epistemic_level is None:
+        if certainty in ("high", "medium"):
+            epistemic_level = "STRUCTURAL SIGNAL"
+        else:
+            epistemic_level = "INFERRED (LOW CONFIDENCE)"
+    return {"statement": statement, "support": support, "epistemic_level": epistemic_level}
 
 
 def _impact_descriptions(
@@ -449,6 +471,7 @@ def _impact_descriptions_for_controller(
             "controller entry point modified",
             "controller entry point is in changed files (direct diff evidence)",
             certainty,
+            epistemic_level="FACT",
         ))
 
     if re.search(r"@PreAuthorize|@Secured|@RolesAllowed|hasRole\(|isAuthenticated", ctrl_clean, re.IGNORECASE):
@@ -541,6 +564,7 @@ def analyze_behavioral_impact(
             "affected_path": affected_path,
             "impact": _impact_descriptions_for_controller(affected_path, end_state, ctrl_clean, evidence_level),
             "end_state": end_state,
+            "end_state_epistemic_level": "INFERRED (LOW CONFIDENCE)",
             "confidence": confidence,
             "evidence_level": evidence_level,
             "trace": trace,
@@ -638,6 +662,7 @@ def analyze_behavioral_impact(
                 "affected_path": affected_path,
                 "impact": _impact_descriptions(changed_class, changed_type, end_state, ctrl_clean, evidence_level),
                 "end_state": end_state,
+                "end_state_epistemic_level": "INFERRED (LOW CONFIDENCE)",
                 "confidence": confidence,
                 "evidence_level": evidence_level,
                 "trace": trace,
