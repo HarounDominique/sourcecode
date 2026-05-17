@@ -2,7 +2,7 @@
 
 **Deterministic, behavior-aware codebase context for AI agents and PR review.**
 
-![Version](https://img.shields.io/badge/version-1.30.14-blue)
+![Version](https://img.shields.io/badge/version-1.30.15-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
@@ -38,7 +38,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.30.14
+# sourcecode 1.30.15
 ```
 
 ---
@@ -134,6 +134,7 @@ sourcecode prepare-context TASK [PATH] [OPTIONS]
 |--------|-------------|
 | `--since REF` | Git ref for `delta` task (e.g. `HEAD~3`, `main`, `v1.2.0`). Required for `delta`; ignored for other tasks. |
 | `--symptom TEXT` | *(fix-bug only)* Keyword hint for the bug — boosts matching files and surfaces related code notes. |
+| `--format TEXT` | Output format: `json` (default) \| `github-comment` (Markdown PR comment, `review-pr` only). |
 | `--llm-prompt` | Append a ready-to-use LLM prompt to the output. |
 | `--dry-run` | Show what would be analyzed without running it. |
 | `--copy` / `-c` | Copy output to clipboard after a successful run. |
@@ -154,6 +155,9 @@ sourcecode prepare-context delta . --since main
 
 # Onboard with a ready-to-paste LLM prompt
 sourcecode prepare-context onboard --llm-prompt
+
+# PR analysis as a GitHub Markdown comment (paste directly into PR)
+sourcecode prepare-context review-pr --since main --format github-comment
 
 # List all tasks
 sourcecode prepare-context --task-help
@@ -225,22 +229,25 @@ sourcecode prepare-context review-pr
       "name": "Order",
       "entry_point": {
         "step": "OrderController.createOrder",
-        "notes": ["condition: authorization check present (@PreAuthorize / @Secured)"]
+        "notes": [
+          { "note": "condition: authorization check present (@PreAuthorize / @Secured)",
+            "epistemic_level": "STRUCTURAL SIGNAL" }
+        ]
       },
       "path": [
         {
           "step": "ShippingService.process",
           "notes": [
-            "branch: Spring cache may short-circuit downstream call",
-            "async: runs in separate thread (@Async)"
+            { "note": "branch: Spring cache annotation present — downstream call may be short-circuited",
+              "epistemic_level": "STRUCTURAL SIGNAL" },
+            { "note": "async: @Async annotation present — runs in separate thread",
+              "epistemic_level": "STRUCTURAL SIGNAL" }
           ]
         },
-        {
-          "step": "OrderRepository.save",
-          "notes": []
-        }
+        { "step": "OrderRepository.save", "notes": [] }
       ],
-      "end_state": "DB write"
+      "end_state": "DB write",
+      "end_state_epistemic_level": "INFERRED (LOW CONFIDENCE)"
     }
   ]
 }
@@ -255,17 +262,33 @@ sourcecode prepare-context review-pr
 
 **Runtime signals detected per step:**
 
-| Signal | Example code | Note emitted |
-|--------|-------------|--------------|
-| Auth guard | `@PreAuthorize`, `@Secured`, `isAuthenticated()` | `condition: authorization check present` |
-| Feature flag | `featureFlag.isEnabled()`, `FeatureToggle` | `condition: feature flag gates execution` |
-| Null/empty guard | `if (x == null) return` | `condition: null/empty guard with early return` |
-| Spring cache | `@Cacheable`, `@CacheEvict` | `branch: Spring cache may short-circuit downstream call` |
-| Optional absence | `Optional<>`, `.orElseThrow()` | `branch: result may be absent (Optional)` |
-| Async thread | `@Async`, `CompletableFuture` | `async: runs in separate thread (@Async)` |
-| Event publishing | `publishEvent()`, `applicationEventPublisher` | `async: Spring application event emitted` |
-| Kafka | `kafkaTemplate.send()` | `async: Kafka message produced` |
-| RabbitMQ | `rabbitTemplate.send()` | `async: RabbitMQ message sent` |
+| Signal | Example code | Note emitted | Epistemic level |
+|--------|-------------|--------------|-----------------|
+| Auth guard | `@PreAuthorize`, `@Secured` | `condition: authorization check present (@PreAuthorize / @Secured)` | `STRUCTURAL SIGNAL` |
+| Auth context read | `isAuthenticated()`, `SecurityContextHolder` | `condition: reads authentication context` | `STRUCTURAL SIGNAL` |
+| Feature flag | `featureFlag.isEnabled()`, `FeatureToggle` | `condition: feature flag gates execution` | `INFERRED (LOW CONFIDENCE)` |
+| Null/empty guard | `if (x == null) return` | `condition: null/empty guard with early return` | `STRUCTURAL SIGNAL` |
+| Spring cache | `@Cacheable`, `@CacheEvict` | `branch: Spring cache annotation present — downstream call may be short-circuited` | `STRUCTURAL SIGNAL` |
+| Manual cache | `cache.get()`, `cacheManager.` | `branch: manual cache lookup detected — downstream call may be short-circuited` | `INFERRED (LOW CONFIDENCE)` |
+| Optional absence | `Optional<>`, `.orElseThrow()` | `branch: Optional type in use — result may be absent` | `STRUCTURAL SIGNAL` |
+| Async thread | `@Async` | `async: @Async annotation present — runs in separate thread` | `STRUCTURAL SIGNAL` |
+| CompletableFuture | `CompletableFuture`, `.supplyAsync()` | `async: CompletableFuture detected — non-blocking execution` | `STRUCTURAL SIGNAL` |
+| Event publishing | `publishEvent()`, `applicationEventPublisher` | `async: Spring application event emitted` | `STRUCTURAL SIGNAL` |
+| Kafka | `kafkaTemplate.`, `KafkaProducer` | `async: Kafka producer detected` | `STRUCTURAL SIGNAL` |
+| RabbitMQ | `rabbitTemplate.`, `amqpTemplate.` | `async: RabbitMQ producer detected` | `STRUCTURAL SIGNAL` |
+
+**Epistemic contract:**
+
+Every output field in `review-pr` carries an explicit `epistemic_level`:
+
+| Level | Meaning |
+|-------|---------|
+| `FACT` | Directly observed in diff (file present, config changed) |
+| `STRUCTURAL SIGNAL` | Annotation or type-system evidence in source (`@Service`, `@Transactional`, injection) |
+| `INFERRED (LOW CONFIDENCE)` | Heuristic pattern match — no full structural proof |
+| `OMITTED` | Insufficient evidence — field not emitted |
+
+No field blends certainty levels without labeling. `end_state` (e.g. `"DB write"`) is always accompanied by `end_state_epistemic_level: "INFERRED (LOW CONFIDENCE)"` — it is a keyword-match heuristic, not an AST-verified fact.
 
 **Other `review-pr` output fields:**
 
@@ -273,9 +296,9 @@ sourcecode prepare-context review-pr
 |-------|-------------|
 | `review_hotspots` | Top changed files ranked by impact score |
 | `suggested_review_order` | Security → API → Service → Persistence → Config |
-| `security_impact` | Changed files touching the security surface |
-| `transactional_impact` | Files crossing transaction boundaries |
-| `test_coverage_risk` | Changed source files with no corresponding test |
+| `security_impact` | Changed security-classified files (`epistemic_level: STRUCTURAL SIGNAL`) + risk note (`INFERRED (LOW CONFIDENCE)`) |
+| `transactional_impact` | Changed service/business-logic files with possible transaction boundary effect |
+| `test_coverage_risk` | Changed source files with no corresponding test (`epistemic_level: INFERRED (LOW CONFIDENCE)`) |
 | `affected_modules` | DDD domain modules touched by the change |
 
 ---
