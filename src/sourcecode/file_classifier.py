@@ -84,16 +84,17 @@ _JAVA_ANNOTATION_RE = re.compile(r'@(RestController|Controller|Service|Repositor
 # (annotation_set, category, relevance, why_template)
 # Checked in priority order; first match wins.
 _JAVA_STEREOTYPE_RULES: list[tuple[frozenset, str, float, str]] = [
-    (frozenset({"EnableWebSecurity"}),               "security",        0.85, "Spring Security configuration"),
-    (frozenset({"RestController"}),                  "api_endpoint",    0.90, "Spring REST controller — defines HTTP API surface"),
-    (frozenset({"Controller", "RequestMapping"}),    "api_endpoint",    0.80, "Spring MVC controller"),
-    (frozenset({"Service", "Transactional"}),        "business_logic",  0.75, "Transactional service — business logic boundary"),
-    (frozenset({"Service"}),                         "business_logic",  0.65, "Spring service component"),
-    (frozenset({"Repository"}),                      "data_access",     0.65, "Spring repository — data access layer"),
-    (frozenset({"Mapper"}),                          "data_access",     0.65, "MyBatis mapper — SQL data access"),
-    (frozenset({"Configuration"}),                   "configuration",   0.70, "Spring configuration class"),
-    (frozenset({"Entity"}),                          "domain_model",    0.50, "JPA entity — domain model"),
-    (frozenset({"Data"}),                            "dto",             0.40, "Lombok DTO"),
+    (frozenset({"EnableWebSecurity"}),               "security",          0.85, "Spring Security configuration"),
+    (frozenset({"RestController"}),                  "api_endpoint",      0.90, "Spring REST controller — defines HTTP API surface"),
+    (frozenset({"Controller", "RequestMapping"}),    "api_endpoint",      0.80, "Spring MVC controller"),
+    (frozenset({"ControllerAdvice"}),                "exception_handler", 0.75, "Spring @ControllerAdvice — cross-cutting exception handling"),
+    (frozenset({"Service", "Transactional"}),        "business_logic",    0.75, "Transactional service — business logic boundary"),
+    (frozenset({"Service"}),                         "business_logic",    0.65, "Spring service component"),
+    (frozenset({"Repository"}),                      "data_access",       0.65, "Spring repository — data access layer"),
+    (frozenset({"Mapper"}),                          "data_access",       0.65, "MyBatis mapper — SQL data access"),
+    (frozenset({"Configuration"}),                   "configuration",     0.70, "Spring configuration class"),
+    (frozenset({"Entity"}),                          "domain_model",      0.50, "JPA entity — domain model"),
+    (frozenset({"Data"}),                            "dto",               0.40, "Lombok DTO"),
 ]
 
 # Categories produced by Java stereotype detection — used downstream to apply direct relevance

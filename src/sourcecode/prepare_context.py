@@ -2596,6 +2596,10 @@ class TaskContextBuilder:
             # These are INFERRED (LOW CONFIDENCE) — stem match, not annotation evidence.
             if any(kw in stem_lower for kw in ("validator", "validation")):
                 return "validation_component"
+            if any(kw in stem_lower for kw in ("filter", "interceptor", "aspect")):
+                return "runtime_filter"
+            if any(kw in stem_lower for kw in ("advice", "advise", "exceptionhandler", "errorhandler")):
+                return "exception_handler"
             if any(kw in stem_lower for kw in ("controller", "resource", "endpoint", "rest")):
                 return "external_interface"
             if any(kw in stem_lower for kw in ("service", "svc", "usecase", "facade")):

@@ -660,6 +660,116 @@ def _jndi_datasources(sm: "SourceMap") -> "Optional[list[dict[str, Any]]]":
     return datasources
 
 
+def _tiered_display_score(
+    pre_bonus_combined: float,
+    file_class: Any,
+    path: str,
+    entry_paths: set,
+    has_structural_signals: bool = False,
+) -> float:
+    """Evidence-tiered display score [0.0, 1.0].
+
+    Tiers enforce: strong evidence > medium evidence > filesystem/path only.
+    M3 sort bonuses must NOT be included in pre_bonus_combined — they are for
+    ordering only and must not inflate the displayed score.
+
+    Tier ceilings:
+      T1  confirmed production entrypoint           0.92–1.00
+      T2  entrypoint (weaker category)              0.80–0.91
+      T3  annotation-confirmed stereotype           0.40–0.90  (table-calibrated)
+      T4  framework import evidence                 0.55–0.79
+      T5  code definitions + imports                0.38–0.54
+      T6  build manifest / tooling / test           0.25–0.45
+      T7  path/filesystem signal only               0.10–0.39
+    """
+    from sourcecode.file_classifier import JAVA_STEREOTYPE_CATEGORIES
+
+    cat = file_class.category if file_class else None
+    base_rel = file_class.relevance if file_class else 0.0
+
+    # T1: confirmed production entrypoint
+    if path in entry_paths and cat in ("runtime_core", "cli_entrypoint"):
+        return round(min(1.0, max(0.92, base_rel)), 3)
+
+    # T2: in entry_paths but weaker evidence category
+    if path in entry_paths:
+        return round(min(0.91, max(0.80, pre_bonus_combined / 2.0)), 3)
+
+    # T3: annotation-confirmed stereotype — table values are already calibrated
+    if file_class and cat in JAVA_STEREOTYPE_CATEGORIES:
+        return round(base_rel, 3)
+
+    # T4: framework import evidence (medium strength)
+    if cat in ("api_layer", "database_layer", "infrastructure"):
+        return round(min(0.79, max(0.55, pre_bonus_combined / 2.0)), 3)
+
+    # T5: code definitions with imports (medium-low)
+    if cat in ("application_logic", "domain_model"):
+        return round(min(0.54, max(0.38, pre_bonus_combined / 2.0)), 3)
+
+    # T6: build manifest / tooling / test
+    if cat == "build_system":
+        return round(min(0.45, base_rel), 3)
+    if cat in ("tests", "tooling"):
+        return round(min(0.35, base_rel), 3)
+
+    # T7: no content classification — filesystem/structural signals only
+    # has_structural_signals: fan_in, churn, export — allows up to 0.54
+    # pure path/filename only — hard cap 0.39
+    if has_structural_signals:
+        return round(min(0.54, max(0.10, pre_bonus_combined / 2.0)), 3)
+    return round(min(0.39, max(0.10, pre_bonus_combined / 2.0)), 3)
+
+
+def _build_file_signals(
+    file_class: Any,
+    path: str,
+    entry_paths: set,
+    fs_reasons: list,
+    sem_hub: float,
+) -> list[dict]:
+    """Minimal per-file signal breakdown: what contributed to this file's score."""
+    from sourcecode.file_classifier import JAVA_STEREOTYPE_CATEGORIES
+
+    signals: list[dict] = []
+
+    if path in entry_paths:
+        signals.append({"type": "runtime_entrypoint", "strength": "strong"})
+
+    if file_class:
+        cat = file_class.category
+        if cat in JAVA_STEREOTYPE_CATEGORIES:
+            signals.append({"type": "framework_annotation", "strength": "strong"})
+        elif cat in ("api_layer", "database_layer", "infrastructure"):
+            ev = [e for e in (file_class.evidence or [])[:2] if e]
+            signals.append({"type": "framework_import", "strength": "medium", "evidence": ev})
+        elif cat in ("application_logic",):
+            signals.append({"type": "code_definitions_with_imports", "strength": "medium"})
+        elif cat in ("domain_model",):
+            signals.append({"type": "domain_model_definitions", "strength": "medium"})
+        elif cat in ("build_system",):
+            signals.append({"type": "build_manifest", "strength": "medium"})
+
+    for r in fs_reasons:
+        r_lower = r.lower()
+        if "import centrality" in r_lower or "imported by" in r_lower:
+            signals.append({"type": "import_centrality", "strength": "medium"})
+        elif "hub module" in r_lower:
+            signals.append({"type": "hub_module", "strength": "medium"})
+        elif "recent churn" in r_lower:
+            signals.append({"type": "git_churn", "strength": "medium"})
+        elif "uncommitted" in r_lower:
+            signals.append({"type": "uncommitted_changes", "strength": "medium"})
+
+    if sem_hub >= 0.15:
+        signals.append({"type": "call_graph_hub", "strength": "strong"})
+
+    if not signals:
+        signals.append({"type": "filesystem_path", "strength": "weak"})
+
+    return signals
+
+
 def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> list[dict[str, Any]]:
     from sourcecode.ranking_engine import RankingEngine
 
@@ -714,40 +824,44 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
         content_rel = file_class.relevance if file_class else 0.0
         # Semantic hub bonus: normalised call-graph centrality adds up to +0.30
         sem_hub = semantic_hub_scores.get(path, 0.0) * 0.30
-        combined = fs.score + content_rel + sem_hub
+        pre_bonus_combined = fs.score + content_rel + sem_hub
         # REST controller boost: surface above @Transactional service files
         if path in _rest_ctrl_paths:
-            combined += 2.0
+            pre_bonus_combined += 2.0
 
-        # M3: Structural importance scoring — priority over alphabetical ordering.
+        # M3: Structural importance scoring — SORT ORDER ONLY.
+        # These bonuses drive ranking but must NOT inflate the displayed score.
         stem = Path(path).stem
         stem_lower = stem.lower()
         path_lower = path.lower()
+        sort_bonus = 0.0
         # +10 application entry points
         if path in entry_paths and any(
             k in stem for k in ("Application", "Main", "Initializer", "Bootstrap", "Startup")
         ):
-            combined += 10.0
+            sort_bonus = 10.0
         # +8 known base/infrastructure classes
         elif any(k in stem for k in (
             "GenericRestController", "GenericCRUDRestController", "GenericController",
             "AkitaBaseService", "BaseService", "FilterConfig", "AbstractController",
         )):
-            combined += 8.0
+            sort_bonus = 8.0
         # +6 security configuration
         elif any(k in stem for k in (
             "SecurityConfig", "SecurityStrategy", "WebSecurityConfig", "SecurityFilter",
             "JwtFilter", "AuthConfig", "SecurityConfiguration",
         )):
-            combined += 6.0
+            sort_bonus = 6.0
         # +2 shared utilities
         elif any(k in path_lower for k in ("util", "shared", "common", "helper", "constant")):
-            combined += 2.0
+            sort_bonus = 2.0
+
+        sort_key = pre_bonus_combined + sort_bonus
 
         # Visibility threshold: require meaningful combined signal.
         # Exception: high/medium-confidence files with strong content relevance
         # can survive even if structural score is weak.
-        if combined < _FILE_RELEVANCE_MIN_COMBINED:
+        if sort_key < _FILE_RELEVANCE_MIN_COMBINED:
             if not (file_class
                     and file_class.relevance > 0.45
                     and file_class.confidence in {"high", "medium"}):
@@ -757,48 +871,64 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
         if (file_class
                 and file_class.confidence == "low"
                 and file_class.category in {"config", "auxiliary"}
-                and combined < 0.45):
+                and sort_key < 0.45):
             continue
 
-        # For Java stereotype annotations use the table relevance directly —
-        # the combined/2 formula would dilute the stereotype signal.
-        from sourcecode.file_classifier import JAVA_STEREOTYPE_CATEGORIES
-        if file_class and file_class.category in JAVA_STEREOTYPE_CATEGORIES:
-            relevance_val = round(file_class.relevance, 3)
-        else:
-            relevance_val = round(max(0.0, min(1.0, combined / 2.0)), 3)
+        # Detect whether structural signals (fan_in, churn, etc.) are present
+        # beyond the base path-relevance reason — used by fallback tier.
+        structural_signal_reasons = [
+            r for r in fs.reasons
+            if r not in ("source file", "workspace source root", "runtime entrypoint")
+            and "path" not in r.lower()
+        ]
+        has_structural = bool(structural_signal_reasons)
+
+        # Tiered display score: evidence-gated, tier-capped.
+        # pre_bonus_combined is used (M3 sort_bonus excluded).
+        score_val = _tiered_display_score(
+            pre_bonus_combined, file_class, path, entry_paths, has_structural,
+        )
+        # relevance: raw evidence strength from FileClassifier (content signal only)
+        relevance_val = round(file_class.relevance, 3) if file_class else round(
+            min(0.39, max(0.10, pre_bonus_combined / 2.0)), 3
+        )
+
+        ranking_reasons = [r for r in fs.reasons if r != "source file"]
+        if sem_hub >= 0.15:
+            ranking_reasons.append("call graph hub")
+
+        signals = _build_file_signals(file_class, path, entry_paths, ranking_reasons, sem_hub)
 
         item: dict[str, Any] = {
             "path": path,
             "category": file_class.category if file_class else "source",
             "confidence": file_class.confidence if file_class else "low",
+            "score": score_val,
             "relevance": relevance_val,
-            "score": relevance_val,
             "reason": file_class.reason if file_class else (fs.reasons[0] if fs.reasons else "source file"),
             "evidence": file_class.evidence if file_class else [],
+            "signals": signals,
         }
 
-        ranking_reasons = [r for r in fs.reasons if r != "source file"]
-        if sem_hub >= 0.15:
-            ranking_reasons.append("call graph hub")
         if ranking_reasons:
             item["ranking_reasons"] = ranking_reasons
 
         # Override metadata for known M3 base controller classes
         if any(k in stem for k in ("GenericRestController", "GenericCRUDRestController")):
             item["category"] = "runtime_core"
-            item["relevance"] = 0.95
             item["score"] = 0.95
+            item["relevance"] = 0.95
             item["reason"] = (
                 "base class for all REST controllers — extends this to get "
                 "centralized exception handling via handlerException()"
             )
             item["evidence"] = ["base_rest_controller"]
             item["ranking_reasons"] = ["universal base class", "exception handling contract"]
+            item["signals"] = [{"type": "framework_annotation", "strength": "strong"}]
 
-        scored.append((combined, item))
+        scored.append((sort_key, item))
 
-    # Deterministic sort: score desc, then path asc
+    # Deterministic sort: sort_key desc, then path asc
     scored.sort(key=lambda x: (-x[0], x[1]["path"]))
 
     # Diversity cap: at most half the budget from any single category.

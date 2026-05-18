@@ -290,10 +290,18 @@ class ConfidenceAnalyzer:
         elif production_eps and all(ep.runtime_relevance == "low" for ep in production_eps):
             overall = _min_confidence([overall, "low"])
 
-        # Factor in architecture confidence when available
+        # Factor in architecture confidence when available.
+        # Key rule: if a pattern was detected (not None/"unknown"), arch.confidence="low"
+        # typically reflects missing documentation (no OpenAPI/ADR), not structural uncertainty.
+        # In that case, clamp the downgrade to "medium" so that high stack + high entry_points
+        # is not contradicted by a docs gap.
         arch = sm.architecture
         if arch is not None and arch.requested:
-            overall = _min_confidence([overall, arch.confidence])
+            arch_conf_for_overall = arch.confidence
+            if arch.confidence == "low" and arch.pattern not in (None, "unknown"):
+                # Pattern was detected — low is docs-only, not structural; cap downgrade at medium
+                arch_conf_for_overall = "medium"
+            overall = _min_confidence([overall, arch_conf_for_overall])
             if arch.pattern in (None, "unknown"):
                 # Architecture could not be inferred — don't let stack alone push to high
                 if overall == "high":
