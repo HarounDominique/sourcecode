@@ -1648,6 +1648,12 @@ def prepare_context_cmd(
         "--format",
         help="Output format: json (default) | github-comment (Markdown PR comment for review-pr task)",
     ),
+    debug_perf: bool = typer.Option(
+        False,
+        "--debug-perf",
+        help="Emit per-phase timing to stderr (git scan ms, symptom scoring ms, total ms)",
+        hidden=True,
+    ),
 ) -> None:
     """Task-specific context for AI coding agents.
 
@@ -1714,9 +1720,21 @@ def prepare_context_cmd(
         raise typer.Exit()
 
     from dataclasses import asdict
+    import time as _time
 
     builder = TaskContextBuilder(target)
+    _t0 = _time.perf_counter()
     output = builder.build(task, since=since, symptom=symptom)
+    _t_total = (_time.perf_counter() - _t0) * 1000
+
+    if debug_perf:
+        _perf = getattr(output, "_perf_ms", {}) or {}
+        typer.echo(
+            f"[debug-perf] total={_t_total:.0f}ms"
+            + (f"  git_scan={_perf.get('git_scan_ms', '?')}ms" if "git_scan_ms" in _perf else "")
+            + (f"  symptom={_perf.get('symptom_ms', '?')}ms" if "symptom_ms" in _perf else ""),
+            err=True,
+        )
 
     # Task-specific content-filter: each task emphasizes different output fields.
     # Fields marked False are suppressed from this task's output to reduce noise.
@@ -1918,6 +1936,8 @@ def prepare_context_cmd(
         out["related_notes"] = output.related_notes
     if output.symptom_note:
         out["symptom_note"] = output.symptom_note
+    if output.symptom_explain:
+        out["symptom_explain"] = output.symptom_explain
     if llm_prompt:
         out["llm_prompt"] = builder.render_prompt(output)
 
@@ -2012,12 +2032,33 @@ def repo_ir_cmd(
         "--include-tests",
         help="Include test files in analysis (excluded by default)",
     ),
+    max_nodes: Optional[int] = typer.Option(
+        None,
+        "--max-nodes",
+        help="Limit graph.nodes to top N by impact score (reduces output size)",
+    ),
+    max_edges: Optional[int] = typer.Option(
+        None,
+        "--max-edges",
+        help="Limit graph.edges to N (priority: edges between kept nodes)",
+    ),
+    summary_only: bool = typer.Option(
+        False,
+        "--summary-only",
+        help="Omit full graph.nodes/edges; keep analysis summary, impact, and change_set (<300KB typical)",
+    ),
 ) -> None:
     """Deterministic symbol-level IR for Java repositories.
 
     \b
     Extracts symbols, relations, Spring roles, and (with --since) symbol-level diffs.
-    Output is JSON: symbols[], relations[], changed_symbols[], spring_summary, graph_metadata.
+    Output is JSON: graph{nodes,edges}, analysis, impact, subsystems, change_set.
+
+    \b
+    Size control:
+      --summary-only          Omit full graph; keep analysis + impact (smallest output)
+      --max-nodes N           Keep top N nodes by score
+      --max-edges N           Keep top N edges (priority: both endpoints kept)
 
     \b
     Examples:
@@ -2025,11 +2066,13 @@ def repo_ir_cmd(
       sourcecode repo-ir /path/to/repo --since HEAD~1
       sourcecode repo-ir --files src/main/java/UserService.java
       sourcecode repo-ir --since main --output ir.json
+      sourcecode repo-ir --since HEAD~3 --summary-only --output ir-small.json
+      sourcecode repo-ir --max-nodes 200 --max-edges 500
     """
     import json as _json
     import sys as _sys
 
-    from sourcecode.repository_ir import build_repo_ir, find_java_files
+    from sourcecode.repository_ir import apply_ir_size_limits, build_repo_ir, find_java_files
 
     root = path.resolve()
     if not root.is_dir():
@@ -2063,11 +2106,24 @@ def repo_ir_cmd(
         return
 
     ir = build_repo_ir(file_list, root, since=since)
+    ir = apply_ir_size_limits(
+        ir,
+        max_nodes=max_nodes,
+        max_edges=max_edges,
+        summary_only=summary_only,
+    )
     output = _json.dumps(ir, indent=2, ensure_ascii=False)
 
     if output_path:
         output_path.write_text(output, encoding="utf-8")
-        typer.echo(f"IR written to {output_path}", err=True)
+        n_nodes = len((ir.get("graph") or {}).get("nodes") or [])
+        n_edges = len((ir.get("graph") or {}).get("edges") or [])
+        size_kb = len(output.encode("utf-8")) // 1024
+        typer.echo(
+            f"IR written to {output_path} "
+            f"({size_kb}KB, {n_nodes} nodes, {n_edges} edges)",
+            err=True,
+        )
     else:
         _sys.stdout.write(output)
         _sys.stdout.write("\n")

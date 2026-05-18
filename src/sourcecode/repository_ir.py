@@ -1545,11 +1545,98 @@ def build_repo_ir(
 
 
 # ---------------------------------------------------------------------------
+# Output size limits
+# ---------------------------------------------------------------------------
+
+# Vendor/generated dirs to skip when finding Java files and in git analysis.
+_VENDOR_DIRS: frozenset[str] = frozenset({
+    "vendor", "node_modules", "dist", "target", "build",
+    ".gradle", ".mvn", "generated", "generated-sources",
+    "generated-resources",
+})
+
+
+def apply_ir_size_limits(
+    ir: dict,
+    *,
+    max_nodes: Optional[int] = None,
+    max_edges: Optional[int] = None,
+    summary_only: bool = False,
+) -> dict:
+    """Apply size limits to a repo-ir output dict. Non-destructive: returns new dict.
+
+    Node ordering: top-ranked (by impact score) nodes are kept first.
+    Edge priority: edges connecting two kept nodes over cross-boundary edges.
+    """
+    if not max_nodes and not max_edges and not summary_only:
+        return ir
+
+    out = dict(ir)
+    graph = ir.get("graph") or {}
+    nodes: list[dict] = list(graph.get("nodes") or [])
+    edges: list[dict] = list(graph.get("edges") or [])
+    ranked: list[dict] = list((ir.get("impact") or {}).get("ranked_nodes") or [])
+    analysis: dict = ir.get("analysis") or {}
+
+    if summary_only:
+        n_nodes, n_edges = len(nodes), len(edges)
+        out["graph"] = {
+            "nodes": [],
+            "edges": [],
+            "_omitted": (
+                f"{n_nodes} nodes and {n_edges} edges omitted — "
+                "remove --summary-only to restore full graph"
+            ),
+        }
+        out["reverse_graph"] = {}
+        out["impact"] = {
+            "global_score": (ir.get("impact") or {}).get("global_score", 0),
+            "ranked_nodes": ranked[:20],
+        }
+        out["analysis"] = {
+            "changed_entities": analysis.get("changed_entities") or [],
+            "impacted_entities": (analysis.get("impacted_entities") or [])[:20],
+            "isolated_changes": analysis.get("isolated_changes") or [],
+            "validated_changes": analysis.get("validated_changes") or [],
+        }
+        return out
+
+    # Build score map from ranked_nodes (already sorted -score, fqn)
+    score_map: dict[str, float] = {rn["entity"]: rn["score"] for rn in ranked}
+    kept_fqns: Optional[set[str]] = None
+
+    if max_nodes is not None and len(nodes) > max_nodes:
+        nodes_sorted = sorted(
+            nodes,
+            key=lambda n: (-score_map.get(n["fqn"], 0.0), n["fqn"]),
+        )
+        nodes = nodes_sorted[:max_nodes]
+        kept_fqns = {n["fqn"] for n in nodes}
+        ranked = [rn for rn in ranked if rn["entity"] in kept_fqns]
+
+    if kept_fqns is not None or max_edges is not None:
+        if kept_fqns is not None:
+            # Priority: edges where both endpoints are kept nodes
+            priority = [e for e in edges if e["from"] in kept_fqns and e["to"] in kept_fqns]
+            rest = [e for e in edges if not (e["from"] in kept_fqns and e["to"] in kept_fqns)]
+            edges = priority + rest
+        if max_edges is not None:
+            edges = edges[:max_edges]
+
+    out["graph"] = {"nodes": nodes, "edges": edges}
+    out["impact"] = {
+        "global_score": (ir.get("impact") or {}).get("global_score", 0),
+        "ranked_nodes": ranked,
+    }
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Convenience: find Java files in a repo
 # ---------------------------------------------------------------------------
 
 def find_java_files(root: Path, *, max_files: int = 500) -> list[str]:
-    """Return relative paths to Java files under root, excluding test dirs."""
+    """Return relative paths to Java files under root, excluding test dirs and vendor."""
     results: list[str] = []
     for p in sorted(root.rglob("*.java")):
         if len(results) >= max_files:
@@ -1558,7 +1645,12 @@ def find_java_files(root: Path, *, max_files: int = 500) -> list[str]:
             rel = str(p.relative_to(root)).replace("\\", "/")
         except ValueError:
             continue
+        parts = rel.split("/")
+        # Skip test dirs
         if "/test/" in rel or "/tests/" in rel or rel.startswith("test/"):
+            continue
+        # Skip vendor/generated/build dirs
+        if any(part in _VENDOR_DIRS for part in parts[:-1]):
             continue
         results.append(rel)
     return results

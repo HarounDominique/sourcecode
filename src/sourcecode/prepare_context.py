@@ -333,6 +333,7 @@ class TaskOutput:
     symptom: Optional[str] = None                                  # fix-bug only
     related_notes: list[dict] = field(default_factory=list)        # fix-bug + symptom only
     symptom_note: Optional[str] = None                             # fix-bug: cross-layer synonym note
+    symptom_explain: Optional[dict] = None                         # fix-bug: structured evidence breakdown
     # delta-specific impact fields
     impact_summary: Optional[str] = None
     affected_modules: list[str] = field(default_factory=list)
@@ -818,7 +819,7 @@ class TaskContextBuilder:
                         if not self._is_source(_p) or self._is_test(_p):
                             continue
                         try:
-                            _loc = len((self.root / _p).read_text(errors="replace").splitlines())
+                            _loc = len((self.root / _p).read_text(encoding="utf-8", errors="replace").splitlines())
                             if _loc > 200:
                                 _large.append((_loc, _p))
                         except OSError:
@@ -1207,6 +1208,7 @@ class TaskContextBuilder:
         symptom_keywords: list[str] = []
         related_notes: list[dict] = []
         symptom_note: Optional[str] = None
+        symptom_explain: Optional[dict] = None
         if task_name == "fix-bug" and symptom:
             import re as _re
             _camel_expanded = _re.sub(r'([a-z])([A-Z])', r'\1 \2', symptom)
@@ -1216,12 +1218,24 @@ class TaskContextBuilder:
                 if len(w) > 2
             ]
             if symptom_keywords:
+                # Pre-compile combined keyword pattern for fast content scanning
+                _kw_re = _re.compile(
+                    "|".join(_re.escape(kw) for kw in symptom_keywords),
+                    _re.IGNORECASE,
+                )
+
+                # Structured evidence collectors for symptom_explain
+                _sx_direct_path: list[str] = []
+                _sx_content: list[str] = []
+                _sx_commits: list[dict] = []
+                _sx_synonyms: list[str] = []
+                _sx_boosts: list[dict] = []
+
                 # Pass 1: surface code notes whose text contains any keyword
-                # Also track which file paths have matching notes (for score boost below).
                 _note_matched_paths: dict[str, int] = {}  # path → count of matching notes
                 for _n in cn_notes_for_ranking:
                     _text = (getattr(_n, "text", "") or "").lower()
-                    if any(kw in _text for kw in symptom_keywords):
+                    if _kw_re.search(_text):
                         _np = getattr(_n, "path", "")
                         related_notes.append({
                             "kind": getattr(_n, "kind", ""),
@@ -1231,17 +1245,22 @@ class TaskContextBuilder:
                         })
                         _note_matched_paths[_np] = _note_matched_paths.get(_np, 0) + 1
 
-                # Pass 2: build commit message index — files touched in commits whose
-                # message matches a symptom keyword get a strong recency signal.
-                # This is the primary signal for functional keywords like "sesiones"
-                # that don't appear in file paths but do appear in commit messages.
+                # Pass 2: build commit message index — cap at 60 most-recent commits.
+                # Files touched in commits whose message matches a symptom keyword get
+                # a strong recency signal. Primary signal for domain keywords ("sesiones")
+                # that appear in commit messages but not file paths.
                 _commit_file_hits: dict[str, int] = {}  # path → n matching commits
-                for _cr in _recent_commits_for_symptom:
+                _commits_scanned = _recent_commits_for_symptom[:60]
+                for _cr in _commits_scanned:
                     _msg_lower = (_cr.message or "").lower()
-                    if any(kw in _msg_lower for kw in symptom_keywords):
+                    if _kw_re.search(_msg_lower):
                         for _cf in (_cr.files_changed or []):
                             _cf_norm = _cf.replace("\\", "/")
                             _commit_file_hits[_cf_norm] = _commit_file_hits.get(_cf_norm, 0) + 1
+                        _sx_commits.append({
+                            "message": (_cr.message or "")[:80],
+                            "files": list((_cr.files_changed or [])[:5]),
+                        })
 
                 # Pass 3: inject files from commit index not yet in candidate pool
                 _existing_paths = {rf.path for rf in relevant_files}
@@ -1261,7 +1280,6 @@ class TaskContextBuilder:
                     _existing_paths.add(_cp)
 
                 # Pass 4: inject files whose path matches symptom keywords
-                # but weren't in the candidate pool (no structural/git signals).
                 for _p in all_paths:
                     if _p in _existing_paths:
                         continue
@@ -1282,13 +1300,29 @@ class TaskContextBuilder:
                         why=f"symptom injection: {', '.join(_matching_kws)}",
                     ))
                     _existing_paths.add(_p)
+                    _sx_direct_path.append(_p)
 
-                # Pass 5: multi-signal boost — apply commit, note, content, and path
-                # signals in one pass to avoid redundant file reads.
+                # Pass 5+6 combined: single file read per candidate.
+                # Limit content scan to top 80 candidates by current score to bound I/O.
                 _src_exts = frozenset({".java", ".py", ".ts", ".js", ".kt", ".go"})
+                _frontend_kws = [kw for kw in symptom_keywords if kw in _FRONTEND_SYMPTOM_MAP]
+                _backend_terms_set: list[str] = []
+                if _frontend_kws:
+                    _bt: list[str] = []
+                    for _fkw in _frontend_kws:
+                        _bt.extend(_FRONTEND_SYMPTOM_MAP[_fkw])
+                    _backend_terms_set = list(dict.fromkeys(_bt))
+
+                # Sort before content scan so top candidates get read first
+                relevant_files = sorted(relevant_files, key=lambda rf: -rf.score)
+                _CONTENT_SCAN_LIMIT = 80
+                _scan_candidates = relevant_files[:_CONTENT_SCAN_LIMIT]
+                _no_scan_candidates = relevant_files[_CONTENT_SCAN_LIMIT:]
+
                 _boosted: list[RelevantFile] = []
-                for _rf in relevant_files:
+                for _rf in _scan_candidates:
                     _extra = 0.0
+                    _extra_syn = 0.0
                     _reasons: list[str] = []
                     _p_lower = _rf.path.lower()
 
@@ -1298,6 +1332,7 @@ class TaskContextBuilder:
                         _cb = min(0.40, _c_hits * 0.25)
                         _extra += _cb
                         _reasons.append(f"commit-msg symptom ×{_c_hits} (+{_cb:.2f})")
+                        _sx_boosts.append({"type": "commit_message", "value": round(_cb, 3), "evidence": _rf.path})
 
                     # Code note boost: +0.20/note, cap +0.30
                     _n_hits = _note_matched_paths.get(_rf.path, 0)
@@ -1305,77 +1340,94 @@ class TaskContextBuilder:
                         _nb = min(0.30, _n_hits * 0.20)
                         _extra += _nb
                         _reasons.append(f"note-match symptom ×{_n_hits} (+{_nb:.2f})")
+                        _sx_boosts.append({"type": "code_note", "value": round(_nb, 3), "evidence": _rf.path})
 
-                    # Path keyword boost: +0.20/keyword already in score for injected
-                    # files; re-apply for pre-existing candidates whose path matches.
+                    # Path keyword boost for pre-existing candidates
                     _path_kws = [kw for kw in symptom_keywords if kw in _p_lower]
                     if _path_kws and _rf.role != "symptom_match":
                         _pb = 0.20 * len(_path_kws)
                         _extra += _pb
                         _reasons.append(f"path-kw symptom ({', '.join(_path_kws)}) (+{_pb:.2f})")
+                        _sx_boosts.append({"type": "path_match", "value": round(_pb, 3), "evidence": _rf.path})
 
-                    # Content scan boost: +0.05/hit, cap +0.50 (was +0.02, cap +0.30)
+                    # Single file read — covers both content scan and synonym scan
+                    _body_lower = ""
                     if Path(_rf.path).suffix.lower() in _src_exts:
                         try:
-                            _lines = (self.root / _rf.path).read_text(
+                            _body_lower = (self.root / _rf.path).read_text(
                                 encoding="utf-8", errors="replace"
-                            ).splitlines()[:300]
-                            _body = "\n".join(_lines).lower()
-                            _hits = sum(_body.count(kw) for kw in symptom_keywords)
-                            _content_b = min(0.50, _hits * 0.05)
-                            if _content_b > 0:
-                                _extra += _content_b
-                                _reasons.append(f"content-match symptom ×{_hits} (+{_content_b:.2f})")
+                            )[:12000].lower()  # ~300 lines avg
                         except OSError:
                             pass
 
+                    # Content scan boost: +0.05/hit, cap +0.50
+                    if _body_lower:
+                        _hits = len(_kw_re.findall(_body_lower))
+                        _content_b = min(0.50, _hits * 0.05)
+                        if _content_b > 0:
+                            _extra += _content_b
+                            _reasons.append(f"content-match symptom ×{_hits} (+{_content_b:.2f})")
+                            _sx_boosts.append({"type": "content_match", "value": round(_content_b, 3), "evidence": _rf.path})
+                            _sx_content.append(_rf.path)
+
+                    # Synonym scan (Pass 6): only apply when file has prior non-synonym
+                    # evidence (commit hit, note, path, or content) — prevents boosting
+                    # arbitrary interceptors/configs with no other signal.
+                    if _backend_terms_set and _body_lower:
+                        _prior_boost = _extra  # boost accumulated before synonym
+                        if _prior_boost >= 0.10:  # min threshold: must have real prior signal
+                            _hits_syn = sum(_body_lower.count(t) for t in _backend_terms_set)
+                            _extra_syn = min(0.20, _hits_syn * 0.02)
+                            if _extra_syn > 0:
+                                _sx_synonyms.append(_rf.path)
+                                _sx_boosts.append({"type": "synonym_match", "value": round(_extra_syn, 3), "evidence": _rf.path})
+
+                    _total_extra = _extra + _extra_syn
                     _new_reason = _rf.reason
                     if _reasons:
-                        _new_reason = _rf.reason + ", " + ", ".join(_reasons)
+                        _syn_suffix = f", synonym-match backend (+{_extra_syn:.2f})" if _extra_syn > 0 else ""
+                        _new_reason = _rf.reason + ", " + ", ".join(_reasons) + _syn_suffix
+                    elif _extra_syn > 0:
+                        _new_reason = _rf.reason + f", synonym-match backend (+{_extra_syn:.2f})"
+
                     _boosted.append(RelevantFile(
                         path=_rf.path,
                         role=_rf.role,
-                        score=round(min(_rf.score + _extra, 1.0), 2),
+                        score=round(min(_rf.score + _total_extra, 1.0), 2),
                         reason=_new_reason,
                         why=_rf.why,
                     ))
-                relevant_files = sorted(_boosted, key=lambda rf: -rf.score)
 
-                # Pass 6: cross-layer synonym boost — frontend keywords → backend equivalents
-                _synonym_note: Optional[str] = None
-                _frontend_kws = [kw for kw in symptom_keywords if kw in _FRONTEND_SYMPTOM_MAP]
-                if _frontend_kws:
-                    _backend_terms: list[str] = []
-                    for _fkw in _frontend_kws:
-                        _backend_terms.extend(_FRONTEND_SYMPTOM_MAP[_fkw])
-                    _backend_terms_set = list(dict.fromkeys(_backend_terms))
-                    _synonym_boosted: list[RelevantFile] = []
-                    for _rf in relevant_files:
-                        _extra_syn = 0.0
-                        if Path(_rf.path).suffix.lower() in _src_exts:
-                            try:
-                                _lines_syn = (self.root / _rf.path).read_text(
-                                    encoding="utf-8", errors="replace"
-                                ).splitlines()[:300]
-                                _body_syn = "\n".join(_lines_syn).lower()
-                                _hits_syn = sum(_body_syn.count(t) for t in _backend_terms_set)
-                                _extra_syn = min(0.20, _hits_syn * 0.02)
-                            except OSError:
-                                pass
-                        _synonym_boosted.append(RelevantFile(
-                            path=_rf.path,
-                            role=_rf.role,
-                            score=round(min(_rf.score + _extra_syn, 1.0), 2),
-                            reason=_rf.reason + (f", synonym-match backend (+{_extra_syn:.2f})" if _extra_syn > 0 else ""),
-                            why=_rf.why,
-                        ))
-                    relevant_files = sorted(_synonym_boosted, key=lambda rf: -rf.score)
-                    _synonym_note = (
+                relevant_files = sorted(_boosted + _no_scan_candidates, key=lambda rf: -rf.score)
+
+                # Synonym note (only when synonyms actually fired)
+                if _frontend_kws and _sx_synonyms:
+                    symptom_note = (
                         f"Frontend concept detected ({', '.join(_frontend_kws)}). "
-                        "Backend service-layer and interceptor files boosted by symptom keyword match "
+                        "Backend service-layer files boosted by synonym match "
                         "[INFERRED (LOW CONFIDENCE) — pattern heuristic, not structural proof]."
                     )
-                    symptom_note = _synonym_note
+
+                # Confidence: based on richest signal type present
+                if _commit_file_hits:
+                    _sx_confidence = "HIGH"
+                elif _sx_direct_path or _sx_content:
+                    _sx_confidence = "MEDIUM"
+                else:
+                    _sx_confidence = "LOW"
+
+                symptom_explain = {
+                    "keywords": symptom_keywords,
+                    "confidence": _sx_confidence,
+                    "direct_path_matches": _sx_direct_path[:10],
+                    "content_matches": _sx_content[:10],
+                    "commit_matches": _sx_commits[:10],
+                    "synonym_matches": _sx_synonyms[:10],
+                    "boosts": _sx_boosts[:30],
+                    "final_boost": round(
+                        sum(b["value"] for b in _sx_boosts), 3
+                    ),
+                }
 
         # ── 7. Test gaps (generate-tests only) ────────────────────────────
         test_gaps: list[str] = []
@@ -1474,6 +1526,7 @@ class TaskContextBuilder:
             symptom=symptom if task_name == "fix-bug" and symptom else None,
             related_notes=related_notes,
             symptom_note=symptom_note,
+            symptom_explain=symptom_explain if task_name == "fix-bug" else None,
             impact_summary=_delta_impact_summary,
             affected_modules=_delta_affected_modules,
             risk_areas=_delta_risk_areas,

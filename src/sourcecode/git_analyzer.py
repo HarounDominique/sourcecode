@@ -52,7 +52,14 @@ _HOTSPOT_AUX_DIRS: frozenset[str] = frozenset({
     "sandbox", "sandboxes",
     "ci", "translations", "locales", "locale", "i18n", "l10n",
     ".planning",
+    # vendor / build dirs: high path count, zero operational signal
+    "vendor", "node_modules", "dist", "target", "build",
+    ".gradle", ".mvn", "generated-sources", "generated-resources",
 })
+
+# When git diff returns more changed files than this, degrade gracefully:
+# truncate hotspot analysis depth and emit a structured warning.
+_CHANGED_FILES_DEGRADATION_THRESHOLD = 200
 
 
 def _run_git(args: list[str], cwd: Path, timeout: int = 15) -> tuple[str, int]:
