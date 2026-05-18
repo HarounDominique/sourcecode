@@ -1088,8 +1088,12 @@ class TaskContextBuilder:
         _pr_build_changes: dict = {}
         _pr_committed_changes: list[dict] = []
         _pr_uncommitted_changes: list[dict] = []
-        _pr_committed_files: list[str] = []
-        _pr_uncommitted_files: list[str] = []
+        # Only default these for non-review-pr tasks — review-pr already set them
+        # at line 714 via _get_pr_scope_files. Re-initializing here would shadow
+        # those values and make _committed_set/_uncommitted_set always empty.
+        if task_name != "review-pr":
+            _pr_committed_files: list[str] = []
+            _pr_uncommitted_files: list[str] = []
 
         if task_name == "review-pr":
             _pr_base_ref = since or "HEAD"
@@ -1997,8 +2001,8 @@ class TaskContextBuilder:
 
         DiffSourceType mapping:
           since given  → committed: GIT_RANGE(since, HEAD)
-          no since     → committed: [] (no implicit HEAD~1 fallback)
-          always       → uncommitted: WORKTREE_UNSTAGED + WORKTREE_STAGED
+          no since     → uncommitted: WORKTREE_UNSTAGED + WORKTREE_STAGED
+          no since + clean tree → committed: HEAD_MINUS_1 (auto-fallback)
         """
         import subprocess
 
