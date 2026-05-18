@@ -1610,11 +1610,10 @@ def _serialize_relevant_file(f: Any) -> dict:
     d = {k: v for k, v in _asdict(f).items() if v != "" and v is not None}
     reason = d.pop("reason", "") or ""
     why = d.pop("why", "") or ""
+    d.pop("score", None)  # score removed from public output (internal ranking only)
     explanation = _make_explanation(reason, why)
     if explanation:
         d["explanation"] = explanation
-    if reason:
-        d["reason"] = reason
     return d
 
 
@@ -1882,9 +1881,14 @@ def prepare_context_cmd(
     def _task_include(field: str) -> bool:
         return _content_filter.get(field, True)
 
+    _run_id = hashlib.sha256(
+        f"{task}:{target}:{since or ''}:{format or ''}:{symptom or ''}".encode()
+    ).hexdigest()[:16]
+
     out: dict[str, Any] = {
         "task": output.task,
         "goal": output.goal,
+        "run_id": _run_id,
     }
     if _task_include("project_summary"):
         out["project_summary"] = output.project_summary
@@ -1935,6 +1939,30 @@ def prepare_context_cmd(
                 _sys.stdout.buffer.write(b"\n")
                 _sys.stdout.buffer.flush()
             raise typer.Exit(code=1)
+        if output.ci_decision == "no_changes":
+            # Early exit: no diff — emit minimal JSON without any analysis fields.
+            # Prevents no_changes from ever being serialized alongside relevant_files > 0.
+            _nc_out: dict[str, Any] = {
+                "task": output.task,
+                "ci_decision": "no_changes",
+                "summary": "No changes detected",
+            }
+            if output.since:
+                _nc_out["since"] = output.since
+            if output.analysis_scope:
+                _nc_out["analysis_scope"] = output.analysis_scope
+            _nc_json = json.dumps(_nc_out, indent=2, ensure_ascii=False)
+            if output_path is not None:
+                output_path.write_text(_nc_json, encoding="utf-8")
+            else:
+                import sys as _sys
+                _sys.stdout.buffer.write(_nc_json.encode("utf-8"))
+                _sys.stdout.buffer.write(b"\n")
+                _sys.stdout.buffer.flush()
+            if copy:
+                _copy_to_clipboard(_nc_json)
+                typer.echo("✓ copied to clipboard", err=True)
+            raise typer.Exit()
         if output.ci_decision:
             out["ci_decision"] = output.ci_decision
         if output.since:

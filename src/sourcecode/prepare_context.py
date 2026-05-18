@@ -377,6 +377,25 @@ class TaskOutput:
     analysis_scope: dict = field(default_factory=dict)
 
 
+@dataclass
+class CanonicalAnalysisIR:
+    """Shared intermediate representation produced by _build_delta_impact.
+
+    Both delta and review-pr derive their task-specific output from this IR.
+    Never recalculate logic per command — render views from this single object.
+    """
+    relevant_files: list[RelevantFile]
+    impact_summary: str
+    affected_modules: list[str]
+    risk_areas: list[dict]
+    why_these_files: dict[str, str]
+    analysis_gaps: list[str]
+    system_impact: dict
+    change_type: list[str]
+    dependency_graph_summary: dict
+    impact_score_per_file: dict
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Builder
 # ─────────────────────────────────────────────────────────────────────────────
@@ -934,7 +953,8 @@ class TaskContextBuilder:
         test_set = {p for p in all_paths if self._is_test(p)}
         source_set = {p for p in all_paths if not self._is_test(p) and self._is_source(p)}
 
-        # Delta uses a dedicated impact-analysis path — never the generic ranker.
+        # Delta and review-pr share CanonicalAnalysisIR — computed once, rendered per task.
+        _ir: Optional[CanonicalAnalysisIR] = None
         _delta_impact_summary: Optional[str] = None
         _delta_affected_modules: list[str] = []
         _delta_risk_areas: list[dict] = []
@@ -947,23 +967,22 @@ class TaskContextBuilder:
 
         if task_name in ("delta", "review-pr"):
             _delta_changed_list: list[str] = sorted(_delta_files) if _delta_files else []
-            (
-                relevant_files,
-                _delta_impact_summary,
-                _delta_affected_modules,
-                _delta_risk_areas,
-                _delta_why,
-                _delta_analysis_gaps,
-                _delta_system_impact,
-                _delta_change_type,
-                _delta_dep_graph_summary,
-                _delta_impact_score_per_file,
-            ) = self._build_delta_impact(
+            _ir = self._build_delta_impact(
                 changed_files=_delta_changed_list,
                 all_paths=all_paths,
                 entry_points=entry_points,
                 since=since,
             )
+            relevant_files = _ir.relevant_files
+            _delta_impact_summary = _ir.impact_summary
+            _delta_affected_modules = _ir.affected_modules
+            _delta_risk_areas = _ir.risk_areas
+            _delta_why = _ir.why_these_files
+            _delta_analysis_gaps = _ir.analysis_gaps
+            _delta_system_impact = _ir.system_impact
+            _delta_change_type = _ir.change_type
+            _delta_dep_graph_summary = _ir.dependency_graph_summary
+            _delta_impact_score_per_file = _ir.impact_score_per_file
         else:
             relevant_files = self._rank_files(
                 task_name, spec, all_paths, entry_set, test_set,
@@ -2297,13 +2316,10 @@ class TaskContextBuilder:
         all_paths: list[str],
         entry_points: list,
         since: Optional[str],
-    ) -> tuple[list[RelevantFile], str, list[str], list[dict[str, Any]], dict[str, str], list[str]]:
+    ) -> "CanonicalAnalysisIR":
         """Build incremental impact analysis for changed files.
 
-        Returns:
-            (relevant_files, impact_summary, affected_modules, risk_areas,
-             why_these_files, analysis_gaps)
-
+        Returns CanonicalAnalysisIR — the shared IR consumed by delta and review-pr views.
         Changed files are always included in relevant_files (never dropped by score).
         Related files are expanded type-aware: controller→service→repository→mapper chain.
         Scoring is hierarchical by artifact_type, not by heuristic impact_level.
@@ -2471,6 +2487,18 @@ class TaskContextBuilder:
                 return "data_access"
             if atype == "service":
                 return "service"   # annotation-confirmed — not "core_service" (overclaim)
+            # Name-pattern heuristics — only when atype alone gave no verdict.
+            # These are INFERRED (LOW CONFIDENCE) — stem match, not annotation evidence.
+            if any(kw in stem_lower for kw in ("validator", "validation")):
+                return "validation_component"
+            if any(kw in stem_lower for kw in ("controller", "resource", "endpoint", "rest")):
+                return "external_interface"
+            if any(kw in stem_lower for kw in ("service", "svc", "usecase", "facade")):
+                return "service"
+            if any(kw in stem_lower for kw in ("repository", "repo", "dao", "store")):
+                return "data_access"
+            if any(kw in stem_lower for kw in ("config", "configuration", "settings", "properties")):
+                return "configuration"
             return "unclassified"   # no role claim without evidence
 
         def _structured_why(path: str, atype: str, module: str, role: str, risk_areas: list[str], cls_confidence: str = "low") -> str:
@@ -2491,17 +2519,17 @@ class TaskContextBuilder:
             return " | ".join(parts)
 
         if not changed_files:
-            return (
-                [],
-                "No changes detected — verify the git ref passed to --since",
-                [],
-                [],
-                {},
-                ["No changed files found. Check that --since ref exists and the diff is non-empty."],
-                {},   # system_impact
-                [],   # change_type
-                {"edges": [], "propagation_depth": 0},  # dependency_graph_summary
-                {},   # impact_score_per_file
+            return CanonicalAnalysisIR(
+                relevant_files=[],
+                impact_summary="No changes detected — verify the git ref passed to --since",
+                affected_modules=[],
+                risk_areas=[],
+                why_these_files={},
+                analysis_gaps=["No changed files found. Check that --since ref exists and the diff is non-empty."],
+                system_impact={},
+                change_type=[],
+                dependency_graph_summary={"edges": [], "propagation_depth": 0},
+                impact_score_per_file={},
             )
 
         ep_paths = {ep.path for ep in entry_points}
@@ -3026,17 +3054,17 @@ class TaskContextBuilder:
                 " — related file expansion uses directory proximity only"
             )
 
-        return (
-            relevant,
-            impact_summary,
-            sorted(affected_modules_set),
-            risk_areas_out,
-            why,
-            analysis_gaps,
-            system_impact,
-            aggregate_change_type,
-            dependency_graph_summary,
-            impact_score_per_file,
+        return CanonicalAnalysisIR(
+            relevant_files=relevant,
+            impact_summary=impact_summary,
+            affected_modules=sorted(affected_modules_set),
+            risk_areas=risk_areas_out,
+            why_these_files=why,
+            analysis_gaps=analysis_gaps,
+            system_impact=system_impact,
+            change_type=aggregate_change_type,
+            dependency_graph_summary=dependency_graph_summary,
+            impact_score_per_file=impact_score_per_file,
         )
 
     def _resolve_git_baseline(self, since: Optional[str]) -> dict[str, Any]:
