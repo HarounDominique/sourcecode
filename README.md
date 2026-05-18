@@ -2,7 +2,7 @@
 
 **Deterministic, behavior-aware codebase context for AI agents and PR review.**
 
-![Version](https://img.shields.io/badge/version-1.30.17-blue)
+![Version](https://img.shields.io/badge/version-1.30.18-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
@@ -38,7 +38,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.30.17
+# sourcecode 1.30.18
 ```
 
 ---
