@@ -1271,9 +1271,9 @@ class TaskContextBuilder:
                     "evidence": _evidence,
                     "change_effect": {
                         "statement": _ARTIFACT_CHANGE_EFFECT.get(_f_atype, "application source file (role could not be confirmed)"),
-                        "classification_method": _f_cls.get("confidence", "low"),
+                        "classification_method": _role_basis,
                         "epistemic_level": (
-                            "STRUCTURAL SIGNAL" if _f_cls.get("confidence", "low") == "high"
+                            "STRUCTURAL SIGNAL" if _has_code_ev
                             else "INFERRED (LOW CONFIDENCE)"
                         ),
                     },
@@ -2054,10 +2054,18 @@ class TaskContextBuilder:
         if since is None and not committed_files and not uncommitted_files:
             head_ok = _run("git", "rev-parse", "--verify", "HEAD~1")
             if head_ok is not None:  # HEAD~1 exists
-                head_committed = _run("git", "diff", "--name-only", "--relative", "HEAD~1", "HEAD")
+                head_committed = _run("git", "diff", "--name-only", "--relative", "HEAD~1..HEAD")
                 if head_committed:
                     committed_files = head_committed
                     sources.append(DiffSourceType.HEAD_MINUS_1.value)
+            else:
+                # First commit — no HEAD~1; diff against git empty tree
+                _GIT_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+                first_committed = _run("git", "diff", "--name-only", "--relative",
+                                       _GIT_EMPTY_TREE, "HEAD")
+                if first_committed:
+                    committed_files = first_committed
+                    sources.append("initial_commit")
 
         # ── Drop paths outside self.root ──────────────────────────────────────
         def _drop_outside(lst: list[str]) -> list[str]:
@@ -3280,8 +3288,14 @@ class TaskContextBuilder:
                 files = _diff("HEAD~1")
                 if files is not None:
                     return _make(files or [], "HEAD~1", "head_minus_1_fallback")
+            else:
+                # First commit — no HEAD~1; diff against git empty tree
+                _GIT_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+                files = _diff(_GIT_EMPTY_TREE)
+                if files is not None:
+                    return _make(files or [], _GIT_EMPTY_TREE, "initial_commit_fallback")
 
-            # Confirmed no changes: first commit or empty repo
+            # Confirmed no changes: empty repo
             return {
                 "files": [],
                 "resolved_ref": "HEAD",

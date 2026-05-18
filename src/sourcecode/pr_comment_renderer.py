@@ -171,13 +171,31 @@ def _section_priority_order(out: dict) -> str:
         lines.append("*No priority order available — diff scope too narrow to rank.*")
         return "\n".join(lines)
 
-    for i, path in enumerate(order[:_MAX_PRIORITY_FILES], 1):
+    visible = order[:_MAX_PRIORITY_FILES]
+    all_low = visible and all(
+        (cls_map.get(p, {}).get("change_effect") or {}).get("epistemic_level")
+        == "INFERRED (LOW CONFIDENCE)"
+        for p in visible
+    )
+
+    for i, path in enumerate(visible, 1):
         rc = cls_map.get(path, {})
         effect = rc.get("change_effect", {})
         stmt = effect.get("statement", "application source") if isinstance(effect, dict) else "application source"
-        ep = effect.get("epistemic_level", "STRUCTURAL SIGNAL") if isinstance(effect, dict) else "STRUCTURAL SIGNAL"
         atype = rc.get("artifact_type", "source")
-        lines.append(f"{i}. `{_short(path)}` — {_badge(ep)}: {atype} — {stmt}")
+        if all_low:
+            lines.append(f"{i}. `{_short(path)}` — {atype} — {stmt}")
+        else:
+            ep = effect.get("epistemic_level", "STRUCTURAL SIGNAL") if isinstance(effect, dict) else "STRUCTURAL SIGNAL"
+            lines.append(f"{i}. `{_short(path)}` — {_badge(ep)}: {atype} — {stmt}")
+
+    if all_low:
+        lines.append("")
+        lines.append(
+            f"*Classification confidence: low for all changed files "
+            f"{_badge('INFERRED (LOW CONFIDENCE)')} — "
+            "no annotation/import signals found in changed files.*"
+        )
 
     return "\n".join(lines)
 
@@ -269,50 +287,26 @@ def _section_signals(out: dict) -> str:
 def _section_guidance(out: dict) -> str:
     lines = ["### 5. Review Guidance", ""]
 
-    # Inspect first — top priority files
-    order: list[str] = out.get("suggested_review_order", []) or out.get("review_hotspots", [])
-    runtime: list[dict] = out.get("runtime_changes", [])
-    cls_map: dict[str, dict] = {rc["path"]: rc for rc in runtime}
-
-    if order:
-        lines.append("**Inspect first:**")
-        for path in order[:3]:
-            rc = cls_map.get(path, {})
-            effect = rc.get("change_effect", {})
-            stmt = effect.get("statement", "") if isinstance(effect, dict) else ""
-            ep = effect.get("epistemic_level", "STRUCTURAL SIGNAL") if isinstance(effect, dict) else "STRUCTURAL SIGNAL"
-            label = f" — {stmt}" if stmt else ""
-            lines.append(f"- `{_short(path)}`{label} {_badge(ep)}")
-        lines.append("")
-
-    # Uncertain — heuristic-only behavioral paths
-    behavioral: list[dict] = out.get("behavioral_impact", [])
-    weak_paths = [
-        bi for bi in behavioral
-        if bi.get("evidence_level", "none") == "heuristic_only"
-    ]
-    if weak_paths:
-        lines.append("**Uncertain (heuristic-only — verify manually):**")
-        for bi in weak_paths[:_MAX_UNCERTAIN]:
-            entry = bi.get("entry_point", "")
-            affected: list[str] = bi.get("affected_path", [])
-            path_str = " → ".join(affected) if affected else "unknown"
-            lines.append(
-                f"- `{entry}` → {path_str} "
-                f"{_badge('INFERRED (LOW CONFIDENCE)')}: class reference only, no injection/call proof"
-            )
-        lines.append("")
-
-    # Evidence gaps
+    # Evidence gaps ONLY — "Inspect first" covered by §3, "Uncertain" covered by §2
     gaps: list[str] = out.get("gaps", [])
     cov = out.get("test_coverage_risk", {})
     test_files: list[str] = cov.get("changed_files_without_tests", [])
     test_basis = cov.get("basis", "")
     cov_ep = cov.get("epistemic_level", "INFERRED (LOW CONFIDENCE)")
 
-    gap_items: list[str] = list(gaps)
+    # Skip graph-absence gaps already captured in analysis_limiter
+    missing_signals: set[str] = set(
+        (out.get("analysis_limiter") or {}).get("missing_signals", [])
+    )
+    gap_items: list[str] = [
+        g for g in gaps
+        if not missing_signals or not any(
+            sig.replace("_", " ") in g.lower() for sig in missing_signals
+        )
+    ]
+
     if test_files:
-        shown = test_files[:5]
+        shown = test_files[:3]
         omitted = len(test_files) - len(shown)
         names = ", ".join(f"`{_short(f)}`" for f in shown)
         suffix = f" +{omitted} more" if omitted else ""
@@ -323,11 +317,18 @@ def _section_guidance(out: dict) -> str:
         )
 
     if gap_items:
-        lines.append("**Evidence gaps / missing coverage:**")
-        for g in gap_items:
+        lines.append("**Evidence gaps:**")
+        for g in gap_items[:3]:
             lines.append(f"- {g}")
     else:
         lines.append("*No evidence gaps detected.*")
+
+    if missing_signals:
+        lines.append("")
+        lines.append(
+            f"{_badge('OMITTED')}: {', '.join(sorted(missing_signals))} — "
+            "graph-based impact analysis unavailable"
+        )
 
     return "\n".join(lines)
 

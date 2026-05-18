@@ -2030,6 +2030,10 @@ def prepare_context_cmd(
             out["runtime_changes"] = output.runtime_changes
         if output.build_changes:
             out["build_changes"] = output.build_changes
+        if output.committed_changes:
+            out["committed_changes"] = output.committed_changes
+        if output.uncommitted_changes:
+            out["uncommitted_changes"] = output.uncommitted_changes
         if output.review_hotspots:
             out["review_hotspots"] = output.review_hotspots
         if output.suggested_review_order:
@@ -2047,6 +2051,27 @@ def prepare_context_cmd(
             "files": output.scope_files,
             "repo_root": output.repo_root or "",
         }
+        # analysis_limiter: consolidate missing graph signals into one field
+        _missing_signals: list[str] = []
+        _dgraph = output.dependency_graph_summary or {}
+        if not _dgraph.get("has_graph_evidence"):
+            _missing_signals.append("dependency_graph")
+        _has_import_ev = any(
+            (rc.get("role") or {}).get("has_annotation_signal") or
+            (rc.get("role") or {}).get("has_symbol_signal")
+            for rc in (output.runtime_changes or [])
+        )
+        if not _has_import_ev:
+            _missing_signals.append("import_graph")
+        if _missing_signals:
+            out["analysis_limiter"] = {"missing_signals": _missing_signals}
+        # classification_confidence: global note when all runtime files are low confidence
+        _all_low = bool(output.runtime_changes) and all(
+            (rc.get("change_effect") or {}).get("epistemic_level") == "INFERRED (LOW CONFIDENCE)"
+            for rc in output.runtime_changes
+        )
+        if _all_low:
+            out["classification_confidence"] = "low"
     if output.limitations:
         out["limitations"] = output.limitations
     if output.symptom:
