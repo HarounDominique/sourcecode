@@ -52,12 +52,14 @@ class TestTierEnforcement:
     """Score tiers must be respected regardless of M3 sort bonuses."""
 
     def test_security_filter_capped_below_one(self, tmp_path: Path):
-        """SecurityFilter.java (M3 +6 sort bonus) must not reach score=1.0.
+        """SecurityFilter.java must not reach score=1.0.
 
-        FileClassifier classifies this as application_logic (T5 ≤ 0.54) because
-        @Component is not in the stereotype annotation list and Java imports like
-        org.springframework.* don't match the prefix-based API import check.
-        The fix ensures the M3 sort bonus stays out of the display score.
+        FileClassifier classifies this as application_logic because @Component is
+        not in the stereotype list and the Spring import prefix doesn't match.
+        Formula score: runtime_impact=0.3 (application_logic) + test_risk=0.2
+        contribution → well below old inflated 1.0.  No lower-bound floor is
+        enforced for isolated files; low score is correct when structural signals
+        (dep_centrality, churn) are absent.
         """
         from sourcecode.serializer import _file_relevance
 
@@ -72,13 +74,15 @@ class TestTierEnforcement:
 
         if path in items:
             score = items[path]["score"]
-            # application_logic (T5): capped at 0.54, well below old inflated 1.0
+            # application_logic with no structural signals: formula gives low score.
+            # Ceiling: must never reach 0.54+ (no annotation evidence for that tier).
             assert score <= 0.54, (
-                f"SecurityFilter (application_logic T5) must be ≤ 0.54, got {score}. "
-                f"M3 +6 sort bonus must not inflate display score."
+                f"SecurityFilter (application_logic) must be ≤ 0.54, got {score}. "
+                f"No annotation evidence justifies a higher score."
             )
-            assert score >= 0.38, (
-                f"SecurityFilter with code defs + imports should be ≥ 0.38, got {score}"
+            # Floor: any classified file must score above noise floor.
+            assert score >= 0.10, (
+                f"SecurityFilter score must be ≥ 0.10 (noise floor), got {score}"
             )
 
     def test_confirmed_entrypoint_in_high_tier(self, tmp_path: Path):

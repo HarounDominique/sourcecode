@@ -802,12 +802,12 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
                 semantic_hub_scores[p] = h.get("importance_score", 0.0) / max_importance
 
     entry_paths = {ep.path for ep in sm.entry_points}
-    # REST/MVC controllers are HTTP surface — surface before @Transactional services
-    _rest_ctrl_paths = {
-        ep.path for ep in sm.entry_points
-        if getattr(ep, "kind", "") in {"rest_controller", "mvc_controller"}
-    }
     scored: list[tuple[float, dict[str, Any]]] = []
+
+    from sourcecode.ranking_engine import (
+        compute_impact_score, resolve_runtime_impact, resolve_framework_signal,
+        _NORM_TARGET_HI,
+    )
 
     for path in sm.file_paths:
         file_class = classifier.classify(path)
@@ -821,78 +821,64 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
         if fs.score < -50:  # hard noise
             continue
 
-        content_rel = file_class.relevance if file_class else 0.0
-        # Semantic hub bonus: normalised call-graph centrality adds up to +0.30
-        sem_hub = semantic_hub_scores.get(path, 0.0) * 0.30
-        pre_bonus_combined = fs.score + content_rel + sem_hub
-        # REST controller boost: surface above @Transactional service files
-        if path in _rest_ctrl_paths:
-            pre_bonus_combined += 2.0
-
-        # M3: Structural importance scoring — SORT ORDER ONLY.
-        # These bonuses drive ranking but must NOT inflate the displayed score.
         stem = Path(path).stem
-        stem_lower = stem.lower()
-        path_lower = path.lower()
-        sort_bonus = 0.0
-        # +10 application entry points
-        if path in entry_paths and any(
-            k in stem for k in ("Application", "Main", "Initializer", "Bootstrap", "Startup")
-        ):
-            sort_bonus = 10.0
-        # +8 known base/infrastructure classes
-        elif any(k in stem for k in (
-            "GenericRestController", "GenericCRUDRestController", "GenericController",
-            "AkitaBaseService", "BaseService", "FilterConfig", "AbstractController",
-        )):
-            sort_bonus = 8.0
-        # +6 security configuration
-        elif any(k in stem for k in (
-            "SecurityConfig", "SecurityStrategy", "WebSecurityConfig", "SecurityFilter",
-            "JwtFilter", "AuthConfig", "SecurityConfiguration",
-        )):
-            sort_bonus = 6.0
-        # +2 shared utilities
-        elif any(k in path_lower for k in ("util", "shared", "common", "helper", "constant")):
-            sort_bonus = 2.0
+        cat = file_class.category if file_class else None
 
-        sort_key = pre_bonus_combined + sort_bonus
+        # ── Component 1: runtime_impact — execution-path role ─────────────────
+        runtime_impact = resolve_runtime_impact(cat)
 
-        # Visibility threshold: require meaningful combined signal.
-        # Exception: high/medium-confidence files with strong content relevance
-        # can survive even if structural score is weak.
-        if sort_key < _FILE_RELEVANCE_MIN_COMBINED:
+        # ── Component 2: dependency_centrality — call-graph importance ─────────
+        # Entry points treat external HTTP/CLI callers as high centrality.
+        # Isolated files (no semantic data) score 0.0 — negative weighting by omission.
+        dep_centrality = semantic_hub_scores.get(path, 0.0)
+        if path in entry_paths:
+            dep_centrality = max(dep_centrality, 0.8)
+
+        # ── Component 3: framework_signal_strength — annotation quality ─────────
+        fw_signal = resolve_framework_signal(cat)
+
+        # ── Component 4: change_type_severity — git churn as structural proxy ───
+        churn = git_churn.get(path, 0)
+        change_sev = min(churn / max(max_churn, 1), 1.0) * 0.8
+
+        # ── Component 5: test_risk_factor — no per-file coverage data ──────────
+        test_risk = 0.2
+
+        formula_raw = compute_impact_score(
+            runtime_impact, dep_centrality, fw_signal, change_sev, test_risk
+        )
+
+        # T1 override: confirmed production entrypoints → 0.92–1.00.
+        # Only runtime_core / cli_entrypoint categories justify scores ≥ 0.92.
+        if path in entry_paths and cat in ("runtime_core", "cli_entrypoint"):
+            score_val = round(
+                min(1.0, max(0.92, file_class.relevance if file_class else 0.92)), 3
+            )
+        else:
+            score_val = round(formula_raw, 3)
+
+        # Visibility threshold: formula score or high-relevance content exception.
+        if score_val < _FILE_RELEVANCE_MIN_COMBINED:
             if not (file_class
                     and file_class.relevance > 0.45
                     and file_class.confidence in {"high", "medium"}):
                 continue
 
-        # Suppress low-confidence auxiliary/config files unless structurally prominent
+        # Suppress low-confidence auxiliary/config files
         if (file_class
                 and file_class.confidence == "low"
                 and file_class.category in {"config", "auxiliary"}
-                and sort_key < 0.45):
+                and score_val < 0.45):
             continue
 
-        # Detect whether structural signals (fan_in, churn, etc.) are present
-        # beyond the base path-relevance reason — used by fallback tier.
-        structural_signal_reasons = [
-            r for r in fs.reasons
-            if r not in ("source file", "workspace source root", "runtime entrypoint")
-            and "path" not in r.lower()
-        ]
-        has_structural = bool(structural_signal_reasons)
-
-        # Tiered display score: evidence-gated, tier-capped.
-        # pre_bonus_combined is used (M3 sort_bonus excluded).
-        score_val = _tiered_display_score(
-            pre_bonus_combined, file_class, path, entry_paths, has_structural,
-        )
-        # relevance: raw evidence strength from FileClassifier (content signal only)
+        # relevance: content evidence only — intentionally diverges from score
+        # when dep_centrality or churn are non-zero (score ≠ relevance invariant)
         relevance_val = round(file_class.relevance, 3) if file_class else round(
-            min(0.39, max(0.10, pre_bonus_combined / 2.0)), 3
+            min(0.39, max(0.10, runtime_impact)), 3
         )
 
+        # sem_hub retained for signal reporting only — not used in score formula
+        sem_hub = semantic_hub_scores.get(path, 0.0) * 0.30
         ranking_reasons = [r for r in fs.reasons if r != "source file"]
         if sem_hub >= 0.15:
             ranking_reasons.append("call graph hub")
@@ -913,7 +899,7 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
         if ranking_reasons:
             item["ranking_reasons"] = ranking_reasons
 
-        # Override metadata for known M3 base controller classes
+        # Override: universal base controller classes score as runtime_core
         if any(k in stem for k in ("GenericRestController", "GenericCRUDRestController")):
             item["category"] = "runtime_core"
             item["score"] = 0.95
@@ -926,10 +912,37 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
             item["ranking_reasons"] = ["universal base class", "exception handling contract"]
             item["signals"] = [{"type": "framework_annotation", "strength": "strong"}]
 
-        scored.append((sort_key, item))
+        # sort_key = final score (rank consistency: score order = output order)
+        scored.append((item["score"], item))
 
-    # Deterministic sort: sort_key desc, then path asc
+    # Initial sort: score desc, path asc for deterministic tie-break
     scored.sort(key=lambda x: (-x[0], x[1]["path"]))
+
+    # Normalization: enforce minimum spread ≥ 0.4 among non-T1 files.
+    # T1 files (confirmed entrypoints, 0.92–1.0) are excluded — already correct.
+    # Prevents score compression when structural signals (--semantics, git) absent.
+    _nonep = [(sk, it) for sk, it in scored if it["path"] not in entry_paths]
+    if len(_nonep) > 1:
+        _vals = [it["score"] for _, it in _nonep]
+        _lo, _hi = min(_vals), max(_vals)
+        _spread = _hi - _lo
+        if _spread < 0.40:
+            _top_cat = max(_nonep, key=lambda x: x[1]["score"])[1].get("category", "")
+            _target_hi = _NORM_TARGET_HI.get(_top_cat, 0.60)
+            _target_lo = max(0.10, _target_hi - 0.50)
+            if _spread > 0:
+                _scale = (_target_hi - _target_lo) / _spread
+                for _, it in _nonep:
+                    it["score"] = round(
+                        max(0.0, min(1.0, _target_lo + (it["score"] - _lo) * _scale)), 3
+                    )
+            else:
+                _mid = round((_target_hi + _target_lo) / 2.0, 3)
+                for _, it in _nonep:
+                    it["score"] = _mid
+
+    # Re-sort by final score to guarantee rank consistency after normalization
+    scored.sort(key=lambda x: (-x[1]["score"], x[1]["path"]))
 
     # Diversity cap: at most half the budget from any single category.
     # Prevents 10/10 controllers drowning out services, repositories, domain.

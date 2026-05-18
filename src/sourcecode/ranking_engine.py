@@ -251,3 +251,95 @@ class RankingEngine:
 
     def is_auxiliary(self, path: str) -> bool:
         return self._scorer.is_auxiliary(path)
+
+
+# ---------------------------------------------------------------------------
+# Mandatory scoring formula — deterministic 5-component impact model
+# ---------------------------------------------------------------------------
+
+# runtime_impact: execution-path role of the file
+_RUNTIME_IMPACT: dict[str | None, float] = {
+    "api_endpoint": 1.0,        # @RestController / @Controller
+    "security": 1.0,             # @EnableWebSecurity / security filters
+    "runtime_core": 1.0,         # confirmed production entrypoint
+    "cli_entrypoint": 1.0,
+    "exception_handler": 0.8,    # @ControllerAdvice
+    "business_logic": 0.7,       # @Service (with or without @Transactional)
+    "api_layer": 0.7,            # API framework import (non-annotation evidence)
+    "data_access": 0.5,          # @Repository / @Mapper
+    "database_layer": 0.5,       # DB framework import
+    "infrastructure": 0.5,       # infra dependency import
+    "configuration": 0.4,        # @Configuration
+    "application_logic": 0.3,    # code defs + imports, no framework annotation
+    "domain_model": 0.3,         # @Entity / domain models
+    "dto": 0.2,                  # @Data / pure data carriers
+    "build_system": 0.15,
+    "tests": 0.1,
+    "tooling": 0.05,
+    None: 0.15,                  # unclassified source file
+}
+
+# framework_signal_strength: annotation / import evidence quality
+# Spring annotation → 0.3; security component → +0.2 (total 0.5); import only → 0.2
+_FRAMEWORK_SIGNAL: dict[str | None, float] = {
+    "security": 0.5,             # Spring Security annotation + security component
+    "api_endpoint": 0.3,         # @RestController / @Controller
+    "exception_handler": 0.3,    # @ControllerAdvice
+    "business_logic": 0.3,       # @Service
+    "data_access": 0.3,          # @Repository / @Mapper
+    "configuration": 0.3,        # @Configuration
+    "domain_model": 0.3,         # JPA @Entity
+    "dto": 0.3,                  # Lombok @Data
+    "api_layer": 0.2,            # framework import (weaker than annotation)
+    "database_layer": 0.2,
+    "infrastructure": 0.2,
+}
+
+# Normalization ceiling per evidence tier — used when spread < 0.40
+_NORM_TARGET_HI: dict[str, float] = {
+    "api_endpoint": 0.90,
+    "security": 0.90,
+    "exception_handler": 0.82,
+    "business_logic": 0.80,
+    "api_layer": 0.80,
+    "data_access": 0.70,
+    "database_layer": 0.70,
+    "infrastructure": 0.70,
+    "configuration": 0.65,
+}
+
+
+def resolve_runtime_impact(category: str | None) -> float:
+    """Map FileClassifier category → runtime_impact [0.0, 1.0]."""
+    return _RUNTIME_IMPACT.get(category, _RUNTIME_IMPACT[None])
+
+
+def resolve_framework_signal(category: str | None) -> float:
+    """Map FileClassifier category → framework_signal_strength [0.0, 0.5]."""
+    return _FRAMEWORK_SIGNAL.get(category, 0.0)
+
+
+def compute_impact_score(
+    runtime_impact: float,
+    dependency_centrality: float,
+    framework_signal_strength: float,
+    change_type_severity: float,
+    test_risk_factor: float,
+) -> float:
+    """Mandatory weighted scoring formula.
+
+    score = 0.35×runtime_impact + 0.25×dependency_centrality
+          + 0.20×framework_signal_strength + 0.10×change_type_severity
+          + 0.10×test_risk_factor
+
+    All inputs [0.0, 1.0]. Output clamped [0.0, 1.0].
+    Deterministic: same inputs always produce same output.
+    """
+    raw = (
+        0.35 * runtime_impact
+        + 0.25 * dependency_centrality
+        + 0.20 * framework_signal_strength
+        + 0.10 * change_type_severity
+        + 0.10 * test_risk_factor
+    )
+    return max(0.0, min(1.0, raw))
