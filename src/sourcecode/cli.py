@@ -1723,8 +1723,16 @@ def prepare_context_cmd(
     import time as _time
 
     builder = TaskContextBuilder(target)
+    _progress = Progress()
+    _phase = f"analyzing ({task})"
+    if since:
+        _phase += f" since {since}"
+    _progress.start(_phase)
     _t0 = _time.perf_counter()
-    output = builder.build(task, since=since, symptom=symptom)
+    try:
+        output = builder.build(task, since=since, symptom=symptom)
+    finally:
+        _progress.finish()
     _t_total = (_time.perf_counter() - _t0) * 1000
 
     if debug_perf:
@@ -2105,7 +2113,15 @@ def repo_ir_cmd(
         )
         return
 
-    ir = build_repo_ir(file_list, root, since=since)
+    _ir_phase = f"extracting IR ({len(file_list)} files)"
+    if since:
+        _ir_phase += f" since {since}"
+    _ir_progress = Progress()
+    _ir_progress.start(_ir_phase)
+    try:
+        ir = build_repo_ir(file_list, root, since=since)
+    finally:
+        _ir_progress.finish()
     ir = apply_ir_size_limits(
         ir,
         max_nodes=max_nodes,
