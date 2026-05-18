@@ -997,6 +997,8 @@ def _get_git_old_content(git_root: Path, rel_path: str, since: str) -> Optional[
             cwd=str(git_root),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if result.returncode == 0:

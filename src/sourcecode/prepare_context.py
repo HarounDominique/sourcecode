@@ -561,17 +561,23 @@ _ARTIFACT_CHANGE_EFFECT: dict[str, str] = {
 # Maps frontend symptom keywords → backend terms likely to contain the root cause.
 # Used to boost service/interceptor files when the symptom is UI-only.
 _FRONTEND_SYMPTOM_MAP: dict[str, list[str]] = {
-    "spinner":  ["loading", "setloading", "finalize", "httpinterceptor", "interceptor", "service"],
-    "loading":  ["loading", "setloading", "finalize", "httpinterceptor", "interceptor", "service"],
-    "login":    ["authcontroller", "securityconfig", "filterconfig", "jwtfilter", "auth", "authentication"],
-    "logout":   ["authcontroller", "securityconfig", "jwtfilter", "auth", "session"],
-    "dropdown": ["getmapping", "findall", "obtenertodos", "listall", "findby"],
-    "modal":    ["controller", "getmapping", "findby", "search"],
-    "popup":    ["controller", "getmapping", "findby", "search"],
-    "table":    ["paginated", "findby", "search", "getmapping", "listall"],
-    "grid":     ["paginated", "findby", "search", "getmapping"],
-    "button":   ["postmapping", "putmapping", "deletemapping", "controller", "service"],
-    "form":     ["postmapping", "putmapping", "controller", "service", "dto"],
+    "spinner":    ["loading", "setloading", "finalize", "httpinterceptor", "interceptor", "service"],
+    "loading":    ["loading", "setloading", "finalize", "httpinterceptor", "interceptor", "service"],
+    "login":      ["authcontroller", "securityconfig", "filterconfig", "jwtfilter", "auth", "authentication"],
+    "logout":     ["authcontroller", "securityconfig", "jwtfilter", "auth", "session"],
+    "dropdown":   ["getmapping", "findall", "obtenertodos", "listall", "findby"],
+    "modal":      ["controller", "getmapping", "findby", "search"],
+    "popup":      ["controller", "getmapping", "findby", "search"],
+    "table":      ["paginated", "findby", "search", "getmapping", "listall"],
+    "grid":       ["paginated", "findby", "search", "getmapping"],
+    "button":     ["postmapping", "putmapping", "deletemapping", "controller", "service"],
+    "form":       ["postmapping", "putmapping", "controller", "service", "dto"],
+    # session-related symptoms (Spanish + English)
+    "sesion":     ["httpsession", "sessionmanager", "sessionservice", "sessionrepository", "sessionfactory", "authentication"],
+    "sesiones":   ["httpsession", "sessionmanager", "sessionservice", "sessionrepository", "sessionfactory", "authentication"],
+    "session":    ["httpsession", "sessionmanager", "sessionservice", "sessionrepository", "sessionfactory", "authentication"],
+    # worker/assignment domain terms (common in RRHH/HR systems)
+    "trabajador": ["trabajador", "empleado", "worker", "asignacion", "trabajadordao", "trabajadorservice"],
 }
 
 
@@ -826,12 +832,14 @@ class TaskContextBuilder:
         # ── 5b. Git signals for ranking ────────────────────────────────────
         git_hotspots: dict[str, int] = {}
         uncommitted_files: set[str] = set()
+        _recent_commits_for_symptom: list = []
         try:
             from sourcecode.git_analyzer import GitAnalyzer
             _gc = GitAnalyzer().analyze(self.root, depth=30, days=90)
             _bad = {"no_git_repo", "git_not_found", "git_timeout"}
             if _gc and not (_bad & set(_gc.limitations)):
                 git_hotspots = {h.file: h.commit_count for h in _gc.change_hotspots}
+                _recent_commits_for_symptom = list(_gc.recent_commits)
                 if _gc.uncommitted_changes:
                     _uc = _gc.uncommitted_changes
                     uncommitted_files = set(_uc.staged) | set(_uc.unstaged)
@@ -1208,19 +1216,52 @@ class TaskContextBuilder:
                 if len(w) > 2
             ]
             if symptom_keywords:
-                # Surface code notes whose text contains any keyword
+                # Pass 1: surface code notes whose text contains any keyword
+                # Also track which file paths have matching notes (for score boost below).
+                _note_matched_paths: dict[str, int] = {}  # path → count of matching notes
                 for _n in cn_notes_for_ranking:
                     _text = (getattr(_n, "text", "") or "").lower()
                     if any(kw in _text for kw in symptom_keywords):
+                        _np = getattr(_n, "path", "")
                         related_notes.append({
                             "kind": getattr(_n, "kind", ""),
-                            "path": getattr(_n, "path", ""),
+                            "path": _np,
                             "line": getattr(_n, "line", None),
                             "text": getattr(_n, "text", ""),
                         })
-                # Secondary pass: inject files whose path matches symptom keywords
-                # but weren't in the candidate pool (no structural/git signals).
+                        _note_matched_paths[_np] = _note_matched_paths.get(_np, 0) + 1
+
+                # Pass 2: build commit message index — files touched in commits whose
+                # message matches a symptom keyword get a strong recency signal.
+                # This is the primary signal for functional keywords like "sesiones"
+                # that don't appear in file paths but do appear in commit messages.
+                _commit_file_hits: dict[str, int] = {}  # path → n matching commits
+                for _cr in _recent_commits_for_symptom:
+                    _msg_lower = (_cr.message or "").lower()
+                    if any(kw in _msg_lower for kw in symptom_keywords):
+                        for _cf in (_cr.files_changed or []):
+                            _cf_norm = _cf.replace("\\", "/")
+                            _commit_file_hits[_cf_norm] = _commit_file_hits.get(_cf_norm, 0) + 1
+
+                # Pass 3: inject files from commit index not yet in candidate pool
                 _existing_paths = {rf.path for rf in relevant_files}
+                for _cp, _nhits in _commit_file_hits.items():
+                    if _cp in _existing_paths:
+                        continue
+                    if Path(_cp).suffix.lower() not in _ALL_EXTENSIONS:
+                        continue
+                    _ci_score = round(min(0.5 + 0.15 * _nhits, 0.85), 2)
+                    relevant_files.append(RelevantFile(
+                        path=_cp,
+                        role="symptom_match",
+                        score=_ci_score,
+                        reason=f"commit message matches symptom ({_nhits} commit{'s' if _nhits > 1 else ''})",
+                        why=f"symptom commit-index: {', '.join(symptom_keywords)}",
+                    ))
+                    _existing_paths.add(_cp)
+
+                # Pass 4: inject files whose path matches symptom keywords
+                # but weren't in the candidate pool (no structural/git signals).
                 for _p in all_paths:
                     if _p in _existing_paths:
                         continue
@@ -1242,17 +1283,38 @@ class TaskContextBuilder:
                     ))
                     _existing_paths.add(_p)
 
-                # Re-rank all relevant_files: boost files whose path matches keywords
-                def _symptom_score(rf: "RelevantFile") -> float:
-                    path_lower = rf.path.lower()
-                    return rf.score + 0.2 * sum(1.0 for kw in symptom_keywords if kw in path_lower)
-                relevant_files = sorted(relevant_files, key=lambda rf: -_symptom_score(rf))
-
-                # Content scan boost: read file body for symptom keywords
+                # Pass 5: multi-signal boost — apply commit, note, content, and path
+                # signals in one pass to avoid redundant file reads.
                 _src_exts = frozenset({".java", ".py", ".ts", ".js", ".kt", ".go"})
-                _content_boosted: list[RelevantFile] = []
+                _boosted: list[RelevantFile] = []
                 for _rf in relevant_files:
                     _extra = 0.0
+                    _reasons: list[str] = []
+                    _p_lower = _rf.path.lower()
+
+                    # Commit message boost: +0.25/commit, cap +0.40
+                    _c_hits = _commit_file_hits.get(_rf.path, 0)
+                    if _c_hits:
+                        _cb = min(0.40, _c_hits * 0.25)
+                        _extra += _cb
+                        _reasons.append(f"commit-msg symptom ×{_c_hits} (+{_cb:.2f})")
+
+                    # Code note boost: +0.20/note, cap +0.30
+                    _n_hits = _note_matched_paths.get(_rf.path, 0)
+                    if _n_hits:
+                        _nb = min(0.30, _n_hits * 0.20)
+                        _extra += _nb
+                        _reasons.append(f"note-match symptom ×{_n_hits} (+{_nb:.2f})")
+
+                    # Path keyword boost: +0.20/keyword already in score for injected
+                    # files; re-apply for pre-existing candidates whose path matches.
+                    _path_kws = [kw for kw in symptom_keywords if kw in _p_lower]
+                    if _path_kws and _rf.role != "symptom_match":
+                        _pb = 0.20 * len(_path_kws)
+                        _extra += _pb
+                        _reasons.append(f"path-kw symptom ({', '.join(_path_kws)}) (+{_pb:.2f})")
+
+                    # Content scan boost: +0.05/hit, cap +0.50 (was +0.02, cap +0.30)
                     if Path(_rf.path).suffix.lower() in _src_exts:
                         try:
                             _lines = (self.root / _rf.path).read_text(
@@ -1260,26 +1322,33 @@ class TaskContextBuilder:
                             ).splitlines()[:300]
                             _body = "\n".join(_lines).lower()
                             _hits = sum(_body.count(kw) for kw in symptom_keywords)
-                            _extra = min(0.30, _hits * 0.02)
+                            _content_b = min(0.50, _hits * 0.05)
+                            if _content_b > 0:
+                                _extra += _content_b
+                                _reasons.append(f"content-match symptom ×{_hits} (+{_content_b:.2f})")
                         except OSError:
                             pass
-                    _content_boosted.append(RelevantFile(
+
+                    _new_reason = _rf.reason
+                    if _reasons:
+                        _new_reason = _rf.reason + ", " + ", ".join(_reasons)
+                    _boosted.append(RelevantFile(
                         path=_rf.path,
                         role=_rf.role,
                         score=round(min(_rf.score + _extra, 1.0), 2),
-                        reason=_rf.reason + (f", content-match symptom (+{_extra:.2f})" if _extra > 0 else ""),
+                        reason=_new_reason,
                         why=_rf.why,
                     ))
-                relevant_files = sorted(_content_boosted, key=lambda rf: -rf.score)
+                relevant_files = sorted(_boosted, key=lambda rf: -rf.score)
 
-                # Cross-layer synonym boost: frontend keywords → backend equivalents
+                # Pass 6: cross-layer synonym boost — frontend keywords → backend equivalents
                 _synonym_note: Optional[str] = None
                 _frontend_kws = [kw for kw in symptom_keywords if kw in _FRONTEND_SYMPTOM_MAP]
                 if _frontend_kws:
                     _backend_terms: list[str] = []
                     for _fkw in _frontend_kws:
                         _backend_terms.extend(_FRONTEND_SYMPTOM_MAP[_fkw])
-                    _backend_terms_set = list(dict.fromkeys(_backend_terms))  # dedup, preserve order
+                    _backend_terms_set = list(dict.fromkeys(_backend_terms))
                     _synonym_boosted: list[RelevantFile] = []
                     for _rf in relevant_files:
                         _extra_syn = 0.0
