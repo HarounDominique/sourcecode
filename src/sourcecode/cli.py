@@ -161,7 +161,7 @@ Compressed AI-ready context for Java/Spring enterprise codebases.
 # Known subcommand names — tokens matching these are routed as subcommands,
 # not consumed as a repository path.
 _SUBCOMMANDS: frozenset[str] = frozenset(
-    {"telemetry", "prepare-context", "version", "config", "analyze"}
+    {"telemetry", "prepare-context", "version", "config", "analyze", "repo-ir"}
 )
 
 # Mutable container holding the path extracted by _preprocess_argv().
@@ -1513,10 +1513,31 @@ def main(
             data = redact_dict(data)
         content = json.dumps(data, indent=2, ensure_ascii=False)
     elif compact:
+        if changed_only and _allowed_changed_files:
+            sm = _replace(sm,
+                file_paths=[p for p in sm.file_paths if p in _allowed_changed_files],
+                entry_points=[ep for ep in sm.entry_points if ep.path in _allowed_changed_files],
+                code_notes=[n for n in sm.code_notes if n.path in _allowed_changed_files],
+            )
         data = compact_view(sm, no_tree=no_tree, full=full)
         if not no_redact:
             data = redact_dict(data)
-        content = json.dumps(data, indent=2, ensure_ascii=False)
+        if format == "yaml":
+            from io import StringIO
+            from ruamel.yaml import YAML as _YAML
+            _yaml = _YAML()
+            _yaml.default_flow_style = False
+            _yaml.representer.add_representer(
+                type(None),
+                lambda dumper, data_val: dumper.represent_scalar(
+                    "tag:yaml.org,2002:null", "null"
+                ),
+            )
+            _stream = StringIO()
+            _yaml.dump(data, _stream)
+            content = _stream.getvalue()
+        else:
+            content = json.dumps(data, indent=2, ensure_ascii=False)
     else:
         raw_dict = standard_view(sm, include_tree=tree and not no_tree)
         if not no_redact:
