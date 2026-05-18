@@ -25,6 +25,7 @@ class DiffSourceType(str, Enum):
     WORKTREE_STAGED   = "WORKTREE_STAGED"     # git diff --cached
     GIT_SINCE_REF     = "GIT_SINCE_REF"       # git diff ref HEAD
     GIT_RANGE         = "GIT_RANGE"           # git diff refA refB
+    HEAD_MINUS_1      = "HEAD_MINUS_1"        # git diff HEAD~1 HEAD (auto-fallback when tree clean)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -601,6 +602,83 @@ _FRONTEND_SYMPTOM_MAP: dict[str, list[str]] = {
 }
 
 
+def _build_analysis_scope(
+    *,
+    task_name: str,
+    since: Optional[str],
+    delta_baseline: dict,
+    pr_scope_source: str,
+    pr_uncommitted_files: list,
+) -> dict:
+    """Build analysis_scope metadata from actual git resolution — never hardcoded."""
+    if task_name == "review-pr":
+        sources = pr_scope_source.split(",") if pr_scope_source else []
+        # Derive git_equivalent_command from sources
+        cmds: list[str] = []
+        if DiffSourceType.GIT_RANGE.value in sources or DiffSourceType.GIT_SINCE_REF.value in sources:
+            cmds.append(f"git diff --name-only {since} HEAD")
+        if DiffSourceType.HEAD_MINUS_1.value in sources:
+            cmds.append("git diff --name-only HEAD~1 HEAD")
+        if DiffSourceType.WORKTREE_UNSTAGED.value in sources:
+            cmds.append("git diff --name-only")
+        if DiffSourceType.WORKTREE_STAGED.value in sources:
+            cmds.append("git diff --name-only --cached")
+        git_cmd = " + ".join(cmds) if cmds else "git diff --name-only"
+        return {
+            "sources_used": sources,
+            "git_equivalent_command": git_cmd,
+            "includes_uncommitted": bool(pr_uncommitted_files),
+            "git_resolution": {
+                "source_of_truth": "RANGE" if since else (
+                    "HEAD" if DiffSourceType.HEAD_MINUS_1.value in sources else "WORKTREE"
+                ),
+                "resolved_diff_strategy": pr_scope_source,
+                "commit_count_analyzed": 1 if DiffSourceType.HEAD_MINUS_1.value in sources else (
+                    0 if not since else None
+                ),
+            },
+        }
+
+    # delta
+    rpath = delta_baseline.get("resolution_path", "")
+    rref = delta_baseline.get("resolved_ref", "HEAD")
+
+    _COMMITTED_PATHS = {"exact_local_ref", "remote_tracking_ref", "symbolic_ref"}
+    if rpath in _COMMITTED_PATHS:
+        sources = [DiffSourceType.GIT_SINCE_REF.value]
+        git_cmd = f"git diff --name-only {rref} HEAD"
+        source_of_truth = "RANGE"
+        includes_uncommitted = False
+    elif rpath == "head_minus_1_fallback":
+        sources = [DiffSourceType.HEAD_MINUS_1.value]
+        git_cmd = "git diff --name-only HEAD~1 HEAD"
+        source_of_truth = "HEAD"
+        includes_uncommitted = False
+    elif rpath == "uncommitted_staged":
+        sources = [DiffSourceType.WORKTREE_STAGED.value]
+        git_cmd = "git diff --name-only --cached"
+        source_of_truth = "STAGED"
+        includes_uncommitted = True
+    else:  # uncommitted_unstaged, uncommitted_changes, no_changes_confirmed
+        sources = [DiffSourceType.WORKTREE_UNSTAGED.value]
+        git_cmd = "git diff --name-only"
+        source_of_truth = "WORKTREE"
+        includes_uncommitted = True
+
+    return {
+        "sources_used": sources,
+        "git_equivalent_command": git_cmd,
+        "includes_uncommitted": includes_uncommitted,
+        "git_resolution": {
+            "source_of_truth": source_of_truth,
+            "resolved_diff_strategy": rpath or "unknown",
+            "commit_count_analyzed": 1 if rpath == "head_minus_1_fallback" else (
+                0 if rpath == "no_changes_confirmed" else None
+            ),
+        },
+    }
+
+
 class TaskContextBuilder:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -870,9 +948,11 @@ class TaskContextBuilder:
         # For delta task, relevant_files must rank only files changed in the
         # specified git range, not the full repo by generic entrypoint scoring.
         _delta_files: Optional[set[str]] = None
+        _delta_baseline: dict = {}  # resolution metadata threaded into analysis_scope
         if task_name == "delta":
-            _delta_raw = self._get_git_changed_files(since=since)
-            if _delta_raw is None:
+            _baseline = self._resolve_git_baseline(since=since)
+            _delta_baseline = _baseline
+            if _baseline["error"]:
                 # Explicit --since ref couldn't be resolved — hard error, no fallback
                 _avail_branches, _suggested = self._get_available_refs(since or "")
                 _hints: list[str] = []
@@ -899,8 +979,11 @@ class TaskContextBuilder:
                     error_hints=_hints,
                     gaps=[f"Cannot compute delta: git ref '{since}' not found."] + _hints,
                     ci_decision="git_ref_error",
+                    resolution_path=_baseline.get("resolution_path"),
+                    diff_validation_status=_baseline.get("diff_validation_status"),
                 )
-            elif _delta_raw:
+            _delta_raw = _baseline["files"]
+            if _delta_raw:
                 _delta_files = set(_delta_raw)
 
         # ── 5d. review-pr: set _delta_files from pre-resolved git scope ──────────
@@ -1515,7 +1598,11 @@ class TaskContextBuilder:
         changed_files: list[str] = []
         affected_entry_points: list[str] = []
         if task_name in ("delta", "review-pr"):
-            changed_files = sorted(_delta_files) if _delta_files else (self._get_git_changed_files(since=since) or [])
+            # For delta: _delta_files already resolved via _resolve_git_baseline — no second git call.
+            # For review-pr: _get_git_changed_files fallback still valid as last resort.
+            changed_files = sorted(_delta_files) if _delta_files else (
+                [] if task_name == "delta" else (self._get_git_changed_files(since=since) or [])
+            )
             _ep_set = {ep.path for ep in entry_points}
             # include framework-detected entry points AND files classified as
             # entrypoint/controller/security by artifact taxonomy
@@ -1582,21 +1669,16 @@ class TaskContextBuilder:
             committed_changes=_pr_committed_changes,
             uncommitted_changes=_pr_uncommitted_changes,
             # transparency: explicit diff scope
-            analysis_scope={
-                "sources_used": _pr_scope_source.split(",") if task_name == "review-pr" and _pr_scope_source else (
-                    [DiffSourceType.GIT_SINCE_REF.value] if task_name == "delta" and since else
-                    [DiffSourceType.WORKTREE_UNSTAGED.value] if task_name == "delta" else
-                    []
-                ),
-                "git_equivalent_command": (
-                    f"git diff --name-only {since} HEAD" if since else
-                    "git diff --name-only"
-                ) if task_name in ("delta", "review-pr") else None,
-                "includes_uncommitted": bool(
-                    (task_name == "review-pr" and _pr_uncommitted_files) or
-                    (task_name == "delta" and not since)
-                ),
-            } if task_name in ("delta", "review-pr") else {},
+            analysis_scope=_build_analysis_scope(
+                task_name=task_name,
+                since=since,
+                delta_baseline=_delta_baseline,
+                pr_scope_source=_pr_scope_source,
+                pr_uncommitted_files=_pr_uncommitted_files,
+            ) if task_name in ("delta", "review-pr") else {},
+            resolved_since_ref=_delta_baseline.get("resolved_ref") if task_name == "delta" else None,
+            resolution_path=_delta_baseline.get("resolution_path") if task_name == "delta" else None,
+            diff_validation_status=_delta_baseline.get("diff_validation_status") if task_name == "delta" else None,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
@@ -1961,6 +2043,17 @@ class TaskContextBuilder:
             uncommitted_files.extend(f for f in staged if f not in uncommitted_files)
             if DiffSourceType.WORKTREE_STAGED.value not in sources:
                 sources.append(DiffSourceType.WORKTREE_STAGED.value)
+
+        # ── HEAD~1 fallback — working tree clean, surface last commit ────────
+        # Without --since: if no unstaged/staged changes exist, fall back to the
+        # last committed diff so a clean tree never silently returns no_changes.
+        if since is None and not committed_files and not uncommitted_files:
+            head_ok = _run("git", "rev-parse", "--verify", "HEAD~1")
+            if head_ok is not None:  # HEAD~1 exists
+                head_committed = _run("git", "diff", "--name-only", "--relative", "HEAD~1", "HEAD")
+                if head_committed:
+                    committed_files = head_committed
+                    sources.append(DiffSourceType.HEAD_MINUS_1.value)
 
         # ── Drop paths outside self.root ──────────────────────────────────────
         def _drop_outside(lst: list[str]) -> list[str]:
@@ -3164,25 +3257,33 @@ class TaskContextBuilder:
             }
 
         else:
-            # No since: uncommitted changes first
+            # No since: unstaged → staged → HEAD~1 — never error, clean tree is valid
             ok, out = _run("diff", "--name-only", "--relative", timeout=10)
             if ok:
                 files = [line.strip() for line in out.splitlines() if line.strip()]
                 if files:
-                    return _make(files, "HEAD", "uncommitted_changes")
+                    return _make(files, "HEAD", "uncommitted_unstaged")
 
-            # HEAD~1 fallback
+            # Staged (committed to index but not yet to history)
+            ok, out = _run("diff", "--name-only", "--cached", "--relative", timeout=10)
+            if ok:
+                files = [line.strip() for line in out.splitlines() if line.strip()]
+                if files:
+                    return _make(files, "HEAD", "uncommitted_staged")
+
+            # HEAD~1 fallback — working tree clean, surface last commit
             if _verify("HEAD~1"):
                 files = _diff("HEAD~1")
                 if files is not None:
                     return _make(files or [], "HEAD~1", "head_minus_1_fallback")
 
+            # Confirmed no changes: first commit or empty repo
             return {
                 "files": [],
                 "resolved_ref": "HEAD",
-                "resolution_path": "unresolvable",
-                "diff_validation_status": "invalid_ref",
-                "error": True,
+                "resolution_path": "no_changes_confirmed",
+                "diff_validation_status": "valid_empty",
+                "error": False,
             }
 
     def _get_uncommitted_changed_files(self) -> list[str]:
