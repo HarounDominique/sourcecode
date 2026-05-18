@@ -556,7 +556,7 @@ _ARTIFACT_CHANGE_EFFECT: dict[str, str] = {
     "test":           "test file (no production code modified)",
     "documentation":  "documentation file (no runtime impact)",
     "ide_noise":      "IDE/tooling artifact (no application impact)",
-    "source":         "application source (artifact role requires annotation inspection)",
+    "source":         "application source file (role could not be confirmed from code signals)",
 }
 
 # Maps frontend symptom keywords → backend terms likely to contain the root cause.
@@ -1156,22 +1156,24 @@ class TaskContextBuilder:
                     else "unknown"
                 )
                 _impact_entry = _delta_impact_score_per_file.get(_f) or {}
-                _entry = {
+                _ev_complete = {k: v for k, v in _impact_entry.get("evidence", {}).items() if v}
+                _entry: dict = {
                     "path": _f,
                     "diff_source": _diff_source,
                     "role": _role_obj,
                     "artifact_type": _f_atype,
                     "evidence": _evidence,
                     "change_effect": {
-                        "statement": _ARTIFACT_CHANGE_EFFECT.get(_f_atype, "application source (artifact role requires annotation inspection)"),
+                        "statement": _ARTIFACT_CHANGE_EFFECT.get(_f_atype, "application source file (role could not be confirmed)"),
                         "classification_method": _f_cls.get("confidence", "low"),
                         "epistemic_level": (
                             "STRUCTURAL SIGNAL" if _f_cls.get("confidence", "low") == "high"
                             else "INFERRED (LOW CONFIDENCE)"
                         ),
                     },
-                    "evidence_completeness": _impact_entry.get("evidence", {}),
                 }
+                if _ev_complete:
+                    _entry["evidence_completeness"] = _ev_complete
                 _pr_runtime_changes.append(_entry)
                 # Split committed vs uncommitted — never merged
                 if _f in _committed_set:
@@ -2992,12 +2994,12 @@ class TaskContextBuilder:
 
         # ── Step 6: analysis gaps ──────────────────────────────────────────────
         _bfs_note = (
-            f"BFS multi-hop import propagation repo-wide (propagation_depth={_max_hop})"
+            f"multi-hop import tracing performed (depth {_max_hop})"
             if _max_hop >= 1
-            else "no import-link propagation (no scannable changed files)"
+            else "no downstream dependencies could be verified"
         )
         analysis_gaps: list[str] = [
-            f"Related file expansion: type-aware chain expansion + {_bfs_note} + module/directory heuristics",
+            f"Related file expansion via import analysis and directory proximity ({_bfs_note})",
         ]
         if _expansion_truncated:
             analysis_gaps.insert(0,
@@ -3015,10 +3017,8 @@ class TaskContextBuilder:
         low_confidence = [f for f, cls in classifications.items() if cls.get("confidence") == "low" and not cls["is_noise"]]
         if low_confidence:
             analysis_gaps.append(
-                f"{len(low_confidence)} file(s) classified with low confidence"
-                " (artifact type inferred from extension only)"
-                " — consider adding stem patterns to _classify_changed_file: "
-                + ", ".join(Path(f).name for f in low_confidence[:3])
+                f"{len(low_confidence)} file(s) role inferred from filename only"
+                f" (no code signal found): {', '.join(Path(f).name for f in low_confidence[:3])}"
             )
         if not affected_modules_set and any(not cls["is_noise"] for cls in classifications.values()):
             analysis_gaps.append(

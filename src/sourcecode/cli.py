@@ -1596,6 +1596,87 @@ def main(
                 typer.echo("✓ copied to clipboard", err=True)
 
 
+# ── prepare-context output helpers ────────────────────────────────────────────
+
+def _make_explanation(reason: str, why: str) -> str:
+    """Merge reason+why into one human string. Drop internal pipe-format jargon."""
+    if why and not why.startswith("artifact_type:"):
+        return why
+    return reason
+
+
+def _serialize_relevant_file(f: Any) -> dict:
+    from dataclasses import asdict as _asdict
+    d = {k: v for k, v in _asdict(f).items() if v != "" and v is not None}
+    reason = d.pop("reason", "") or ""
+    why = d.pop("why", "") or ""
+    explanation = _make_explanation(reason, why)
+    if explanation:
+        d["explanation"] = explanation
+    if reason:
+        d["reason"] = reason
+    return d
+
+
+def _transform_impact_scores(scores: dict) -> dict:
+    """Convert internal impact_score_per_file to human-readable review signals."""
+    _THRESHOLDS = [(0.60, "high"), (0.40, "medium")]
+    _CT_LABELS: dict[str, str] = {
+        "security_change":    "security-sensitive change",
+        "behavioral_change":  "behavioral change",
+        "structural_change":  "structural modification",
+        "configuration_change": "configuration change",
+        "dependency_change":  "dependency update",
+        "ui_change":          "UI change",
+    }
+    result: dict = {}
+    for path, entry in scores.items():
+        raw = entry.get("_rank_score", 0.0)
+        priority = next((p for thresh, p in _THRESHOLDS if raw >= thresh), "low")
+        signals: list[str] = [
+            _CT_LABELS[ct] for ct in entry.get("change_types", []) if ct in _CT_LABELS
+        ]
+        ev = entry.get("evidence", {})
+        callers = ev.get("reverse_edge_count", 0)
+        if callers:
+            signals.append(f"imported by {callers} other file{'s' if callers > 1 else ''}")
+        out_entry: dict = {"review_priority": priority}
+        if signals:
+            out_entry["signals"] = signals
+        result[path] = out_entry
+    return result
+
+
+def _clean_system_impact(si: dict) -> dict:
+    """Remove empty lists/dicts from system_impact — only emit positive signals."""
+    return {k: v for k, v in si.items() if v}
+
+
+def _build_human_summary(output: Any) -> dict:
+    """Human-readable summary block for delta/review-pr output."""
+    concerns: list[str] = []
+    si = getattr(output, "system_impact", {}) or {}
+    for ri in si.get("runtime_impact", []):
+        sig = ri.get("signal", "")
+        if sig:
+            concerns.append(sig)
+    for bc in si.get("behavioral_changes", []):
+        stmt = bc.get("statement", "")
+        if stmt:
+            concerns.append(stmt)
+    cov = getattr(output, "test_coverage_risk", {}) or {}
+    missing = cov.get("changed_files_without_tests", [])
+    if missing:
+        concerns.append(f"{len(missing)} changed file(s) without test coverage detected")
+    summary: dict = {}
+    if getattr(output, "impact_summary", None):
+        summary["description"] = output.impact_summary
+    if concerns:
+        summary["review_concerns"] = concerns[:6]
+    summary["confidence"] = (getattr(output, "confidence", None) or "medium").upper()
+    return summary
+
+
 @app.command("prepare-context")
 def prepare_context_cmd(
     task: Optional[str] = typer.Argument(
@@ -1813,7 +1894,7 @@ def prepare_context_cmd(
         out["confidence"] = output.confidence
     if task != "review-pr" and _task_include("relevant_files"):
         out["relevant_files"] = [
-            {k: v for k, v in asdict(f).items() if v != ""}
+            _serialize_relevant_file(f)
             for f in output.relevant_files
         ]
     if _task_include("key_dependencies") and output.key_dependencies:
@@ -1864,16 +1945,19 @@ def prepare_context_cmd(
             out["affected_modules"] = output.affected_modules
         if output.risk_areas:
             out["risk_areas"] = output.risk_areas
-        if output.why_these_files:
-            out["reasoning"] = output.why_these_files
         if output.change_type:
             out["change_type"] = output.change_type
         if output.system_impact:
-            out["system_impact"] = output.system_impact
+            _si = _clean_system_impact(output.system_impact)
+            if _si:
+                out["system_impact"] = _si
         if output.dependency_graph_summary:
-            out["dependency_graph_summary"] = output.dependency_graph_summary
+            _dgraph = {k: v for k, v in output.dependency_graph_summary.items() if v is not None}
+            if _dgraph:
+                out["dependency_graph_summary"] = _dgraph
         if output.impact_score_per_file:
-            out["impact_score_per_file"] = output.impact_score_per_file
+            out["impact_score_per_file"] = _transform_impact_scores(output.impact_score_per_file)
+        out["summary"] = _build_human_summary(output)
     # review-pr specific fields
     if task == "review-pr":
         if output.error_code:
@@ -1928,8 +2012,7 @@ def prepare_context_cmd(
             out["behavioral_impact"] = output.behavioral_impact
         if output.impact_summary:
             out["impact_summary"] = output.impact_summary
-        if output.why_these_files:
-            out["reasoning"] = output.why_these_files
+        out["summary"] = _build_human_summary(output)
         # git-first scope metadata
         out["scope"] = {
             "source": output.scope_source or "git_diff",
