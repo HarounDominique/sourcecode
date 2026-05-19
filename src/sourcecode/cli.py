@@ -424,7 +424,7 @@ def main(
     no_redact: bool = typer.Option(
         False,
         "--no-redact",
-        help="Disable secret redaction. Use with caution — output may contain sensitive values.",
+        help="Disable secret redaction of output strings. Note: env var values from the OS are never included in output regardless of this flag (security policy).",
     ),
     version: Optional[bool] = typer.Option(
         None,
@@ -437,7 +437,7 @@ def main(
     depth: int = typer.Option(
         4,
         "--depth",
-        help="File tree traversal depth (default: 4). Java/Maven projects auto-adjust to 12.",
+        help="File tree traversal depth (default: 4). Java/Maven projects auto-adjust to a minimum of 12; values below 12 have no effect on Java projects.",
         min=1,
         max=20,
     ),
@@ -1734,6 +1734,11 @@ def prepare_context_cmd(
         help="Emit per-phase timing to stderr (git scan ms, symptom scoring ms, total ms)",
         hidden=True,
     ),
+    fast: bool = typer.Option(
+        False,
+        "--fast",
+        help="Skip deep analysis (content search, test gap discovery, code annotations). Uses manifest/metadata only. Target: < 6 s.",
+    ),
 ) -> None:
     """Task-specific context for AI coding agents.
 
@@ -1808,9 +1813,14 @@ def prepare_context_cmd(
     if since:
         _phase += f" since {since}"
     _progress.start(_phase)
+    if not fast:
+        import sys as _sys
+        if _sys.stderr.isatty():
+            _sys.stderr.write(f"Analyzing ({task})... (deep scan may take 15–35 s for large codebases)\n")
+            _sys.stderr.flush()
     _t0 = _time.perf_counter()
     try:
-        output = builder.build(task, since=since, symptom=symptom)
+        output = builder.build(task, since=since, symptom=symptom, fast=fast)
     finally:
         _progress.finish()
     _t_total = (_time.perf_counter() - _t0) * 1000
@@ -1960,8 +1970,8 @@ def prepare_context_cmd(
                 _sys.stdout.buffer.write(b"\n")
                 _sys.stdout.buffer.flush()
             if copy:
-                _copy_to_clipboard(_nc_json)
-                typer.echo("✓ copied to clipboard", err=True)
+                if _copy_to_clipboard(_nc_json):
+                    typer.echo("✓ copied to clipboard", err=True)
             raise typer.Exit()
         if output.ci_decision:
             out["ci_decision"] = output.ci_decision
@@ -2082,6 +2092,10 @@ def prepare_context_cmd(
         out["symptom_note"] = output.symptom_note
     if output.symptom_explain:
         out["symptom_explain"] = output.symptom_explain
+    if getattr(output, "symptom_hint", None):
+        out["symptom_hint"] = output.symptom_hint
+    if getattr(output, "warnings", None):
+        out["warnings"] = output.warnings
     if llm_prompt:
         out["llm_prompt"] = builder.render_prompt(output)
 

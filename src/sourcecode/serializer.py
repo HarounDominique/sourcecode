@@ -248,6 +248,16 @@ def _compact_git_context(sm: "SourceMap") -> "Optional[dict[str, Any]]":
                 for f, n in _fc.most_common(5)
             ]
             ctx["hotspots_source"] = "recent_commits"
+    if gc.recent_commits:
+        ctx["recent_commits"] = [
+            {
+                "hash": c.hash[:8],
+                "message": (c.message or "")[:80],
+                "date": (c.date or "")[:10],
+                "author": c.author or "",
+            }
+            for c in gc.recent_commits[:5]
+        ]
     return ctx if ctx else None
 
 

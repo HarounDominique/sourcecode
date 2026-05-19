@@ -335,6 +335,7 @@ class TaskOutput:
     related_notes: list[dict] = field(default_factory=list)        # fix-bug + symptom only
     symptom_note: Optional[str] = None                             # fix-bug: cross-layer synonym note
     symptom_explain: Optional[dict] = None                         # fix-bug: structured evidence breakdown
+    symptom_hint: Optional[str] = None                             # fix-bug: redirect hint when term not found in this module
     # delta-specific impact fields
     impact_summary: Optional[str] = None
     affected_modules: list[str] = field(default_factory=list)
@@ -348,6 +349,7 @@ class TaskOutput:
     error_code: Optional[str] = None
     error_message: Optional[str] = None
     error_hints: list[str] = field(default_factory=list)
+    warnings: list[dict] = field(default_factory=list)             # structured warnings (REF_NOT_FOUND, etc.)
     # CI decision state machine — machine-decidable signal
     ci_decision: Optional[str] = None  # "no_changes" | "analysis_success" | "git_ref_error" | "no_git_repo"
     # git baseline resolution metadata
@@ -683,7 +685,7 @@ class TaskContextBuilder:
     def __init__(self, root: Path) -> None:
         self.root = root
 
-    def build(self, task_name: str, *, since: Optional[str] = None, symptom: Optional[str] = None) -> TaskOutput:
+    def build(self, task_name: str, *, since: Optional[str] = None, symptom: Optional[str] = None, fast: bool = False) -> TaskOutput:
         if task_name not in TASKS:
             raise ValueError(
                 f"Unknown task '{task_name}'. Available: {', '.join(TASKS)}"
@@ -880,7 +882,7 @@ class TaskContextBuilder:
         improvement_opportunities: list[str] = []
         cn_notes_for_ranking: list = []
 
-        if spec.enable_code_notes:
+        if spec.enable_code_notes and not fast:
             from dataclasses import asdict
             from sourcecode.code_notes_analyzer import CodeNotesAnalyzer
 
@@ -1317,6 +1319,7 @@ class TaskContextBuilder:
         related_notes: list[dict] = []
         symptom_note: Optional[str] = None
         symptom_explain: Optional[dict] = None
+        symptom_hint: Optional[str] = None
         if task_name == "fix-bug" and symptom:
             import re as _re
             _camel_expanded = _re.sub(r'([a-z])([A-Z])', r'\1 \2', symptom)
@@ -1537,9 +1540,30 @@ class TaskContextBuilder:
                     ),
                 }
 
+                # BUG #4: LOW confidence + 0 content matches → clear suspected_areas,
+                # emit actionable redirect instead of unrelated files.
+                if _sx_confidence == "LOW" and not _sx_content:
+                    suspected_areas = []
+                    _is_fe_term = any(kw in _FRONTEND_SYMPTOM_MAP for kw in symptom_keywords)
+                    _root_name = self.root.name
+                    if _is_fe_term:
+                        _fe_redirect = (
+                            f"Term {symptom!r} not found in sources under {_root_name!r}. "
+                            f"This appears to be a frontend symptom. "
+                            f"Try: prepare-context fix-bug . --symptom {symptom!r} "
+                            f"(monorepo root) or target a frontend sub-project directly."
+                        )
+                    else:
+                        _fe_redirect = (
+                            f"Term {symptom!r} not found in sources under {_root_name!r}. "
+                            f"Verify the spelling or try a related term. "
+                            f"If this is a frontend symptom, run against the frontend sub-project."
+                        )
+                    symptom_hint = _fe_redirect
+
         # ── 7. Test gaps (generate-tests only) ────────────────────────────
         test_gaps: list[str] = []
-        if task_name == "generate-tests":
+        if task_name == "generate-tests" and not fast:
             def _normalize_test_stem(stem: str) -> str:
                 # Java: FooTest / FooTests → Foo; TestFoo → Foo
                 if stem.endswith("Tests"):
@@ -1683,6 +1707,8 @@ class TaskContextBuilder:
             resolved_since_ref=_delta_baseline.get("resolved_ref") if task_name == "delta" else None,
             resolution_path=_delta_baseline.get("resolution_path") if task_name == "delta" else None,
             diff_validation_status=_delta_baseline.get("diff_validation_status") if task_name == "delta" else None,
+            warnings=_delta_baseline.get("warnings", []) if task_name == "delta" else [],
+            symptom_hint=symptom_hint if task_name == "fix-bug" else None,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
@@ -3261,6 +3287,7 @@ class TaskContextBuilder:
                         "resolution_path": "head_minus_1_fallback",
                         "diff_validation_status": "invalid_ref",  # original ref unresolved
                         "error": False,
+                        "warnings": [{"code": "REF_NOT_FOUND", "ref": since, "resolved_to": "HEAD~1"}],
                     }
 
             # All stages failed
