@@ -459,7 +459,9 @@ class TestGraphAlgorithms:
         edges = [RelationEdge("A", "B", "imports"), RelationEdge("B", "C", "imports")]
         components = _detect_subsystems(["A", "B", "C"], edges)
         assert len(components) == 1
-        assert sorted(components[0]) == ["A", "B", "C"]
+        # New format: list[dict] with label, package_prefix, member_count, summary
+        assert components[0]["member_count"] == 3
+        assert isinstance(components[0]["label"], str)
 
     def test_detect_subsystems_two_components(self):
         from sourcecode.repository_ir import RelationEdge
@@ -578,11 +580,13 @@ class TestOutputContract:
         assert "dropped_fields" in ir["audit"]
         assert isinstance(ir["audit"]["dropped_fields"], list)
 
-    def test_subsystems_is_list_of_lists(self):
+    def test_subsystems_is_list_of_dicts(self):
         ir = extract_file_ir(SIMPLE_SERVICE, "UserService.java")
         assert isinstance(ir["subsystems"], list)
         for sub in ir["subsystems"]:
-            assert isinstance(sub, list)
+            assert isinstance(sub, dict)
+            assert "label" in sub
+            assert "member_count" in sub
 
     def test_change_set_empty_without_diff(self):
         ir = extract_file_ir(SIMPLE_SERVICE, "UserService.java")
@@ -732,10 +736,12 @@ class TestBuildRepoIr:
         ir = build_repo_ir(["UserService.java", "UserController.java"], tmp_path)
         assert len(ir["subsystems"]) >= 1
 
-    def test_global_score_zero_without_diff(self, tmp_path):
+    def test_global_score_nonzero_without_diff(self, tmp_path):
+        # BUG-3 fix: without --since, scores use call-graph centrality (never all-zero)
         (tmp_path / "UserService.java").write_text(SIMPLE_SERVICE, encoding="utf-8")
         ir = build_repo_ir(["UserService.java"], tmp_path)
-        assert ir["impact"]["global_score"] == 0.0
+        assert ir["impact"]["global_score"] >= 0.0
+        assert ir["impact"]["score_basis"] in ("call_graph_centrality", "none")
 
 
 # ---------------------------------------------------------------------------

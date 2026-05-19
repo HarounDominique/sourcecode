@@ -1091,8 +1091,54 @@ def _build_evidence_bundles(
     return bundles
 
 
-def _detect_subsystems(all_fqns: list[str], relations: list[RelationEdge]) -> list[list[str]]:
-    """Connected components of the relation graph (Union-Find, graph-only)."""
+def _common_package_prefix(fqns: list[str]) -> str:
+    """Longest common dot-separated package prefix across a list of FQNs."""
+    if not fqns:
+        return ""
+    # Strip class/method suffix — keep only package parts (lowercase segments)
+    def pkg_parts(fqn: str) -> list[str]:
+        parts = fqn.split(".")
+        # Drop trailing class/method names (PascalCase or after '#')
+        result = []
+        for p in parts:
+            if "#" in p:
+                break
+            if p and p[0].isupper():
+                break
+            result.append(p)
+        return result
+
+    segs = [pkg_parts(f) for f in fqns if pkg_parts(f)]
+    if not segs:
+        return fqns[0].rsplit(".", 1)[0] if "." in fqns[0] else fqns[0]
+    common = segs[0]
+    for s in segs[1:]:
+        new_common = []
+        for a, b in zip(common, s):
+            if a == b:
+                new_common.append(a)
+            else:
+                break
+        common = new_common
+        if not common:
+            break
+    return ".".join(common) if common else fqns[0].rsplit(".", 1)[0]
+
+
+def _subsystem_label(package_prefix: str) -> str:
+    """Derive short human label from package prefix (last meaningful segment)."""
+    parts = [p for p in package_prefix.split(".") if p]
+    # Skip generic top-level segments
+    _SKIP = {"com", "org", "net", "io", "java", "javax"}
+    meaningful = [p for p in parts if p not in _SKIP]
+    return meaningful[-1] if meaningful else (parts[-1] if parts else package_prefix)
+
+
+def _detect_subsystems(all_fqns: list[str], relations: list[RelationEdge]) -> list[dict]:
+    """Connected components of the relation graph (Union-Find, graph-only).
+
+    Returns labeled subsystem objects instead of raw FQN arrays.
+    """
     fqn_set = set(all_fqns)
     parent: dict[str, str] = {fqn: fqn for fqn in all_fqns}
 
@@ -1117,7 +1163,23 @@ def _detect_subsystems(all_fqns: list[str], relations: list[RelationEdge]) -> li
         root = find(fqn)
         components.setdefault(root, []).append(fqn)
 
-    return [sorted(v) for v in sorted(components.values())]
+    result: list[dict] = []
+    for members in sorted(components.values()):
+        members = sorted(members)
+        pkg_prefix = _common_package_prefix(members)
+        label = _subsystem_label(pkg_prefix)
+        # Summary: first 3 short class names + total count
+        short_names = [m.split(".")[-1].split("#")[0] for m in members[:3]]
+        summary = ", ".join(short_names)
+        if len(members) > 3:
+            summary += f" ... ({len(members)} total)"
+        result.append({
+            "label": label,
+            "package_prefix": pkg_prefix,
+            "member_count": len(members),
+            "summary": summary,
+        })
+    return result
 
 
 _EDGE_REASON_TEMPLATES: dict[str, str] = {
@@ -1287,6 +1349,7 @@ def _assemble(
 
     # Score per node: ir_weight × graph_centrality × diff_intensity × evidence_strength
     # Unchanged nodes: diff_intensity=0 → score=0 (no diff signal)
+    has_diff = bool(sorted_changed)
     node_scores: dict[str, float] = {}
     for sym in sorted_syms:
         fqn = sym.symbol
@@ -1298,6 +1361,28 @@ def _assemble(
         di = _diff_intensity_cs(cs) if cs else 0.0
         es = bundles[fqn].evidence_strength if fqn in bundles else 0.0
         node_scores[fqn] = round(w * c * di * es, 4) if di > 0 else 0.0
+
+    # No diff signal (no --since): fall back to call-graph centrality scores.
+    # Avoids emitting all-zero scores which mislead agents into thinking the tool is broken.
+    score_basis: str
+    impact_note: Optional[str]
+    if not has_diff and sorted_syms:
+        for sym in sorted_syms:
+            fqn = sym.symbol
+            role = spring_role_map.get(fqn, "other")
+            w = _IR_WEIGHTS.get(role, _IR_WEIGHT_DEFAULT)
+            raw_c = in_deg.get(fqn, 0) + out_deg.get(fqn, 0) + bfs_reach.get(fqn, 0) * 0.1
+            c = min(1.0, raw_c / max_raw)
+            node_scores[fqn] = round(w * c, 4)
+        score_basis = "call_graph_centrality"
+        impact_note = "impact scores based on call-graph centrality (no --since provided)"
+    elif has_diff:
+        score_basis = "diff_impact"
+        impact_note = None
+    else:
+        # No symbols at all — omit scores entirely rather than emit zeros
+        score_basis = "none"
+        impact_note = None
 
     # --- Analysis: classify changed symbols ---
     dropped_fields: list[dict] = []
@@ -1435,6 +1520,8 @@ def _assemble(
         },
         "impact": {
             "global_score": global_score,
+            "score_basis": score_basis,
+            **({"impact_note": impact_note} if impact_note else {}),
             "ranked_nodes": ranked_nodes,
         },
         "subsystems": subsystems,

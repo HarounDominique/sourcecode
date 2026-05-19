@@ -563,6 +563,10 @@ def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
     if security:
         result["security"] = security
     if controllers:
+        # Count unique files (classes) vs total entries (methods/endpoints)
+        controller_classes = len({c["path"] for c in controllers})
+        controller_methods = len(controllers)
+
         # Extract all DDD module names from controller paths and group by domain area.
         # Path pattern: .../ddd/{module}/infrastructure/rest/*Controller.java
         _DDD_LAYERS = {"application", "domain", "infrastructure"}
@@ -582,6 +586,10 @@ def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
                 seen_modules.add(module)
                 module_names.append(module)
 
+        _ctrl_note = (
+            f"{controller_methods} @RequestMapping methods across "
+            f"{controller_classes} controller classes"
+        )
         if len(module_names) > 30:
             # Group by first path segment under ddd/ (inferred domain area)
             domain_groups: dict[str, list[str]] = {}
@@ -600,12 +608,16 @@ def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
                     if module not in domain_groups[domain_prefix or "other"]:
                         domain_groups[domain_prefix or "other"].append(module)
             result["controllers"] = {
-                "count": len(controllers),
+                "classes": controller_classes,
+                "methods": controller_methods,
+                "note": _ctrl_note,
                 "modules": {k: sorted(v) for k, v in sorted(domain_groups.items())},
             }
         else:
             result["controllers"] = {
-                "count": len(controllers),
+                "classes": controller_classes,
+                "methods": controller_methods,
+                "note": _ctrl_note,
                 "modules": sorted(module_names),
             }
     return result
@@ -1315,6 +1327,13 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False, full: bool = False) ->
         result["transactional_boundaries"] = _transactional
     if _git_ctx:
         result["git_context"] = _git_ctx
+    # Angular structural analysis (GAP-10)
+    if sm.project_type in ("angular-spa", "webapp") or any(
+        any(f.name == "Angular" for f in s.frameworks) for s in sm.stacks
+    ):
+        _ang = _angular_analysis(sm)
+        if _ang and (_ang.get("component_count", 0) > 0 or _ang.get("angular_version")):
+            result["angular_analysis"] = _ang
     if _spring_profiles:
         result["spring_profiles"] = _spring_profiles
     _always_include = {"project_type", "project_summary", "architecture_summary", "dependency_summary"}
@@ -1599,6 +1618,88 @@ def validate_cross_analyzer_consistency(
     return findings
 
 
+def _angular_analysis(sm: "SourceMap") -> "Optional[dict[str, Any]]":
+    """Extract Angular structural metrics for TypeScript/Angular projects (GAP-10)."""
+    import json as _json
+    import re as _re
+
+    ts_files = [p for p in sm.file_paths if p.endswith(".ts") and not p.endswith(".d.ts")]
+    if not ts_files:
+        return None
+
+    root = Path(sm.metadata.analyzed_path) if sm.metadata.analyzed_path else Path(".")
+
+    component_count = 0
+    service_count = 0
+    lazy_routes_count = 0
+    akita_stores = 0
+    standalone_components = False
+    route_paths: list[str] = []
+
+    for rel in ts_files:
+        try:
+            content = (root / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        component_count += content.count("@Component(")
+        service_count += content.count("@Injectable(")
+        lazy_routes_count += content.count("loadChildren(")
+        akita_stores += content.count("@StoreConfig(")
+        if not standalone_components and "bootstrapApplication(" in content:
+            standalone_components = True
+        # Route tree: parse path: '...' in routing files
+        fname = rel.replace("\\", "/").split("/")[-1]
+        if "routing" in fname or fname in ("app.routes.ts",):
+            for m in _re.finditer(r"path\s*:\s*['\"]([^'\"]*)['\"]", content):
+                val = m.group(1)
+                if val and val not in route_paths:
+                    route_paths.append(val)
+
+    # Angular version from package.json
+    angular_version: Optional[str] = None
+    pkg_json = root / "package.json"
+    if pkg_json.exists():
+        try:
+            pkg = _json.loads(pkg_json.read_text(encoding="utf-8", errors="replace"))
+            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            av = deps.get("@angular/core")
+            if av:
+                angular_version = av.lstrip("^~>=")
+        except Exception:
+            pass
+
+    # Also check angular.json for entry point
+    entry_point: Optional[str] = None
+    angular_json = root / "angular.json"
+    if angular_json.exists():
+        try:
+            aj = _json.loads(angular_json.read_text(encoding="utf-8", errors="replace"))
+            projects = aj.get("projects") or {}
+            for proj in projects.values():
+                main = (
+                    (proj.get("architect") or {})
+                    .get("build", {})
+                    .get("options", {})
+                    .get("main")
+                )
+                if main:
+                    entry_point = main
+                    break
+        except Exception:
+            pass
+
+    return {
+        "angular_version": angular_version,
+        "standalone_components": standalone_components,
+        "lazy_routes_count": lazy_routes_count,
+        "akita_stores": akita_stores,
+        "route_tree": route_paths[:20],
+        "component_count": component_count,
+        "service_count": service_count,
+        **({"entry_point": entry_point} if entry_point else {}),
+    }
+
+
 def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
     """Opinionated output for AI agents — structured, noise-free, gap-aware.
 
@@ -1822,6 +1923,14 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
 
     if signals:
         result["signals"] = signals
+
+    # ── 8b. Angular structural analysis (GAP-10) ──────────────────────────────
+    if sm.project_type in ("angular-spa", "webapp") or any(
+        any(f.name == "Angular" for f in s.frameworks) for s in sm.stacks
+    ):
+        _ang = _angular_analysis(sm)
+        if _ang and (_ang.get("component_count", 0) > 0 or _ang.get("angular_version")):
+            result["angular_analysis"] = _ang
 
     # ── 9. Git context — lightweight (top-5 hotspots, branch, uncommitted count)
     _gc = _compact_git_context(sm)

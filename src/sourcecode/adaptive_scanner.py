@@ -19,7 +19,7 @@ from typing import Any, Optional, cast
 from pathspec import GitIgnoreSpec
 
 from sourcecode.repo_classifier import RepoTopology
-from sourcecode.scanner import DEFAULT_EXCLUDES, MANIFEST_NAMES
+from sourcecode.scanner import DEFAULT_EXCLUDES, EXCLUDED_FILE_SUFFIXES, MANIFEST_NAMES
 
 
 class AdaptiveScanner:
@@ -88,13 +88,14 @@ class AdaptiveScanner:
 
     def _load_gitignore_spec(self) -> GitIgnoreSpec:
         if self._gitignore_spec is None:
-            gitignore = self.root / ".gitignore"
             lines: list[str] = []
-            if gitignore.exists():
-                try:
-                    lines = gitignore.read_text(encoding="utf-8", errors="replace").splitlines()
-                except OSError:
-                    pass
+            for ignore_file in (".gitignore", ".sourcecodeIgnore"):
+                candidate = self.root / ignore_file
+                if candidate.exists():
+                    try:
+                        lines.extend(candidate.read_text(encoding="utf-8", errors="replace").splitlines())
+                    except OSError:
+                        pass
             self._gitignore_spec = GitIgnoreSpec.from_lines(lines)
         return self._gitignore_spec
 
@@ -201,6 +202,9 @@ class AdaptiveScanner:
             for fname in filenames:
                 # Skip flag-shaped names (shell redirect artifacts)
                 if fname.startswith("-"):
+                    continue
+                # Skip minified/map files
+                if any(fname.endswith(sfx) for sfx in EXCLUDED_FILE_SUFFIXES):
                     continue
                 fpath = current / fname
                 if fpath.is_symlink():

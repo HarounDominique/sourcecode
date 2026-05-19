@@ -25,7 +25,7 @@ _API_FRAMEWORKS = {
     "Ktor",
     "Play",
 }
-_WEB_FRAMEWORKS = {"Next.js", "React", "Vue", "Svelte", "Vite", "Flutter", "Phoenix"}
+_WEB_FRAMEWORKS = {"Next.js", "React", "Vue", "Svelte", "Vite", "Flutter", "Phoenix", "Angular"}
 _CLI_FRAMEWORKS = {"Typer", "Cobra", "Clap"}
 _API_STACKS = {"python", "go", "java", "php", "ruby", "dotnet", "kotlin", "scala"}
 ConfidenceLevel = Literal["high", "medium", "low"]
@@ -104,6 +104,13 @@ class TypeClassifier:
 
         if "src/lib.rs" in flat_paths and not any(path.endswith("main.rs") for path in flat_paths):
             return "library"
+
+        # Angular SPA: angular.json is the canonical signal; framework detection is secondary
+        if (
+            "angular.json" in flat_paths
+            or "Angular" in framework_names
+        ):
+            return "angular-spa"
 
         if framework_names & _WEB_FRAMEWORKS or any(
             path.startswith(("app/", "pages/", "components/")) for path in flat_paths

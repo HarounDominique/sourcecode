@@ -592,6 +592,16 @@ def main(
         "-c",
         help="Copy output to system clipboard after a successful run. No-op when --output is used or clipboard is unavailable.",
     ),
+    exclude: Optional[str] = typer.Option(
+        None,
+        "--exclude",
+        help="Additional directories/patterns to exclude, comma-separated (e.g. 'legacy,generated').",
+    ),
+    no_cache: bool = typer.Option(
+        False,
+        "--no-cache",
+        help="Bypass the scan cache and force a fresh analysis.",
+    ),
 ) -> None:
     """Analyze a repository and produce structured context for AI coding agents.
 
@@ -798,10 +808,59 @@ def main(
         no_tree = True  # agents never need the raw file tree
         architecture = True  # agents need full architectural signal (M4)
 
+    # ── GAP-9: Cache check — serve from .sourcecode-cache when git SHA unchanged ──
+    import hashlib as _hashlib
+    import subprocess as _sub
+    _cache_dir = target / ".sourcecode-cache"
+    _cache_hit_content: Optional[str] = None
+    _git_sha = ""
+    _cache_key = ""
+    _cache_file: Optional[Path] = None
+    if not no_cache:
+        try:
+            _sha_r = _sub.run(
+                ["git", "-C", str(target), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=3,
+            )
+            _git_sha = _sha_r.stdout.strip()
+            # Only cache when target IS the git repo root (not a subdir of one),
+            # to avoid polluting sub-project directories used in tests.
+            if _git_sha and (target / ".git").exists():
+                # Include every output-affecting flag so different flag combos never collide
+                _flags_str = (
+                    f"c={compact},ag={agent},fmt={format},full={full},"
+                    f"co={changed_only},dep={dependencies},gm={graph_modules},"
+                    f"docs={docs},fm={full_metrics},sem={semantics},"
+                    f"arch={architecture},gc={git_context},em={env_map},"
+                    f"cn={code_notes},tree={tree},mode={mode}"
+                )
+                _flags_h = _hashlib.md5(_flags_str.encode()).hexdigest()[:8]
+                _cache_key = f"{_git_sha}-{_flags_h}"
+                _cache_file = _cache_dir / f"snapshot-{_cache_key}.json"
+                if _cache_file.exists():
+                    _cache_hit_content = _cache_file.read_text(encoding="utf-8")
+        except Exception:
+            _git_sha = ""
+            _cache_key = ""
+            _cache_file = None
+
+    if _cache_hit_content is not None:
+        from sourcecode.serializer import write_output
+        write_output(_cache_hit_content, output=output)
+        if copy and not output:
+            _copy_to_clipboard(_cache_hit_content)
+        return
+
+    # BUG-2: parse --exclude into extra_excludes frozenset
+    _extra_excludes: Optional[frozenset[str]] = None
+    if exclude:
+        _extra_excludes = frozenset(e.strip() for e in exclude.split(",") if e.strip())
+
     _progress = Progress()
     _progress.start("scanning files")
 
-    scanner = AdaptiveScanner(target, topology=_topology, base_depth=effective_depth)
+    scanner = AdaptiveScanner(target, topology=_topology, base_depth=effective_depth,
+                               extra_excludes=_extra_excludes)
     raw_tree = scanner.scan_tree()
 
     # 2. Filter .env and *.secret entries from file tree (SEC-02, all levels)
@@ -1514,9 +1573,10 @@ def main(
         content = json.dumps(data, indent=2, ensure_ascii=False)
     elif compact:
         if changed_only and _allowed_changed_files:
+            # GAP-5: preserve full entry_points for architecture context even in
+            # --changed-only mode. Only filter file_paths and code_notes.
             sm = _replace(sm,
                 file_paths=[p for p in sm.file_paths if p in _allowed_changed_files],
-                entry_points=[ep for ep in sm.entry_points if ep.path in _allowed_changed_files],
                 code_notes=[n for n in sm.code_notes if n.path in _allowed_changed_files],
             )
         data = compact_view(sm, no_tree=no_tree, full=full)
@@ -1584,6 +1644,14 @@ def main(
     # 6. Write output (CLI-04)
     _progress.finish()
     write_output(content, output=output)
+
+    # GAP-9: Persist to cache for future identical runs (git SHA unchanged)
+    if not no_cache and _cache_key and _cache_file is not None and not _pipeline_error:
+        try:
+            _cache_dir.mkdir(parents=True, exist_ok=True)
+            _cache_file.write_text(content, encoding="utf-8")
+        except Exception:
+            pass
 
     if _pipeline_error:
         raise typer.Exit(code=2)

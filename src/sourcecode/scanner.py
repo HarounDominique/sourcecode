@@ -27,6 +27,22 @@ DEFAULT_EXCLUDES: frozenset[str] = frozenset({
     "dist",
     "build",
     "target",
+    # Additional generated/IDE/tool dirs
+    ".gradle",
+    ".planning",
+    ".idea",
+    "coverage",
+    ".sourcecode-cache",
+    ".mvn",
+    "generated",
+    "generated-sources",
+})
+
+# File suffixes excluded by default (minified/map files add noise, not signal)
+EXCLUDED_FILE_SUFFIXES: frozenset[str] = frozenset({
+    ".min.js",
+    ".min.css",
+    ".map",
 })
 
 # Nombres de ficheros de manifiesto conocidos (para find_manifests)
@@ -120,13 +136,13 @@ class FileScanner:
         self._gitignore_spec: Optional[GitIgnoreSpec] = None
 
     def _load_gitignore_spec(self) -> GitIgnoreSpec:
-        """Carga .gitignore del proyecto como GitIgnoreSpec (SCAN-01)."""
+        """Carga .gitignore y .sourcecodeIgnore como GitIgnoreSpec (SCAN-01)."""
         if self._gitignore_spec is None:
-            gitignore = self.root / ".gitignore"
-            if gitignore.exists():
-                lines = gitignore.read_text(encoding="utf-8", errors="replace").splitlines()
-            else:
-                lines = []
+            lines: list[str] = []
+            for ignore_file in (".gitignore", ".sourcecodeIgnore"):
+                candidate = self.root / ignore_file
+                if candidate.exists():
+                    lines.extend(candidate.read_text(encoding="utf-8", errors="replace").splitlines())
             self._gitignore_spec = GitIgnoreSpec.from_lines(lines)
         return self._gitignore_spec
 
@@ -182,6 +198,9 @@ class FileScanner:
                 # Skip flag-shaped names (e.g. "-o", "--format") — shell redirect artifacts.
                 # No legitimate source file starts with "-".
                 if fname.startswith("-"):
+                    continue
+                # Skip minified/map files — no signal value
+                if any(fname.endswith(sfx) for sfx in EXCLUDED_FILE_SUFFIXES):
                     continue
                 fpath = current / fname
                 # SCAN-03: no incluir symlinks de fichero

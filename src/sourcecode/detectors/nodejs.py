@@ -217,6 +217,7 @@ class NodejsDetector(AbstractDetector):
         _INDEX_PATHS = {"src/index.js", "src/index.ts", "index.js", "index.ts"}
         for path in [
             "server.js", "server.ts",
+            "main.ts", "main.js",  # Angular/root-level entry (e.g. Angular CLI projects)
             "src/index.js", "src/index.ts",
             "src/main.js", "src/main.ts", "src/main.tsx",
             "app/page.tsx", "pages/index.js",

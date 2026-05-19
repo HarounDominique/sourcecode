@@ -604,6 +604,33 @@ _FRONTEND_SYMPTOM_MAP: dict[str, list[str]] = {
 }
 
 
+MAX_FILES_FAST = 2000  # above this threshold --fast uses git-index-only mode
+
+
+def _count_files_bounded(root: "Path", limit: int = MAX_FILES_FAST + 1) -> int:
+    """Count files under root, stopping early once limit reached (O(n) fast exit)."""
+    import os as _os
+    count = 0
+    for _, _, fnames in _os.walk(str(root)):
+        count += len(fnames)
+        if count >= limit:
+            return count
+    return count
+
+
+def _git_changed_files_fast(root: "Path") -> list[str]:
+    """Return files reported by git diff --name-only HEAD (for fast-mode scanning)."""
+    import subprocess as _sp
+    try:
+        r = _sp.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            capture_output=True, text=True, cwd=str(root), timeout=5,
+        )
+        return [f.strip() for f in r.stdout.splitlines() if f.strip()]
+    except Exception:
+        return []
+
+
 def _build_analysis_scope(
     *,
     task_name: str,
@@ -761,6 +788,21 @@ class TaskContextBuilder:
             # for behavioral_impact reverse lookups without scanning the whole repo).
             file_tree: dict = {}
             all_paths = self._expand_scope_for_analysis(_pr_scope_files or [])
+        elif fast and _count_files_bounded(self.root) > MAX_FILES_FAST:
+            # Fast mode on large repo: git-index-only — only scan git-changed files.
+            # Skips full AdaptiveScanner traversal which takes 35s+ on 7k+ file repos.
+            _git_files = _git_changed_files_fast(self.root)
+            _git_files = [f for f in _git_files if (self.root / f).exists()]
+            if not _git_files:
+                # Fallback: use a shallow scan (depth 2) to get some context
+                scanner = AdaptiveScanner(self.root, base_depth=2)
+                file_tree = scanner.scan_tree()
+                manifests = scanner.find_manifests()
+                all_paths = [p.replace("\\", "/") for p in flatten_file_tree(file_tree)]
+            else:
+                file_tree = {}
+                all_paths = _git_files
+                # Keep manifests from shallow pre-scan
         else:
             _topology = RepoClassifier().classify(self.root)
             _base_depth = 12 if _is_java else 6
@@ -1413,8 +1455,9 @@ class TaskContextBuilder:
                     _existing_paths.add(_p)
                     _sx_direct_path.append(_p)
 
-                # Pass 5+6 combined: single file read per candidate.
-                # Limit content scan to top 80 candidates by current score to bound I/O.
+                # Pass 4b: grep-based injection for frontend→backend synonym terms.
+                # Runs parallel grep for each backend term to find files not yet in
+                # the candidate pool (e.g. AkitaBaseService containing setLoading).
                 _src_exts = frozenset({".java", ".py", ".ts", ".js", ".kt", ".go"})
                 _frontend_kws = [kw for kw in symptom_keywords if kw in _FRONTEND_SYMPTOM_MAP]
                 _backend_terms_set: list[str] = []
@@ -1423,6 +1466,40 @@ class TaskContextBuilder:
                     for _fkw in _frontend_kws:
                         _bt.extend(_FRONTEND_SYMPTOM_MAP[_fkw])
                     _backend_terms_set = list(dict.fromkeys(_bt))
+
+                if _backend_terms_set and not fast:
+                    import subprocess as _sp2
+                    _grepped: set[str] = set()
+                    for _term in _backend_terms_set[:6]:
+                        try:
+                            _gr = _sp2.run(
+                                ["grep", "-r", "-l", "-i", _term,
+                                 "--include=*.ts", "--include=*.java",
+                                 str(self.root)],
+                                capture_output=True, text=True, timeout=4,
+                            )
+                            for _line in _gr.stdout.splitlines():
+                                try:
+                                    _rel = str(Path(_line.strip()).relative_to(self.root)).replace("\\", "/")
+                                    _grepped.add(_rel)
+                                except ValueError:
+                                    pass
+                        except Exception:
+                            pass
+                    _existing_paths_now = {rf.path for rf in relevant_files}
+                    for _gf in sorted(_grepped):
+                        if _gf in _existing_paths_now:
+                            continue
+                        if Path(_gf).suffix.lower() not in _src_exts:
+                            continue
+                        relevant_files.append(RelevantFile(
+                            path=_gf,
+                            role="symptom_match",
+                            score=0.45,
+                            reason="content contains backend symptom term (grep)",
+                            why=f"grep injection: {', '.join(_backend_terms_set[:3])}",
+                        ))
+                        _existing_paths_now.add(_gf)
 
                 # Sort before content scan so top candidates get read first
                 relevant_files = sorted(relevant_files, key=lambda rf: -rf.score)
