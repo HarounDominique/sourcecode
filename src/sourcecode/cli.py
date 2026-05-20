@@ -188,6 +188,7 @@ _OPTIONS_WITH_VALUE: frozenset[str] = frozenset({
     "--rank-by",
     "--symbol",
     "--max-importers",
+    "--exclude",
 })
 
 
@@ -851,10 +852,18 @@ def main(
             _copy_to_clipboard(_cache_hit_content)
         return
 
-    # BUG-2: parse --exclude into extra_excludes frozenset
     _extra_excludes: Optional[frozenset[str]] = None
     if exclude:
         _extra_excludes = frozenset(e.strip() for e in exclude.split(",") if e.strip())
+        # IMP-2: warn if the exclude value looks like it was swallowed as a path
+        # (BUG-2 symptom in older versions: --exclude value consumed as repo path).
+        import sys as _sys_warn
+        if len(_extra_excludes) == 1 and Path(list(_extra_excludes)[0]).is_dir():
+            _sys_warn.stderr.write(
+                f"[sourcecode] Warning: --exclude value '{list(_extra_excludes)[0]}' is a directory path. "
+                "If this was meant as a pattern, use --exclude=pattern or --exclude pattern (both are supported).\n"
+            )
+            _sys_warn.stderr.flush()
 
     _progress = Progress()
     _progress.start("scanning files")
@@ -1807,6 +1816,11 @@ def prepare_context_cmd(
         "--fast",
         help="Skip deep analysis (content search, test gap discovery, code annotations). Uses manifest/metadata only. Target: < 6 s.",
     ),
+    include_config: bool = typer.Option(
+        False,
+        "--include-config",
+        help="(generate-tests) Include tooling config files (*.conf.js, .eslintrc*, etc.) in test_gaps. Excluded by default.",
+    ),
 ) -> None:
     """Task-specific context for AI coding agents.
 
@@ -1888,7 +1902,7 @@ def prepare_context_cmd(
             _sys.stderr.flush()
     _t0 = _time.perf_counter()
     try:
-        output = builder.build(task, since=since, symptom=symptom, fast=fast)
+        output = builder.build(task, since=since, symptom=symptom, fast=fast, include_config=include_config)
     finally:
         _progress.finish()
     _t_total = (_time.perf_counter() - _t0) * 1000
@@ -2359,8 +2373,23 @@ def repo_ir_cmd(
             err=True,
         )
     else:
-        _sys.stdout.write(output)
-        _sys.stdout.write("\n")
+        try:
+            _sys.stdout.buffer.write(output.encode("utf-8"))
+            _sys.stdout.buffer.write(b"\n")
+            _sys.stdout.buffer.flush()
+        except UnicodeEncodeError as _ue:
+            # IMP-2: emit workaround before re-raising so the user knows what to do.
+            _sys.stderr.write(
+                f"[sourcecode] UnicodeEncodeError on stdout ({_ue.encoding}): "
+                "your console codec cannot encode this output.\n"
+                "Workaround: sourcecode repo-ir --output ir.json\n"
+            )
+            _sys.stderr.flush()
+            raise
+        except AttributeError:
+            # Fallback for wrapped stdout without buffer (e.g. some test harnesses)
+            _sys.stdout.write(output)
+            _sys.stdout.write("\n")
 
 
 # ── version ───────────────────────────────────────────────────────────────────
@@ -2413,5 +2442,13 @@ def main_entry() -> None:
     can consume them as positional arguments (which would prevent subcommand
     routing for tokens like 'version' or 'config').
     """
+    import sys as _sys
+    # Force UTF-8 on stdout so Unicode characters (arrows, etc.) survive on
+    # Windows where the default console codec is cp1252 (BUG-1).
+    if hasattr(_sys.stdout, "reconfigure"):
+        try:
+            _sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     _preprocess_argv()
     app()

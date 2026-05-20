@@ -712,7 +712,7 @@ class TaskContextBuilder:
     def __init__(self, root: Path) -> None:
         self.root = root
 
-    def build(self, task_name: str, *, since: Optional[str] = None, symptom: Optional[str] = None, fast: bool = False) -> TaskOutput:
+    def build(self, task_name: str, *, since: Optional[str] = None, symptom: Optional[str] = None, fast: bool = False, include_config: bool = False) -> TaskOutput:
         if task_name not in TASKS:
             raise ValueError(
                 f"Unknown task '{task_name}'. Available: {', '.join(TASKS)}"
@@ -788,6 +788,14 @@ class TaskContextBuilder:
             # for behavioral_impact reverse lookups without scanning the whole repo).
             file_tree: dict = {}
             all_paths = self._expand_scope_for_analysis(_pr_scope_files or [])
+        elif fast and task_name == "onboard":
+            # Onboard fast: always use shallow scan so manifests and entry points
+            # are discoverable — git-changed-only mode would return only dirty files
+            # (e.g. .idea/vcs.xml) which yields no useful entry points (BUG-3).
+            scanner = AdaptiveScanner(self.root, base_depth=2)
+            file_tree = scanner.scan_tree()
+            manifests = scanner.find_manifests()
+            all_paths = [p.replace("\\", "/") for p in flatten_file_tree(file_tree)]
         elif fast and _count_files_bounded(self.root) > MAX_FILES_FAST:
             # Fast mode on large repo: git-index-only — only scan git-changed files.
             # Skips full AdaptiveScanner traversal which takes 35s+ on 7k+ file repos.
@@ -1652,11 +1660,26 @@ class TaskContextBuilder:
                 # Python/JS: test_foo / foo_test
                 return stem.removeprefix("test_").removesuffix("_test")
 
+            # Patterns excluded from test_gaps by default (IMP-1): tooling config
+            # files have no business logic to test. --include-config overrides.
+            _CONFIG_EXCLUDE_PATTERNS = (
+                ".eslintrc", ".prettierrc", "eslint.config",
+                "karma.conf", "jest.config", "babel.config",
+                "webpack.config", "vite.config", "rollup.config",
+                "tsconfig", "angular.json", ".claude/",
+            )
+
+            def _is_config_file(p: str) -> bool:
+                name = Path(p).name.lower()
+                norm = p.replace("\\", "/")
+                return any(pat in name or pat in norm for pat in _CONFIG_EXCLUDE_PATTERNS)
+
             test_stems = {_normalize_test_stem(Path(p).stem) for p in test_set}
             untested = [
                 p for p in source_set
                 if Path(p).stem not in test_stems
                 and not any(pen in p for pen in spec.ranking_penalties)
+                and (include_config or not _is_config_file(p))
             ]
             untested.sort(key=lambda p: (len(p.split("/")), p))
             test_gaps = untested[:15]

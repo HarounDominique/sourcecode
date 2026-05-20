@@ -1643,7 +1643,23 @@ def _angular_analysis(sm: "SourceMap") -> "Optional[dict[str, Any]]":
             continue
         component_count += content.count("@Component(")
         service_count += content.count("@Injectable(")
-        lazy_routes_count += content.count("loadChildren(")
+        # Count lazy route patterns: `loadChildren:` (property syntax used in route
+        # configs) and `loadComponent:` (standalone component lazy loading). The old
+        # `loadChildren(` form counted zero because Angular uses property syntax, not
+        # a function call (BUG-5).
+        fname_lower = rel.replace("\\", "/").split("/")[-1].lower()
+        _is_routing_file = (
+            "routing" in fname_lower
+            or fname_lower in ("app.routes.ts", "app-routing.module.ts")
+            or fname_lower.endswith(".routes.ts")
+        )
+        lazy_routes_count += content.count("loadChildren:")
+        lazy_routes_count += content.count("loadComponent:")
+        if _is_routing_file:
+            # Also count standalone dynamic imports that aren't already caught above
+            _lc_imports = content.count("import(") - content.count("loadChildren:") - content.count("loadComponent:")
+            if _lc_imports > 0:
+                lazy_routes_count += _lc_imports
         akita_stores += content.count("@StoreConfig(")
         if not standalone_components and "bootstrapApplication(" in content:
             standalone_components = True
@@ -1661,7 +1677,13 @@ def _angular_analysis(sm: "SourceMap") -> "Optional[dict[str, Any]]":
     if pkg_json.exists():
         try:
             pkg = _json.loads(pkg_json.read_text(encoding="utf-8", errors="replace"))
-            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            # Use `or {}` so explicit `null` values in package.json don't
+            # raise TypeError when unpacking (BUG-4).
+            deps = {
+                **(pkg.get("dependencies") or {}),
+                **(pkg.get("devDependencies") or {}),
+                **(pkg.get("peerDependencies") or {}),
+            }
             av = deps.get("@angular/core")
             if av:
                 angular_version = av.lstrip("^~>=")
