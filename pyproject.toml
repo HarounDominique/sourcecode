@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sourcecode"
-version = "1.30.30"
+version = "1.31.0"
 description = "Deterministic codebase context for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -39,11 +39,15 @@ dev = [
     "pytest>=8",
     "ruff>=0.15",
     "mypy>=1.10",
+    "mcp>=1.0.0",
 ]
 ast = [
     "tree-sitter>=0.21",
     "tree-sitter-typescript>=0.21",
     "tree-sitter-javascript>=0.21",
+]
+mcp = [
+    "mcp>=1.0.0",
 ]
 
 [[tool.mypy.overrides]]

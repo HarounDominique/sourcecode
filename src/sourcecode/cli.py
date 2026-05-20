@@ -154,6 +154,10 @@ Compressed AI-ready context for Java/Spring enterprise codebases.
 
 [bold]Subcommands:[/bold]
   prepare-context TASK [PATH]  [dim]# task-specific context (onboard, delta, fix-bug, ...)[/dim]
+  mcp init                     [dim]# setup MCP integration (Claude Desktop, Cursor)[/dim]
+  mcp status                   [dim]# show MCP integration status[/dim]
+  mcp remove                   [dim]# remove MCP integration safely[/dim]
+  mcp serve                    [dim]# start MCP server for AI agent integration[/dim]
   telemetry status|enable|disable
   version
 """
@@ -161,7 +165,7 @@ Compressed AI-ready context for Java/Spring enterprise codebases.
 # Known subcommand names — tokens matching these are routed as subcommands,
 # not consumed as a repository path.
 _SUBCOMMANDS: frozenset[str] = frozenset(
-    {"telemetry", "prepare-context", "version", "config", "analyze", "repo-ir"}
+    {"telemetry", "prepare-context", "version", "config", "analyze", "repo-ir", "mcp"}
 )
 
 # Mutable container holding the path extracted by _preprocess_argv().
@@ -300,6 +304,9 @@ except Exception:
 telemetry_app = typer.Typer(help="Manage anonymous telemetry (opt-in).", rich_markup_mode="rich")
 app.add_typer(telemetry_app, name="telemetry")
 
+mcp_app = typer.Typer(help="MCP integration: setup, status, serve, remove.", rich_markup_mode="rich")
+app.add_typer(mcp_app, name="mcp")
+
 
 def _maybe_ask_consent() -> None:
     """Show first-run consent prompt once, on interactive TTYs only."""
@@ -313,6 +320,26 @@ def _maybe_ask_consent() -> None:
                 typer.echo("Telemetry enabled. Thank you. Disable: sourcecode telemetry disable", err=True)
             else:
                 typer.echo("Telemetry disabled. Enable anytime: sourcecode telemetry enable", err=True)
+    except Exception:
+        pass
+
+
+def _maybe_show_mcp_hint() -> None:
+    """Show MCP integration hint once after first install, on TTY only."""
+    import sys as _sys
+    try:
+        if not _sys.stderr.isatty():
+            return
+        from sourcecode.telemetry.config import _CONFIG_FILE, _load, _save
+        data = _load()
+        if data.get("mcp", {}).get("hint_shown"):
+            return
+        typer.echo("", err=True)
+        typer.echo("  MCP integration available:", err=True)
+        typer.echo("  → sourcecode mcp init", err=True)
+        typer.echo("", err=True)
+        data.setdefault("mcp", {})["hint_shown"] = True
+        _save(data)
     except Exception:
         pass
 
@@ -616,6 +643,7 @@ def main(
     # First-run consent (skip for telemetry/version/config subcommands)
     if ctx.invoked_subcommand not in ("telemetry", "version", "config"):
         _maybe_ask_consent()
+        _maybe_show_mcp_hint()
 
     # When a subcommand is invoked, skip the main analysis.
     if ctx.invoked_subcommand is not None:
@@ -2430,6 +2458,249 @@ def analyze_cmd(
         err=True,
     )
     raise typer.Exit(code=1)
+
+
+# ── MCP server ────────────────────────────────────────────────────────────────
+
+@mcp_app.command("serve")
+def mcp_serve() -> None:
+    """Start the MCP server on stdio for AI agent integration.
+
+    \b
+    Requires the 'mcp' extra:
+      pip install sourcecode[mcp]
+
+    \b
+    Configure in your MCP client (e.g. Claude Desktop):
+      {
+        "sourcecode": {
+          "command": "sourcecode",
+          "args": ["mcp", "serve"]
+        }
+      }
+    """
+    import logging
+    import sys as _sys
+
+    logging.basicConfig(
+        stream=_sys.stderr,
+        level=logging.INFO,
+        format="[sourcecode-mcp] %(levelname)s %(message)s",
+    )
+    try:
+        from sourcecode.mcp.server import mcp as _mcp
+    except ImportError:
+        typer.echo(
+            "MCP support not available. Install with:\n"
+            "  pip install sourcecode[mcp]",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    log = logging.getLogger(__name__)
+    log.info("sourcecode-mcp starting (stdio transport)")
+    try:
+        _mcp.run()
+    except KeyboardInterrupt:
+        log.info("sourcecode-mcp stopped")
+    except Exception as exc:
+        log.critical("sourcecode-mcp fatal error: %s", exc, exc_info=True)
+        raise typer.Exit(code=1)
+
+
+# ── MCP onboarding ────────────────────────────────────────────────────────────
+
+@mcp_app.command("init")
+def mcp_init(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+) -> None:
+    """Setup MCP integration for Claude Desktop, Cursor, and other clients.
+
+    \b
+    Detects installed MCP clients, backs up their config files, and safely
+    inserts the sourcecode server entry. Fully idempotent — safe to re-run.
+    """
+    from sourcecode.mcp.onboarding.detector import detect_clients
+    from sourcecode.mcp.onboarding.planner import build_install_plan
+    from sourcecode.mcp.onboarding import backup, applier
+
+    typer.echo("Detecting MCP clients...")
+    typer.echo("")
+
+    clients = detect_clients()
+    if not clients:
+        typer.echo("No MCP clients found on this system.")
+        typer.echo("")
+        typer.echo("Manual setup — add to your MCP client config:")
+        typer.echo('  "sourcecode": {"command": "sourcecode", "args": ["mcp", "serve"]}')
+        raise typer.Exit(code=0)
+
+    # Show detection results
+    for client in clients:
+        mark = "✓" if client.app_installed else "○"
+        note = "" if client.app_installed else "  (not found)"
+        typer.echo(f"  {mark}  {client.name:<18} {client.config_path}{note}")
+    typer.echo("")
+
+    # Build plan
+    plan = build_install_plan(clients)
+    actionable = [a for a in plan if a.client.app_installed and not a.already_installed]
+    already_done = [a for a in plan if a.client.app_installed and a.already_installed]
+
+    if already_done and not actionable:
+        typer.echo("Already configured:")
+        for a in already_done:
+            typer.echo(f"  ✓  {a.client.name}   {a.client.config_path}")
+        typer.echo("")
+        typer.echo("Nothing to do. Remove: sourcecode mcp remove")
+        raise typer.Exit(code=0)
+
+    if already_done:
+        typer.echo("Already configured:")
+        for a in already_done:
+            typer.echo(f"  ✓  {a.client.name}   {a.client.config_path}")
+        typer.echo("")
+
+    # Show plan for actionable items
+    typer.echo("This will:")
+    for a in actionable:
+        verb = "Create " if a.will_create_file else "Modify "
+        typer.echo(f"  {verb}  {a.client.config_path}")
+    typer.echo(f"  Backup → ~/.config/sourcecode/mcp-backups/")
+    typer.echo("")
+
+    if not yes:
+        confirmed = typer.confirm("Proceed?", default=False)
+        if not confirmed:
+            typer.echo("Aborted.")
+            raise typer.Exit(code=0)
+        typer.echo("")
+
+    # Apply
+    errors: list[str] = []
+    for a in actionable:
+        try:
+            config = applier.read_config(a.client.config_path)
+            if a.client.config_path.exists():
+                bak = backup.create(a.client.config_path)
+                typer.echo(f"  ✓ Backup   {bak}")
+            updated = applier.apply_entry(config)
+            applier.write_config(a.client.config_path, updated)
+            if not applier.validate(a.client.config_path):
+                errors.append(f"{a.client.name}: JSON validation failed after write")
+                continue
+            typer.echo(f"  ✓ Updated  {a.client.config_path}")
+        except Exception as exc:
+            errors.append(f"{a.client.name}: {exc}")
+
+    typer.echo("")
+
+    if errors:
+        for err in errors:
+            typer.echo(f"  ✗ {err}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo("MCP integration active.")
+    typer.echo("")
+
+    restart_needed = [a.client.name for a in actionable if not a.will_create_file]
+    if restart_needed:
+        typer.echo(f"  Restart {', '.join(restart_needed)} to apply changes.")
+    typer.echo("  Remove:  sourcecode mcp remove")
+
+
+@mcp_app.command("status")
+def mcp_status() -> None:
+    """Show MCP integration status for all detected clients."""
+    from sourcecode.mcp.onboarding.detector import detect_clients
+    from sourcecode.mcp.onboarding import applier
+
+    clients = detect_clients()
+    typer.echo("MCP Integration Status")
+    typer.echo("")
+
+    if not clients:
+        typer.echo("  No MCP clients detected on this system.")
+        raise typer.Exit(code=0)
+
+    for client in clients:
+        if not client.app_installed:
+            typer.echo(f"  ○  {client.name:<18} not found")
+            continue
+        config = applier.read_config(client.config_path)
+        if applier.is_installed(config):
+            typer.echo(f"  ✓  {client.name:<18} configured   {client.config_path}")
+        else:
+            typer.echo(f"  ✗  {client.name:<18} not configured")
+    typer.echo("")
+    typer.echo("  Setup:   sourcecode mcp init")
+    typer.echo("  Remove:  sourcecode mcp remove")
+
+
+@mcp_app.command("remove")
+def mcp_remove(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+) -> None:
+    """Remove sourcecode MCP integration from all configured clients.
+
+    \b
+    Backs up config files before modifying. Restores from backup when available,
+    otherwise removes the sourcecode entry while preserving all other config.
+    """
+    from sourcecode.mcp.onboarding.detector import detect_clients
+    from sourcecode.mcp.onboarding.planner import build_remove_plan
+    from sourcecode.mcp.onboarding import backup, applier
+
+    clients = detect_clients()
+    plan = build_remove_plan(clients)
+    installed = [a for a in plan if a.already_installed]
+
+    if not installed:
+        typer.echo("sourcecode MCP integration not found in any client config.")
+        typer.echo("  Setup: sourcecode mcp init")
+        raise typer.Exit(code=0)
+
+    typer.echo("Remove sourcecode MCP integration from:")
+    typer.echo("")
+    for a in installed:
+        typer.echo(f"  {a.client.name}   {a.client.config_path}")
+        bak = backup.latest(a.client.config_path)
+        if bak:
+            typer.echo(f"    Backup available: {bak}")
+    typer.echo("")
+
+    if not yes:
+        confirmed = typer.confirm("Proceed?", default=False)
+        if not confirmed:
+            typer.echo("Aborted.")
+            raise typer.Exit(code=0)
+        typer.echo("")
+
+    errors: list[str] = []
+    for a in installed:
+        try:
+            bak = backup.create(a.client.config_path)
+            typer.echo(f"  ✓ Backup   {bak}")
+            config = applier.read_config(a.client.config_path)
+            updated = applier.remove_entry(config)
+            applier.write_config(a.client.config_path, updated)
+            if not applier.validate(a.client.config_path):
+                errors.append(f"{a.client.name}: JSON validation failed — restoring backup")
+                backup.restore(bak, a.client.config_path)
+                continue
+            typer.echo(f"  ✓ Updated  {a.client.config_path}")
+        except Exception as exc:
+            errors.append(f"{a.client.name}: {exc}")
+
+    typer.echo("")
+
+    if errors:
+        for err in errors:
+            typer.echo(f"  ✗ {err}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo("MCP integration removed.")
+    typer.echo("  Re-add:  sourcecode mcp init")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
