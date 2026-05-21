@@ -1,3 +1,3 @@
 """sourcecode — Deterministic codebase context maps for AI coding agents."""
 
-__version__ = "1.31.2"
+__version__ = "1.31.3"

@@ -2467,6 +2467,8 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
     _CLASS_PATH_RE = _re.compile(
         r'@RequestMapping\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']',
     )
+    _REQUEST_METHOD_VERB_RE = _re.compile(r'method\s*=\s*RequestMethod\.([A-Z]+)')
+    _VALUE_PATH_RE = _re.compile(r'value\s*=\s*"([^"]+)"')
 
     _HTTP_METHOD_MAP = {
         "Get": "GET", "Post": "POST", "Put": "PUT",
@@ -2502,12 +2504,24 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
         cls_m = _CLASS_RE.search(content)
         class_name = cls_m.group(1) if cls_m else java_file.stem
 
-        # Extract class-level base path from @RequestMapping on the class
+        # Extract class-level base path and locate class body start
         class_base = ""
         lines = content.splitlines()
+
+        # First pass: find class/interface declaration line index
+        class_body_start = 0
         for i, line in enumerate(lines):
-            if "@RequestMapping" in line and i < len(lines) - 1:
-                # Check if next non-blank line is class declaration or it's on same block
+            stripped_l = line.strip()
+            if (not stripped_l.startswith("//") and not stripped_l.startswith("*")
+                    and ("class " in stripped_l or "interface " in stripped_l)
+                    and _CLASS_RE.search(stripped_l)):
+                class_body_start = i + 1
+                break
+
+        # Second pass: extract class-level @RequestMapping path (only before class body)
+        search_end = class_body_start if class_body_start else len(lines)
+        for i in range(search_end):
+            if "@RequestMapping" in lines[i]:
                 block = "\n".join(lines[max(0, i - 1): i + 5])
                 if "class " in block or "interface " in block:
                     path_m = _CLASS_PATH_RE.search(block)
@@ -2515,12 +2529,13 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
                         class_base = path_m.group(1).rstrip("/")
                     break
 
-        # Extract method-level endpoints
-        # Parse line-by-line to associate annotations with methods
+        # Extract method-level endpoints starting from inside class body
+        # (skipping class-level annotations that appear before the class declaration)
         pending_annotations: list[tuple[str, str]] = []  # (http_verb, path_suffix)
         pending_filtro: Optional[str] = None
 
-        for i, line in enumerate(lines):
+        for i in range(class_body_start, len(lines)):
+            line = lines[i]
             stripped = line.strip()
 
             # Check for @M3FiltroSeguridad
@@ -2535,6 +2550,19 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
                 verb_key = hm.group(1)
                 http_verb = _HTTP_METHOD_MAP.get(verb_key, "GET")
                 path_suffix = (hm.group(2) or "").strip()
+
+                # For @RequestMapping: resolve HTTP method from method= attribute
+                if verb_key == "Request":
+                    annotation_block = "\n".join(lines[i:min(i + 5, len(lines))])
+                    vm = _REQUEST_METHOD_VERB_RE.search(annotation_block)
+                    if vm:
+                        http_verb = vm.group(1)
+                    # If path not captured (method= precedes value=), try value= extraction
+                    if not path_suffix:
+                        vp = _VALUE_PATH_RE.search(annotation_block)
+                        if vp:
+                            path_suffix = vp.group(1)
+
                 pending_annotations.append((http_verb, path_suffix))
                 continue
 
