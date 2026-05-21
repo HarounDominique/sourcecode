@@ -19,7 +19,7 @@ import subprocess
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
 # Data classes — Phases 1–4
@@ -142,9 +142,22 @@ _REQUEST_MAPPING_RE = re.compile(
 )
 
 _ENDPOINT_ANNOTATIONS: frozenset[str] = frozenset({
+    # Spring MVC
     "@GetMapping", "@PostMapping", "@PutMapping", "@DeleteMapping",
     "@PatchMapping", "@RequestMapping",
+    # JAX-RS / Jakarta REST
+    "@GET", "@POST", "@PUT", "@DELETE", "@PATCH", "@HEAD", "@OPTIONS",
 })
+
+# JAX-RS HTTP verb annotations (subset of _ENDPOINT_ANNOTATIONS; path lives in @Path, not here).
+_JAXRS_HTTP_ANNOTATIONS: frozenset[str] = frozenset({
+    "@GET", "@POST", "@PUT", "@DELETE", "@PATCH", "@HEAD", "@OPTIONS",
+})
+
+# Annotations whose args contain a path value and must be captured.
+_PATH_ANNOTATIONS: frozenset[str] = frozenset({"@Path"})
+
+_PERMISSION_ANNOTATIONS: frozenset[str] = frozenset({"@M3FiltroSeguridad"})
 
 _MODIFIER_WORDS: frozenset[str] = frozenset({
     "public", "private", "protected", "static", "final", "abstract",
@@ -164,6 +177,7 @@ _INJECT_ANNOTATIONS: frozenset[str] = frozenset({
 })
 
 _SPRING_ROLE_MAP: dict[str, str] = {
+    # Spring MVC / Spring Boot
     "@RestController": "controller",
     "@Controller": "controller",
     "@Service": "service",
@@ -171,24 +185,61 @@ _SPRING_ROLE_MAP: dict[str, str] = {
     "@Component": "component",
     "@Configuration": "config",
     "@Bean": "config",
+    # CDI / Jakarta EE
+    "@ApplicationScoped": "service",
+    "@RequestScoped": "service",
+    "@SessionScoped": "service",
+    "@Singleton": "service",
+    "@Dependent": "component",
+    "@Named": "component",
+    # JAX-RS provider
+    "@Provider": "provider",
 }
 
+# Keycloak/Quarkus SPI interface names — classes implementing these are spi_provider entry points.
+_SPI_ROLE_INTERFACES: frozenset[str] = frozenset({
+    "EventListenerProvider", "EventListenerProviderFactory",
+    "RealmResourceProvider", "RealmResourceProviderFactory",
+    "AuthenticatorFactory", "Authenticator",
+    "ProtocolMapper", "ProtocolMapperFactory",
+    "CredentialProvider", "CredentialProviderFactory",
+    "PolicyProviderFactory", "PolicyProvider",
+    "RequiredActionProvider", "RequiredActionFactory",
+    "IdentityProviderMapper", "IdentityProviderFactory",
+})
+
 _SPRING_OTHER: frozenset[str] = frozenset({
+    # Spring
     "@Transactional", "@RequestMapping", "@GetMapping", "@PostMapping",
     "@PutMapping", "@DeleteMapping", "@PatchMapping", "@Autowired",
     "@Inject", "@Value", "@Qualifier", "@EnableWebSecurity",
     "@SpringBootApplication", "@EnableAutoConfiguration",
     "@EventListener", "@Async", "@Scheduled", "@Cacheable", "@CacheEvict",
+    # CDI / Jakarta EE
+    "@ApplicationScoped", "@RequestScoped", "@SessionScoped", "@Dependent",
+    "@Named", "@Produces", "@Consumes",
+    # JAX-RS (non-HTTP-verb)
+    "@Path", "@PathParam", "@QueryParam", "@FormParam", "@HeaderParam",
+    "@MatrixParam", "@CookieParam", "@Context",
 })
 
 _PUBLISH_EVENT_RE = re.compile(r'\.publishEvent\s*\(\s*new\s+(\w+)\s*[(\{]')
 
 _HTTP_METHOD_MAP: dict[str, str] = {
+    # Spring MVC
     "@GetMapping": "GET",
     "@PostMapping": "POST",
     "@PutMapping": "PUT",
     "@DeleteMapping": "DELETE",
     "@PatchMapping": "PATCH",
+    # JAX-RS
+    "@GET": "GET",
+    "@POST": "POST",
+    "@PUT": "PUT",
+    "@DELETE": "DELETE",
+    "@PATCH": "PATCH",
+    "@HEAD": "HEAD",
+    "@OPTIONS": "OPTIONS",
 }
 
 # ---------------------------------------------------------------------------
@@ -411,7 +462,7 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
                 ann_args = ann_m.group(2) or ""
                 if ann not in pending_anns:
                     pending_anns.append(ann)
-                if ann_args and ann in _ENDPOINT_ANNOTATIONS:
+                if ann_args and (ann in _ENDPOINT_ANNOTATIONS or ann in _PERMISSION_ANNOTATIONS or ann in _PATH_ANNOTATIONS):
                     pending_ann_values[ann] = ann_args.strip()
             depth += net
             _pop_closed(class_stack, depth)
@@ -629,12 +680,14 @@ def _spring_role(annotations: list[str]) -> str:
 
 
 def _build_spring_summary(symbols: list[SymbolRecord]) -> dict:
-    """Phase 2: Aggregate Spring-annotated symbols into a summary."""
+    """Phase 2: Aggregate Spring/CDI/JAX-RS annotated symbols into a summary."""
     controllers: list[str] = []
     services: list[str] = []
     repositories: list[str] = []
     configs: list[str] = []
     transactional: list[str] = []
+    providers: list[str] = []
+    spi_impls: list[str] = []
 
     for sym in symbols:
         if sym.type not in ("class", "interface"):
@@ -651,17 +704,33 @@ def _build_spring_summary(symbols: list[SymbolRecord]) -> dict:
             repositories.append(sym.symbol)
         elif role == "config":
             configs.append(sym.symbol)
+        elif role == "provider":
+            providers.append(sym.symbol)
+
+        # JAX-RS class-level @Path → resource controller (no Spring annotation required).
+        if role == "unknown" and "@Path" in sym.annotations:
+            controllers.append(sym.symbol)
+
+        # Keycloak/Quarkus SPI: class signature mentions a known SPI interface.
+        sig = sym.signature or ""
+        if any(iface in sig for iface in _SPI_ROLE_INTERFACES):
+            spi_impls.append(sym.symbol)
 
         if "@Transactional" in sym.annotations:
             transactional.append(sym.symbol)
 
-    return {
-        "controllers": sorted(controllers),
+    result: dict = {
+        "controllers": sorted(set(controllers)),
         "services": sorted(services),
         "repositories": sorted(repositories),
         "configs": sorted(configs),
         "transactional": sorted(transactional),
     }
+    if providers:
+        result["providers"] = sorted(providers)
+    if spi_impls:
+        result["spi_implementations"] = sorted(spi_impls)
+    return result
 
 
 def _extract_mapped_paths(source: str, class_fqn: str) -> dict[str, str]:
@@ -848,6 +917,24 @@ def _parse_route_path(args_str: str) -> str:
     return m.group(1) if m else ""
 
 
+def _parse_route_paths(args_str: str) -> list[str]:
+    """Return all route paths from annotation args, including array syntax.
+
+    Handles:
+      @RequestMapping("/single")                    → ["/single"]
+      @RequestMapping({"/v1/foo", "/v1/bar"})       → ["/v1/foo", "/v1/bar"]
+      @RequestMapping(value = "/single")            → ["/single"]
+    """
+    if not args_str:
+        return [""]
+    for key in ("value", "path"):
+        m = re.search(rf'\b{key}\s*=\s*"([^"]*)"', args_str)
+        if m:
+            return [m.group(1)]
+    paths = re.findall(r'"([^"]*)"', args_str)
+    return paths if paths else [""]
+
+
 def _parse_route_http_method(ann_name: str, args_str: str) -> str:
     """Derive HTTP method from annotation name or explicit method= arg."""
     explicit = _HTTP_METHOD_MAP.get(ann_name)
@@ -868,9 +955,8 @@ def _parse_route_extras(args_str: str) -> dict:
 
 
 def _is_route_symbol(sym: SymbolRecord) -> bool:
-    return bool(sym.annotation_values) and any(
-        a in _ENDPOINT_ANNOTATIONS for a in sym.annotations
-    )
+    # JAX-RS @GET has no annotation args, so annotation_values may be empty.
+    return any(a in _ENDPOINT_ANNOTATIONS for a in sym.annotations)
 
 
 def _route_annotation_name(sym: SymbolRecord) -> str:
@@ -892,7 +978,7 @@ def _symbol_fingerprint(sym: SymbolRecord) -> str:
     route_val_seg = "|".join(
         f"{a}:{sym.annotation_values.get(a, '')}"
         for a in sorted(sym.annotations)
-        if a in _ENDPOINT_ANNOTATIONS
+        if a in _ENDPOINT_ANNOTATIONS or a in _PATH_ANNOTATIONS
     )
     return (
         f"{sym.type}|{','.join(sym.modifiers)}"
@@ -976,6 +1062,12 @@ def _diff_routes(
         new_ann = _route_annotation_name(new_sym)
         old_args = old_sym.annotation_values.get(old_ann, "")
         new_args = new_sym.annotation_values.get(new_ann, "")
+
+        # JAX-RS: HTTP verb carries no path; path lives in @Path annotation.
+        if old_ann in _JAXRS_HTTP_ANNOTATIONS:
+            old_args = old_sym.annotation_values.get("@Path", "")
+        if new_ann in _JAXRS_HTTP_ANNOTATIONS:
+            new_args = new_sym.annotation_values.get("@Path", "")
 
         old_path = _parse_route_path(old_args)
         new_path = _parse_route_path(new_args)
@@ -1595,26 +1687,39 @@ def _build_route_surface(
     extends_map: child_fqn → parent_simple_name derived from RelationEdge extends edges.
     Projects inherited endpoints onto subclasses that have a class-level @RequestMapping
     prefix but zero own method-level endpoints (IC-001 fix).
+
+    route_diffs semantics:
+      None  → build full route surface from symbols (used by build_repo_ir and
+              extract_java_endpoints)
+      []    → return empty (no baseline to diff against, e.g. extract_file_ir
+              without old_source)
+      [...]  → return the pre-computed diffs from _diff_routes
     """
-    if route_diffs:
+    if route_diffs is not None:
         return route_diffs
 
-    # Phase 1: build per-class metadata (prefix) and own endpoint list
-    class_info: dict[str, dict] = {}  # simple_name → {fqn, prefix, own_endpoints}
+    # Phase 1: build per-class metadata (prefixes list) and own endpoint list.
+    # "prefixes" is a list to support array @RequestMapping({"/v1/foo", "/v1/bar"}).
+    class_info: dict[str, dict] = {}  # simple_name → {fqn, prefixes, own_endpoints}
     for sym in symbols:
         if sym.type not in ("class", "interface"):
             continue
         simple = sym.symbol.split(".")[-1]
-        prefix = ""
+        prefixes: list[str] = [""]
         if "@RequestMapping" in sym.annotations:
             args = sym.annotation_values.get("@RequestMapping", "")
-            prefix = _parse_route_path(args)
-        class_info[simple] = {"fqn": sym.symbol, "prefix": prefix, "own_endpoints": []}
+            prefixes = _parse_route_paths(args)
+        elif "@Path" in sym.annotations:
+            # JAX-RS: class-level @Path is the resource prefix.
+            args = sym.annotation_values.get("@Path", "")
+            prefixes = _parse_route_paths(args) if args else [""]
+        class_info[simple] = {"fqn": sym.symbol, "prefixes": prefixes, "own_endpoints": []}
 
     routes: list[dict] = []
     seen: set[tuple] = set()
 
-    # Phase 2: emit own endpoint symbols and record them per class
+    # Phase 2: emit own endpoint symbols and record them per class.
+    # Each method emits one route per class-level prefix (handles array prefix).
     for sym in symbols:
         if sym.symbol_kind != "endpoint":
             continue
@@ -1624,7 +1729,11 @@ def _build_route_surface(
         cls_fqn = _enclosing_class(sym.symbol)
         cls_simple = cls_fqn.split(".")[-1]
         args = sym.annotation_values.get(ann_name, "")
-        suffix = _parse_route_path(args)
+        # JAX-RS: HTTP verb annotations carry no path; path lives in @Path on the method.
+        if ann_name in _JAXRS_HTTP_ANNOTATIONS:
+            suffix = _parse_route_path(sym.annotation_values.get("@Path", ""))
+        else:
+            suffix = _parse_route_path(args)
         method = _parse_route_http_method(ann_name, args) or "GET"
 
         if cls_simple in class_info:
@@ -1632,24 +1741,24 @@ def _build_route_surface(
                 (method, suffix, sym.symbol, sym.stable_id)
             )
 
-        prefix = class_info.get(cls_simple, {}).get("prefix", "")
-        full_path = (prefix + "/" + suffix).replace("//", "/").rstrip("/") or "/"
-        if not full_path.startswith("/"):
-            full_path = "/" + full_path
+        for prefix in class_info.get(cls_simple, {}).get("prefixes", [""]):
+            full_path = (prefix + "/" + suffix).replace("//", "/").rstrip("/") or "/"
+            if not full_path.startswith("/"):
+                full_path = "/" + full_path
 
-        key = (sym.symbol, method, prefix)
-        if key not in seen:
-            seen.add(key)
-            routes.append({
-                "symbol": sym.symbol,
-                "controller": cls_fqn,
-                "declaring_class": cls_fqn,
-                "effective_class": cls_fqn,
-                "path": full_path,
-                "method": method,
-                "stable_id": sym.stable_id,
-                "inheritance_depth": 0,
-            })
+            key = (sym.symbol, method, prefix)
+            if key not in seen:
+                seen.add(key)
+                routes.append({
+                    "symbol": sym.symbol,
+                    "controller": cls_fqn,
+                    "declaring_class": cls_fqn,
+                    "effective_class": cls_fqn,
+                    "path": full_path,
+                    "method": method,
+                    "stable_id": sym.stable_id,
+                    "inheritance_depth": 0,
+                })
 
     # Phase 3: inheritance projection — subclasses with zero own endpoints
     # but with a class-level @RequestMapping prefix inherit parent methods.
@@ -1663,7 +1772,7 @@ def _build_route_surface(
         for cls_simple, data in class_info.items():
             if data["own_endpoints"]:
                 continue
-            if not data["prefix"]:
+            if not any(data["prefixes"]):
                 continue
 
             chain = simple_extends.get(cls_simple)
@@ -1676,23 +1785,23 @@ def _build_route_surface(
                     break
                 if parent["own_endpoints"]:
                     for verb, suffix, declaring_sym, stable_id in parent["own_endpoints"]:
-                        prefix = data["prefix"]
-                        full_path = (prefix + "/" + suffix).replace("//", "/").rstrip("/") or "/"
-                        if not full_path.startswith("/"):
-                            full_path = "/" + full_path
-                        key = (cls_simple, declaring_sym, verb, prefix)
-                        if key not in seen:
-                            seen.add(key)
-                            routes.append({
-                                "symbol": declaring_sym,
-                                "controller": data["fqn"],
-                                "declaring_class": parent["fqn"],
-                                "effective_class": data["fqn"],
-                                "path": full_path,
-                                "method": verb,
-                                "stable_id": stable_id,
-                                "inheritance_depth": depth,
-                            })
+                        for prefix in data["prefixes"]:
+                            full_path = (prefix + "/" + suffix).replace("//", "/").rstrip("/") or "/"
+                            if not full_path.startswith("/"):
+                                full_path = "/" + full_path
+                            key = (cls_simple, declaring_sym, verb, prefix)
+                            if key not in seen:
+                                seen.add(key)
+                                routes.append({
+                                    "symbol": declaring_sym,
+                                    "controller": data["fqn"],
+                                    "declaring_class": parent["fqn"],
+                                    "effective_class": data["fqn"],
+                                    "path": full_path,
+                                    "method": verb,
+                                    "stable_id": stable_id,
+                                    "inheritance_depth": depth,
+                                })
                     break
                 chain = simple_extends.get(chain)
                 depth += 1
@@ -1794,8 +1903,12 @@ def build_repo_ir(
             seen.add(key)
             unique_relations.append(e)
 
-    all_route_diffs_sorted = sorted(all_route_diffs, key=lambda d: d["symbol"])
-    return _assemble(all_symbols, unique_relations, all_changed, spring_summary, all_route_diffs_sorted)
+    # When since is given, route_surface is a diff view (empty [] or list of changes).
+    # When since is None, pass None so _build_route_surface builds the full route surface.
+    route_diffs_arg: Optional[list[dict]] = (
+        sorted(all_route_diffs, key=lambda d: d["symbol"]) if since else None
+    )
+    return _assemble(all_symbols, unique_relations, all_changed, spring_summary, route_diffs_arg)
 
 
 # ---------------------------------------------------------------------------
@@ -1907,6 +2020,85 @@ def apply_ir_size_limits(
 # ---------------------------------------------------------------------------
 # Convenience: find Java files in a repo
 # ---------------------------------------------------------------------------
+
+def extract_java_endpoints(root: Path) -> "dict[str, Any]":
+    """Extract REST endpoint surface from Java source files.
+
+    Canonical endpoint extractor — uses IR symbol extraction + _build_route_surface().
+    Single source of truth for endpoint data; replaces the standalone regex extractor
+    that previously lived in cli.py.
+
+    Returns JSON-serializable dict:
+      {endpoints: [{method, path, controller, handler, required_permission?}], total, undocumented}
+    """
+    import re as _re
+    from typing import Any as _Any
+    from sourcecode.path_filters import is_test_path
+
+    _EXTENDS_FROM_SIG = _re.compile(r'\bextends\s+(\w+)')
+    _FILTRO_VAL = _re.compile(r'(?:nombreRecurso\s*=\s*)?["\']([^"\']+)["\']')
+
+    java_files = sorted(
+        p for p in root.rglob("*.java")
+        if not is_test_path(str(p).replace("\\", "/"))
+        and "target/" not in str(p).replace("\\", "/")
+    )
+
+    all_symbols: list[SymbolRecord] = []
+    sym_map: dict[str, SymbolRecord] = {}
+    extends_map: dict[str, str] = {}
+
+    for jf in java_files:
+        try:
+            source = jf.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        try:
+            rel = str(jf.relative_to(root)).replace("\\", "/")
+        except ValueError:
+            rel = str(jf).replace("\\", "/")
+        _, symbols, _ = _extract_symbols(source, rel)
+        for sym in symbols:
+            all_symbols.append(sym)
+            sym_map[sym.symbol] = sym
+            if sym.type in ("class", "interface"):
+                m = _EXTENDS_FROM_SIG.search(sym.signature or "")
+                if m:
+                    extends_map[sym.symbol] = m.group(1)
+
+    routes = _build_route_surface(all_symbols, route_diffs=None, extends_map=extends_map)
+
+    endpoints: list[dict] = []
+    for route in routes:
+        sym = sym_map.get(route["symbol"])
+        required_permission: Optional[str] = None
+        if sym:
+            filtro_args = sym.annotation_values.get("@M3FiltroSeguridad", "")
+            if filtro_args:
+                fm = _FILTRO_VAL.search(filtro_args)
+                if fm:
+                    required_permission = fm.group(1)
+
+        handler = (
+            route["symbol"].split("#")[1]
+            if "#" in route["symbol"]
+            else route["symbol"].rsplit(".", 1)[-1]
+        )
+        controller = route["effective_class"].split(".")[-1]
+
+        entry: dict = {
+            "method": route["method"],
+            "path": route["path"],
+            "controller": controller,
+            "handler": handler,
+        }
+        if required_permission:
+            entry["required_permission"] = required_permission
+        endpoints.append(entry)
+
+    undocumented = sum(1 for e in endpoints if "required_permission" not in e)
+    return {"endpoints": endpoints, "total": len(endpoints), "undocumented": undocumented}
+
 
 def find_java_files(root: Path, *, max_files: int = 3000) -> list[str]:
     """Return relative paths to Java files under root, excluding test dirs and vendor."""

@@ -63,6 +63,21 @@ def test_get_compact_context_default_path():
     assert "--compact" in args
 
 
+def test_get_compact_context_with_git_context():
+    with patch(_RUNNER_PATH, return_value=_PARSED_OUTPUT) as mock_rc:
+        server.get_compact_context("/some/repo", git_context=True)
+    args = mock_rc.call_args[0][0]
+    assert "--git-context" in args
+    assert "--compact" in args
+
+
+def test_get_compact_context_without_git_context():
+    with patch(_RUNNER_PATH, return_value=_PARSED_OUTPUT) as mock_rc:
+        server.get_compact_context("/some/repo", git_context=False)
+    args = mock_rc.call_args[0][0]
+    assert "--git-context" not in args
+
+
 def test_get_compact_context_failure():
     with patch(_RUNNER_PATH, side_effect=RuntimeError("boom")):
         result = server.get_compact_context("/some/repo")
@@ -86,6 +101,21 @@ def test_get_agent_context_default_path():
     args = mock_rc.call_args[0][0]
     assert args[0] == "."
     assert "--agent" in args
+
+
+def test_get_agent_context_with_git_context():
+    with patch(_RUNNER_PATH, return_value=_PARSED_OUTPUT) as mock_rc:
+        server.get_agent_context("/some/repo", git_context=True)
+    args = mock_rc.call_args[0][0]
+    assert "--git-context" in args
+    assert "--agent" in args
+
+
+def test_get_agent_context_without_git_context():
+    with patch(_RUNNER_PATH, return_value=_PARSED_OUTPUT) as mock_rc:
+        server.get_agent_context("/some/repo", git_context=False)
+    args = mock_rc.call_args[0][0]
+    assert "--git-context" not in args
 
 
 def test_get_agent_context_failure():
@@ -197,6 +227,78 @@ def test_get_ir_summary_failure():
     _assert_failure(result, "EXECUTION_FAILED")
 
 
+# --- onboard_context ---
+
+def test_onboard_context_success():
+    with patch(_RUNNER_PATH, return_value=_PARSED_OUTPUT) as mock_rc:
+        result = server.onboard_context("/some/repo")
+    _assert_success(result)
+    args = mock_rc.call_args[0][0]
+    assert args == ["prepare-context", "onboard", "/some/repo"]
+
+
+def test_onboard_context_failure():
+    with patch(_RUNNER_PATH, side_effect=RuntimeError("fail")):
+        result = server.onboard_context("/some/repo")
+    _assert_failure(result, "EXECUTION_FAILED")
+
+
+# --- version ---
+
+def test_version_success():
+    with patch(_RUNNER_PATH, return_value="sourcecode 1.2.3") as mock_rc:
+        result = server.version()
+    _assert_success(result)
+    assert mock_rc.call_args[0][0] == ["version"]
+
+
+def test_version_failure():
+    with patch(_RUNNER_PATH, side_effect=RuntimeError("not installed")):
+        result = server.version()
+    _assert_failure(result, "EXECUTION_FAILED")
+
+
+# --- config ---
+
+def test_config_success():
+    with patch(_RUNNER_PATH, return_value="key=value") as mock_rc:
+        result = server.config()
+    _assert_success(result)
+    assert mock_rc.call_args[0][0] == ["config"]
+
+
+def test_config_failure():
+    with patch(_RUNNER_PATH, side_effect=RuntimeError("fail")):
+        result = server.config()
+    _assert_failure(result, "EXECUTION_FAILED")
+
+
+# --- telemetry ---
+
+def test_telemetry_success_all_actions():
+    for action in ("status", "enable", "disable"):
+        with patch(_RUNNER_PATH, return_value="ok") as mock_rc:
+            result = server.telemetry(action)
+        _assert_success(result)
+        assert mock_rc.call_args[0][0] == ["telemetry", action]
+
+
+def test_telemetry_invalid_action_rejected():
+    result = server.telemetry("--enable")
+    _assert_failure(result, "INVALID_ARGUMENT")
+
+
+def test_telemetry_unknown_action_rejected():
+    result = server.telemetry("reset")
+    _assert_failure(result, "INVALID_ARGUMENT")
+
+
+def test_telemetry_failure():
+    with patch(_RUNNER_PATH, side_effect=RuntimeError("fail")):
+        result = server.telemetry("status")
+    _assert_failure(result, "EXECUTION_FAILED")
+
+
 # --- envelope invariants ---
 
 def test_all_tools_json_serializable():
@@ -210,6 +312,10 @@ def test_all_tools_json_serializable():
             server.get_ir_summary("/p"),
             server.fix_bug_context("/p"),
             server.review_pr_context("/p"),
+            server.onboard_context("/p"),
+            server.version(),
+            server.config(),
+            server.telemetry("status"),
         ]
     for r in results:
         json.dumps(r)

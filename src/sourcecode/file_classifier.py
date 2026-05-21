@@ -61,6 +61,7 @@ _TOOLING_FILES = {
 _API_IMPORTS = {
     "fastapi", "flask", "django", "express", "koa", "fastify", "hono",
     "@nestjs/core", "@apollo/server", "graphql", "springframework",
+    "javax.ws.rs", "jakarta.ws.rs",  # JAX-RS
 }
 _DB_IMPORTS = {
     "sqlalchemy", "psycopg2", "asyncpg", "pymongo", "mongoose", "prisma",
@@ -78,8 +79,15 @@ _IMPORT_RE = re.compile(
 )
 _DEF_RE = re.compile(r"\b(class|def|function|const|export\s+class|interface|type)\s+[A-Za-z_]", re.MULTILINE)
 
-# Java Spring stereotype annotation detection
-_JAVA_ANNOTATION_RE = re.compile(r'@(RestController|Controller|Service|Repository|Mapper|Entity|Data|Configuration|EnableWebSecurity|ControllerAdvice|Transactional)\b')
+# Java stereotype annotation detection — Spring, JAX-RS, CDI/Jakarta EE, Quarkus
+_JAVA_ANNOTATION_RE = re.compile(
+    r'@(RestController|Controller|Service|Repository|Mapper|Entity|Data|Configuration'
+    r'|EnableWebSecurity|ControllerAdvice|Transactional'
+    r'|Path|Provider'  # JAX-RS
+    r'|ApplicationScoped|RequestScoped|SessionScoped|Singleton|Dependent'  # CDI
+    r'|Inject|Named'  # CDI DI
+    r')\b'
+)
 
 # (annotation_set, category, relevance, why_template)
 # Checked in priority order; first match wins.
@@ -88,11 +96,22 @@ _JAVA_STEREOTYPE_RULES: list[tuple[frozenset, str, float, str]] = [
     (frozenset({"RestController"}),                  "api_endpoint",      0.90, "Spring REST controller — defines HTTP API surface"),
     (frozenset({"Controller", "RequestMapping"}),    "api_endpoint",      0.80, "Spring MVC controller"),
     (frozenset({"ControllerAdvice"}),                "exception_handler", 0.75, "Spring @ControllerAdvice — cross-cutting exception handling"),
+    # JAX-RS
+    (frozenset({"Path"}),                            "api_endpoint",      0.85, "JAX-RS resource — defines REST endpoint surface"),
+    (frozenset({"Provider"}),                        "infrastructure",    0.70, "JAX-RS @Provider — cross-cutting REST infrastructure"),
+    # Spring service / data
     (frozenset({"Service", "Transactional"}),        "business_logic",    0.75, "Transactional service — business logic boundary"),
     (frozenset({"Service"}),                         "business_logic",    0.65, "Spring service component"),
     (frozenset({"Repository"}),                      "data_access",       0.65, "Spring repository — data access layer"),
     (frozenset({"Mapper"}),                          "data_access",       0.65, "MyBatis mapper — SQL data access"),
     (frozenset({"Configuration"}),                   "configuration",     0.70, "Spring configuration class"),
+    # CDI / Jakarta EE
+    (frozenset({"ApplicationScoped"}),               "business_logic",    0.65, "CDI application-scoped bean"),
+    (frozenset({"RequestScoped"}),                   "business_logic",    0.60, "CDI request-scoped bean"),
+    (frozenset({"SessionScoped"}),                   "business_logic",    0.60, "CDI session-scoped bean"),
+    (frozenset({"Singleton"}),                       "business_logic",    0.65, "CDI/Jakarta singleton bean"),
+    (frozenset({"Dependent"}),                       "business_logic",    0.50, "CDI dependent-scoped bean"),
+    # Domain / DTO
     (frozenset({"Entity"}),                          "domain_model",      0.50, "JPA entity — domain model"),
     (frozenset({"Data"}),                            "dto",               0.40, "Lombok DTO"),
 ]

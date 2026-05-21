@@ -50,6 +50,29 @@ _SECURITY_CONFIG_ANNOTATION_RE = re.compile(r'@EnableWebSecurity\b')
 _ONCE_PER_REQUEST_FILTER_RE = re.compile(r'extends\s+(?:OncePerRequestFilter|GenericFilterBean)\b')
 _JWT_FILTER_KEYWORDS_RE = re.compile(r'\b(?:jwt|token|bearer|authorization)\b', re.IGNORECASE)
 
+# --- JAX-RS / Jakarta REST ---
+_JAX_RS_PATH_RE = re.compile(r'@Path\s*\(\s*["\']([^"\']+)["\']')
+_JAX_RS_VERB_RE = re.compile(r'@(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b')
+_JAX_RS_PROVIDER_RE = re.compile(r'@Provider\b')
+
+# --- CDI / Jakarta EE scopes ---
+_CDI_SCOPED_RE = re.compile(r'@(?:ApplicationScoped|RequestScoped|SessionScoped|Singleton|Dependent)\b')
+
+# --- Keycloak / Quarkus SPI ---
+# Matches "implements EventListenerProvider" or "implements Foo, EventListenerProvider, Bar"
+_SPI_IMPL_RE = re.compile(
+    r'implements\s+[\w\s,]*\b('
+    r'EventListenerProvider|EventListenerProviderFactory'
+    r'|RealmResourceProvider|RealmResourceProviderFactory'
+    r'|AuthenticatorFactory|Authenticator'
+    r'|ProtocolMapper|ProtocolMapperFactory'
+    r'|CredentialProvider|CredentialProviderFactory'
+    r'|PolicyProviderFactory|PolicyProvider'
+    r'|RequiredActionProvider|RequiredActionFactory'
+    r'|IdentityProviderMapper|IdentityProviderFactory'
+    r')\b'
+)
+
 # @Transactional detection
 _TRANSACTIONAL_RE = re.compile(r'@Transactional\b')
 # Extracts class name: `public class Foo` or `class Foo`
@@ -333,6 +356,17 @@ class JavaDetector(AbstractDetector):
             abs_path = context.root / rel_path
             entry_points.extend(self._parse_web_xml(abs_path, rel_path))
 
+        # 4. META-INF/services SPI declarations (Keycloak/Quarkus service-loader pattern).
+        # Each file name is the SPI interface FQN; content lists implementing classes.
+        service_paths = [p for p in all_paths if "META-INF/services/" in p and not p.endswith("/")]
+        for rel_path in service_paths[:50]:
+            iface_name = Path(rel_path).name
+            entry_points.append(EntryPoint(
+                path=rel_path, stack="java", kind="spi_provider",
+                source="service_loader", confidence="high",
+                evidence=f"SPI:{iface_name}",
+            ))
+
         # Deduplicate by (path, kind)
         seen: set[tuple[str, str]] = set()
         unique_eps: list[EntryPoint] = []
@@ -361,7 +395,10 @@ class JavaDetector(AbstractDetector):
             try:
                 for dirpath, _dirs, filenames in _os.walk(str(src_root)):
                     for fname in filenames:
-                        if "Controller" not in fname or not fname.endswith(".java"):
+                        if not fname.endswith(".java"):
+                            continue
+                        # Include Spring controllers and JAX-RS resources by naming convention.
+                        if "Controller" not in fname and "Resource" not in fname:
                             continue
                         full = Path(dirpath) / fname
                         if full.is_symlink():
@@ -390,9 +427,17 @@ class JavaDetector(AbstractDetector):
         has_filter = "Filter" in content
         has_security = "WebSecurityConfigurerAdapter" in content or "SecurityFilterChain" in content or "EnableWebSecurity" in content
         has_once_filter = "OncePerRequestFilter" in content or "GenericFilterBean" in content
+        has_jax_rs = "@Path" in content or "@GET" in content or "@POST" in content or "@Provider" in content
+        has_cdi = "ApplicationScoped" in content or "RequestScoped" in content or "@Singleton" in content
+        has_spi = "implements" in content and any(k in content for k in (
+            "EventListenerProvider", "RealmResourceProvider", "AuthenticatorFactory",
+            "ProtocolMapper", "CredentialProvider", "PolicyProvider",
+            "RequiredActionProvider", "IdentityProviderMapper",
+        ))
         if (not has_controller and not has_filter and not has_security
                 and "ControllerAdvice" not in content
-                and "M3FiltroSeguridad" not in content):
+                and "M3FiltroSeguridad" not in content
+                and not has_jax_rs and not has_cdi and not has_spi):
             return []
 
         if _REST_CONTROLLER_RE.search(content):
@@ -467,6 +512,45 @@ class JavaDetector(AbstractDetector):
                 source="annotation", confidence="high",
                 evidence="jwt_filter" if is_jwt else "request_filter",
             )]
+
+        # --- JAX-RS resource class ---
+        if has_jax_rs and _JAX_RS_PATH_RE.search(content) and _JAX_RS_VERB_RE.search(content):
+            path_m = _JAX_RS_PATH_RE.search(content)
+            verb_m = _JAX_RS_VERB_RE.search(content)
+            http_path: str | None = None
+            if path_m and verb_m:
+                http_path = f"[{verb_m.group(1)}] {path_m.group(1)}"
+            elif path_m:
+                http_path = path_m.group(1)
+            return [EntryPoint(
+                path=rel_path, stack="java", kind="jax_rs_controller",
+                source="annotation", confidence="high",
+                http_path=http_path,
+            )]
+        if has_jax_rs and _JAX_RS_PROVIDER_RE.search(content):
+            return [EntryPoint(
+                path=rel_path, stack="java", kind="jax_rs_provider",
+                source="annotation", confidence="high",
+                evidence="@Provider",
+            )]
+
+        # --- Keycloak / Quarkus SPI implementation ---
+        if has_spi:
+            spi_m = _SPI_IMPL_RE.search(content)
+            if spi_m:
+                return [EntryPoint(
+                    path=rel_path, stack="java", kind="spi_provider",
+                    source="annotation", confidence="high",
+                    evidence=f"SPI:{spi_m.group(1)}",
+                )]
+
+        # --- CDI / Jakarta EE scoped bean ---
+        if has_cdi and _CDI_SCOPED_RE.search(content):
+            return [EntryPoint(
+                path=rel_path, stack="java", kind="cdi_bean",
+                source="annotation", confidence="medium",
+            )]
+
         return []
 
     def _parse_web_xml(self, abs_path: Path, rel_path: str) -> list[EntryPoint]:

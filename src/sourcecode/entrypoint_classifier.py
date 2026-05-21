@@ -68,8 +68,15 @@ def runtime_relevance(ep: EntryPoint, classification: Classification | None = No
     if classification != "production":
         return "low"
     # Annotation-detected HTTP controllers are the primary runtime surface
-    if ep.source == "annotation" and ep.kind in {"rest_controller", "mvc_controller"}:
+    if ep.source == "annotation" and ep.kind in {
+        "rest_controller", "mvc_controller", "jax_rs_controller",
+    }:
         return "high"
+    # JAX-RS providers and Keycloak SPI implementations are runtime-active
+    if ep.source in {"annotation", "service_loader"} and ep.kind in {
+        "jax_rs_provider", "spi_provider",
+    }:
+        return "medium"
     reason = (ep.reason or "").lower()
     if ep.source == "package.json#bin" or reason == "bin" or reason in _PRODUCTION_SCRIPT_REASONS:
         return "high"

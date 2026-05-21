@@ -15,10 +15,9 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from sourcecode import __version__
 from sourcecode.mcp.runner import run_command
 
-mcp = FastMCP("sourcecode", version=__version__)
+mcp = FastMCP("sourcecode")
 
 
 def _ok(data: Any) -> dict:
@@ -37,29 +36,41 @@ def _execute(args: list[str]) -> dict:
 
 
 @mcp.tool()
-def get_compact_context(repo_path: str = ".") -> dict:
+def get_compact_context(repo_path: str = ".", git_context: bool = False) -> dict:
     """High-signal summary of a repository (~1000-3000 tokens).
 
-    Maps to: sourcecode <repo_path> --compact
+    Maps to: sourcecode <repo_path> --compact [--git-context]
     Returns: stacks, entry points, dependency summary, confidence, gaps.
     repo_path: absolute path to the repository (default: current working directory).
+    git_context: include git log and branch context in the analysis.
     """
     if not isinstance(repo_path, str):
         return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    return _execute([repo_path, "--compact"])
+    if not isinstance(git_context, bool):
+        return _err("git_context must be boolean", "INVALID_ARGUMENT")
+    args = [repo_path, "--compact"]
+    if git_context:
+        args.append("--git-context")
+    return _execute(args)
 
 
 @mcp.tool()
-def get_agent_context(repo_path: str = ".") -> dict:
+def get_agent_context(repo_path: str = ".", git_context: bool = False) -> dict:
     """Agent-optimised analysis: identity, entry points, dependencies, gaps.
 
-    Maps to: sourcecode <repo_path> --agent
+    Maps to: sourcecode <repo_path> --agent [--git-context]
     Returns: structured noise-free JSON for AI agents.
     repo_path: absolute path to the repository (default: current working directory).
+    git_context: include git log and branch context in the analysis.
     """
     if not isinstance(repo_path, str):
         return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    return _execute([repo_path, "--agent"])
+    if not isinstance(git_context, bool):
+        return _err("git_context must be boolean", "INVALID_ARGUMENT")
+    args = [repo_path, "--agent"]
+    if git_context:
+        args.append("--git-context")
+    return _execute(args)
 
 
 @mcp.tool()
@@ -154,3 +165,51 @@ def review_pr_context(repo_path: str = ".", since: str = "") -> dict:
     if since and isinstance(since, str) and since.strip():
         args.extend(["--since", since.strip()])
     return _execute(args)
+
+
+@mcp.tool()
+def onboard_context(repo_path: str = ".") -> dict:
+    """Onboarding context: structured overview for new contributors.
+
+    Maps to: sourcecode prepare-context onboard <repo_path>
+    repo_path: absolute path to the repository (default: current working directory).
+    """
+    if not isinstance(repo_path, str):
+        return _err("repo_path must be a string", "INVALID_ARGUMENT")
+    return _execute(["prepare-context", "onboard", repo_path])
+
+
+_TELEMETRY_ACTIONS = frozenset({"status", "enable", "disable"})
+
+
+@mcp.tool()
+def version() -> dict:
+    """Print sourcecode CLI version.
+
+    Maps to: sourcecode version
+    """
+    return _execute(["version"])
+
+
+@mcp.tool()
+def config() -> dict:
+    """Show sourcecode CLI configuration.
+
+    Maps to: sourcecode config
+    """
+    return _execute(["config"])
+
+
+@mcp.tool()
+def telemetry(action: str) -> dict:
+    """Manage telemetry settings.
+
+    Maps to: sourcecode telemetry <status|enable|disable>
+    action must be one of: status, enable, disable
+    """
+    if action not in _TELEMETRY_ACTIONS:
+        return _err(
+            f"action must be one of {sorted(_TELEMETRY_ACTIONS)}",
+            "INVALID_ARGUMENT",
+        )
+    return _execute(["telemetry", action])
