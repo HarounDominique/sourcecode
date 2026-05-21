@@ -2495,6 +2495,10 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
 
     endpoints: list[dict] = []
     seen: set[tuple] = set()
+    # Fix 1: inheritance projection — tracks class data so controllers with ONLY
+    # inherited endpoints (no own @RequestMapping methods) are not silently dropped.
+    _class_info: dict[str, dict] = {}
+    _EXTENDS_RE_LOCAL = _re.compile(r'\bextends\s+(\w+)')
 
     from sourcecode.path_filters import is_test_path as _is_test_path
 
@@ -2579,14 +2583,18 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
         # Extract class-level base path and locate class body start
         lines = content.splitlines()
 
-        # First pass: find class/interface declaration line index
+        # First pass: find class/interface declaration line index and extends clause.
         class_body_start = 0
+        extends_class_name: Optional[str] = None
         for i, line in enumerate(lines):
             stripped_l = line.strip()
             if (not stripped_l.startswith("//") and not stripped_l.startswith("*")
                     and ("class " in stripped_l or "interface " in stripped_l)
                     and _CLASS_RE.search(stripped_l)):
                 class_body_start = i + 1
+                _ext_m = _EXTENDS_RE_LOCAL.search(stripped_l)
+                if _ext_m:
+                    extends_class_name = _ext_m.group(1)
                 break
 
         # Second pass: extract class-level @RequestMapping path (only before class body).
@@ -2656,6 +2664,7 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
         pending_annotations: list[tuple[str, str]] = []  # (http_verb, path_suffix)
         pending_filtro: Optional[str] = None
         in_block_comment = False
+        file_own_endpoints: list[tuple] = []  # (http_verb, path_suffix, handler, filtro)
 
         for i in range(class_body_start, len(lines)):
             line = lines[i]
@@ -2708,6 +2717,7 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
                 handler = mm.group(1) if mm else ""
                 if handler and not handler.startswith("class"):
                     for http_verb, path_suffix in pending_annotations:
+                        file_own_endpoints.append((http_verb, path_suffix, handler, pending_filtro))
                         for _cb in class_bases:  # Bug #1B: one endpoint per class prefix
                             full_path = (_cb + "/" + path_suffix).replace("//", "/").rstrip("/") or "/"
                             if not full_path.startswith("/"):
@@ -2732,6 +2742,50 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
             if stripped == "}":
                 pending_annotations = []
                 pending_filtro = None
+
+        # Store per-class data for inheritance projection
+        _class_info[class_name] = {
+            "base_paths": class_bases,
+            "extends_class": extends_class_name,
+            "own_endpoints": file_own_endpoints,
+        }
+
+    # Fix 1: Inheritance projection — controllers whose methods are 100% inherited from a
+    # base class emit 0 endpoints above because no method-level annotations exist in their
+    # file. Walk the inheritance chain and project parent suffixes with the child's base path.
+    for _cls, _data in _class_info.items():
+        if _data["own_endpoints"]:
+            continue
+        _bases = _data["base_paths"]
+        if not _bases or _bases == [""]:
+            continue
+        _chain = _data.get("extends_class")
+        _visited: set[str] = {_cls}
+        while _chain and _chain not in _visited:
+            _visited.add(_chain)
+            _parent = _class_info.get(_chain)
+            if not _parent:
+                break
+            if _parent["own_endpoints"]:
+                for _verb, _suffix, _handler, _filtro in _parent["own_endpoints"]:
+                    for _cb in _bases:
+                        _fp = (_cb + "/" + _suffix).replace("//", "/").rstrip("/") or "/"
+                        if not _fp.startswith("/"):
+                            _fp = "/" + _fp
+                        _key = (_cls, _handler, _verb, _cb)
+                        if _key not in seen:
+                            seen.add(_key)
+                            _entry: dict[str, Any] = {
+                                "method": _verb,
+                                "path": _fp,
+                                "controller": _cls,
+                                "handler": _handler,
+                            }
+                            if _filtro:
+                                _entry["required_permission"] = _filtro
+                            endpoints.append(_entry)
+                break
+            _chain = _parent.get("extends_class")
 
     endpoints.sort(key=lambda e: (e.get("controller", ""), e.get("path", "")))
     undocumented = sum(1 for e in endpoints if "required_permission" not in e)

@@ -178,7 +178,10 @@ _SPRING_OTHER: frozenset[str] = frozenset({
     "@PutMapping", "@DeleteMapping", "@PatchMapping", "@Autowired",
     "@Inject", "@Value", "@Qualifier", "@EnableWebSecurity",
     "@SpringBootApplication", "@EnableAutoConfiguration",
+    "@EventListener", "@Async", "@Scheduled", "@Cacheable", "@CacheEvict",
 })
+
+_PUBLISH_EVENT_RE = re.compile(r'\.publishEvent\s*\(\s*new\s+(\w+)\s*[(\{]')
 
 _HTTP_METHOD_MAP: dict[str, str] = {
     "@GetMapping": "GET",
@@ -787,6 +790,33 @@ def _build_relations(
                     evidence={"type": "structural", "value": f"member of {enclosing}"},
                 ))
 
+    # Fix 5: Event flow edges — publishEvent publishers and @EventListener subscribers.
+    # listens_to_event: method with @EventListener → resolved event parameter type(s).
+    for sym in symbols:
+        if sym.type == "method" and "@EventListener" in sym.annotations:
+            for imp_fqn in sym.imports_used:
+                edges.append(RelationEdge(
+                    from_symbol=sym.symbol,
+                    to_symbol=imp_fqn,
+                    type="listens_to_event",
+                    confidence="high",
+                    evidence={"type": "annotation", "value": "@EventListener"},
+                ))
+
+    # publishes_event: class that calls publishEvent(new XxxEvent(...)) → event type FQN.
+    _class_syms = [s for s in symbols if s.type in ("class", "interface") and "#" not in s.symbol]
+    for m in _PUBLISH_EVENT_RE.finditer(source):
+        event_simple = m.group(1)
+        event_fqn = import_map.get(event_simple, event_simple)
+        for cls_sym in _class_syms:
+            edges.append(RelationEdge(
+                from_symbol=cls_sym.symbol,
+                to_symbol=event_fqn,
+                type="publishes_event",
+                confidence="medium",
+                evidence={"type": "method_call", "value": f"publishEvent(new {event_simple})"},
+            ))
+
     seen: set[tuple[str, str, str]] = set()
     unique: list[RelationEdge] = []
     for e in edges:
@@ -1190,6 +1220,8 @@ _EDGE_REASON_TEMPLATES: dict[str, str] = {
     "contained_in": "{from_sym} is a member of {to_sym}",
     "annotated_with": "{from_sym} is annotated with {to_sym}",
     "mapped_to": "Route {to_sym} depends on {from_sym}",
+    "publishes_event": "{from_sym} publishes event {to_sym}",
+    "listens_to_event": "{from_sym} listens for event {to_sym}",
 }
 
 # Edge types to exclude from reverse impact traversal (too noisy / non-dependency semantics)
@@ -1526,11 +1558,41 @@ def _assemble(
         },
         "subsystems": subsystems,
         "change_set": change_set_out,
-        "route_surface": route_diffs or [],
+        "route_surface": _build_route_surface(sorted_syms, route_diffs),
         "audit": {
             "dropped_fields": dropped_fields,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Route surface helper (Fix 4)
+# ---------------------------------------------------------------------------
+
+def _build_route_surface(symbols: list[SymbolRecord], route_diffs: Optional[list[dict]]) -> list[dict]:
+    """Return route surface: diffs when --since provided, else static snapshot of all endpoints."""
+    if route_diffs:
+        return route_diffs
+    routes: list[dict] = []
+    for sym in symbols:
+        if sym.symbol_kind != "endpoint":
+            continue
+        ann_name = next((a for a in sym.annotations if a in _ENDPOINT_ANNOTATIONS), None)
+        if not ann_name:
+            continue
+        args = sym.annotation_values.get(ann_name, "")
+        path = _parse_route_path(args)
+        method = _parse_route_http_method(ann_name, args)
+        if not path and not method:
+            continue
+        routes.append({
+            "symbol": sym.symbol,
+            "controller": _enclosing_class(sym.symbol),
+            "path": path,
+            "method": method or "GET",
+            "stable_id": sym.stable_id,
+        })
+    return sorted(routes, key=lambda r: (r["controller"], r["path"]))
 
 
 # ---------------------------------------------------------------------------
@@ -1675,7 +1737,17 @@ def apply_ir_size_limits(
                 "remove --summary-only to restore full graph"
             ),
         }
-        out["reverse_graph"] = {}
+        # Fix 3: keep bounded reverse graph instead of wiping it.
+        full_rg: dict = ir.get("reverse_graph") or {}
+        if full_rg:
+            _rg_sorted = sorted(
+                full_rg.items(),
+                key=lambda x: sum(len(v) for v in x[1].values()),
+                reverse=True,
+            )
+            out["reverse_graph"] = dict(_rg_sorted[:50])
+        else:
+            out["reverse_graph"] = {}
         out["impact"] = {
             "global_score": (ir.get("impact") or {}).get("global_score", 0),
             "ranked_nodes": ranked[:20],
@@ -1703,10 +1775,19 @@ def apply_ir_size_limits(
 
     if kept_fqns is not None or max_edges is not None:
         if kept_fqns is not None:
-            # Priority: edges where both endpoints are kept nodes
-            priority = [e for e in edges if e["from"] in kept_fqns and e["to"] in kept_fqns]
-            rest = [e for e in edges if not (e["from"] in kept_fqns and e["to"] in kept_fqns)]
-            edges = priority + rest
+            # Fix 2: type-aware priority so semantic edges survive node truncation.
+            # Annotation strings (@Service etc.) and field FQNs are never in kept_fqns,
+            # so "both endpoints kept" drops all injects/annotated_with edges.
+            _SEMANTIC_TYPES = frozenset({"extends", "implements", "injects",
+                                         "publishes_event", "listens_to_event"})
+            _ANNOTATION_TYPES = frozenset({"annotated_with"})
+            tier1 = [e for e in edges if e["from"] in kept_fqns and e["type"] in _SEMANTIC_TYPES]
+            tier2 = [e for e in edges if e["from"] in kept_fqns and e["type"] in _ANNOTATION_TYPES]
+            tier3 = [e for e in edges
+                     if e["from"] in kept_fqns and e["to"] in kept_fqns and e["type"] == "imports"]
+            _seen_e = {(e["from"], e["to"], e["type"]) for e in tier1 + tier2 + tier3}
+            tier4 = [e for e in edges if (e["from"], e["to"], e["type"]) not in _seen_e]
+            edges = tier1 + tier2 + tier3 + tier4
         if max_edges is not None:
             edges = edges[:max_edges]
 
