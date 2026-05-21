@@ -20,7 +20,8 @@ _SYMBOL_LOOKBACK = 25  # líneas hacia atrás para encontrar el símbolo envolve
 _SKIP_DIRS = {
     "node_modules", ".git", "__pycache__", ".venv", "venv",
     ".mypy_cache", "dist", "build", ".tox", ".eggs",
-    ".next", ".nuxt", ".output", "vendor", "coverage",
+    ".next", ".nuxt", ".output", "vendor", "vendors", "coverage",
+    "third_party", "thirdparty",
 }
 
 _CODE_EXTENSIONS = {
@@ -255,4 +256,6 @@ class CodeNotesAnalyzer:
                 # here was redundant and caused files to be silently skipped when
                 # traversal order varied (different files filled the quota first).
                 if suffix in _CODE_EXTENSIONS:
-                    _scan_source_file(entry, rel, notes, total_count)
+                    from sourcecode.path_filters import is_vendor_path as _is_vendor
+                    if not _is_vendor(rel):
+                        _scan_source_file(entry, rel, notes, total_count)

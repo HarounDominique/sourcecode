@@ -295,9 +295,13 @@ class JavaDetector(AbstractDetector):
         self._augment_deep_java_controllers(context, all_java)
 
         # 1. @SpringBootApplication entry: Application.java / Main.java by name
+        # Exclude test trees: test helpers like AdminApplication.java in
+        # integration/src/test/java/ must not be treated as production entrypoints.
+        from sourcecode.path_filters import is_test_path as _is_test_path
         app_candidates = [
             p for p in all_java
             if p.endswith(("Application.java", "Main.java"))
+            and not _is_test_path(p)
         ]
         entry_points: list[EntryPoint] = [
             EntryPoint(path=p, stack="java", kind="application", source="manifest")
@@ -307,7 +311,7 @@ class JavaDetector(AbstractDetector):
         # 2. Annotation-based scan: @RestController, @WebFilter, FilterRegistrationBean
         # Prioritize Controller-named files so all REST controllers are detected
         # even in large codebases where total files > _MAX_JAVA_ENTRY_SCAN.
-        _non_test = [p for p in all_java if "/test/" not in p and "/tests/" not in p]
+        _non_test = [p for p in all_java if not _is_test_path(p)]
         _ctrl_files = [p for p in _non_test if "Controller" in p]
         _other_files = [p for p in _non_test if "Controller" not in p]
         scan_candidates = _ctrl_files + _other_files[:max(0, _MAX_JAVA_ENTRY_SCAN - len(_ctrl_files))]

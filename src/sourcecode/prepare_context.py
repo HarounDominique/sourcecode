@@ -310,7 +310,8 @@ class RelevantFile:
     role: str    # entrypoint | source | test
     score: float
     reason: str
-    why: str = ""  # why this file matters for the specific task
+    why: str = ""                # why this file matters for the specific task
+    tier: Optional[str] = None   # fix-bug only: high | medium | low
 
 
 @dataclass
@@ -974,7 +975,33 @@ class TaskContextBuilder:
                 and (d.role or "unknown") in {"runtime", "parsing", "serialization", "observability", "infra"}
                 and d.scope not in {"dev"}
             ]
-            direct.sort(key=lambda d: (0 if d.ecosystem == primary_eco else 1, d.name.lower()))
+            # Rank by framework centrality: core infra (ORM, Spring) > serialization > other.
+            # Penalise vendored tooling (closure-compiler, shaded utilities) so that
+            # Hibernate/JPA/Solr appear before minor build-time dependencies.
+            _HIGH_SIGNAL_FRAGMENTS = (
+                "hibernate", "jpa", "spring-core", "spring-context", "spring-web",
+                "spring-boot", "spring-security", "spring-data",
+                "solr", "elasticsearch", "kafka", "redis",
+                "jackson", "gson",
+                "mybatis", "druid", "datasource",
+                "tomcat", "undertow", "netty",
+                "slf4j", "logback", "log4j",
+            )
+            _LOW_SIGNAL_FRAGMENTS = (
+                "closure-compiler", "closure-library",
+                "google-closure", "rhino",
+                "guava-gwt",
+            )
+
+            def _dep_rank(d: Any) -> tuple:
+                art = (d.name or "").lower()
+                eco_match = 0 if d.ecosystem == primary_eco else 1
+                is_high = any(frag in art for frag in _HIGH_SIGNAL_FRAGMENTS)
+                is_low = any(frag in art for frag in _LOW_SIGNAL_FRAGMENTS)
+                infra_score = 0 if is_high else (2 if is_low else 1)
+                return (eco_match, infra_score, art)
+
+            direct.sort(key=_dep_rank)
             _SKIP_DEP_KEYS = {"parent", "workspace", "resolved_version", "manifest_path"}
             key_dependencies = [
                 {k: v for k, v in asdict(d).items() if v is not None and k not in _SKIP_DEP_KEYS}
@@ -1182,6 +1209,7 @@ class TaskContextBuilder:
                 uncommitted_files=uncommitted_files,
                 code_notes=cn_notes_for_ranking if cn_notes_for_ranking else None,
                 delta_files=None,
+                symptom=symptom if task_name == "fix-bug" else None,
             )
 
         # ── 6b. review-pr: derive PR-specific impact sections from delta analysis ──
@@ -2025,6 +2053,7 @@ class TaskContextBuilder:
         uncommitted_files: Optional[set[str]] = None,
         code_notes: Optional[list] = None,
         delta_files: Optional[set[str]] = None,
+        symptom: Optional[str] = None,
     ) -> list[RelevantFile]:
         from sourcecode.ranking_engine import RankingEngine
         from sourcecode.file_classifier import FileClassifier
@@ -2043,6 +2072,11 @@ class TaskContextBuilder:
         _annotated_files: set[str] = set()
         _dominant_stack = ""
         _recently_changed_stacks: set[str] = set()
+        # Query-aware signals extracted from symptom (class names, exception types, tokens)
+        _symptom_class_names: set[str] = set()    # CamelCase class names
+        _symptom_exception_types: set[str] = set() # *Exception / *Error tokens
+        _symptom_tokens: set[str] = set()          # all lowercase tokens
+
         if task_name == "fix-bug":
             _bug_kinds = {"FIXME", "BUG", "HACK", "XXX"}
             for _n in (code_notes or []):
@@ -2067,6 +2101,19 @@ class TaskContextBuilder:
             if _stk_counts:
                 _dominant_stack = _stk_counts.most_common(1)[0][0]
                 _recently_changed_stacks = set(_stk_counts.keys())
+
+            # Extract structured signals from symptom text for AND-weighted ranking
+            if symptom:
+                import re as _re_bug
+                _camel_re = _re_bug.compile(r'\b([A-Z][a-zA-Z0-9]+)\b')
+                for _tok in _camel_re.findall(symptom):
+                    if _tok.endswith(("Exception", "Error", "Throwable")):
+                        _symptom_exception_types.add(_tok)
+                    else:
+                        _symptom_class_names.add(_tok)
+                _symptom_tokens = {
+                    w.lower() for w in _re_bug.split(r'[\s\W]+', symptom) if len(w) > 2
+                }
 
         scored: list[tuple[float, str, RelevantFile]] = []
 
@@ -2117,6 +2164,64 @@ class TaskContextBuilder:
             _fix_bug_why = ""
             if task_name == "fix-bug":
                 _why_parts: list[str] = []
+
+                # ── Query-aware AND-weighted signals (symptom-derived) ──
+                # These intentionally outweigh git-recency signals so that
+                # OrderServiceImpl.java ranks top-3 regardless of churn history.
+                if _symptom_class_names or _symptom_exception_types:
+                    _stem = Path(path).stem
+                    _stem_lower = _stem.lower()
+                    _matched_class = next(
+                        (c for c in _symptom_class_names if _stem_lower == c.lower()),
+                        None,
+                    )
+                    _matched_exc = next(
+                        (e for e in _symptom_exception_types if _stem_lower == e.lower()),
+                        None,
+                    )
+                    _impl_match = next(
+                        (c for c in _symptom_class_names
+                         if _stem_lower in (c.lower() + "impl", c.lower() + "service",
+                                            c.lower() + "serviceimpl", c.lower() + "helper")),
+                        None,
+                    )
+                    if _matched_class:
+                        content_boost += 3.0
+                        _why_parts.append(f"exact class match: {_stem} (+3.0)")
+                    elif _matched_exc:
+                        content_boost += 2.0
+                        _why_parts.append(f"exception class match: {_stem} (+2.0)")
+                    elif _impl_match:
+                        content_boost += 2.5
+                        _why_parts.append(f"class impl match: {_stem} (+2.5)")
+                    else:
+                        # Symbol appears anywhere in path (package adjacency)
+                        _path_class_hit = next(
+                            (c for c in _symptom_class_names if c.lower() in path_lower),
+                            None,
+                        )
+                        if _path_class_hit:
+                            content_boost += 1.0
+                            _why_parts.append(f"symbol in path: {_path_class_hit} (+1.0)")
+                        elif any(e.lower() in path_lower for e in _symptom_exception_types):
+                            content_boost += 0.8
+                            _why_parts.append("exception type in path (+0.8)")
+
+                # AND-weighted token intersection — multiple matching tokens >> single
+                if _symptom_tokens:
+                    _path_parts = set(path_lower.replace("/", " ").replace(".", " ").replace("_", " ").split())
+                    _intersection = _symptom_tokens & _path_parts
+                    _n_match = len(_intersection)
+                    if _n_match >= 3:
+                        _tok_boost = min(1.2, _n_match * 0.25)
+                        content_boost += _tok_boost
+                        _why_parts.append(f"token AND match ({_n_match} terms: {sorted(_intersection)[:3]}) (+{_tok_boost:.2f})")
+                    elif _n_match == 2:
+                        content_boost += 0.4
+                        _why_parts.append(f"token AND match (2 terms: {sorted(_intersection)}) (+0.40)")
+                    # Single-token match: no boost — avoids OR explosion
+
+                # ── Git / annotation signals ──
                 if path in _uncommitted:
                     content_boost += 0.40
                     _why_parts.append("uncommitted change (+0.40)")
@@ -2203,7 +2308,7 @@ class TaskContextBuilder:
             }
             _repo_size = len(all_paths)
             _task_budget = {
-                "fix-bug": max(20, min(40, _repo_size // 80)),
+                "fix-bug": 30,  # hard cap — prevents token explosion on large repos
                 "onboard": max(15, min(25, _repo_size // 150)),
                 "explain": max(10, min(20, _repo_size // 200)),
                 "generate-tests": max(20, min(35, _repo_size // 100)),
@@ -2271,7 +2376,21 @@ class TaskContextBuilder:
                             _covered.add(_layer)
                             _missing.discard(_layer)
 
-            return [_rf_map[p] for p in _selected if p in _rf_map]
+            result = [_rf_map[p] for p in _selected if p in _rf_map]
+
+            # Assign fix-bug tiers based on raw score (pre-normalised total)
+            if task_name == "fix-bug":
+                _score_lookup = {path: total for total, path, _ in scored}
+                for _rf in result:
+                    _s = _score_lookup.get(_rf.path, 0.0)
+                    if _s >= 4.0:
+                        _rf.tier = "high"
+                    elif _s >= 1.5:
+                        _rf.tier = "medium"
+                    else:
+                        _rf.tier = "low"
+
+            return result
         except Exception:
             return [f for _, _, f in scored[:15]]
 

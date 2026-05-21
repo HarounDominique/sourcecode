@@ -2496,12 +2496,58 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
     endpoints: list[dict] = []
     seen: set[tuple] = set()
 
+    from sourcecode.path_filters import is_test_path as _is_test_path
+
     java_files = [
         p for p in root.rglob("*.java")
-        if "/test/" not in str(p).replace("\\", "/")
-        and "/tests/" not in str(p).replace("\\", "/")
+        if not _is_test_path(str(p).replace("\\", "/"))
         and "target/" not in str(p).replace("\\", "/")
     ]
+
+    # ── Meta-annotation index ─────────────────────────────────────────────────
+    # First pass: find @interface declarations and the annotations they carry.
+    # This lets us detect controllers annotated with framework wrappers like
+    # @FrameworkController that itself carries @Controller.
+    #
+    # Index maps annotation simple name → set of annotation names it is
+    # annotated with (one level; resolution is done recursively below).
+    _ANN_DECL_RE = _re.compile(r'public\s+@interface\s+(\w+)')
+    _ANN_USE_RE = _re.compile(r'@(\w+)')
+
+    _meta_index: dict[str, set[str]] = {}
+    for _jf in java_files:
+        _raw: str
+        try:
+            _raw = _jf.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "@interface" not in _raw:
+            continue
+        _decl_m = _ANN_DECL_RE.search(_raw)
+        if not _decl_m:
+            continue
+        _ann_name = _decl_m.group(1)
+        # Collect annotations appearing in the header (before the @interface line)
+        _header = _raw[: _decl_m.start()]
+        _meta_anns: set[str] = {
+            m for m in _ANN_USE_RE.findall(_header)
+            if m not in ("interface", "interface")  # strip keywords; annotation names only
+        }
+        _meta_index[_ann_name] = _meta_anns
+
+    _CONTROLLER_CORE = frozenset({"Controller", "RestController"})
+
+    def _resolves_to_controller(name: str, visited: "set[str]") -> bool:
+        """Return True when annotation *name* transitively carries @Controller/@RestController."""
+        if name in _CONTROLLER_CORE:
+            return True
+        if name in visited:
+            return False
+        visited.add(name)
+        for parent in _meta_index.get(name, ()):
+            if _resolves_to_controller(parent, visited):
+                return True
+        return False
 
     for java_file in java_files:
         try:
@@ -2509,9 +2555,17 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
         except OSError:
             continue
 
-        # Only process files with REST controller or mapping annotations
-        if not any(x in content for x in ("@RestController", "@Controller", "@RequestMapping")):
-            continue
+        # Process files with direct controller/mapping annotations OR
+        # with custom annotations that transitively resolve to @Controller/@RestController.
+        _has_direct = any(x in content for x in ("@RestController", "@Controller", "@RequestMapping"))
+        if not _has_direct:
+            # Quick meta-annotation check: extract class-level annotation names
+            # (first 60 lines — before the class body opens) and resolve them.
+            _header_lines = content.splitlines()[:60]
+            _header_text = "\n".join(_header_lines)
+            _file_anns = set(_ANN_USE_RE.findall(_header_text))
+            if not any(_resolves_to_controller(a, set()) for a in _file_anns):
+                continue
 
         try:
             rel_path = str(java_file.relative_to(root)).replace("\\", "/")
