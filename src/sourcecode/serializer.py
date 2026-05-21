@@ -409,7 +409,10 @@ def _spring_profiles_context(sm: "SourceMap") -> "Optional[dict[str, Any]]":
         else:
             matches = [
                 p for p in sm.file_paths
-                if pfx in Path(p).stem.lower() and p.endswith(".java")
+                if (Path(p).stem.lower() == pfx
+                    or Path(p).stem.lower().startswith(pfx + "-")
+                    or Path(p).stem.lower().endswith("-" + pfx))
+                and p.endswith(".java")
             ]
         if matches:
             per_profile[profile] = [Path(p).name for p in matches[:5]]
@@ -534,6 +537,8 @@ def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
 
     for ep in eps:
         path = getattr(ep, "path", "")
+        if "/test/" in path or "/tests/" in path:
+            continue
         kind = getattr(ep, "kind", "")
         stem = _Path(path).stem
 
@@ -587,8 +592,9 @@ def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
                 module_names.append(module)
 
         _ctrl_note = (
-            f"{controller_methods} @RequestMapping methods across "
+            f"{controller_methods} detected entry-point methods across "
             f"{controller_classes} controller classes"
+            f" (use 'sourcecode endpoints' for full surface)"
         )
         if len(module_names) > 30:
             # Group by first path segment under ddd/ (inferred domain area)

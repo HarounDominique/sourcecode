@@ -401,7 +401,7 @@ def main(
         help=(
             "High-signal summary (typically 1000–3000 tokens depending on repo size): "
             "stacks, entry points, dependency summary, confidence, and gaps. "
-            "Includes security_surface, mybatis, and transactional_boundaries for Java projects. "
+            "Includes security_surface (when @M3FiltroSeguridad detected), mybatis (when MyBatis framework detected), and transactional_boundaries for Java projects. "
             "Use --agent for maximum signal or --slim (when available) for minimal token footprint."
         ),
     ),
@@ -2418,14 +2418,20 @@ def repo_ir_cmd(
 
     if output_path:
         output_path.write_text(output, encoding="utf-8")
-        n_nodes = len((ir.get("graph") or {}).get("nodes") or [])
-        n_edges = len((ir.get("graph") or {}).get("edges") or [])
         size_kb = len(output.encode("utf-8")) // 1024
-        typer.echo(
-            f"IR written to {output_path} "
-            f"({size_kb}KB, {n_nodes} nodes, {n_edges} edges)",
-            err=True,
-        )
+        if summary_only:
+            typer.echo(
+                f"IR written to {output_path} ({size_kb}KB, graph omitted by --summary-only)",
+                err=True,
+            )
+        else:
+            n_nodes = len((ir.get("graph") or {}).get("nodes") or [])
+            n_edges = len((ir.get("graph") or {}).get("edges") or [])
+            typer.echo(
+                f"IR written to {output_path} "
+                f"({size_kb}KB, {n_nodes} nodes, {n_edges} edges)",
+                err=True,
+            )
     else:
         try:
             _sys.stdout.buffer.write(output.encode("utf-8"))
@@ -2462,7 +2468,11 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
         r'@(Get|Post|Put|Delete|Patch|Request)Mapping\s*'
         r'(?:\(\s*(?:value\s*=\s*)?(?:"([^"]*)"|\{[^}]*\}|[^)]*)\s*\))?',
     )
-    _CLASS_RE = _re.compile(r'(?:class|interface)\s+(\w+)')
+    _CLASS_RE = _re.compile(
+        r'^[ \t]*(?:(?:public|protected|private|abstract|final|@\w+)\s+)*'
+        r'(?:class|interface)\s+(\w+)',
+        _re.MULTILINE,
+    )
     _METHOD_RE = _re.compile(
         r'(?:public|protected|private)\s+\S+\s+(\w+)\s*\(',
     )
@@ -2540,7 +2550,45 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
                 if "class " in block or "interface " in block:
                     path_m = _CLASS_PATH_RE.search(block)
                     if path_m:
-                        class_bases = [path_m.group(1).rstrip("/")]
+                        captured = path_m.group(1).rstrip("/")
+                        # Handle string concat: @RequestMapping("lit" + ClassName.CONST)
+                        _CONCAT_CONST_RE = _re.compile(
+                            r'@RequestMapping\s*\(\s*(?:value\s*=\s*)?'
+                            r'["\']([^"\']*)["\'\s]*\+\s*(\w+)\.(\w+)'
+                        )
+                        cc_m = _CONCAT_CONST_RE.search(block)
+                        if cc_m:
+                            prefix_lit = cc_m.group(1)
+                            c_class = cc_m.group(2)
+                            c_field = cc_m.group(3)
+                            _SVAL_RE = _re.compile(
+                                r'static\s+final\s+String\s+'
+                                + _re.escape(c_field)
+                                + r'\s*=\s*"([^"]+)"'
+                            )
+                            resolved = None
+                            m_cur = _SVAL_RE.search(content)
+                            if m_cur:
+                                resolved = m_cur.group(1)
+                            else:
+                                for _jf in java_files:
+                                    if _jf.stem == c_class:
+                                        try:
+                                            _jf_txt = _jf.read_text(
+                                                encoding="utf-8", errors="replace"
+                                            )
+                                            m_jf = _SVAL_RE.search(_jf_txt)
+                                            if m_jf:
+                                                resolved = m_jf.group(1)
+                                                break
+                                        except OSError:
+                                            pass
+                            if resolved is not None:
+                                class_bases = [(prefix_lit + resolved).rstrip("/")]
+                            else:
+                                class_bases = [captured] if captured else [""]
+                        else:
+                            class_bases = [captured] if captured else [""]
                     else:
                         arr_m = _CLASS_ARRAY_PATH_RE.search(block)
                         if arr_m:

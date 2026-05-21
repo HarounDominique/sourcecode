@@ -59,8 +59,13 @@ class HeuristicDetector(AbstractDetector):
         paths = flatten_file_tree(context.file_tree)
         counts: Counter[str] = Counter()
         for path in paths:
-            if path.startswith("."):
+            if path.startswith(".") or _is_auxiliary_path(path):
                 continue
+            # Skip JS/TS files bundled as Java static resources (not Node.js source)
+            if path.endswith((".js", ".ts", ".tsx", ".jsx", ".mjs")):
+                _np = path.replace("\\", "/")
+                if "src/main/resources/" in _np or "src/main/webapp/" in _np:
+                    continue
             for extension, stack in _EXTENSION_MAP.items():
                 if path.endswith(extension):
                     counts[stack] += 1
