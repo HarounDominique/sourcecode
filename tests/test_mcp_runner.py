@@ -13,12 +13,12 @@ def _invoke_result(exit_code: int = 0, output: str = "some output") -> MagicMock
     return m
 
 
-def test_run_command_returns_raw_string():
+def test_run_command_parses_json():
     payload = '{"project": {"primary_stack": "python"}}'
     with patch("sourcecode.mcp.runner._runner.invoke", return_value=_invoke_result(0, payload)):
         result = run_command(["--agent"])
-    assert isinstance(result, str)
-    assert result == payload
+    assert isinstance(result, dict)
+    assert result == {"project": {"primary_stack": "python"}}
 
 
 def test_run_command_returns_non_json_string():

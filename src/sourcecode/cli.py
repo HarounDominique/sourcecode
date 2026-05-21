@@ -2467,10 +2467,6 @@ def mcp_serve() -> None:
     """Start the MCP server on stdio for AI agent integration.
 
     \b
-    Requires the 'mcp' extra:
-      pip install sourcecode[mcp]
-
-    \b
     Configure in your MCP client (e.g. Claude Desktop):
       {
         "sourcecode": {
@@ -2487,15 +2483,7 @@ def mcp_serve() -> None:
         level=logging.INFO,
         format="[sourcecode-mcp] %(levelname)s %(message)s",
     )
-    try:
-        from sourcecode.mcp.server import mcp as _mcp
-    except ImportError:
-        typer.echo(
-            "MCP support not available. Install with:\n"
-            "  pip install sourcecode[mcp]",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    from sourcecode.mcp.server import mcp as _mcp
 
     log = logging.getLogger(__name__)
     log.info("sourcecode-mcp starting (stdio transport)")
@@ -2513,21 +2501,44 @@ def mcp_serve() -> None:
 @mcp_app.command("init")
 def mcp_init(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+    target: Optional[str] = typer.Option(
+        None,
+        "--target",
+        "-t",
+        help="Target client: claude-desktop | cursor. Default: auto-detect all.",
+    ),
 ) -> None:
     """Setup MCP integration for Claude Desktop, Cursor, and other clients.
 
     \b
     Detects installed MCP clients, backs up their config files, and safely
     inserts the sourcecode server entry. Fully idempotent — safe to re-run.
+
+    \b
+    Examples:
+      sourcecode mcp init
+      sourcecode mcp init --target claude-desktop
+      sourcecode mcp init --target cursor --yes
     """
-    from sourcecode.mcp.onboarding.detector import detect_clients
+    from sourcecode.mcp.onboarding.detector import detect_clients, is_client_running
     from sourcecode.mcp.onboarding.planner import build_install_plan
     from sourcecode.mcp.onboarding import backup, applier
 
     typer.echo("Detecting MCP clients...")
     typer.echo("")
 
-    clients = detect_clients()
+    all_clients = detect_clients()
+
+    if target:
+        target_slug = target.lower()
+        clients = [c for c in all_clients if c.slug == target_slug]
+        if not clients:
+            valid = ", ".join(c.slug for c in all_clients)
+            typer.echo(f"Unknown target '{target}'. Valid: {valid}", err=True)
+            raise typer.Exit(code=1)
+    else:
+        clients = all_clients
+
     if not clients:
         typer.echo("No MCP clients found on this system.")
         typer.echo("")
@@ -2603,36 +2614,81 @@ def mcp_init(
     typer.echo("MCP integration active.")
     typer.echo("")
 
-    restart_needed = [a.client.name for a in actionable if not a.will_create_file]
-    if restart_needed:
-        typer.echo(f"  Restart {', '.join(restart_needed)} to apply changes.")
+    # Post-write: validate config and warn if client not running
+    for a in actionable:
+        if not is_client_running(a.client):
+            typer.echo(
+                f"  ⚠ Config written but {a.client.name} is not running. "
+                f"Start {a.client.name} and run sourcecode mcp status to verify.",
+                err=False,
+            )
+        else:
+            restart_msg = "" if a.will_create_file else f" Restart {a.client.name} to apply."
+            typer.echo(f"  ✓ {a.client.name} is running.{restart_msg}")
+
+    typer.echo("")
     typer.echo("  Remove:  sourcecode mcp remove")
 
 
 @mcp_app.command("status")
 def mcp_status() -> None:
-    """Show MCP integration status for all detected clients."""
-    from sourcecode.mcp.onboarding.detector import detect_clients
+    """Show MCP integration status: dependencies, config files, and connectivity."""
+    from sourcecode.mcp.onboarding.detector import detect_clients, is_client_running
     from sourcecode.mcp.onboarding import applier
 
-    clients = detect_clients()
-    typer.echo("MCP Integration Status")
+    sep = "─" * 46
+
+    typer.echo("MCP Status")
+    typer.echo(sep)
+
+    # Stage 1: Dependencies
+    try:
+        import mcp as _mcp_pkg  # noqa: F401
+        typer.echo("Dependencies  ✓ installed")
+    except ImportError:
+        typer.echo("Dependencies  ✗ missing")
+        typer.echo("  Fix: pip install sourcecode[mcp]")
     typer.echo("")
 
+    clients = detect_clients()
     if not clients:
         typer.echo("  No MCP clients detected on this system.")
+        typer.echo(sep)
+        typer.echo("  Setup:   sourcecode mcp init")
         raise typer.Exit(code=0)
 
+    # Stage 2: Config files
+    typer.echo("Config files")
     for client in clients:
         if not client.app_installed:
-            typer.echo(f"  ○  {client.name:<18} not found")
+            typer.echo(f"  {client.name:<20} ✗ not found")
+            typer.echo(f"    Expected: {client.config_path}")
+            typer.echo(f"    Fix:      sourcecode mcp init --target {client.slug}")
             continue
         config = applier.read_config(client.config_path)
         if applier.is_installed(config):
-            typer.echo(f"  ✓  {client.name:<18} configured   {client.config_path}")
+            typer.echo(f"  {client.name:<20} ✓ configured   {client.config_path}")
         else:
-            typer.echo(f"  ✗  {client.name:<18} not configured")
+            typer.echo(f"  {client.name:<20} ✗ not configured")
+            typer.echo(f"    Fix: sourcecode mcp init --target {client.slug}")
     typer.echo("")
+
+    # Stage 3: Connectivity
+    typer.echo("Connectivity")
+    any_installed = any(c.app_installed for c in clients)
+    if not any_installed:
+        typer.echo("  (no clients to check)")
+    else:
+        for client in clients:
+            if not client.app_installed:
+                continue
+            if is_client_running(client):
+                typer.echo(f"  {client.name:<20} ✓ running")
+            else:
+                typer.echo(f"  {client.name:<20} ✗ not running")
+                typer.echo(f"    Fix: open {client.name}, then run sourcecode mcp status")
+
+    typer.echo(sep)
     typer.echo("  Setup:   sourcecode mcp init")
     typer.echo("  Remove:  sourcecode mcp remove")
 

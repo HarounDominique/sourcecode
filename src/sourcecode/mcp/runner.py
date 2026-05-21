@@ -6,14 +6,18 @@ lookup, no process fork, no stdout encoding issues.
 """
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from typer.testing import CliRunner
 
 _runner = CliRunner()
 
 
-def run_command(args: list[str]) -> str:
-    """Invoke a sourcecode CLI command in-process and return stdout.
+def run_command(args: list[str]) -> Any:
+    """Invoke a sourcecode CLI command in-process and return parsed output.
 
+    Returns parsed JSON dict when output is valid JSON, else the raw string.
     Raises RuntimeError on non-zero exit or empty output.
     """
     from sourcecode.cli import _detected_path, _preprocess_args, app
@@ -37,4 +41,7 @@ def run_command(args: list[str]) -> str:
             f"Args: {args}"
         )
 
-    return output
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError:
+        return output

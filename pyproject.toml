@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sourcecode"
-version = "1.31.0"
+version = "1.31.1"
 description = "Deterministic codebase context for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -29,6 +29,7 @@ dependencies = [
     "pathspec>=1.0",
     "ruamel.yaml>=0.18",
     "tomli>=2.0; python_version < '3.11'",
+    "mcp>=1.0.0",
 ]
 
 [project.scripts]

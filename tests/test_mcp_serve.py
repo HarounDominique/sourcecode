@@ -26,14 +26,6 @@ def test_mcp_serve_help():
     assert result.exit_code == 0
 
 
-def test_mcp_serve_missing_dependency_exits_with_hint():
-    """ImportError on mcp package → exit 1 + install hint."""
-    with patch.dict(sys.modules, {"sourcecode.mcp.server": None}):
-        result = invoke(["mcp", "serve"])
-    assert result.exit_code == 1
-    assert "sourcecode[mcp]" in result.output
-
-
 def test_mcp_serve_calls_mcp_run():
     """When mcp is available, serve calls mcp.run()."""
     mock_server_mod = MagicMock()
