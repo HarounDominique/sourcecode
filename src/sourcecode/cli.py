@@ -165,7 +165,7 @@ Compressed AI-ready context for Java/Spring enterprise codebases.
 # Known subcommand names — tokens matching these are routed as subcommands,
 # not consumed as a repository path.
 _SUBCOMMANDS: frozenset[str] = frozenset(
-    {"telemetry", "prepare-context", "version", "config", "analyze", "repo-ir", "mcp"}
+    {"telemetry", "prepare-context", "version", "config", "analyze", "repo-ir", "mcp", "endpoints"}
 )
 
 # Mutable container holding the path extracted by _preprocess_argv().
@@ -2037,6 +2037,27 @@ def prepare_context_cmd(
         out["changed_files"] = output.changed_files
     if _task_include("affected_entry_points") and output.affected_entry_points:
         out["affected_entry_points"] = output.affected_entry_points
+    # compact_base fields — included for all non-delta/review-pr tasks (Fix #1)
+    if task not in ("delta", "review-pr"):
+        if output.entry_points_structured:
+            out["entry_points"] = output.entry_points_structured
+        if output.deployment:
+            out["deployment"] = output.deployment
+        if output.deployment_risks:
+            out["deployment_risks"] = output.deployment_risks
+        if output.security_surface:
+            out["security_surface"] = output.security_surface
+        if output.mybatis:
+            out["mybatis"] = output.mybatis
+        if output.transactional_boundaries:
+            out["transactional_boundaries"] = output.transactional_boundaries
+        if output.spring_profiles_info:
+            out["spring_profiles"] = output.spring_profiles_info
+        if output.angular_analysis and (
+            output.angular_analysis.get("component_count", 0) > 0
+            or output.angular_analysis.get("angular_version")
+        ):
+            out["angular_analysis"] = output.angular_analysis
     # Delta-specific impact fields
     if task == "delta":
         if output.error_code:
@@ -2418,6 +2439,190 @@ def repo_ir_cmd(
             # Fallback for wrapped stdout without buffer (e.g. some test harnesses)
             _sys.stdout.write(output)
             _sys.stdout.write("\n")
+
+
+# ── endpoints ─────────────────────────────────────────────────────────────────
+
+def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
+    """Extract REST endpoint surface from Java source files.
+
+    Scans all .java files for @RequestMapping/@GetMapping/@PostMapping/@PutMapping/
+    @DeleteMapping/@PatchMapping and @M3FiltroSeguridad annotations.
+    Returns JSON-serializable dict with endpoints list, total, and undocumented count.
+    """
+    import re as _re
+    from pathlib import Path as _Path
+
+    _HTTP_MAPPING_RE = _re.compile(
+        r'@(Get|Post|Put|Delete|Patch|Request)Mapping\s*'
+        r'(?:\(\s*(?:value\s*=\s*)?(?:"([^"]*)"|\{[^}]*\}|[^)]*)\s*\))?',
+    )
+    _CLASS_RE = _re.compile(r'(?:class|interface)\s+(\w+)')
+    _METHOD_RE = _re.compile(
+        r'(?:public|protected|private)\s+\S+\s+(\w+)\s*\(',
+    )
+    _FILTRO_RE = _re.compile(
+        r'@M3FiltroSeguridad\s*\(\s*(?:nombreRecurso\s*=\s*)?["\']([^"\']+)["\']',
+    )
+    _CLASS_PATH_RE = _re.compile(
+        r'@RequestMapping\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']',
+    )
+
+    _HTTP_METHOD_MAP = {
+        "Get": "GET", "Post": "POST", "Put": "PUT",
+        "Delete": "DELETE", "Patch": "PATCH", "Request": "GET",
+    }
+
+    endpoints: list[dict] = []
+    seen: set[tuple] = set()
+
+    java_files = [
+        p for p in root.rglob("*.java")
+        if "/test/" not in str(p).replace("\\", "/")
+        and "/tests/" not in str(p).replace("\\", "/")
+        and "target/" not in str(p).replace("\\", "/")
+    ]
+
+    for java_file in java_files:
+        try:
+            content = java_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        # Only process files with REST controller or mapping annotations
+        if not any(x in content for x in ("@RestController", "@Controller", "@RequestMapping")):
+            continue
+
+        try:
+            rel_path = str(java_file.relative_to(root)).replace("\\", "/")
+        except ValueError:
+            rel_path = str(java_file).replace("\\", "/")
+
+        # Extract class name
+        cls_m = _CLASS_RE.search(content)
+        class_name = cls_m.group(1) if cls_m else java_file.stem
+
+        # Extract class-level base path from @RequestMapping on the class
+        class_base = ""
+        lines = content.splitlines()
+        for i, line in enumerate(lines):
+            if "@RequestMapping" in line and i < len(lines) - 1:
+                # Check if next non-blank line is class declaration or it's on same block
+                block = "\n".join(lines[max(0, i - 1): i + 5])
+                if "class " in block or "interface " in block:
+                    path_m = _CLASS_PATH_RE.search(block)
+                    if path_m:
+                        class_base = path_m.group(1).rstrip("/")
+                    break
+
+        # Extract method-level endpoints
+        # Parse line-by-line to associate annotations with methods
+        pending_annotations: list[tuple[str, str]] = []  # (http_verb, path_suffix)
+        pending_filtro: Optional[str] = None
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            # Check for @M3FiltroSeguridad
+            fm = _FILTRO_RE.search(stripped)
+            if fm:
+                pending_filtro = fm.group(1)
+                continue
+
+            # Check for HTTP mapping annotations
+            hm = _HTTP_MAPPING_RE.search(stripped)
+            if hm:
+                verb_key = hm.group(1)
+                http_verb = _HTTP_METHOD_MAP.get(verb_key, "GET")
+                path_suffix = (hm.group(2) or "").strip()
+                pending_annotations.append((http_verb, path_suffix))
+                continue
+
+            # Check for method declaration — flush pending annotations
+            if pending_annotations and ("public " in stripped or "protected " in stripped):
+                mm = _METHOD_RE.search(stripped)
+                handler = mm.group(1) if mm else ""
+                if handler and not handler.startswith("class"):
+                    for http_verb, path_suffix in pending_annotations:
+                        full_path = (class_base + "/" + path_suffix).replace("//", "/").rstrip("/") or "/"
+                        if not full_path.startswith("/"):
+                            full_path = "/" + full_path
+                        key = (class_name, handler, http_verb)
+                        if key not in seen:
+                            seen.add(key)
+                            entry: dict[str, Any] = {
+                                "method": http_verb,
+                                "path": full_path,
+                                "controller": class_name,
+                                "handler": handler,
+                            }
+                            if pending_filtro:
+                                entry["required_permission"] = pending_filtro
+                            endpoints.append(entry)
+                    pending_annotations = []
+                    pending_filtro = None
+                    continue
+
+            # Non-annotation, non-method line — reset if it's a closing brace or blank
+            if stripped in ("}", "{", "") or stripped.startswith("//") or stripped.startswith("*"):
+                if stripped == "}":
+                    pending_annotations = []
+                    pending_filtro = None
+
+    endpoints.sort(key=lambda e: (e.get("controller", ""), e.get("path", "")))
+    undocumented = sum(1 for e in endpoints if "required_permission" not in e)
+
+    return {
+        "endpoints": endpoints,
+        "total": len(endpoints),
+        "undocumented": undocumented,
+    }
+
+
+@app.command("endpoints")
+def endpoints_cmd(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository path to scan for REST endpoints (default: current directory)",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+) -> None:
+    """Extract REST API endpoint surface from Java source files.
+
+    \b
+    Scans all @GetMapping/@PostMapping/@PutMapping/@DeleteMapping/@PatchMapping
+    and @RequestMapping annotations. Extracts HTTP method, path, controller class,
+    handler method, and @M3FiltroSeguridad permission resource name.
+
+    \b
+    Examples:
+      sourcecode endpoints .
+      sourcecode endpoints /path/to/repo
+      sourcecode endpoints . --output endpoints.json
+    """
+    import sys as _sys
+
+    target = path.resolve()
+    if not target.exists() or not target.is_dir():
+        typer.echo(f"Error: '{target}' is not a valid directory.", err=True)
+        raise typer.Exit(code=1)
+
+    data = _extract_java_endpoints(target)
+    output = json.dumps(data, indent=2, ensure_ascii=False)
+
+    if output_path is not None:
+        output_path.write_text(output, encoding="utf-8")
+        typer.echo(
+            f"Endpoints written to {output_path} ({data['total']} endpoints)",
+            err=True,
+        )
+    else:
+        _sys.stdout.buffer.write(output.encode("utf-8"))
+        _sys.stdout.buffer.write(b"\n")
+        _sys.stdout.buffer.flush()
 
 
 # ── version ───────────────────────────────────────────────────────────────────

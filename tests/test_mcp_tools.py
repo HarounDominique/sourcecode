@@ -94,18 +94,26 @@ def test_get_agent_context_failure():
     _assert_failure(result, "EXECUTION_FAILED")
 
 
-# --- get_endpoints (pending) ---
+# --- get_endpoints ---
 
-def test_get_endpoints_returns_not_implemented():
-    result = server.get_endpoints("/some/repo")
-    _assert_failure(result, "NOT_IMPLEMENTED")
-    assert "pending" in result["error"]["message"].lower()
+def test_get_endpoints_success():
+    with patch(_RUNNER_PATH, return_value=_PARSED_OUTPUT) as mock_rc:
+        result = server.get_endpoints("/some/repo")
+    _assert_success(result)
+    args = mock_rc.call_args[0][0]
+    assert args == ["endpoints", "/some/repo"]
 
 
-def test_get_endpoints_never_calls_runner():
-    with patch(_RUNNER_PATH) as mock_rc:
+def test_get_endpoints_calls_runner():
+    with patch(_RUNNER_PATH, return_value=_PARSED_OUTPUT) as mock_rc:
         server.get_endpoints("/some/repo")
-    mock_rc.assert_not_called()
+    mock_rc.assert_called_once()
+
+
+def test_get_endpoints_failure():
+    with patch(_RUNNER_PATH, side_effect=RuntimeError("fail")):
+        result = server.get_endpoints("/some/repo")
+    _assert_failure(result, "EXECUTION_FAILED")
 
 
 # --- get_module_context ---
@@ -196,11 +204,13 @@ def test_all_tools_json_serializable():
         results = [
             server.get_compact_context("/p"),
             server.get_agent_context("/p"),
+            server.get_endpoints("/p"),
             server.get_module_context("/p", "api"),
             server.get_delta("/p", "main"),
             server.get_ir_summary("/p"),
+            server.fix_bug_context("/p"),
+            server.review_pr_context("/p"),
         ]
-    results.append(server.get_endpoints("/p"))
     for r in results:
         json.dumps(r)
 

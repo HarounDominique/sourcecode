@@ -2012,7 +2012,7 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
         if not sm.dependency_summary or not sm.dependency_summary.requested:
             analysis_gaps.append({
                 "area": "dependencies",
-                "reason": "Dependencies not analyzed — add --dependencies for full context",
+                "reason": "Dependencies not analyzed — use the full analyze command with dependency flags for complete context",
                 "impact": "medium",
             })
 

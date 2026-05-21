@@ -15,9 +15,10 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from sourcecode import __version__
 from sourcecode.mcp.runner import run_command
 
-mcp = FastMCP("sourcecode")
+mcp = FastMCP("sourcecode", version=__version__)
 
 
 def _ok(data: Any) -> dict:
@@ -63,16 +64,16 @@ def get_agent_context(repo_path: str = ".") -> dict:
 
 @mcp.tool()
 def get_endpoints(repo_path: str = ".") -> dict:
-    """API endpoint surface extraction.
+    """REST API endpoint surface extraction from Java source files.
 
-    Maps to: sourcecode <repo_path> --endpoints (pending CLI implementation)
+    Maps to: sourcecode endpoints <repo_path>
+    Returns: endpoints list with method, path, controller, handler, required_permission;
+             total count and undocumented count.
     repo_path: absolute path to the repository (default: current working directory).
     """
-    return _err(
-        "get_endpoints requires --endpoints CLI flag (pending implementation). "
-        "Use get_compact_context for now — the output includes api_endpoint-classified files.",
-        "NOT_IMPLEMENTED",
-    )
+    if not isinstance(repo_path, str):
+        return _err("repo_path must be a string", "INVALID_ARGUMENT")
+    return _execute(["endpoints", repo_path])
 
 
 @mcp.tool()
@@ -117,3 +118,39 @@ def get_ir_summary(repo_path: str = ".") -> dict:
     if not isinstance(repo_path, str):
         return _err("repo_path must be a string", "INVALID_ARGUMENT")
     return _execute(["repo-ir", repo_path, "--summary-only"])
+
+
+@mcp.tool()
+def fix_bug_context(repo_path: str = ".", symptom: str = "") -> dict:
+    """Risk-ranked files for bug investigation, optionally focused by symptom.
+
+    Maps to: sourcecode prepare-context fix-bug <repo_path> [--symptom <symptom>]
+    Includes compact_base: security_surface, transactional_boundaries, spring_profiles.
+    repo_path: absolute path to the repository (default: current working directory).
+    symptom: optional error message or class name to focus the file ranking
+             (e.g. "NullPointerException in EstructuraRrHhRestController").
+    """
+    if not isinstance(repo_path, str):
+        return _err("repo_path must be a string", "INVALID_ARGUMENT")
+    args = ["prepare-context", "fix-bug", repo_path]
+    if symptom and isinstance(symptom, str) and symptom.strip():
+        args.extend(["--symptom", symptom.strip()])
+    return _execute(args)
+
+
+@mcp.tool()
+def review_pr_context(repo_path: str = ".", since: str = "") -> dict:
+    """Execution paths and risk analysis for changed files in a pull request.
+
+    Maps to: sourcecode prepare-context review-pr <repo_path> [--since <since>]
+    Returns: compact_base + execution_paths (diff-scoped) + hotspots for changed files.
+    repo_path: absolute path to the repository (default: current working directory).
+    since: git ref to diff against (e.g. HEAD~3, main, origin/main).
+           If omitted, diffs against uncommitted changes or HEAD~1 fallback.
+    """
+    if not isinstance(repo_path, str):
+        return _err("repo_path must be a string", "INVALID_ARGUMENT")
+    args = ["prepare-context", "review-pr", repo_path]
+    if since and isinstance(since, str) and since.strip():
+        args.extend(["--since", since.strip()])
+    return _execute(args)

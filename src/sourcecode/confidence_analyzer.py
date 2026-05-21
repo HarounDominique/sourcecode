@@ -175,7 +175,7 @@ class ConfidenceAnalyzer:
         if dep_summary is None or not dep_summary.requested:
             gaps.append(AnalysisGap(
                 area="dependencies",
-                reason="Dependencies not analyzed — run with --dependencies for full context",
+                reason="Dependencies not analyzed — use the full analyze command with dependency flags for complete context",
                 impact="medium",
             ))
         elif dep_summary.requested and dep_summary.total_count == 0:

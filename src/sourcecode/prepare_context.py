@@ -322,7 +322,7 @@ class TaskOutput:
     relevant_files: list[RelevantFile]
     suspected_areas: list[str]
     improvement_opportunities: list[str]
-    test_gaps: list[str]
+    test_gaps: list  # list[str] for non-Java; list[dict] for Java (has path/public_method_count/has_spring_annotations)
     key_dependencies: list[dict[str, Any]]
     code_notes_summary: Optional[dict[str, Any]]
     limitations: list[str]
@@ -378,6 +378,15 @@ class TaskOutput:
     uncommitted_changes: list[dict] = field(default_factory=list)
     # transparency: explicit diff scope for every command
     analysis_scope: dict = field(default_factory=dict)
+    # compact_base fields — enriched in all prepare-context tasks (Fix #1)
+    security_surface: Optional[dict] = None
+    mybatis: Optional[dict] = None
+    transactional_boundaries: Optional[dict] = None
+    spring_profiles_info: Optional[dict] = None
+    angular_analysis: Optional[dict] = None
+    deployment_risks: list[str] = field(default_factory=list)
+    deployment: Optional[dict] = None
+    entry_points_structured: Optional[dict] = None
 
 
 @dataclass
@@ -901,6 +910,53 @@ class TaskContextBuilder:
 
         from sourcecode.context_summarizer import ContextSummarizer
         sm.context_summary = ContextSummarizer(self.root).generate(sm)
+
+        # ── 3b. Compact-base enrichment (Fix #1) ───────────────────────────
+        # Enrich sm with Java-specific fields — same as main CLI pipeline
+        _java_stack_cb = next((s for s in stacks if s.stack == "java"), None)
+        if _java_stack_cb is not None:
+            sm.language_version = getattr(_java_stack_cb, "language_version", None) or None
+            sm.spring_profiles = getattr(_java_stack_cb, "spring_profiles", []) or []
+            sm.app_server_hint = getattr(_java_stack_cb, "app_server_hint", None) or None
+            sm.packaging = getattr(_java_stack_cb, "packaging", None) or None
+
+        # Import serializer helpers — same functions used by --compact
+        from sourcecode.serializer import (
+            _security_surface_from_eps as _cb_sec_fn,
+            _mybatis_pairing as _cb_mybatis_fn,
+            _transactional_summary as _cb_trans_fn,
+            _spring_profiles_context as _cb_spring_fn,
+            _angular_analysis as _cb_angular_fn,
+            _project_deployment_risks as _cb_deploy_risks_fn,
+            _bootstrap_structured as _cb_bootstrap_fn,
+            _spring_boot_version as _cb_sbver_fn,
+            _jndi_datasources as _cb_jndi_fn,
+        )
+
+        _cb_security_surface = _cb_sec_fn(entry_points, root=self.root, file_paths=all_paths)
+        _cb_mybatis = _cb_mybatis_fn(sm)
+        _cb_transactional = _cb_trans_fn(sm)
+        _cb_spring_profiles = _cb_spring_fn(sm)
+        _cb_angular = _cb_angular_fn(sm)
+        _cb_deploy_risks = _cb_deploy_risks_fn(sm)
+        _cb_bootstrap = _cb_bootstrap_fn(entry_points)
+
+        _cb_sb_ver = _cb_sbver_fn(sm)
+        _cb_deployment: Optional[dict] = None
+        _cb_packaging = getattr(sm, "packaging", None)
+        _cb_app_server = getattr(sm, "app_server_hint", None)
+        if _cb_sb_ver or _cb_packaging or _cb_app_server:
+            _cb_deployment = {}
+            if _cb_sb_ver:
+                _cb_deployment["spring_boot_version"] = _cb_sb_ver
+            if _cb_packaging:
+                _cb_deployment["packaging"] = _cb_packaging
+            if _cb_app_server:
+                _cb_deployment["app_server_hint"] = _cb_app_server
+        _cb_jndi = _cb_jndi_fn(sm)
+        if _cb_jndi:
+            _cb_deployment = _cb_deployment or {}
+            _cb_deployment["jndi_datasources"] = _cb_jndi
 
         # ── 4. Dependencies ────────────────────────────────────────────────
         key_dependencies: list[dict[str, Any]] = []
@@ -1647,42 +1703,107 @@ class TaskContextBuilder:
                     symptom_hint = _fe_redirect
 
         # ── 7. Test gaps (generate-tests only) ────────────────────────────
-        test_gaps: list[str] = []
+        test_gaps: list = []
         if task_name == "generate-tests" and not fast:
-            def _normalize_test_stem(stem: str) -> str:
-                # Java: FooTest / FooTests → Foo; TestFoo → Foo
-                if stem.endswith("Tests"):
-                    return stem[:-5]
-                if stem.endswith("Test"):
-                    return stem[:-4]
-                if stem.startswith("Test") and len(stem) > 4 and stem[4].isupper():
-                    return stem[4:]
-                # Python/JS: test_foo / foo_test
-                return stem.removeprefix("test_").removesuffix("_test")
+            if _is_java:
+                # Java-aware algorithm (Fix #2): find Service/RestController/Repository/Mapper
+                # files with no matching test pair in src/test/**
+                _JAVA_TARGET_SUFFIXES = (
+                    "Service.java", "RestController.java",
+                    "Repository.java", "Mapper.java",
+                )
+                # Build set of test stems (FooTest → Foo, FooIT → Foo, etc.)
+                _java_test_stems: set[str] = set()
+                for _tp in all_paths:
+                    if not _tp.endswith(".java"):
+                        continue
+                    if not self._is_test(_tp):
+                        continue
+                    _ts = Path(_tp).stem
+                    for _suf in ("Test", "IT", "Tests", "Spec"):
+                        if _ts.endswith(_suf):
+                            _ts = _ts[: -len(_suf)]
+                            break
+                    if _ts.startswith("Test") and len(_ts) > 4 and _ts[4].isupper():
+                        _ts = _ts[4:]
+                    _java_test_stems.add(_ts)
 
-            # Patterns excluded from test_gaps by default (IMP-1): tooling config
-            # files have no business logic to test. --include-config overrides.
-            _CONFIG_EXCLUDE_PATTERNS = (
-                ".eslintrc", ".prettierrc", "eslint.config",
-                "karma.conf", "jest.config", "babel.config",
-                "webpack.config", "vite.config", "rollup.config",
-                "tsconfig", "angular.json", ".claude/",
-            )
+                _java_candidates: list[dict] = []
+                for _p in all_paths:
+                    if not any(_p.endswith(_s) for _s in _JAVA_TARGET_SUFFIXES):
+                        continue
+                    if self._is_test(_p):
+                        continue
+                    _pnorm = _p.replace("\\", "/")
+                    if "src/main/resources" in _pnorm or "target/" in _pnorm:
+                        continue
+                    if Path(_p).stem in _java_test_stems:
+                        continue
+                    _pub_count = 0
+                    _ann_count = 0
+                    try:
+                        _content = (self.root / _p).read_text(
+                            encoding="utf-8", errors="replace"
+                        )[:16000]
+                        _pub_count = _content.count("public ")
+                        _ann_count = (
+                            _content.count("@Transactional")
+                            + _content.count("@RequestMapping")
+                            + _content.count("@GetMapping")
+                            + _content.count("@PostMapping")
+                            + _content.count("@PutMapping")
+                            + _content.count("@DeleteMapping")
+                        )
+                    except OSError:
+                        pass
+                    _java_candidates.append({
+                        "path": _p,
+                        "public_method_count": _pub_count,
+                        "has_spring_annotations": _ann_count > 0,
+                        "_rank": _pub_count + _ann_count * 2,
+                    })
 
-            def _is_config_file(p: str) -> bool:
-                name = Path(p).name.lower()
-                norm = p.replace("\\", "/")
-                return any(pat in name or pat in norm for pat in _CONFIG_EXCLUDE_PATTERNS)
+                _java_candidates.sort(key=lambda x: -x["_rank"])
+                test_gaps = [
+                    {
+                        "path": c["path"],
+                        "public_method_count": c["public_method_count"],
+                        "has_spring_annotations": c["has_spring_annotations"],
+                    }
+                    for c in _java_candidates
+                ]
+            else:
+                # Non-Java algorithm (unchanged)
+                def _normalize_test_stem(stem: str) -> str:
+                    if stem.endswith("Tests"):
+                        return stem[:-5]
+                    if stem.endswith("Test"):
+                        return stem[:-4]
+                    if stem.startswith("Test") and len(stem) > 4 and stem[4].isupper():
+                        return stem[4:]
+                    return stem.removeprefix("test_").removesuffix("_test")
 
-            test_stems = {_normalize_test_stem(Path(p).stem) for p in test_set}
-            untested = [
-                p for p in source_set
-                if Path(p).stem not in test_stems
-                and not any(pen in p for pen in spec.ranking_penalties)
-                and (include_config or not _is_config_file(p))
-            ]
-            untested.sort(key=lambda p: (len(p.split("/")), p))
-            test_gaps = untested[:15]
+                _CONFIG_EXCLUDE_PATTERNS = (
+                    ".eslintrc", ".prettierrc", "eslint.config",
+                    "karma.conf", "jest.config", "babel.config",
+                    "webpack.config", "vite.config", "rollup.config",
+                    "tsconfig", "angular.json", ".claude/",
+                )
+
+                def _is_config_file(p: str) -> bool:
+                    name = Path(p).name.lower()
+                    norm = p.replace("\\", "/")
+                    return any(pat in name or pat in norm for pat in _CONFIG_EXCLUDE_PATTERNS)
+
+                test_stems = {_normalize_test_stem(Path(p).stem) for p in test_set}
+                untested = [
+                    p for p in source_set
+                    if Path(p).stem not in test_stems
+                    and not any(pen in p for pen in spec.ranking_penalties)
+                    and (include_config or not _is_config_file(p))
+                ]
+                untested.sort(key=lambda p: (len(p.split("/")), p))
+                test_gaps = untested[:15]
 
         # ── 8. Confidence + gaps ──────────────────────────────────────────────
         from sourcecode.confidence_analyzer import ConfidenceAnalyzer
@@ -1809,6 +1930,15 @@ class TaskContextBuilder:
             diff_validation_status=_delta_baseline.get("diff_validation_status") if task_name == "delta" else None,
             warnings=_delta_baseline.get("warnings", []) if task_name == "delta" else [],
             symptom_hint=symptom_hint if task_name == "fix-bug" else None,
+            # compact_base fields (Fix #1) — superset of --compact for all tasks
+            security_surface=_cb_security_surface,
+            mybatis=_cb_mybatis,
+            transactional_boundaries=_cb_transactional,
+            spring_profiles_info=_cb_spring_profiles,
+            angular_analysis=_cb_angular,
+            deployment_risks=_cb_deploy_risks,
+            deployment=_cb_deployment,
+            entry_points_structured=_cb_bootstrap,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:
