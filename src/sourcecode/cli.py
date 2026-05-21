@@ -1849,6 +1849,11 @@ def prepare_context_cmd(
         "--include-config",
         help="(generate-tests) Include tooling config files (*.conf.js, .eslintrc*, etc.) in test_gaps. Excluded by default.",
     ),
+    all_gaps: bool = typer.Option(
+        False,
+        "--all",
+        help="(generate-tests) Return the full test_gaps list without truncating to top 20.",
+    ),
 ) -> None:
     """Task-specific context for AI coding agents.
 
@@ -1930,7 +1935,7 @@ def prepare_context_cmd(
             _sys.stderr.flush()
     _t0 = _time.perf_counter()
     try:
-        output = builder.build(task, since=since, symptom=symptom, fast=fast, include_config=include_config)
+        output = builder.build(task, since=since, symptom=symptom, fast=fast, include_config=include_config, all_gaps=all_gaps)
     finally:
         _progress.finish()
     _t_total = (_time.perf_counter() - _t0) * 1000
@@ -1957,8 +1962,8 @@ def prepare_context_cmd(
         },
         "explain": {
             "project_summary": True, "architecture_summary": True,
-            "relevant_files": True, "key_dependencies": True,
-            "gaps": True, "confidence": True,
+            "relevant_files": False, "key_dependencies": True,
+            "gaps": False, "confidence": True,
             "suspected_areas": False, "improvement_opportunities": False,
             "test_gaps": False, "code_notes_summary": False,
             "changed_files": False, "affected_entry_points": False,
@@ -2467,6 +2472,9 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
     _CLASS_PATH_RE = _re.compile(
         r'@RequestMapping\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']',
     )
+    # Handles array syntax: @RequestMapping({"/v1/foo", "/v1/bar"})
+    _CLASS_ARRAY_PATH_RE = _re.compile(r'@RequestMapping\s*\(\s*\{([^}]*)\}')
+    _QUOTED_STR_RE = _re.compile(r'"([^"]+)"')
     _REQUEST_METHOD_VERB_RE = _re.compile(r'method\s*=\s*RequestMethod\.([A-Z]+)')
     _VALUE_PATH_RE = _re.compile(r'value\s*=\s*"([^"]+)"')
 
@@ -2505,7 +2513,6 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
         class_name = cls_m.group(1) if cls_m else java_file.stem
 
         # Extract class-level base path and locate class body start
-        class_base = ""
         lines = content.splitlines()
 
         # First pass: find class/interface declaration line index
@@ -2518,25 +2525,52 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
                 class_body_start = i + 1
                 break
 
-        # Second pass: extract class-level @RequestMapping path (only before class body)
+        # Second pass: extract class-level @RequestMapping path (only before class body).
+        # Supports both single-string and array syntax (Bug #1B).
         search_end = class_body_start if class_body_start else len(lines)
+        class_bases: list[str] = [""]  # default: no prefix
         for i in range(search_end):
+            sl = lines[i].strip()
+            if sl.startswith("//") or sl.startswith("*"):
+                continue
             if "@RequestMapping" in lines[i]:
-                block = "\n".join(lines[max(0, i - 1): i + 5])
+                # Cap block to search_end so method annotations inside the class body
+                # cannot be matched as the class-level prefix (Bug #1B).
+                block = "\n".join(lines[max(0, i - 1): min(i + 5, search_end + 1)])
                 if "class " in block or "interface " in block:
                     path_m = _CLASS_PATH_RE.search(block)
                     if path_m:
-                        class_base = path_m.group(1).rstrip("/")
-                    break
+                        class_bases = [path_m.group(1).rstrip("/")]
+                    else:
+                        arr_m = _CLASS_ARRAY_PATH_RE.search(block)
+                        if arr_m:
+                            paths = _QUOTED_STR_RE.findall(arr_m.group(1))
+                            if paths:
+                                class_bases = [p.rstrip("/") for p in paths]
+                break
 
-        # Extract method-level endpoints starting from inside class body
-        # (skipping class-level annotations that appear before the class declaration)
+        # Extract method-level endpoints starting from inside class body.
+        # Bug #1A fix: track block comments and skip // lines before annotation checks.
         pending_annotations: list[tuple[str, str]] = []  # (http_verb, path_suffix)
         pending_filtro: Optional[str] = None
+        in_block_comment = False
 
         for i in range(class_body_start, len(lines)):
             line = lines[i]
             stripped = line.strip()
+
+            # Block comment state tracking (Bug #1A)
+            if in_block_comment:
+                if "*/" in stripped:
+                    in_block_comment = False
+                continue
+            if stripped.startswith("/*"):
+                if "*/" not in stripped:
+                    in_block_comment = True
+                continue
+            # Skip line comments (Bug #1A)
+            if stripped.startswith("//"):
+                continue
 
             # Check for @M3FiltroSeguridad
             fm = _FILTRO_RE.search(stripped)
@@ -2572,30 +2606,30 @@ def _extract_java_endpoints(root: "Path") -> "dict[str, Any]":
                 handler = mm.group(1) if mm else ""
                 if handler and not handler.startswith("class"):
                     for http_verb, path_suffix in pending_annotations:
-                        full_path = (class_base + "/" + path_suffix).replace("//", "/").rstrip("/") or "/"
-                        if not full_path.startswith("/"):
-                            full_path = "/" + full_path
-                        key = (class_name, handler, http_verb)
-                        if key not in seen:
-                            seen.add(key)
-                            entry: dict[str, Any] = {
-                                "method": http_verb,
-                                "path": full_path,
-                                "controller": class_name,
-                                "handler": handler,
-                            }
-                            if pending_filtro:
-                                entry["required_permission"] = pending_filtro
-                            endpoints.append(entry)
+                        for _cb in class_bases:  # Bug #1B: one endpoint per class prefix
+                            full_path = (_cb + "/" + path_suffix).replace("//", "/").rstrip("/") or "/"
+                            if not full_path.startswith("/"):
+                                full_path = "/" + full_path
+                            key = (class_name, handler, http_verb, _cb)
+                            if key not in seen:
+                                seen.add(key)
+                                entry: dict[str, Any] = {
+                                    "method": http_verb,
+                                    "path": full_path,
+                                    "controller": class_name,
+                                    "handler": handler,
+                                }
+                                if pending_filtro:
+                                    entry["required_permission"] = pending_filtro
+                                endpoints.append(entry)
                     pending_annotations = []
                     pending_filtro = None
                     continue
 
-            # Non-annotation, non-method line — reset if it's a closing brace or blank
-            if stripped in ("}", "{", "") or stripped.startswith("//") or stripped.startswith("*"):
-                if stripped == "}":
-                    pending_annotations = []
-                    pending_filtro = None
+            # Non-annotation, non-method line — reset on closing brace
+            if stripped == "}":
+                pending_annotations = []
+                pending_filtro = None
 
     endpoints.sort(key=lambda e: (e.get("controller", ""), e.get("path", "")))
     undocumented = sum(1 for e in endpoints if "required_permission" not in e)

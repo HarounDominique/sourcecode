@@ -721,7 +721,7 @@ class TaskContextBuilder:
     def __init__(self, root: Path) -> None:
         self.root = root
 
-    def build(self, task_name: str, *, since: Optional[str] = None, symptom: Optional[str] = None, fast: bool = False, include_config: bool = False) -> TaskOutput:
+    def build(self, task_name: str, *, since: Optional[str] = None, symptom: Optional[str] = None, fast: bool = False, include_config: bool = False, all_gaps: bool = False) -> TaskOutput:
         if task_name not in TASKS:
             raise ValueError(
                 f"Unknown task '{task_name}'. Available: {', '.join(TASKS)}"
@@ -1763,14 +1763,18 @@ class TaskContextBuilder:
                         "_rank": _pub_count + _ann_count * 2,
                     })
 
-                _java_candidates.sort(key=lambda x: -x["_rank"])
+                _java_candidates.sort(
+                    key=lambda x: -(x["public_method_count"] * (1.5 if x["has_spring_annotations"] else 1.0))
+                )
+                _top = _java_candidates if all_gaps else _java_candidates[:20]
                 test_gaps = [
                     {
                         "path": c["path"],
                         "public_method_count": c["public_method_count"],
                         "has_spring_annotations": c["has_spring_annotations"],
+                        "rank_score": round(c["public_method_count"] * (1.5 if c["has_spring_annotations"] else 1.0), 1),
                     }
-                    for c in _java_candidates
+                    for c in _top
                 ]
             else:
                 # Non-Java algorithm (unchanged)
@@ -2206,8 +2210,67 @@ class TaskContextBuilder:
                 "refactor": max(15, min(30, _repo_size // 120)),
             }
             _budget = _task_budget.get(task_name, 15)
-            _selected = _ctx.select_subgraph(_ns, contracts=[], budget=_budget, min_score=0.15)
+            _selected = list(_ctx.select_subgraph(_ns, contracts=[], budget=_budget, min_score=0.15))
             _rf_map = {path: rf for _, path, rf in scored}
+
+            # Bug #3: onboard must cover ≥3 arch layers (controllers/services/domain/repositories).
+            if task_name == "onboard":
+                def _arch_layer(p: str) -> str:
+                    n = Path(p).name.lower()
+                    if "controller" in n:
+                        return "controllers"
+                    if "repository" in n or "mapper" in n or "dao" in n:
+                        return "repositories"
+                    if "service" in n:
+                        return "services"
+                    pn = p.replace("\\", "/")
+                    if "entity" in n or "/entity/" in pn or "/domain/" in pn or "/model/" in pn:
+                        return "domain"
+                    return "other"
+
+                _REQUIRED = {"controllers", "services", "repositories", "domain"}
+                _covered = {_arch_layer(p) for p in _selected} & _REQUIRED
+                _missing = _REQUIRED - _covered
+                if len(_covered) < 3 and _missing:
+                    _sel_set = set(_selected)
+                    # First pass: inject from already-scored files
+                    for _, _p, _ in sorted(scored, key=lambda x: -x[0]):
+                        if len(_covered) >= 3:
+                            break
+                        if _p in _sel_set or _p not in _rf_map:
+                            continue
+                        _layer = _arch_layer(_p)
+                        if _layer in _missing:
+                            _selected.append(_p)
+                            _sel_set.add(_p)
+                            _covered.add(_layer)
+                            _missing.discard(_layer)
+                    # Second pass: fallback scan of all_paths when scored files
+                    # don't cover enough layers (e.g. all Java files scored ≤ 0
+                    # due to auxiliary/example package detection).
+                    if len(_covered) < 3 and _missing:
+                        _NON_TEST = ("/test/", "/tests/", "/spec/")
+                        for _p in all_paths:
+                            if len(_covered) >= 3:
+                                break
+                            if _p in _sel_set:
+                                continue
+                            if any(s in _p.replace("\\", "/") for s in _NON_TEST):
+                                continue
+                            _layer = _arch_layer(_p)
+                            if _layer not in _missing:
+                                continue
+                            _rf_map[_p] = RelevantFile(
+                                path=_p,
+                                role="source",
+                                score=0.1,
+                                reason="layer coverage (onboard)",
+                            )
+                            _selected.append(_p)
+                            _sel_set.add(_p)
+                            _covered.add(_layer)
+                            _missing.discard(_layer)
+
             return [_rf_map[p] for p in _selected if p in _rf_map]
         except Exception:
             return [f for _, _, f in scored[:15]]
