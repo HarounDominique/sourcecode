@@ -330,7 +330,7 @@ class ArchitectureAnalyzer:
                     tentative = True
                 if not _hard_evidence:
                     limitations.append(
-                        "Pattern not confirmed by module import graph; run with --graph-modules for structural validation"
+                        "Pattern inferred from directory structure; import graph not available — structural dependency direction unverified"
                     )
                 if not _hard_evidence:
                     matched_dirs = sorted({

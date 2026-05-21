@@ -141,6 +141,11 @@ class RuntimeClassifier:
                 raw.append((ws_path, self._load_pkg_json(pkg_root)))
 
         fan_in = self._compute_fan_in(raw)
+        # IC-004: merge Maven pom.xml cross-module fan_in when no JS deps detected
+        maven_fan_in = self._compute_maven_fan_in(root, workspace_paths)
+        for ws_path, count in maven_fan_in.items():
+            fan_in[ws_path] = fan_in.get(ws_path, 0) + count
+
         results: list[MonorepoPackageInfo] = []
 
         for ws_path, pkg_json in raw:
@@ -280,6 +285,9 @@ class RuntimeClassifier:
                 scores["infrastructure_layer"] = scores.get("infrastructure_layer", 0) + fan_boost
 
         if not scores:
+            # IC-004: Java/Maven fallback — no JS signals but module may have a pom.xml
+            if not pkg_json:
+                return self._classify_maven_module(ws_path, name, fan_in)
             return "unknown", signals, "low"
 
         best_role = max(scores, key=lambda r: (scores[r], _ROLE_PRIORITY.get(r, 0)))
@@ -326,6 +334,76 @@ class RuntimeClassifier:
     def _criticality(self, role: str, fan_in: int) -> str:
         if role in {"runtime_core", "plugin_host"}:
             return "high"
-        if role in {"backend_runtime", "frontend_runtime", "composition_layer"} or fan_in >= 3:
+        # IC-004: infrastructure_layer with high fan_in = shared foundation = high criticality
+        if role == "infrastructure_layer" and fan_in >= 3:
+            return "high"
+        if role in {"backend_runtime", "frontend_runtime", "composition_layer",
+                    "infrastructure_layer"} or fan_in >= 3:
             return "medium"
         return "low"
+
+    def _compute_maven_fan_in(self, root: Path, workspace_paths: list[str]) -> dict[str, int]:
+        """IC-004: Compute cross-module fan_in from all pom.xml files under each workspace.
+
+        Scans all pom.xml files (top-level and sub-module) within each workspace path.
+        Counts distinct modules that declare a dependency containing another module's leaf name.
+        Uses 1 hit per source module (not per pom file) to avoid inflation.
+        """
+        fan_in: dict[str, int] = {}
+        leaf_to_path: dict[str, str] = {ws.split("/")[-1]: ws for ws in workspace_paths}
+
+        for ws_path in workspace_paths:
+            ws_dir = root / ws_path
+            if not ws_dir.is_dir():
+                continue
+            deps_found: set[str] = set()
+            for pom in ws_dir.rglob("pom.xml"):
+                if "target/" in str(pom):
+                    continue
+                try:
+                    content = pom.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for dep_leaf, target_path in leaf_to_path.items():
+                    if target_path != ws_path and dep_leaf in content:
+                        deps_found.add(target_path)
+            for target_path in deps_found:
+                fan_in[target_path] = fan_in.get(target_path, 0) + 1
+
+        return fan_in
+
+    def _classify_maven_module(
+        self, ws_path: str, name: str, fan_in: int
+    ) -> tuple[str, list[str], str]:
+        """IC-004: Classify a Java/Maven module by path conventions and fan_in.
+
+        Called when no JS signals exist (no package.json). Uses path name patterns
+        and pom fan_in (cross-module dependency count) to determine role/criticality.
+        """
+        signals: list[str] = ["maven:module"]
+        leaf = ws_path.lower().rstrip("/").split("/")[-1]
+
+        if re.search(r"\b(common|shared|util|utils|lib|base|foundation)\b", leaf):
+            signals.append("maven:shared_library")
+            return "infrastructure_layer", signals, "high" if fan_in >= 3 else "medium"
+
+        if re.search(r"\b(integration|it|test|tests|e2e)\b", leaf):
+            signals.append("maven:test_module")
+            return "test_layer", signals, "low"
+
+        if re.search(r"\b(admin|web|api|rest|controller|ui)\b", leaf):
+            signals.append("maven:web_module")
+            return "backend_runtime", signals, "medium"
+
+        if re.search(r"\b(core|framework|domain|service|profile)\b", leaf):
+            signals.append("maven:core_module")
+            return "backend_runtime", signals, "high" if fan_in >= 2 else "medium"
+
+        if fan_in >= 3:
+            signals.append(f"maven:high_fan_in({fan_in})")
+            return "infrastructure_layer", signals, "high"
+        if fan_in >= 1:
+            signals.append(f"maven:fan_in({fan_in})")
+            return "infrastructure_layer", signals, "medium"
+
+        return "unknown", signals, "low"

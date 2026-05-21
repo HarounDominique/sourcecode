@@ -379,6 +379,59 @@ def _spring_boot_version(sm: "SourceMap") -> "Optional[str]":
     return None
 
 
+def _spring_event_signal(sm: "SourceMap") -> "Optional[dict[str, Any]]":
+    """IC-005: Surface @EventListener and publishEvent from Java source files.
+
+    Scans sm.file_paths for Java files containing Spring event annotations.
+    Only runs on Java/Spring projects. Lightweight — path heuristics first,
+    then targeted content scan on candidate files only.
+    """
+    import re as _re
+    java_paths = [p for p in sm.file_paths if p.endswith(".java") and "target/" not in p]
+    if not java_paths:
+        return None
+    _frameworks = [f.name for s in (sm.stacks or []) for f in s.frameworks]
+    if not any("Spring" in fw for fw in _frameworks):
+        return None
+
+    analyzed_path = getattr(sm.metadata, "analyzed_path", None) if sm.metadata else None
+    root = Path(analyzed_path) if analyzed_path else None
+
+    listeners: list[str] = []
+    publishers: list[str] = []
+    event_types: set[str] = set()
+    _publish_re = _re.compile(r"\.publishEvent\s*\(\s*new\s+(\w+)")
+
+    for rel_path in java_paths:
+        if root is None:
+            break
+        try:
+            content = (root / rel_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "@EventListener" in content:
+            cls_m = _re.search(r"class\s+(\w+)", content)
+            cls_name = cls_m.group(1) if cls_m else Path(rel_path).stem
+            if cls_name not in listeners:
+                listeners.append(cls_name)
+        for m in _publish_re.finditer(content):
+            event_types.add(m.group(1))
+            cls_m = _re.search(r"class\s+(\w+)", content)
+            cls_name = cls_m.group(1) if cls_m else Path(rel_path).stem
+            if cls_name not in publishers:
+                publishers.append(cls_name)
+
+    if not listeners and not publishers:
+        return None
+
+    return {
+        "listeners": sorted(set(listeners))[:10],
+        "publishers": sorted(set(publishers))[:10],
+        "event_types": sorted(event_types)[:10],
+        "flow_count": len(listeners) + len(publishers),
+    }
+
+
 def _spring_profiles_context(sm: "SourceMap") -> "Optional[dict[str, Any]]":
     """Build structured spring_profiles block: detected names + per-profile file variants."""
     # Gather profile names from env_summary (populated by env_analyzer scanning
@@ -1948,6 +2001,11 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
     _txn = _transactional_summary(sm, full=full)
     if _txn:
         signals["transactional_boundaries"] = _txn
+
+    # IC-005: Spring event flows (@EventListener / publishEvent)
+    _evf = _spring_event_signal(sm)
+    if _evf:
+        signals["event_flows"] = _evf
 
     if signals:
         result["signals"] = signals

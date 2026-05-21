@@ -1212,6 +1212,41 @@ class TaskContextBuilder:
                 symptom=symptom if task_name == "fix-bug" else None,
             )
 
+        # ── IC-006: fix-bug suspected_areas — recompute from ranked files + bug notes ──
+        # relevant_files is now ranked by RankingEngine (git churn, fan_in, centrality, notes).
+        # suspected_areas should reflect that ranking, not raw comment count.
+        if task_name == "fix-bug" and relevant_files:
+            _bug_kinds = {"FIXME", "BUG", "HACK", "XXX"}
+            _bug_counts: dict[str, int] = {}
+            for _note in cn_notes_for_ranking:
+                if _note.kind in _bug_kinds:
+                    _bug_counts[_note.path] = _bug_counts.get(_note.path, 0) + 1
+
+            # Primary: top-ranked RelevantFile objects (dataclass, use .path/.reason)
+            _ranked_paths = [rf.path for rf in relevant_files[:30]]
+            _primary: list[str] = []
+            for rf in relevant_files[:30]:
+                p = rf.path
+                if not p:
+                    continue
+                n = _bug_counts.get(p, 0)
+                reason_str = str(rf.reason) if rf.reason else ""
+                note_str = f" ({n} bug annotation{'s' if n > 1 else ''})" if n else ""
+                _primary.append(f"{p}{note_str}" + (f" — {reason_str}" if reason_str else ""))
+                if len(_primary) >= 5:
+                    break
+
+            # Secondary: remaining high-note files not already in primary
+            _ranked_set = set(_ranked_paths[:len(_primary)])
+            _secondary = [
+                f"{p} ({n} annotation{'s' if n > 1 else ''})"
+                for p, n in sorted(_bug_counts.items(), key=lambda x: -x[1])
+                if p not in _ranked_set
+            ][:3]
+
+            if _primary or _secondary:
+                suspected_areas = _primary + _secondary
+
         # ── 6b. review-pr: derive PR-specific impact sections from delta analysis ──
         _pr_security_impact: dict = {}
         _pr_transactional_impact: dict = {}

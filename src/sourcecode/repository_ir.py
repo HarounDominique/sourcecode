@@ -1537,6 +1537,18 @@ def _assemble(
             by_type.setdefault(e.type, []).append(e.from_symbol)
         reverse_graph_out[target] = by_type
 
+    # IC-005: aggregate event flow edges already built in _build_relations
+    _listen_edges = [e for e in sorted_rels if e.type == "listens_to_event"]
+    _publish_edges = [e for e in sorted_rels if e.type == "publishes_event"]
+    _spring_events: Optional[dict] = None
+    if _listen_edges or _publish_edges:
+        _spring_events = {
+            "listeners": sorted({e.from_symbol for e in _listen_edges}),
+            "publishers": sorted({e.from_symbol for e in _publish_edges}),
+            "event_types": sorted({e.to_symbol for e in _listen_edges + _publish_edges}),
+            "flow_count": len(_listen_edges) + len(_publish_edges),
+        }
+
     return {
         "schema_version": "final-v1",
         "graph": {
@@ -1558,7 +1570,11 @@ def _assemble(
         },
         "subsystems": subsystems,
         "change_set": change_set_out,
-        "route_surface": _build_route_surface(sorted_syms, route_diffs),
+        "route_surface": _build_route_surface(sorted_syms, route_diffs, extends_map={
+            e.from_symbol: e.to_symbol.split(".")[-1]
+            for e in sorted_rels if e.type == "extends"
+        }),
+        **({"spring_events": _spring_events} if _spring_events else {}),
         "audit": {
             "dropped_fields": dropped_fields,
         },
@@ -1569,30 +1585,119 @@ def _assemble(
 # Route surface helper (Fix 4)
 # ---------------------------------------------------------------------------
 
-def _build_route_surface(symbols: list[SymbolRecord], route_diffs: Optional[list[dict]]) -> list[dict]:
-    """Return route surface: diffs when --since provided, else static snapshot of all endpoints."""
+def _build_route_surface(
+    symbols: list[SymbolRecord],
+    route_diffs: Optional[list[dict]],
+    extends_map: Optional[dict[str, str]] = None,
+) -> list[dict]:
+    """Return route surface with inheritance projection.
+
+    extends_map: child_fqn → parent_simple_name derived from RelationEdge extends edges.
+    Projects inherited endpoints onto subclasses that have a class-level @RequestMapping
+    prefix but zero own method-level endpoints (IC-001 fix).
+    """
     if route_diffs:
         return route_diffs
+
+    # Phase 1: build per-class metadata (prefix) and own endpoint list
+    class_info: dict[str, dict] = {}  # simple_name → {fqn, prefix, own_endpoints}
+    for sym in symbols:
+        if sym.type not in ("class", "interface"):
+            continue
+        simple = sym.symbol.split(".")[-1]
+        prefix = ""
+        if "@RequestMapping" in sym.annotations:
+            args = sym.annotation_values.get("@RequestMapping", "")
+            prefix = _parse_route_path(args)
+        class_info[simple] = {"fqn": sym.symbol, "prefix": prefix, "own_endpoints": []}
+
     routes: list[dict] = []
+    seen: set[tuple] = set()
+
+    # Phase 2: emit own endpoint symbols and record them per class
     for sym in symbols:
         if sym.symbol_kind != "endpoint":
             continue
         ann_name = next((a for a in sym.annotations if a in _ENDPOINT_ANNOTATIONS), None)
         if not ann_name:
             continue
+        cls_fqn = _enclosing_class(sym.symbol)
+        cls_simple = cls_fqn.split(".")[-1]
         args = sym.annotation_values.get(ann_name, "")
-        path = _parse_route_path(args)
-        method = _parse_route_http_method(ann_name, args)
-        if not path and not method:
-            continue
-        routes.append({
-            "symbol": sym.symbol,
-            "controller": _enclosing_class(sym.symbol),
-            "path": path,
-            "method": method or "GET",
-            "stable_id": sym.stable_id,
-        })
-    return sorted(routes, key=lambda r: (r["controller"], r["path"]))
+        suffix = _parse_route_path(args)
+        method = _parse_route_http_method(ann_name, args) or "GET"
+
+        if cls_simple in class_info:
+            class_info[cls_simple]["own_endpoints"].append(
+                (method, suffix, sym.symbol, sym.stable_id)
+            )
+
+        prefix = class_info.get(cls_simple, {}).get("prefix", "")
+        full_path = (prefix + "/" + suffix).replace("//", "/").rstrip("/") or "/"
+        if not full_path.startswith("/"):
+            full_path = "/" + full_path
+
+        key = (sym.symbol, method, prefix)
+        if key not in seen:
+            seen.add(key)
+            routes.append({
+                "symbol": sym.symbol,
+                "controller": cls_fqn,
+                "declaring_class": cls_fqn,
+                "effective_class": cls_fqn,
+                "path": full_path,
+                "method": method,
+                "stable_id": sym.stable_id,
+                "inheritance_depth": 0,
+            })
+
+    # Phase 3: inheritance projection — subclasses with zero own endpoints
+    # but with a class-level @RequestMapping prefix inherit parent methods.
+    if extends_map:
+        fqn_to_simple: dict[str, str] = {d["fqn"]: s for s, d in class_info.items()}
+        simple_extends: dict[str, str] = {
+            fqn_to_simple.get(child_fqn, child_fqn.split(".")[-1]): parent_simple
+            for child_fqn, parent_simple in extends_map.items()
+        }
+
+        for cls_simple, data in class_info.items():
+            if data["own_endpoints"]:
+                continue
+            if not data["prefix"]:
+                continue
+
+            chain = simple_extends.get(cls_simple)
+            visited: set[str] = {cls_simple}
+            depth = 1
+            while chain and chain not in visited:
+                visited.add(chain)
+                parent = class_info.get(chain)
+                if not parent:
+                    break
+                if parent["own_endpoints"]:
+                    for verb, suffix, declaring_sym, stable_id in parent["own_endpoints"]:
+                        prefix = data["prefix"]
+                        full_path = (prefix + "/" + suffix).replace("//", "/").rstrip("/") or "/"
+                        if not full_path.startswith("/"):
+                            full_path = "/" + full_path
+                        key = (cls_simple, declaring_sym, verb, prefix)
+                        if key not in seen:
+                            seen.add(key)
+                            routes.append({
+                                "symbol": declaring_sym,
+                                "controller": data["fqn"],
+                                "declaring_class": parent["fqn"],
+                                "effective_class": data["fqn"],
+                                "path": full_path,
+                                "method": verb,
+                                "stable_id": stable_id,
+                                "inheritance_depth": depth,
+                            })
+                    break
+                chain = simple_extends.get(chain)
+                depth += 1
+
+    return sorted(routes, key=lambda r: (r["effective_class"], r["path"]))
 
 
 # ---------------------------------------------------------------------------
@@ -1803,7 +1908,7 @@ def apply_ir_size_limits(
 # Convenience: find Java files in a repo
 # ---------------------------------------------------------------------------
 
-def find_java_files(root: Path, *, max_files: int = 500) -> list[str]:
+def find_java_files(root: Path, *, max_files: int = 3000) -> list[str]:
     """Return relative paths to Java files under root, excluding test dirs and vendor."""
     results: list[str] = []
     for p in sorted(root.rglob("*.java")):

@@ -836,6 +836,7 @@ def main(
         code_notes = True
         no_tree = True  # agents never need the raw file tree
         architecture = True  # agents need full architectural signal (M4)
+        graph_modules = True  # IC-003: import graph needed for architecture confidence
 
     # ── GAP-9: Cache check — serve from .sourcecode-cache when git SHA unchanged ──
     import hashlib as _hashlib
