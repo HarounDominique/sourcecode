@@ -15,9 +15,15 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from sourcecode import __version__ as _sourcecode_version
 from sourcecode.mcp.runner import run_command
 
+# FIX-P0-5: MCP server version must match CLI version exactly.
+# FastMCP does not accept version= in __init__; inject it on the underlying
+# low-level Server so the MCP initialize handshake reports the correct version.
 mcp = FastMCP("sourcecode")
+if hasattr(mcp, "_mcp_server"):
+    mcp._mcp_server.version = _sourcecode_version  # type: ignore[attr-defined]
 
 
 def _ok(data: Any) -> dict:
@@ -37,10 +43,14 @@ def _execute(args: list[str]) -> dict:
 
 @mcp.tool()
 def get_compact_context(repo_path: str = ".", git_context: bool = False) -> dict:
-    """High-signal summary of a repository (~1000-3000 tokens).
+    """Compact human/LLM summary of a repository (~1000-3000 tokens). USE THIS FIRST.
+
+    Best for: quick project orientation, first-time context, token-budget constrained tasks.
+    Returns: stacks, entry points, dependency summary, architecture summary, confidence, gaps.
+    Includes security_surface, mybatis, and transactional_boundaries for Java/Spring projects.
+    For richer machine-oriented detail (deeper signals, more sections), use get_agent_context.
 
     Maps to: sourcecode <repo_path> --compact [--git-context]
-    Returns: stacks, entry points, dependency summary, confidence, gaps.
     repo_path: absolute path to the repository (default: current working directory).
     git_context: include git log and branch context in the analysis.
     """
@@ -56,10 +66,14 @@ def get_compact_context(repo_path: str = ".", git_context: bool = False) -> dict
 
 @mcp.tool()
 def get_agent_context(repo_path: str = ".", git_context: bool = False) -> dict:
-    """Agent-optimised analysis: identity, entry points, dependencies, gaps.
+    """Full structured agent context with extended machine-oriented signals (~5000-15000 tokens).
+
+    Best for: deep analysis, bug investigation, code review, or when get_compact_context
+    lacks sufficient detail. Includes all compact fields plus: env_map, code_notes,
+    architecture layers, security surface, transactional boundaries, module graph summary.
+    Prefer get_compact_context for quick orientation or token-constrained workflows.
 
     Maps to: sourcecode <repo_path> --agent [--git-context]
-    Returns: structured noise-free JSON for AI agents.
     repo_path: absolute path to the repository (default: current working directory).
     git_context: include git log and branch context in the analysis.
     """
@@ -248,12 +262,14 @@ def config() -> dict:
 def telemetry(action: str) -> dict:
     """Manage telemetry settings.
 
-    Maps to: sourcecode telemetry <status|enable|disable>
-    action must be one of: status, enable, disable
+    Maps to: sourcecode telemetry <action>
+    action: one of "status" (show current state), "enable" (opt in), "disable" (opt out).
+    Valid values: "status" | "enable" | "disable"
     """
+    # FIX-P2-10: enumerate valid actions in docstring so agents don't guess.
     if action not in _TELEMETRY_ACTIONS:
         return _err(
-            f"action must be one of {sorted(_TELEMETRY_ACTIONS)}",
+            f"Invalid action '{action}'. Must be one of: {', '.join(sorted(_TELEMETRY_ACTIONS))}",
             "INVALID_ARGUMENT",
         )
     return _execute(["telemetry", action])

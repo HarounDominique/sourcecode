@@ -671,14 +671,14 @@ def main(
             f"Error: invalid value '{mode}' for --mode. Valid options: {', '.join(_MODE_CHOICES)}",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
     _RANK_CHOICES = ("relevance", "centrality", "git-churn")
     if rank_by not in _RANK_CHOICES:
         typer.echo(
             f"Error: invalid value '{rank_by}' for --rank-by. Valid options: {', '.join(_RANK_CHOICES)}",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
     if symbol is not None and not symbol.strip():
         typer.echo("symbol query cannot be empty", err=True)
@@ -690,14 +690,14 @@ def main(
             "Symbol search uses the contract pipeline which does not run in raw mode.",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
     if entrypoints_only and mode not in ("contract", "standard"):
         typer.echo(
             f"Error: --entrypoints-only requires --mode contract or standard (got '{mode}').",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
     if dependency_depth > 0:
         typer.echo(
@@ -721,27 +721,30 @@ def main(
             f"Error: invalid value '{format}' for --format. Valid options: {', '.join(FORMAT_CHOICES)}",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
     if graph_detail not in GRAPH_DETAIL_CHOICES:
         typer.echo(
             f"Error: invalid value '{graph_detail}' for --graph-detail. Valid options: {', '.join(GRAPH_DETAIL_CHOICES)}",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
     if docs_depth not in DOCS_DEPTH_CHOICES:
         typer.echo(
             f"Error: invalid value '{docs_depth}' for --docs-depth. Valid options: {', '.join(DOCS_DEPTH_CHOICES)}",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
     # Path was extracted from argv by _preprocess_argv() before Click ran.
-    target = Path(_detected_path[0]).resolve()
+    # FIX-P2-8: preserve original user input in error messages (Windows Git Bash
+    # rewrites "/nonexistent" → "C:\Program Files\Git\nonexistent" via Path.resolve()).
+    _raw_path_input = _detected_path[0]
+    target = Path(_raw_path_input).resolve()
     if not target.exists():
-        typer.echo(f"Error: directory '{target}' does not exist.", err=True)
+        typer.echo(f"Error: directory '{_raw_path_input}' does not exist.", err=True)
         raise typer.Exit(code=1)
     if not target.is_dir():
-        typer.echo(f"Error: '{target}' is not a directory.", err=True)
+        typer.echo(f"Error: '{_raw_path_input}' is not a directory.", err=True)
         raise typer.Exit(code=1)
 
     # Normalize mode aliases
@@ -860,13 +863,27 @@ def main(
                 # Include every output-affecting flag so different flag combos never collide
                 # Include version so cache is invalidated on sourcecode upgrades
                 from sourcecode import __version__ as _sc_version
+                # FIX-P0-1: cache key must include ALL analysis-affecting flags.
+                # Previously missing: exclude, depth, rank_by, symbol, entrypoints_only,
+                # no_redact, graph_detail, docs_depth, max_nodes, graph_edges,
+                # max_importers, emit_graph.
+                # Use effective_depth (not raw depth) so Java auto-adjustment is captured.
+                _excl_key = (
+                    ",".join(sorted(e.strip() for e in exclude.split(",") if e.strip()))
+                    if exclude else ""
+                )
                 _flags_str = (
                     f"v={_sc_version},"
                     f"c={compact},ag={agent},fmt={format},full={full},"
                     f"co={changed_only},dep={dependencies},gm={graph_modules},"
                     f"docs={docs},fm={full_metrics},sem={semantics},"
                     f"arch={architecture},gc={git_context},em={env_map},"
-                    f"cn={code_notes},tree={tree},mode={mode}"
+                    f"cn={code_notes},tree={tree},mode={mode},"
+                    f"ex={_excl_key},depth={effective_depth},"
+                    f"rb={rank_by},sym={symbol},ep={entrypoints_only},"
+                    f"nr={no_redact},gd={graph_detail},dd={docs_depth},"
+                    f"mn={max_nodes},ge={graph_edges},mi={max_importers},"
+                    f"eg={emit_graph}"
                 )
                 _flags_h = _hashlib.md5(_flags_str.encode()).hexdigest()[:8]
                 _cache_key = f"{_git_sha}-{_flags_h}"
@@ -1612,7 +1629,23 @@ def main(
         data = agent_view(sm, full=full)
         if not no_redact:
             data = redact_dict(data)
-        content = json.dumps(data, indent=2, ensure_ascii=False)
+        # FIX-P0-2: agent mode must honour --format yaml (previously always emitted JSON).
+        if format == "yaml":
+            from io import StringIO
+            from ruamel.yaml import YAML as _YAML
+            _yaml_ag = _YAML()
+            _yaml_ag.default_flow_style = False
+            _yaml_ag.representer.add_representer(
+                type(None),
+                lambda dumper, data_val: dumper.represent_scalar(
+                    "tag:yaml.org,2002:null", "null"
+                ),
+            )
+            _stream_ag = StringIO()
+            _yaml_ag.dump(data, _stream_ag)
+            content = _stream_ag.getvalue()
+        else:
+            content = json.dumps(data, indent=2, ensure_ascii=False)
     elif compact:
         if changed_only and _allowed_changed_files:
             # GAP-5: preserve full entry_points for architecture context even in
@@ -2747,11 +2780,14 @@ def mcp_status() -> None:
         typer.echo("  Setup:   sourcecode mcp init")
         raise typer.Exit(code=0)
 
-    # Stage 2: Config files
-    typer.echo("Config files")
+    # Stage 2: Config files — is sourcecode registered in the client's config?
+    # FIX-P0-6: "configured" and "running" are distinct, independent checks.
+    # A client app may be running without sourcecode configured, or configured but not running.
+    # Display each state as a separate labelled field to prevent contradiction.
+    typer.echo("Config (sourcecode registered in client config?)")
     for client in clients:
         if not client.app_installed:
-            typer.echo(f"  {client.name:<20} ✗ not found")
+            typer.echo(f"  {client.name:<20} ✗ app not found at expected path")
             typer.echo(f"    Expected: {client.config_path}")
             typer.echo(f"    Fix:      sourcecode mcp init --target {client.slug}")
             continue
@@ -2759,15 +2795,16 @@ def mcp_status() -> None:
         if applier.is_installed(config):
             typer.echo(f"  {client.name:<20} ✓ configured   {client.config_path}")
         else:
-            typer.echo(f"  {client.name:<20} ✗ not configured")
+            typer.echo(f"  {client.name:<20} ✗ not configured  (app found, but sourcecode entry missing)")
             typer.echo(f"    Fix: sourcecode mcp init --target {client.slug}")
     typer.echo("")
 
-    # Stage 3: Connectivity
-    typer.echo("Connectivity")
+    # Stage 3: Process liveness — is the client app currently running?
+    # This is independent from config: a running app may still need restart to pick up config.
+    typer.echo("Runtime (client app process running?)")
     any_installed = any(c.app_installed for c in clients)
     if not any_installed:
-        typer.echo("  (no clients to check)")
+        typer.echo("  (no client apps found — nothing to check)")
     else:
         for client in clients:
             if not client.app_installed:
@@ -2779,6 +2816,8 @@ def mcp_status() -> None:
                 typer.echo(f"    Fix: open {client.name}, then run sourcecode mcp status")
 
     typer.echo(sep)
+    typer.echo("  Note:    'configured' and 'running' are checked independently.")
+    typer.echo("           A running app still needs restart after first-time config.")
     typer.echo("  Setup:   sourcecode mcp init")
     typer.echo("  Remove:  sourcecode mcp remove")
 

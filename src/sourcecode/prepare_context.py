@@ -3734,42 +3734,35 @@ class TaskContextBuilder:
             }
 
         if since:
+            # FIX-P0-4: delta must behave consistently with review-pr for invalid refs.
+            # review-pr fails immediately if the exact ref is not found.
+            # delta previously silently rewrote to origin/HEAD (e.g. origin/develop)
+            # or HEAD~1, masking the invalid ref and reporting "no_changes".
+            #
+            # New policy (matches review-pr):
+            #   Stage 1: exact local ref — succeed
+            #   Stage 2: remote-tracking ref (origin/<since>) — succeed (transparent alias)
+            #   STOP: no symbolic-ref rewrite, no HEAD~1 silent fallback.
+            #   Failure → structured error with hints, same schema as review-pr.
+
             # Stage 1: exact local ref
             if _verify(since):
                 files = _diff(since)
                 if files is not None:
                     return _make(files, since, "exact_local_ref")
 
-            # Stage 2: remote-tracking ref (origin/<since>)
+            # Stage 2: remote-tracking ref (origin/<since>) — transparent remote alias
             remote_ref = f"origin/{since}"
             if _verify(remote_ref):
                 files = _diff(remote_ref)
                 if files is not None:
                     return _make(files, remote_ref, "remote_tracking_ref")
 
-            # Stage 3: symbolic ref (origin/HEAD → e.g. origin/main)
-            ok, symref = _run("symbolic-ref", "refs/remotes/origin/HEAD")
-            if ok and symref:
-                short = symref.removeprefix("refs/remotes/")
-                if _verify(short):
-                    files = _diff(short)
-                    if files is not None:
-                        return _make(files, short, "symbolic_ref")
+            # Stages 3 & 4 removed: symbolic-ref rewrite (origin/HEAD → different branch)
+            # and HEAD~1 silent fallback are both dangerous when the caller named a specific
+            # ref — they produce wrong diffs without any error signal.
 
-            # Stage 4: HEAD~1 fallback — original ref was invalid
-            if _verify("HEAD~1"):
-                files = _diff("HEAD~1")
-                if files is not None:
-                    return {
-                        "files": files,
-                        "resolved_ref": "HEAD~1",
-                        "resolution_path": "head_minus_1_fallback",
-                        "diff_validation_status": "invalid_ref",  # original ref unresolved
-                        "error": False,
-                        "warnings": [{"code": "REF_NOT_FOUND", "ref": since, "resolved_to": "HEAD~1"}],
-                    }
-
-            # All stages failed
+            # All resolution stages failed → hard error (consistent with review-pr)
             return {
                 "files": [],
                 "resolved_ref": since,

@@ -2224,6 +2224,10 @@ def apply_ir_size_limits(
     analysis: dict = ir.get("analysis") or {}
 
     if summary_only:
+        # FIX-P0-3: summary_only must be safe for LLM context windows.
+        # Hard budget: 100 KB. Bound every top-level section, not just graph.
+        _SUMMARY_MAX_BYTES = 100_000
+
         n_nodes, n_edges = len(nodes), len(edges)
         out["graph"] = {
             "nodes": [],
@@ -2233,7 +2237,7 @@ def apply_ir_size_limits(
                 "remove --summary-only to restore full graph"
             ),
         }
-        # Fix 3: keep bounded reverse graph instead of wiping it.
+        # Reverse graph: top 30 hubs by in-degree (most depended-upon)
         full_rg: dict = ir.get("reverse_graph") or {}
         if full_rg:
             _rg_sorted = sorted(
@@ -2241,7 +2245,7 @@ def apply_ir_size_limits(
                 key=lambda x: sum(len(v) for v in x[1].values()),
                 reverse=True,
             )
-            out["reverse_graph"] = dict(_rg_sorted[:50])
+            out["reverse_graph"] = dict(_rg_sorted[:30])
         else:
             out["reverse_graph"] = {}
         out["impact"] = {
@@ -2249,11 +2253,73 @@ def apply_ir_size_limits(
             "ranked_nodes": ranked[:20],
         }
         out["analysis"] = {
-            "changed_entities": analysis.get("changed_entities") or [],
+            "changed_entities": (analysis.get("changed_entities") or [])[:20],
             "impacted_entities": (analysis.get("impacted_entities") or [])[:20],
-            "isolated_changes": analysis.get("isolated_changes") or [],
-            "validated_changes": analysis.get("validated_changes") or [],
+            "isolated_changes": (analysis.get("isolated_changes") or [])[:10],
+            "validated_changes": (analysis.get("validated_changes") or [])[:10],
         }
+        # Bound subsystems: top 20 by member count
+        raw_subsystems: list = ir.get("subsystems") or []
+        if raw_subsystems:
+            _ss_sorted = sorted(
+                raw_subsystems,
+                key=lambda s: len(s.get("members", [])),
+                reverse=True,
+            )
+            out["subsystems"] = _ss_sorted[:20]
+            if len(raw_subsystems) > 20:
+                out["subsystems_note"] = (
+                    f"Showing 20/{len(raw_subsystems)} subsystems by member count. "
+                    "Remove --summary-only for the full list."
+                )
+        # Bound change_set: top 30 by impact
+        raw_cs: list = ir.get("change_set") or []
+        out["change_set"] = raw_cs[:30]
+        if len(raw_cs) > 30:
+            out["change_set_note"] = (
+                f"Showing 30/{len(raw_cs)} changed symbols. "
+                "Remove --summary-only for the full list."
+            )
+        # Bound route_surface: top 50 endpoints by path
+        raw_rs = ir.get("route_surface")
+        if isinstance(raw_rs, dict):
+            raw_eps: list = raw_rs.get("endpoints") or []
+            if len(raw_eps) > 50:
+                out["route_surface"] = {
+                    **raw_rs,
+                    "endpoints": raw_eps[:50],
+                    "_note": (
+                        f"Showing 50/{len(raw_eps)} endpoints. "
+                        "Remove --summary-only for full route surface."
+                    ),
+                }
+        # spring_events: keep as-is (usually small)
+        # analysis_gaps: keep as-is (usually small)
+
+        # Hard byte budget: truncate if still too large
+        import json as _json
+        _encoded = _json.dumps(out, ensure_ascii=False)
+        if len(_encoded.encode("utf-8")) > _SUMMARY_MAX_BYTES:
+            # Progressively trim large sections until under budget
+            for _trim_key, _trim_limit in [
+                ("reverse_graph", 15), ("subsystems", 10),
+                ("change_set", 10), ("ranked_nodes_trim", 10),
+            ]:
+                if _trim_key == "ranked_nodes_trim":
+                    out["impact"] = {**out["impact"], "ranked_nodes": ranked[:_trim_limit]}
+                elif _trim_key in out and isinstance(out[_trim_key], (dict, list)):
+                    _val = out[_trim_key]
+                    if isinstance(_val, dict):
+                        out[_trim_key] = dict(list(_val.items())[:_trim_limit])
+                    else:
+                        out[_trim_key] = _val[:_trim_limit]
+                _encoded = _json.dumps(out, ensure_ascii=False)
+                if len(_encoded.encode("utf-8")) <= _SUMMARY_MAX_BYTES:
+                    break
+            out["_budget_note"] = (
+                f"Output truncated to ~{_SUMMARY_MAX_BYTES // 1024}KB for LLM safety. "
+                "Remove --summary-only or use --output for full IR."
+            )
         return out
 
     # Build score map from ranked_nodes (already sorted -score, fqn)
