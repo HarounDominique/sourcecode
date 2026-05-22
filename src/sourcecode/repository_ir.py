@@ -176,7 +176,7 @@ _INJECT_ANNOTATIONS: frozenset[str] = frozenset({
     "@Autowired", "@Inject", "@Value", "@Qualifier", "@Resource",
 })
 
-_SPRING_ROLE_MAP: dict[str, str] = {
+_JAVA_ROLE_MAP: dict[str, str] = {
     # Spring MVC / Spring Boot
     "@RestController": "controller",
     "@Controller": "controller",
@@ -189,12 +189,22 @@ _SPRING_ROLE_MAP: dict[str, str] = {
     "@ApplicationScoped": "service",
     "@RequestScoped": "service",
     "@SessionScoped": "service",
+    "@ConversationScoped": "service",
     "@Singleton": "service",
     "@Dependent": "component",
     "@Named": "component",
-    # JAX-RS provider
+    "@Produces": "component",
+    # JAX-RS
     "@Provider": "provider",
+    "@Consumes": "controller",
+    # Quarkus
+    "@QuarkusMain": "entrypoint",
+    "@QuarkusTest": "test",
+    "@QuarkusIntegrationTest": "test",
 }
+
+# Backward-compatible alias — external callers may reference this name.
+_SPRING_ROLE_MAP = _JAVA_ROLE_MAP
 
 # Keycloak/Quarkus SPI interface names — classes implementing these are spi_provider entry points.
 _SPI_ROLE_INTERFACES: frozenset[str] = frozenset({
@@ -676,19 +686,28 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — Spring semantic tagging
+# Phase 2 — Java/Jakarta/CDI/JAX-RS semantic tagging
 # ---------------------------------------------------------------------------
 
-def _spring_role(annotations: list[str]) -> str:
+def _java_role(annotations: list[str]) -> str:
+    """Return the architecture role for a class based on its annotations.
+
+    Covers Spring MVC, CDI/Jakarta EE, JAX-RS, and Quarkus patterns.
+    Returns 'unknown' when no recognized annotation is present.
+    """
     for ann in annotations:
-        role = _SPRING_ROLE_MAP.get(ann)
+        role = _JAVA_ROLE_MAP.get(ann)
         if role:
             return role
     return "unknown"
 
 
+# Backward-compatible alias used by external callers and serializer.
+_spring_role = _java_role
+
+
 def _build_spring_summary(symbols: list[SymbolRecord]) -> dict:
-    """Phase 2: Aggregate Spring/CDI/JAX-RS annotated symbols into a summary."""
+    """Phase 2: Aggregate Java/CDI/JAX-RS/Spring annotated symbols into a summary."""
     controllers: list[str] = []
     services: list[str] = []
     repositories: list[str] = []
@@ -703,7 +722,7 @@ def _build_spring_summary(symbols: list[SymbolRecord]) -> dict:
                 transactional.append(sym.symbol)
             continue
 
-        role = _spring_role(sym.annotations)
+        role = _java_role(sym.annotations)
         if role == "controller":
             controllers.append(sym.symbol)
         elif role == "service":
@@ -939,6 +958,104 @@ def _build_relations(
 # ---------------------------------------------------------------------------
 # Route-surface helpers
 # ---------------------------------------------------------------------------
+
+# Return types that are never JAX-RS resource classes
+_LOCATOR_SKIP_RETURN_TYPES: frozenset[str] = frozenset({
+    "void", "Void", "Object", "Response", "String", "List", "Map", "Set",
+    "Collection", "Optional", "CompletionStage", "Future", "Mono", "Flux",
+    "Builder", "UriBuilder", "Link", "URI", "URL",
+    "javax.ws.rs.core.Response", "jakarta.ws.rs.core.Response",
+})
+
+
+def _join_path_segments(*segments: str) -> str:
+    """Join JAX-RS path segments with slash normalization.
+
+    >>> _join_path_segments("/admin", "realms", "{realm}", "attack-detection")
+    '/admin/realms/{realm}/attack-detection'
+    >>> _join_path_segments("/admin", "", "")
+    '/admin'
+    """
+    parts = [s.strip("/") for s in segments if s and s.strip("/")]
+    return ("/" + "/".join(parts)) if parts else "/"
+
+
+def _build_jaxrs_locator_map(symbols: list["SymbolRecord"]) -> dict[str, list[tuple[str, str]]]:
+    """Detect JAX-RS sub-resource locator methods and build child → [(parent, path)] map.
+
+    A sub-resource locator is a method that:
+    - Has @Path annotation
+    - Has NO HTTP verb annotation (@GET, @POST, @PUT, @DELETE, @PATCH, @HEAD, @OPTIONS)
+    - Returns a non-trivial resource class type
+
+    Returns: child_class_simple → [(parent_class_simple, locator_path_segment), ...]
+    """
+    locator_map: dict[str, list[tuple[str, str]]] = {}
+    for sym in symbols:
+        if sym.type != "method" and sym.symbol_kind not in ("method",):
+            continue
+        if "@Path" not in sym.annotations:
+            continue
+        # Exclude endpoint methods (have HTTP verb)
+        if any(a in sym.annotations for a in _JAXRS_HTTP_ANNOTATIONS):
+            continue
+        # Exclude Spring endpoints
+        if any(a in sym.annotations for a in _ENDPOINT_ANNOTATIONS - _JAXRS_HTTP_ANNOTATIONS):
+            continue
+
+        locator_path = _parse_route_path(sym.annotation_values.get("@Path", ""))
+
+        ret = sym.return_type.strip()
+        if not ret:
+            continue
+        # Simplify: strip package prefix and generics
+        ret_simple = ret.split(".")[-1].split("<")[0].strip()
+        if not ret_simple or ret_simple in _LOCATOR_SKIP_RETURN_TYPES:
+            continue
+        if ret_simple[0].islower():  # lowercase → primitive/variable, not a class
+            continue
+
+        parent_fqn = _enclosing_class(sym.symbol)
+        parent_simple = parent_fqn.split(".")[-1]
+
+        locator_map.setdefault(ret_simple, []).append((parent_simple, locator_path))
+
+    return locator_map
+
+
+def _resolve_jaxrs_prefixes(
+    cls_simple: str,
+    class_info: dict[str, dict],
+    locator_map: dict[str, list[tuple[str, str]]],
+    visited: frozenset,
+) -> list[str]:
+    """Recursively compute full path prefixes by walking up the JAX-RS locator chain.
+
+    For a class with no class-level @Path, its effective prefix(es) come entirely
+    from the locator chain: parent_prefix + locator_method_path + own_class_path.
+
+    Cycle guard: visited prevents infinite recursion in malformed hierarchies.
+    """
+    if cls_simple in visited:
+        return class_info.get(cls_simple, {}).get("prefixes", [""])
+
+    own_prefixes = class_info.get(cls_simple, {}).get("prefixes", [""])
+
+    if cls_simple not in locator_map:
+        return own_prefixes
+
+    new_visited = visited | {cls_simple}
+    full_prefixes: list[str] = []
+
+    for parent_simple, locator_path in locator_map[cls_simple]:
+        parent_full = _resolve_jaxrs_prefixes(parent_simple, class_info, locator_map, new_visited)
+        for pp in parent_full:
+            for op in own_prefixes:
+                combined = _join_path_segments(pp, locator_path, op)
+                full_prefixes.append(combined)
+
+    return full_prefixes if full_prefixes else own_prefixes
+
 
 def _parse_route_path(args_str: str) -> str:
     """Extract path string from annotation args. Handles named and positional forms."""
@@ -1347,6 +1464,10 @@ def _detect_subsystems(all_fqns: list[str], relations: list[RelationEdge]) -> li
 
     result: list[dict] = []
     for pkg_prefix, members in sorted(components.items()):
+        # Skip bare class names (no package) and method references — these are
+        # unpackaged utility classes (e.g. CopyDependencies) or IR artefacts.
+        if "." not in pkg_prefix or "#" in pkg_prefix:
+            continue
         members = sorted(members)
         label = _subsystem_label(pkg_prefix)
         short_names = [m.split(".")[-1].split("#")[0] for m in members[:3]]
@@ -1539,11 +1660,14 @@ def _assemble(
     sorted_rels = sorted(relations, key=lambda e: (e.from_symbol, e.type, e.to_symbol))
     sorted_changed = sorted(changed_symbols, key=lambda c: c.symbol)
 
-    # Spring role map: fqn → role (from annotation evidence only)
+    # Java role map: fqn → role (annotation evidence + JAX-RS @Path heuristic)
     spring_role_map: dict[str, str] = {}
     for sym in sorted_syms:
         if sym.type in ("class", "interface"):
-            role = _spring_role(sym.annotations)
+            role = _java_role(sym.annotations)
+            # JAX-RS resource: class-level @Path without a recognized annotation → controller
+            if role == "unknown" and "@Path" in sym.annotations:
+                role = "controller"
             spring_role_map[sym.symbol] = role
 
     # Degree maps (graph-derived)
@@ -1797,11 +1921,19 @@ def _build_route_surface(
     route_diffs: Optional[list[dict]],
     extends_map: Optional[dict[str, str]] = None,
 ) -> list[dict]:
-    """Return route surface with inheritance projection.
+    """Return route surface with inheritance projection and JAX-RS sub-resource locator resolution.
 
     extends_map: child_fqn → parent_simple_name derived from RelationEdge extends edges.
     Projects inherited endpoints onto subclasses that have a class-level @RequestMapping
     prefix but zero own method-level endpoints (IC-001 fix).
+
+    JAX-RS sub-resource locators: methods with @Path but no HTTP verb annotation that return
+    a resource class are used to compose full paths across the locator chain.
+    Example: AdminRoot(@Path("/admin")) → getRealmsAdmin()(@Path("realms")) →
+             RealmsAdminResource → getRealmAdmin()(@Path("{realm}")) →
+             RealmAdminResource → getAttackDetection()(@Path("attack-detection")) →
+             AttackDetectionResource → @GET @Path("brute-force/users/{userId}")
+    Resolved path: /admin/realms/{realm}/attack-detection/brute-force/users/{userId}
 
     route_diffs semantics:
       None  → build full route surface from symbols (used by build_repo_ir and
@@ -1812,6 +1944,11 @@ def _build_route_surface(
     """
     if route_diffs is not None:
         return route_diffs
+
+    # Phase 0: Build JAX-RS sub-resource locator map.
+    # child_class_simple → [(parent_class_simple, locator_path_segment), ...]
+    # Built before class_info so it is available for the "skip client proxy" guard.
+    locator_map = _build_jaxrs_locator_map(symbols)
 
     # Phase 1: build per-class metadata (prefixes list) and own endpoint list.
     # "prefixes" is a list to support array @RequestMapping({"/v1/foo", "/v1/bar"}).
@@ -1839,7 +1976,9 @@ def _build_route_surface(
     seen: set[tuple] = set()
 
     # Phase 2: emit own endpoint symbols and record them per class.
-    # Each method emits one route per class-level prefix (handles array prefix).
+    # Each method emits one route per resolved effective prefix.
+    # For JAX-RS: effective prefix is resolved via sub-resource locator chain.
+    # For Spring: effective prefix is the class-level @RequestMapping value (unchanged).
     for sym in symbols:
         if sym.symbol_kind != "endpoint":
             continue
@@ -1849,20 +1988,30 @@ def _build_route_surface(
         cls_fqn = _enclosing_class(sym.symbol)
         cls_simple = cls_fqn.split(".")[-1]
         args = sym.annotation_values.get(ann_name, "")
-        # JAX-RS: HTTP verb annotations carry no path; path lives in @Path on the method.
+
         if ann_name in _JAXRS_HTTP_ANNOTATIONS:
+            # JAX-RS: HTTP verb annotations carry no path; path lives in @Path on the method.
             suffix = _parse_route_path(sym.annotation_values.get("@Path", ""))
-            # Skip JAX-RS routes with no server-side path binding — client proxy interfaces
-            # have HTTP verb annotations but neither a class-level @Path nor a method @Path.
-            # Use has_path_ann (annotation presence) not just prefix value: @Path args may be
-            # unparsed (multi-line, constant expression) yet the class IS a server resource.
             _cls_entry = class_info.get(cls_simple, {})
             cls_prefixes = _cls_entry.get("prefixes", [""])
             cls_has_path = _cls_entry.get("has_path_ann", False)
-            if not suffix and not cls_has_path and all(not p for p in cls_prefixes):
+            # Skip client proxy interfaces: no class-level @Path, no method @Path,
+            # and not reachable via a locator chain. Client proxies (e.g. RESTEasy
+            # @RegisterRestClient) have HTTP verb annotations but no server-side binding.
+            if (not suffix and not cls_has_path
+                    and all(not p for p in cls_prefixes)
+                    and cls_simple not in locator_map):
                 continue
+            # Resolve full path prefix via sub-resource locator chain.
+            # For classes with no locator parent this returns own class prefix (unchanged).
+            effective_prefixes = _resolve_jaxrs_prefixes(
+                cls_simple, class_info, locator_map, frozenset()
+            )
         else:
+            # Spring MVC: path lives in annotation args; class prefix from @RequestMapping.
             suffix = _parse_route_path(args)
+            effective_prefixes = class_info.get(cls_simple, {}).get("prefixes", [""])
+
         method = _parse_route_http_method(ann_name, args) or "GET"
 
         if cls_simple in class_info:
@@ -1870,7 +2019,7 @@ def _build_route_surface(
                 (method, suffix, sym.symbol, sym.stable_id)
             )
 
-        for prefix in class_info.get(cls_simple, {}).get("prefixes", [""]):
+        for prefix in effective_prefixes:
             full_path = (prefix + "/" + suffix).replace("//", "/").rstrip("/") or "/"
             if not full_path.startswith("/"):
                 full_path = "/" + full_path
@@ -2167,10 +2316,16 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
     _EXTENDS_FROM_SIG = _re.compile(r'\bextends\s+(\w+)')
     _FILTRO_VAL = _re.compile(r'(?:nombreRecurso\s*=\s*)?["\']([^"\']+)["\']')
 
+    # Exclude REST client proxy modules — they use JAX-RS annotations for client-side
+    # proxy generation (RESTEasy, MicroProfile REST Client) and are NOT server resources.
+    _CLIENT_PATH_FRAGMENTS = (
+        "/admin-client/", "/rest-client/", "/client-api/", "/api-client/",
+    )
     java_files = sorted(
         p for p in root.rglob("*.java")
         if not is_test_path(str(p).replace("\\", "/"))
         and "target/" not in str(p).replace("\\", "/")
+        and not any(f in str(p).replace("\\", "/") for f in _CLIENT_PATH_FRAGMENTS)
     )
 
     all_symbols: list[SymbolRecord] = []
@@ -2229,7 +2384,7 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
     return {"endpoints": endpoints, "total": len(endpoints), "undocumented": undocumented}
 
 
-def find_java_files(root: Path, *, max_files: int = 3000) -> list[str]:
+def find_java_files(root: Path, *, max_files: int = 8000) -> list[str]:
     """Return relative paths to Java files under root, excluding test dirs and vendor."""
     results: list[str] = []
     for p in sorted(root.rglob("*.java")):
@@ -2245,6 +2400,10 @@ def find_java_files(root: Path, *, max_files: int = 3000) -> list[str]:
             continue
         # Skip vendor/generated/build dirs
         if any(part in _VENDOR_DIRS for part in parts[:-1]):
+            continue
+        # Skip REST client proxy modules — JAX-RS annotations there are for client-side
+        # proxy generation, not server resources. Including them pollutes IR roles and routes.
+        if any(f in rel for f in ("/admin-client/", "/rest-client/", "/client-api/", "/api-client/")):
             continue
         results.append(rel)
     return results

@@ -380,15 +380,15 @@ class TestDocAnalyzerLanguageCoverage:
         records, summary = DocAnalyzer().analyze(root, tree)
         return records, summary
 
-    def test_java_marked_unsupported(self):
-        """Java files → language_coverage['java'] == 'unsupported'."""
+    def test_java_marked_supported(self):
+        """Java files with Javadoc → language_coverage['java'] == 'supported'."""
         _, summary = self._analyze({
             "src/UserService.java": (
                 "/** Creates a user. */\n"
                 "public class UserService {}\n"
             )
         })
-        assert summary.language_coverage.get("java") == "unsupported"
+        assert summary.language_coverage.get("java") == "supported"
 
     def test_python_marked_supported(self):
         """Python files → language_coverage['python'] == 'supported'."""
@@ -404,36 +404,37 @@ class TestDocAnalyzerLanguageCoverage:
         })
         assert summary.language_coverage.get("typescript") == "supported"
 
-    def test_java_no_doc_records_emitted(self):
-        """Java files must NOT produce DocRecords (no false coverage)."""
-        records, summary = self._analyze({
+    def test_java_javadoc_produces_records(self):
+        """Java files with Javadoc comments produce DocRecords with language='java'."""
+        records, _ = self._analyze({
             "src/Service.java": "/** Does stuff. */\npublic class Service {}\n"
         })
         java_records = [r for r in records if r.language == "java"]
-        assert java_records == []
+        assert len(java_records) == 1
+        assert java_records[0].kind == "class"
+        assert java_records[0].symbol == "Service"
+        assert java_records[0].doc_text == "Does stuff."
 
-    def test_java_unsupported_limitation_emitted(self):
-        """Java files → limitation entry stating docs not extracted."""
+    def test_java_no_javadoc_no_coverage_entry(self):
+        """Java file with no Javadoc comments → no language_coverage entry (nothing to report)."""
         _, summary = self._analyze({
             "src/Service.java": "public class Service {}\n"
         })
-        lim_text = " ".join(summary.limitations)
-        assert "java" in lim_text.lower()
-        assert any(
-            kw in lim_text.lower()
-            for kw in ("unsupported", "not supported", "docs_unavailable", "docs_not_extracted")
-        )
+        # No Javadoc found → Java not tracked as "supported" or "unsupported"
+        assert summary.language_coverage.get("java") is None
 
     def test_mixed_py_java_coverage(self):
-        """Mixed Python+Java → Python supported, Java unsupported; Python docs extracted."""
+        """Mixed Python+Java → Python supported, Java supported when Javadoc present."""
         records, summary = self._analyze({
             "app/main.py": '"""Entry point."""\ndef run(): pass\n',
             "src/Svc.java": "/** Java service. */\npublic class Svc {}\n",
         })
         assert summary.language_coverage.get("python") == "supported"
-        assert summary.language_coverage.get("java") == "unsupported"
+        assert summary.language_coverage.get("java") == "supported"
         py_records = [r for r in records if r.language == "python"]
         assert len(py_records) > 0
+        java_records = [r for r in records if r.language == "java"]
+        assert len(java_records) > 0
 
     def test_go_marked_unsupported(self):
         """Go files → language_coverage['go'] == 'unsupported'."""

@@ -9,6 +9,7 @@ from sourcecode.repository_ir import (
     _bfs_reachability,
     _build_evidence_bundles,
     _build_relations,
+    _build_route_surface,
     _build_spring_summary,
     _detect_subsystems,
     _diff_intensity_cs,
@@ -456,8 +457,12 @@ class TestGraphAlgorithms:
 
     def test_detect_subsystems_single_component(self):
         from sourcecode.repository_ir import RelationEdge
-        edges = [RelationEdge("A", "B", "imports"), RelationEdge("B", "C", "imports")]
-        components = _detect_subsystems(["A", "B", "C"], edges)
+        # Use FQN-style names so the no-bare-class filter does not strip them
+        edges = [
+            RelationEdge("com.example.A", "com.example.B", "imports"),
+            RelationEdge("com.example.B", "com.example.C", "imports"),
+        ]
+        components = _detect_subsystems(["com.example.A", "com.example.B", "com.example.C"], edges)
         assert len(components) == 1
         # New format: list[dict] with label, package_prefix, member_count, summary
         assert components[0]["member_count"] == 3
@@ -465,13 +470,23 @@ class TestGraphAlgorithms:
 
     def test_detect_subsystems_two_components(self):
         from sourcecode.repository_ir import RelationEdge
-        edges = [RelationEdge("A", "B", "imports")]
-        # C is isolated
-        components = _detect_subsystems(["A", "B", "C"], edges)
+        # Different canonical packages → two distinct subsystems
+        # com.example.web.* → com.example.web
+        # com.example.service.* → com.example.service
+        edges = [RelationEdge("com.example.web.A", "com.example.service.C", "imports")]
+        components = _detect_subsystems(
+            ["com.example.web.A", "com.example.web.B", "com.example.service.C"], edges
+        )
         assert len(components) == 2
+        pkg_prefixes = {c["package_prefix"] for c in components}
+        assert "com.example.web" in pkg_prefixes
+        assert "com.example.service" in pkg_prefixes
 
     def test_detect_subsystems_no_edges(self):
-        components = _detect_subsystems(["A", "B", "C"], [])
+        # Three distinct packages → three distinct subsystems regardless of edges
+        components = _detect_subsystems(
+            ["com.example.web.A", "com.example.service.B", "com.example.repo.C"], []
+        )
         assert len(components) == 3
 
     def test_propagate_impact_direct_neighbor(self):
@@ -520,10 +535,12 @@ class TestGraphAlgorithms:
 class TestOutputContract:
     def test_top_level_keys(self):
         ir = extract_file_ir(SIMPLE_SERVICE, "UserService.java")
-        assert set(ir.keys()) == {
+        required = {
             "schema_version", "graph", "reverse_graph", "analysis", "impact",
             "subsystems", "change_set", "route_surface", "audit",
         }
+        # analysis_gaps and spring_events are optional present-if-non-empty keys
+        assert required.issubset(set(ir.keys()))
 
     def test_schema_version(self):
         ir = extract_file_ir(SIMPLE_SERVICE, "UserService.java")
@@ -1341,3 +1358,198 @@ class TestReverseImpactGraph:
         impacted = {e["entity"] for e in ir["analysis"]["impacted_entities"]}
         # save() is in UserRepository but did NOT change — should not appear as impacted
         assert "com.example.repo.UserRepository#save" not in impacted
+
+
+# ---------------------------------------------------------------------------
+# JAX-RS sub-resource locator chain composition (P1 fix)
+# ---------------------------------------------------------------------------
+
+_JAXRS_ADMIN_ROOT = """\
+package org.example.admin;
+import javax.ws.rs.Path; import javax.ws.rs.GET; import javax.ws.rs.core.Response;
+
+@Path("/admin")
+public class AdminRoot {
+    @GET
+    public Response index() { return null; }
+
+    @Path("realms")
+    public RealmsResource getRealms() { return new RealmsResource(); }
+}
+"""
+
+_JAXRS_REALMS_RESOURCE = """\
+package org.example.admin;
+import javax.ws.rs.Path; import javax.ws.rs.GET; import javax.ws.rs.PathParam;
+
+public class RealmsResource {
+    @Path("{realm}")
+    public RealmResource getRealm(@PathParam("realm") String name) { return new RealmResource(); }
+
+    @GET
+    public Object listRealms() { return null; }
+}
+"""
+
+_JAXRS_REALM_RESOURCE = """\
+package org.example.admin;
+import javax.ws.rs.Path; import javax.ws.rs.GET; import javax.ws.rs.DELETE;
+
+public class RealmResource {
+    @Path("attack-detection")
+    public AttackDetectionResource getAttackDetection() { return new AttackDetectionResource(); }
+
+    @GET
+    public Object getRealm() { return null; }
+
+    @DELETE
+    public void deleteRealm() {}
+}
+"""
+
+_JAXRS_ATTACK_RESOURCE = """\
+package org.example.admin;
+import javax.ws.rs.Path; import javax.ws.rs.GET; import javax.ws.rs.DELETE; import javax.ws.rs.PathParam;
+
+public class AttackDetectionResource {
+    @GET
+    @Path("brute-force/users/{userId}")
+    public Object userStatus(@PathParam("userId") String id) { return null; }
+
+    @DELETE
+    @Path("brute-force/users")
+    public void clearAll() {}
+}
+"""
+
+
+def _build_jaxrs_routes():
+    all_syms = []
+    for src, rel in [
+        (_JAXRS_ADMIN_ROOT, "AdminRoot.java"),
+        (_JAXRS_REALMS_RESOURCE, "RealmsResource.java"),
+        (_JAXRS_REALM_RESOURCE, "RealmResource.java"),
+        (_JAXRS_ATTACK_RESOURCE, "AttackDetectionResource.java"),
+    ]:
+        _, syms, _ = _extract_symbols(src, rel)
+        all_syms.extend(syms)
+    return _build_route_surface(all_syms, route_diffs=None)
+
+
+class TestJaxrsLocatorChainComposition:
+    """P1: JAX-RS sub-resource locator chain path composition."""
+
+    def test_root_own_endpoint_has_correct_path(self):
+        routes = _build_jaxrs_routes()
+        paths = {(r["method"], r["path"]) for r in routes}
+        assert ("GET", "/admin") in paths
+
+    def test_two_level_locator_composes_path(self):
+        routes = _build_jaxrs_routes()
+        paths = {r["path"] for r in routes}
+        assert "/admin/realms" in paths
+
+    def test_three_level_locator_composes_path(self):
+        routes = _build_jaxrs_routes()
+        paths = {r["path"] for r in routes}
+        assert "/admin/realms/{realm}" in paths
+
+    def test_four_level_locator_delete(self):
+        routes = _build_jaxrs_routes()
+        paths = {(r["method"], r["path"]) for r in routes}
+        assert ("DELETE", "/admin/realms/{realm}") in paths
+
+    def test_deep_chain_attack_detection_get(self):
+        routes = _build_jaxrs_routes()
+        paths = {(r["method"], r["path"]) for r in routes}
+        assert ("GET", "/admin/realms/{realm}/attack-detection/brute-force/users/{userId}") in paths
+
+    def test_deep_chain_attack_detection_delete(self):
+        routes = _build_jaxrs_routes()
+        paths = {(r["method"], r["path"]) for r in routes}
+        assert ("DELETE", "/admin/realms/{realm}/attack-detection/brute-force/users") in paths
+
+    def test_total_route_count(self):
+        routes = _build_jaxrs_routes()
+        assert len(routes) == 6
+
+    def test_no_partial_paths_emitted(self):
+        routes = _build_jaxrs_routes()
+        paths = {r["path"] for r in routes}
+        # Partial paths that existed before fix must not be present
+        assert "/brute-force/users" not in paths
+        assert "/brute-force/users/{userId}" not in paths
+        assert "/attack-detection/brute-force/users" not in paths
+
+    def test_controller_field_is_declaring_class(self):
+        routes = _build_jaxrs_routes()
+        attack = [r for r in routes if "attack-detection" in r["path"]]
+        for r in attack:
+            assert "AttackDetectionResource" in r["controller"]
+
+    def test_spring_mvc_unaffected(self):
+        spring_src = """\
+package com.example;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/v1")
+public class UserController {
+    @GetMapping("/users")
+    public Object getUsers() { return null; }
+    @DeleteMapping("/users/{id}")
+    public void delete() {}
+}
+"""
+        _, syms, _ = _extract_symbols(spring_src, "UserController.java")
+        routes = _build_route_surface(syms, route_diffs=None)
+        paths = {(r["method"], r["path"]) for r in routes}
+        assert ("GET", "/api/v1/users") in paths
+        assert ("DELETE", "/api/v1/users/{id}") in paths
+        assert len(routes) == 2
+
+    def test_cycle_guard_no_crash(self):
+        # Circular locator references must not cause infinite recursion
+        src_a = """\
+package com.example;
+import javax.ws.rs.Path; import javax.ws.rs.GET;
+@Path("/a")
+public class ResourceA {
+    @Path("b")
+    public ResourceB getB() { return null; }
+    @GET public Object get() { return null; }
+}
+"""
+        src_b = """\
+package com.example;
+import javax.ws.rs.Path; import javax.ws.rs.GET;
+public class ResourceB {
+    @Path("a")
+    public ResourceA getA() { return null; }
+    @GET public Object get() { return null; }
+}
+"""
+        all_syms = []
+        for src, rel in [(src_a, "ResourceA.java"), (src_b, "ResourceB.java")]:
+            _, syms, _ = _extract_symbols(src, rel)
+            all_syms.extend(syms)
+        # Must not raise RecursionError or any other exception
+        routes = _build_route_surface(all_syms, route_diffs=None)
+        assert isinstance(routes, list)
+
+    def test_client_proxy_interface_excluded(self):
+        # JAX-RS client proxy: HTTP verb annotations but no @Path anywhere → skip
+        proxy_src = """\
+package com.example.client;
+import javax.ws.rs.GET; import javax.ws.rs.POST;
+
+public interface UserClient {
+    @GET
+    Object getUser();
+    @POST
+    Object createUser();
+}
+"""
+        _, syms, _ = _extract_symbols(proxy_src, "UserClient.java")
+        routes = _build_route_surface(syms, route_diffs=None)
+        assert routes == []

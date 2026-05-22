@@ -434,6 +434,16 @@ def _spring_event_signal(sm: "SourceMap") -> "Optional[dict[str, Any]]":
 
 def _spring_profiles_context(sm: "SourceMap") -> "Optional[dict[str, Any]]":
     """Build structured spring_profiles block: detected names + per-profile file variants."""
+    # Only emit for Spring Boot / Spring projects. Quarkus and Jakarta EE projects
+    # use application-{profile}.properties too but those are NOT Spring profiles.
+    _is_spring = any(
+        f.name in ("Spring Boot", "Spring")
+        for stack in getattr(sm, "stacks", [])
+        for f in getattr(stack, "frameworks", [])
+    )
+    if not _is_spring:
+        return None
+
     # Gather profile names from env_summary (populated by env_analyzer scanning
     # application-{profile}.yml files) or the top-level spring_profiles list.
     profiles: list[str] = []
@@ -691,9 +701,24 @@ def _lightweight_arch_pattern(sm: "SourceMap") -> "Optional[dict[str, Any]]":
         for part in p.replace("\\", "/").split("/")[:-1]:
             dir_names.add(part.lower())
 
-    has_controller = bool({"controller", "controllers", "api", "rest", "web", "handler", "handlers"} & dir_names)
-    has_service = bool({"service", "services", "usecase", "usecases", "application"} & dir_names)
-    has_repository = bool({"repository", "repositories", "repo", "repos", "dao", "persistence"} & dir_names)
+    # HTTP handler layer: Spring MVC controllers AND JAX-RS resources
+    has_controller = bool(
+        {"controller", "controllers", "api", "rest", "web", "handler", "handlers",
+         "resource", "resources", "endpoint", "endpoints"}
+        & dir_names
+    )
+    # Business logic layer: Spring services, CDI providers, use-cases
+    has_service = bool(
+        {"service", "services", "usecase", "usecases", "application",
+         "provider", "providers", "manager", "managers"}
+        & dir_names
+    )
+    # Data access layer: JPA/JDBC repos, CDI stores, DAOs
+    has_repository = bool(
+        {"repository", "repositories", "repo", "repos", "dao", "persistence",
+         "store", "stores", "datastore", "datastores"}
+        & dir_names
+    )
     has_domain = bool({"domain", "domains", "core", "model", "models", "entity", "entities"} & dir_names)
     has_infra = bool({"infrastructure", "infra", "adapter", "adapters"} & dir_names)
 
@@ -2052,8 +2077,9 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
 
     if sm.analysis_gaps:
         analysis_gaps = [asdict(g) for g in sm.analysis_gaps]
-    else:
-        # Fallback gap derivation when confidence_analyzer was not run
+    elif sm.confidence_summary is None:
+        # Fallback gap derivation only when confidence_analyzer was not run at all
+        # (empty sm.analysis_gaps with sm.confidence_summary set means analyzer ran → 0 gaps)
         if not sm.entry_points:
             analysis_gaps.append({
                 "area": "entry_points",

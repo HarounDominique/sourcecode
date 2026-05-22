@@ -78,8 +78,9 @@ def get_endpoints(repo_path: str = ".") -> dict:
     """REST API endpoint surface extraction from Java source files.
 
     Maps to: sourcecode endpoints <repo_path>
-    Returns: endpoints list with method, path, controller, handler, required_permission;
-             total count and undocumented count.
+    Returns: endpoints list with method, path, controller, handler fields;
+             total (int) and undocumented (int) counts.
+    Supports Spring MVC (@GetMapping etc.) and JAX-RS (@GET/@POST etc.).
     repo_path: absolute path to the repository (default: current working directory).
     """
     if not isinstance(repo_path, str):
@@ -177,6 +178,49 @@ def onboard_context(repo_path: str = ".") -> dict:
     if not isinstance(repo_path, str):
         return _err("repo_path must be a string", "INVALID_ARGUMENT")
     return _execute(["prepare-context", "onboard", repo_path])
+
+
+@mcp.tool()
+def explain_context(repo_path: str = ".") -> dict:
+    """Architecture and entry-point explanation for a repository.
+
+    Maps to: sourcecode prepare-context explain <repo_path>
+    Returns: project summary, architecture, entry points, key dependencies.
+    repo_path: absolute path to the repository (default: current working directory).
+    """
+    if not isinstance(repo_path, str):
+        return _err("repo_path must be a string", "INVALID_ARGUMENT")
+    return _execute(["prepare-context", "explain", repo_path])
+
+
+@mcp.tool()
+def refactor_context(repo_path: str = ".") -> dict:
+    """Structural issues and refactor opportunities for a repository.
+
+    Maps to: sourcecode prepare-context refactor <repo_path>
+    Returns: structural issues, coupling hotspots, improvement opportunities.
+    repo_path: absolute path to the repository (default: current working directory).
+    """
+    if not isinstance(repo_path, str):
+        return _err("repo_path must be a string", "INVALID_ARGUMENT")
+    return _execute(["prepare-context", "refactor", repo_path])
+
+
+@mcp.tool()
+def generate_tests_context(repo_path: str = ".", include_all: bool = False) -> dict:
+    """Untested source files and test gap analysis for a repository.
+
+    Maps to: sourcecode prepare-context generate-tests <repo_path> [--all]
+    Returns: test_gaps list of untested files ranked by risk.
+    repo_path: absolute path to the repository (default: current working directory).
+    include_all: return full test_gaps list without truncating to top 20.
+    """
+    if not isinstance(repo_path, str):
+        return _err("repo_path must be a string", "INVALID_ARGUMENT")
+    args = ["prepare-context", "generate-tests", repo_path]
+    if include_all:
+        args.append("--all")
+    return _execute(args)
 
 
 _TELEMETRY_ACTIONS = frozenset({"status", "enable", "disable"})

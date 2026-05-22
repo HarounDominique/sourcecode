@@ -111,10 +111,13 @@ class TestApplyIrSizeLimits:
         result = self.fn(ir, summary_only=True)
         assert len(result["impact"]["ranked_nodes"]) <= 20
 
-    def test_summary_only_clears_reverse_graph(self) -> None:
+    def test_summary_only_bounds_reverse_graph(self) -> None:
+        # summary_only keeps a bounded reverse_graph (up to 50 entries) rather than
+        # wiping it — the bounded graph is still useful for dependency navigation.
         ir = _make_ir(n_nodes=5)
         result = self.fn(ir, summary_only=True)
-        assert result["reverse_graph"] == {}
+        assert "reverse_graph" in result
+        assert len(result["reverse_graph"]) <= 50
 
     def test_global_score_preserved(self) -> None:
         ir = _make_ir(n_nodes=10)

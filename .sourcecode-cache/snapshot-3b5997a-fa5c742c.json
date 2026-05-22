@@ -1,0 +1,261 @@
+{
+  "schema_version": "1.0",
+  "project_type": "cli",
+  "project_summary": "CLI: Deterministic codebase context for AI coding agents. Stack: Python (Typer).",
+  "architecture_summary": "Python cli tool using Typer.\nLayered Architecture with orchestration, processing, data layers.\nAnalyzes repository tree and detects stack, entry points, and project type.\nProduces a JSON/YAML-serializable SourceMap with secret redaction.\nOpcionalmente añade dependencias, grafo de módulos, docs y docstrings, métricas de calidad y semántica y call graph.",
+  "stacks": [
+    {
+      "stack": "python",
+      "detection_method": "manifest",
+      "confidence": "high",
+      "primary": true,
+      "frameworks": [
+        "Typer"
+      ],
+      "package_manager": "pip"
+    }
+  ],
+  "entry_points": [
+    {
+      "path": "src/sourcecode/cli.py",
+      "kind": "cli",
+      "confidence": "high"
+    }
+  ],
+  "dependency_summary": {
+    "requested": true,
+    "total_count": 13,
+    "direct": 13,
+    "sources": [
+      "manifest"
+    ]
+  },
+  "key_dependencies": [
+    {
+      "name": "mcp",
+      "version": ">=1.0.0"
+    },
+    {
+      "name": "typer",
+      "version": ">=0.24"
+    },
+    {
+      "name": "pathspec",
+      "version": ">=1.0",
+      "role": "parsing"
+    },
+    {
+      "name": "ruamel.yaml",
+      "version": ">=0.18",
+      "role": "serialization"
+    },
+    {
+      "name": "tomli",
+      "version": ">=2.0",
+      "role": "serialization"
+    }
+  ],
+  "env_summary": {
+    "total": 16,
+    "required": 4,
+    "categories": [
+      "application",
+      "auth",
+      "database",
+      "general",
+      "server"
+    ]
+  },
+  "env_map": [
+    {
+      "key": "DB_HOST",
+      "required": true,
+      "category": "database"
+    },
+    {
+      "key": "KEY",
+      "required": true,
+      "category": "general"
+    },
+    {
+      "key": "LDAP_PASSWORD",
+      "required": true,
+      "category": "auth"
+    },
+    {
+      "key": "SPRING_DATASOURCE_PASSWORD",
+      "required": true,
+      "category": "auth"
+    },
+    {
+      "key": "CI",
+      "category": "general"
+    },
+    {
+      "key": "NO_COLOR",
+      "category": "general"
+    },
+    {
+      "key": "SOURCECODE_TELEMETRY_ENDPOINT",
+      "category": "server"
+    },
+    {
+      "key": "SPRING_DATASOURCE_URL",
+      "category": "server"
+    },
+    {
+      "key": "SPRING_DATASOURCE_USERNAME",
+      "category": "general"
+    },
+    {
+      "key": "TERM",
+      "category": "general"
+    },
+    {
+      "key": "app.name",
+      "category": "application"
+    },
+    {
+      "key": "app.timeout",
+      "category": "application"
+    },
+    {
+      "key": "saint.env",
+      "category": "application"
+    },
+    {
+      "key": "saint.integration.url",
+      "category": "application"
+    },
+    {
+      "key": "saint.ldap.url",
+      "category": "application"
+    }
+  ],
+  "code_notes_summary": {
+    "total": 19,
+    "by_kind": {
+      "BUG": 7,
+      "TODO": 7,
+      "FIXME": 2,
+      "NOTE": 2,
+      "HACK": 1
+    }
+  },
+  "code_notes": [
+    {
+      "kind": "BUG",
+      "path": "src/sourcecode/prepare_context.py",
+      "line": 1747,
+      "text": "#4: LOW confidence + 0 content matches → clear suspected_areas,"
+    },
+    {
+      "kind": "BUG",
+      "path": "src/sourcecode/prepare_context.py",
+      "line": 2378,
+      "text": "#3: onboard must cover ≥3 arch layers (controllers/services/domain/repositories)."
+    },
+    {
+      "kind": "BUG",
+      "path": "tests/test_bug_fixes_v16.py",
+      "line": 21,
+      "text": "1 — UTF-8 round-trip via write_output"
+    },
+    {
+      "kind": "BUG",
+      "path": "tests/test_bug_fixes_v16.py",
+      "line": 46,
+      "text": "2 — Java DDD scan reaches depth 10 (Mapper.xml found)"
+    },
+    {
+      "kind": "BUG",
+      "path": "tests/test_bug_fixes_v16.py",
+      "line": 105,
+      "text": "3 — --changed-only uses allowed_changed_files, not empty"
+    },
+    {
+      "kind": "BUG",
+      "path": "tests/test_bug_fixes_v16.py",
+      "line": 158,
+      "text": "4 — fix-bug ranks Java (changed + annotated) above TypeScript (unchanged)"
+    },
+    {
+      "kind": "BUG",
+      "path": "tests/test_repository_ir.py",
+      "line": 757,
+      "text": "3 fix: without --since, scores use call-graph centrality (never all-zero)"
+    },
+    {
+      "kind": "FIXME",
+      "path": "tests/fixtures/latin1_sample.java",
+      "line": 2,
+      "text": "La funciónño está incompleta — falta validación de ó y é"
+    },
+    {
+      "kind": "FIXME",
+      "path": "tests/test_code_notes_analyzer.py",
+      "line": 39,
+      "text": "broken\\n\","
+    },
+    {
+      "kind": "TODO",
+      "path": "src/sourcecode/schema.py",
+      "line": 472,
+      "text": "| FIXME | HACK | NOTE | DEPRECATED | WARNING | XXX | BUG | OPTIMIZE"
+    },
+    {
+      "kind": "TODO",
+      "path": "tests/fixtures/latin1_sample.java",
+      "line": 1,
+      "text": "Revisar los días de IT en la sección de mantenimiento"
+    },
+    {
+      "kind": "TODO",
+      "path": "tests/fixtures/latin1_sample_iso.java",
+      "line": 2,
+      "text": "La función está bien"
+    },
+    {
+      "kind": "TODO",
+      "path": "tests/test_broadleaf_fixes.py",
+      "line": 406,
+      "text": "refactor cart logic\\nvar x = 1;\\n\")"
+    },
+    {
+      "kind": "TODO",
+      "path": "tests/test_broadleaf_fixes.py",
+      "line": 412,
+      "text": "internal jQuery note\\n// FIXME: internal issue\\nvar j={};\\n\")"
+    },
+    {
+      "kind": "TODO",
+      "path": "tests/test_bug_fixes_v1302.py",
+      "line": 304,
+      "text": "fix this\\nx = 1\\n\")"
+    }
+  ],
+  "confidence_summary": {
+    "overall": "high",
+    "stack": "high",
+    "entry_points": "high",
+    "sections": {
+      "stack": "high",
+      "entrypoints": "high",
+      "dependencies": "high",
+      "architecture": "low",
+      "file_relevance": "medium"
+    }
+  },
+  "analysis_gaps": [
+    {
+      "area": "documentation",
+      "reason": "No Architecture Decision Records (ADRs) detected — missing docs/ or adr/ directory",
+      "impact": "low"
+    },
+    {
+      "area": "api_contract",
+      "reason": "No OpenAPI/Swagger contract detected — agents cannot auto-discover API surface without it",
+      "impact": "medium"
+    }
+  ]
+}

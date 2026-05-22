@@ -1147,7 +1147,7 @@ class DependencyAnalyzer:
         records: list[DependencyRecord] = []
         deps_elem = root_elem.find(f"{ns}dependencies")
         if deps_elem is None:
-            return [], ["java: pom.xml sin bloque <dependencies>"]
+            return [], ["java: pom.xml has no <dependencies> block"]
 
         for dep in deps_elem.findall(f"{ns}dependency"):
             group_id = (dep.findtext(f"{ns}groupId") or "").strip()
@@ -1195,7 +1195,7 @@ class DependencyAnalyzer:
 
         limitations: list[str] = []
         if not records:
-            limitations.append("java: pom.xml sin dependencias parseables (puede usar BOM o propiedades)")
+            limitations.append("java: pom.xml has no parseable dependencies (may use BOM or properties)")
 
         # Warn when Spring Boot BOM manages transitive deps — they can't be resolved statically.
         parent_artifact_local = (

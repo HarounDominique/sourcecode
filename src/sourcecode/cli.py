@@ -858,7 +858,10 @@ def main(
             # to avoid polluting sub-project directories used in tests.
             if _git_sha and (target / ".git").exists():
                 # Include every output-affecting flag so different flag combos never collide
+                # Include version so cache is invalidated on sourcecode upgrades
+                from sourcecode import __version__ as _sc_version
                 _flags_str = (
+                    f"v={_sc_version},"
                     f"c={compact},ag={agent},fmt={format},full={full},"
                     f"co={changed_only},dep={dependencies},gm={graph_modules},"
                     f"docs={docs},fm={full_metrics},sem={semantics},"
@@ -2475,9 +2478,9 @@ def endpoints_cmd(
     """Extract REST API endpoint surface from Java source files.
 
     \b
-    Scans all @GetMapping/@PostMapping/@PutMapping/@DeleteMapping/@PatchMapping
-    and @RequestMapping annotations. Extracts HTTP method, path, controller class,
-    handler method, and @M3FiltroSeguridad permission resource name.
+    Scans Spring MVC (@GetMapping/@PostMapping/@PutMapping/@DeleteMapping/@PatchMapping/@RequestMapping)
+    and JAX-RS (@GET/@POST/@PUT/@DELETE/@PATCH with @Path) annotations.
+    Extracts HTTP method, path, controller class, and handler method.
 
     \b
     Examples:

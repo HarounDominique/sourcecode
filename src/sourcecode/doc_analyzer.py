@@ -273,10 +273,11 @@ class DocAnalyzer:
                 name = class_m.group(1)
                 doc_text = self._clean_javadoc(jd_match.group(1))
                 records.append(DocRecord(
+                    symbol=name,
+                    kind="class",
+                    language="java",
                     path=path,
                     workspace=workspace,
-                    kind="class",
-                    name=name,
                     doc_text=doc_text,
                     importance=self._infer_importance(path, "class", entry_points),
                 ))
@@ -291,10 +292,11 @@ class DocAnalyzer:
                     continue
                 doc_text = self._clean_javadoc(jd_match.group(1))
                 records.append(DocRecord(
+                    symbol=name,
+                    kind="function",
+                    language="java",
                     path=path,
                     workspace=workspace,
-                    kind="function",
-                    name=name,
                     doc_text=doc_text,
                     importance=self._infer_importance(path, "function", entry_points),
                 ))

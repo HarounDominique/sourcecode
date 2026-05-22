@@ -222,11 +222,18 @@ class ConfidenceAnalyzer:
             ))
 
         # Spring profile documentation (comments in application-{profile}.yml)
+        # Only relevant for Spring Boot projects — Quarkus/Jakarta use similar file names
+        # but they're Quarkus profiles, not Spring profiles.
+        _is_spring_boot = any(
+            f.name in ("Spring Boot", "Spring")
+            for stack in sm.stacks
+            for f in getattr(stack, "frameworks", [])
+        )
         _profile_ymls = [
             p for p in sm.file_paths
             if "application-" in p.rsplit("/", 1)[-1] and p.endswith((".yml", ".yaml", ".properties"))
         ]
-        if _profile_ymls:
+        if _is_spring_boot and _profile_ymls:
             # Check for at least one comment line (# ...) across profile files
             _root = Path(sm.metadata.analyzed_path) if sm.metadata.analyzed_path else None
             _has_profile_docs = False

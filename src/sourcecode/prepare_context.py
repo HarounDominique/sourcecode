@@ -573,17 +573,17 @@ def _read_code_signal_evidence(root: Path, file_path: str, artifact_type: str) -
 
 _ARTIFACT_CHANGE_EFFECT: dict[str, str] = {
     "entrypoint":     "application entrypoint (framework bootstrap / CLI handler)",
-    "controller":     "HTTP routing layer (request-to-handler mapping)",
-    "service":        "business logic layer (@Service component)",
-    "repository":     "data access layer (persistence queries / ORM)",
+    "controller":     "HTTP handler layer (Spring @RestController / JAX-RS @Path resource)",
+    "service":        "business logic layer (Spring @Service / CDI @ApplicationScoped bean)",
+    "repository":     "data access layer (persistence queries / ORM / CDI store)",
     "mapper":         "SQL-object mapping layer (MyBatis mapper / query template)",
     "security":       "security component (authentication / access control configuration)",
-    "spring_config":  "Spring @Configuration class (bean definitions / datasource wiring)",
-    "spring_profile": "Spring profile override (environment-specific configuration)",
+    "spring_config":  "framework configuration class (Spring @Configuration / Quarkus @QuarkusApplication)",
+    "spring_profile": "environment-specific configuration override (Spring profile / Quarkus profile)",
     "config":         "configuration file (application properties / environment values)",
     "build_manifest": "build manifest (dependency and plugin configuration)",
     "db_migration":   "database schema migration (DDL change pending execution)",
-    "domain_model":   "domain entity (@Entity / value object)",
+    "domain_model":   "domain entity (@Entity / CDI model / value object)",
     "dto":            "data transfer object (serialization contract)",
     "test":           "test file (no production code modified)",
     "documentation":  "documentation file (no runtime impact)",
@@ -1810,32 +1810,44 @@ class TaskContextBuilder:
                         )[:16000]
                         _pub_count = _content.count("public ")
                         _ann_count = (
+                            # Spring MVC / Spring Boot
                             _content.count("@Transactional")
                             + _content.count("@RequestMapping")
                             + _content.count("@GetMapping")
                             + _content.count("@PostMapping")
                             + _content.count("@PutMapping")
                             + _content.count("@DeleteMapping")
+                            # JAX-RS
+                            + _content.count("@Path")
+                            + _content.count("@GET")
+                            + _content.count("@POST")
+                            + _content.count("@PUT")
+                            + _content.count("@DELETE")
+                            + _content.count("@PATCH")
+                            # CDI / Jakarta EE
+                            + _content.count("@ApplicationScoped")
+                            + _content.count("@RequestScoped")
+                            + _content.count("@Singleton")
                         )
                     except OSError:
                         pass
                     _java_candidates.append({
                         "path": _p,
                         "public_method_count": _pub_count,
-                        "has_spring_annotations": _ann_count > 0,
+                        "has_framework_annotations": _ann_count > 0,
                         "_rank": _pub_count + _ann_count * 2,
                     })
 
                 _java_candidates.sort(
-                    key=lambda x: -(x["public_method_count"] * (1.5 if x["has_spring_annotations"] else 1.0))
+                    key=lambda x: -(x["public_method_count"] * (1.5 if x["has_framework_annotations"] else 1.0))
                 )
                 _top = _java_candidates if all_gaps else _java_candidates[:20]
                 test_gaps = [
                     {
                         "path": c["path"],
                         "public_method_count": c["public_method_count"],
-                        "has_spring_annotations": c["has_spring_annotations"],
-                        "rank_score": round(c["public_method_count"] * (1.5 if c["has_spring_annotations"] else 1.0), 1),
+                        "has_framework_annotations": c["has_framework_annotations"],
+                        "rank_score": round(c["public_method_count"] * (1.5 if c["has_framework_annotations"] else 1.0), 1),
                     }
                     for c in _top
                 ]
@@ -1893,15 +1905,20 @@ class TaskContextBuilder:
 
         conf_summary, analysis_gaps = ConfidenceAnalyzer().analyze(sm_for_conf)
         confidence = conf_summary.overall
+        _has_mybatis = any(
+            f.name == "MyBatis"
+            for s in stacks
+            for f in getattr(s, "frameworks", [])
+        )
         if task_name in ("delta", "review-pr"):
             # Use delta-specific gaps; ConfidenceAnalyzer gaps are about full-repo
             # detection quality and are not meaningful for an incremental diff.
             gaps = _delta_analysis_gaps
-            if _mybatis_warning:
+            if _mybatis_warning and _has_mybatis:
                 gaps.append(_mybatis_warning["reason"])
         else:
             gaps = [g.reason for g in analysis_gaps]
-            if _mybatis_warning:
+            if _mybatis_warning and _has_mybatis:
                 gaps.append(_mybatis_warning["reason"])
 
         # ── 9. why_these_files ────────────────────────────────────────────────
@@ -2262,6 +2279,9 @@ class TaskContextBuilder:
                     # Single-token match: no boost — avoids OR explosion
 
                 # ── Git / annotation signals ──
+                _note_ct = _note_counts.get(path, 0)
+                if _note_ct > 0:
+                    _why_parts.append(f"annotation density ({_note_ct} FIXME/BUG/HACK notes)")
                 if path in _uncommitted:
                     content_boost += 0.40
                     _why_parts.append("uncommitted change (+0.40)")
@@ -2359,11 +2379,21 @@ class TaskContextBuilder:
             if task_name == "onboard":
                 def _arch_layer(p: str) -> str:
                     n = Path(p).name.lower()
+                    is_java = n.endswith(".java")
+                    # HTTP handler layer: Spring MVC controllers AND JAX-RS resources/endpoints
+                    # Restrict "resource"/"endpoint" to .java files to avoid matching
+                    # Maven's src/main/resources/ directory or XML resource files.
                     if "controller" in n:
                         return "controllers"
-                    if "repository" in n or "mapper" in n or "dao" in n:
+                    if is_java and ("resource" in n or "endpoint" in n or "restadapter" in n):
+                        return "controllers"
+                    # Data access layer: Spring repos, DAOs, JDBC, JPA stores
+                    if "repository" in n or "mapper" in n or "dao" in n or "store" in n:
                         return "repositories"
+                    # Business logic: Spring @Service, CDI providers, factories
                     if "service" in n:
+                        return "services"
+                    if is_java and ("provider" in n or "factory" in n or "manager" in n):
                         return "services"
                     pn = p.replace("\\", "/")
                     if "entity" in n or "/entity/" in pn or "/domain/" in pn or "/model/" in pn:
