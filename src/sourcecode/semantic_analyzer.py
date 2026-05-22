@@ -54,10 +54,18 @@ _MAPPER_IFACE_RE = re.compile(
 _EXTENDS_RE = re.compile(
     r'(?:class|interface)\s+([A-Z][A-Za-z0-9_]*)\s+extends\s+([A-Z][A-Za-z0-9_]*)'
 )
-_M3_FILTRO_METHOD_RE = re.compile(
-    r'@M3FiltroSeguridad(?:\([^)]*\))?\s+(?:@[^\s]+\s+)*'
-    r'(?:public|private|protected)\s+\w[\w<>\[\]]*\s+([a-z][A-Za-z0-9_]*)\s*\('
-)
+# Custom AOP annotation registry — extend here for project-specific security/AOP annotations.
+# Each entry: (method_regex, impl_symbol_name).
+# method_regex must capture the annotated method name in group 1.
+_CUSTOM_AOP_ANNOTATIONS: list[tuple[re.Pattern, str]] = [
+    (
+        re.compile(
+            r'@M3FiltroSeguridad(?:\([^)]*\))?\s+(?:@[^\s]+\s+)*'
+            r'(?:public|private|protected)\s+\w[\w<>\[\]]*\s+([a-z][A-Za-z0-9_]*)\s*\('
+        ),
+        "M3FiltroSeguridadImpl",
+    ),
+]
 _LOMBOK_CLASS_RE = re.compile(
     r'(@(?:Data|Slf4j|Builder|AllArgsConstructor|NoArgsConstructor)(?:\([^)]*\))?\s+)*'
     r'(?:public\s+)?(?:class|interface)\s+([A-Z][A-Za-z0-9_]*)',
@@ -1061,19 +1069,20 @@ class SemanticAnalyzer:
                 method="heuristic",
             ))
 
-        # P3-C: @M3FiltroSeguridad AOP proxy edges
-        for m in _M3_FILTRO_METHOD_RE.finditer(content):
-            method_name = m.group(1)
-            line = content[: m.start()].count("\n") + 1
-            calls.append(CallRecord(
-                caller_path=rel_path,
-                caller_symbol="M3FiltroSeguridadImpl",
-                callee_path=rel_path,
-                callee_symbol=method_name,
-                call_line=line,
-                confidence="medium",
-                method="heuristic",
-            ))
+        # P3-C: Custom AOP annotation proxy edges — driven by _CUSTOM_AOP_ANNOTATIONS registry
+        for _aop_re, _aop_impl in _CUSTOM_AOP_ANNOTATIONS:
+            for m in _aop_re.finditer(content):
+                method_name = m.group(1)
+                line = content[: m.start()].count("\n") + 1
+                calls.append(CallRecord(
+                    caller_path=rel_path,
+                    caller_symbol=_aop_impl,
+                    callee_path=rel_path,
+                    callee_symbol=method_name,
+                    call_line=line,
+                    confidence="medium",
+                    method="heuristic",
+                ))
 
         return symbols, calls
 

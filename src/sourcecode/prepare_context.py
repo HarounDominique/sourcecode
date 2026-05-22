@@ -2103,8 +2103,15 @@ class TaskContextBuilder:
         _uncommitted = uncommitted_files or set()
         _max_churn = max(_hotspots.values(), default=1)
 
+        # Per-file note counts — feeds code_note_count into RankingEngine for all tasks.
+        # RankingEngine is the sole ranking source; no ad-hoc annotation boost outside it.
+        _note_counts: dict[str, int] = {}
+        for _n in (code_notes or []):
+            _np = getattr(_n, "path", "")
+            if _np:
+                _note_counts[_np] = _note_counts.get(_np, 0) + 1
+
         # Pre-compute fix-bug signals (used only when task_name == "fix-bug")
-        _annotated_files: set[str] = set()
         _dominant_stack = ""
         _recently_changed_stacks: set[str] = set()
         # Query-aware signals extracted from symptom (class names, exception types, tokens)
@@ -2113,10 +2120,6 @@ class TaskContextBuilder:
         _symptom_tokens: set[str] = set()          # all lowercase tokens
 
         if task_name == "fix-bug":
-            _bug_kinds = {"FIXME", "BUG", "HACK", "XXX"}
-            for _n in (code_notes or []):
-                if getattr(_n, "kind", "").upper() in _bug_kinds:
-                    _annotated_files.add(getattr(_n, "path", ""))
 
             def _file_stack(p: str) -> str:
                 ext = Path(p).suffix.lower()
@@ -2167,13 +2170,15 @@ class TaskContextBuilder:
             if is_test and task_name != "generate-tests":
                 continue
 
-            # Structural + git signals from unified engine (task-weighted)
+            # Structural + git signals from unified engine (task-weighted).
+            # code_note_count routes annotation density through RankingEngine — single source.
             fs = engine.score(
                 path,
                 is_entrypoint=(path in runtime_entry_set),
                 git_churn=_hotspots.get(path, 0),
                 max_churn=_max_churn,
                 is_changed=(path in _uncommitted),
+                code_note_count=_note_counts.get(path, 0),
                 task=task_name,
             )
 
@@ -2264,9 +2269,6 @@ class TaskContextBuilder:
                 if _recency > 0:
                     content_boost += _recency
                     _why_parts.append(f"recent commits (+{_recency:.2f})")
-                if path in _annotated_files:
-                    content_boost += 0.20
-                    _why_parts.append("FIXME/BUG annotation (+0.20)")
                 _file_stk = _file_stack(path)
                 if _dominant_stack and _file_stk == _dominant_stack:
                     content_boost += 0.10

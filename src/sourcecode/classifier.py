@@ -20,6 +20,7 @@ _API_FRAMEWORKS = {
     "Rocket",
     "Spring Boot",
     "Quarkus",
+    "Jakarta EE",   # JAX-RS / Jakarta REST — pure JAX-RS projects must not fall to "unknown"
     "Laravel",
     "Symfony",
     "Ktor",

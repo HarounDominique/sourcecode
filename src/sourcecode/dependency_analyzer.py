@@ -128,8 +128,13 @@ def _infer_role(name: str, ecosystem: str, scope: str) -> str:
         return "runtime"
 
     if ecosystem == "java":
+        # Scope is authoritative: provided and dev scopes are not runtime, regardless of
+        # artifact name. Checking artifact patterns first would mis-classify spring-boot-test
+        # (scope=test) as "runtime", inflating false-positive fan-in signals.
         if scope == "provided":
             return "provided"
+        if is_dev:
+            return "devtool"
         artifact = n.split(":")[-1] if ":" in n else n
         if any(x in artifact for x in ("spring-boot", "spring-security")):
             return "runtime"
@@ -143,7 +148,7 @@ def _infer_role(name: str, ecosystem: str, scope: str) -> str:
             return "parsing"
         if any(x in artifact for x in ("jjwt", "nimbus-jose")):
             return "runtime"
-        return "devtool" if is_dev else "runtime"
+        return "runtime"
 
     return "devtool" if is_dev else "runtime"
 

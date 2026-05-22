@@ -34,13 +34,16 @@ _HTTP_PATH_RE = re.compile(
 _REQUEST_METHOD_VERB_RE = re.compile(
     r'method\s*=\s*RequestMethod\.([A-Z]+)'
 )
-# @M3FiltroSeguridad custom security annotation
-_M3_FILTRO_RE = re.compile(r'@M3FiltroSeguridad\b')
-_M3_FILTRO_PARAMS_RE = re.compile(
-    r'@M3FiltroSeguridad\s*\(\s*'
-    r'(?:nombreRecurso\s*=\s*(?:"([^"]*)"|([\w.]+)))?'  # group 1: string literal, group 2: constant ref
-    r'(?:[^)]*nivelRequerido\s*=\s*(\d+))?'  # group 3: nivel
-)
+# Custom security annotation registry — extend here for project-specific annotations.
+# Each entry: annotation_simple_name → compiled params regex.
+# Groups: (1) resource string literal, (2) resource constant ref, (3) level integer.
+_CUSTOM_SECURITY_ANNOTATIONS: dict[str, re.Pattern] = {
+    "M3FiltroSeguridad": re.compile(
+        r'@M3FiltroSeguridad\s*\(\s*'
+        r'(?:nombreRecurso\s*=\s*(?:"([^"]*)"|([\w.]+)))?'
+        r'(?:[^)]*nivelRequerido\s*=\s*(\d+))?'
+    ),
+}
 
 # Security config detection
 _WEB_SECURITY_CONFIGURER_RE = re.compile(r'WebSecurityConfigurerAdapter\b')
@@ -436,7 +439,7 @@ class JavaDetector(AbstractDetector):
         ))
         if (not has_controller and not has_filter and not has_security
                 and "ControllerAdvice" not in content
-                and "M3FiltroSeguridad" not in content
+                and not any(ann in content for ann in _CUSTOM_SECURITY_ANNOTATIONS)
                 and not has_jax_rs and not has_cdi and not has_spi):
             return []
 
@@ -449,11 +452,13 @@ class JavaDetector(AbstractDetector):
             elif verb_match:
                 http_path = f"[{verb_match.group(1)}]"
             security_evidence = None
-            m3_match = _M3_FILTRO_PARAMS_RE.search(content)
-            if m3_match:
-                nombre = m3_match.group(1) or m3_match.group(2) or ""
-                nivel = m3_match.group(3) or ""
-                security_evidence = f"@M3FiltroSeguridad(nombreRecurso={nombre!r}, nivelRequerido={nivel})"
+            for _ann_name, _ann_re in _CUSTOM_SECURITY_ANNOTATIONS.items():
+                _m = _ann_re.search(content)
+                if _m:
+                    nombre = _m.group(1) or _m.group(2) or ""
+                    nivel = _m.group(3) or ""
+                    security_evidence = f"@{_ann_name}(nombreRecurso={nombre!r}, nivelRequerido={nivel})"
+                    break
             return [EntryPoint(
                 path=rel_path, stack="java", kind="rest_controller",
                 source="annotation", confidence="high",
@@ -474,11 +479,13 @@ class JavaDetector(AbstractDetector):
             elif verb_match:
                 http_path = f"[{verb_match.group(1)}]"
             security_evidence = None
-            m3_match = _M3_FILTRO_PARAMS_RE.search(content)
-            if m3_match:
-                nombre = m3_match.group(1) or m3_match.group(2) or ""
-                nivel = m3_match.group(3) or ""
-                security_evidence = f"@M3FiltroSeguridad(nombreRecurso={nombre!r}, nivelRequerido={nivel})"
+            for _ann_name, _ann_re in _CUSTOM_SECURITY_ANNOTATIONS.items():
+                _m = _ann_re.search(content)
+                if _m:
+                    nombre = _m.group(1) or _m.group(2) or ""
+                    nivel = _m.group(3) or ""
+                    security_evidence = f"@{_ann_name}(nombreRecurso={nombre!r}, nivelRequerido={nivel})"
+                    break
             return [EntryPoint(
                 path=rel_path, stack="java", kind="mvc_controller",
                 source="annotation", confidence="medium",
@@ -514,7 +521,10 @@ class JavaDetector(AbstractDetector):
             )]
 
         # --- JAX-RS resource class ---
-        if has_jax_rs and _JAX_RS_PATH_RE.search(content) and _JAX_RS_VERB_RE.search(content):
+        # Guard uses annotation PRESENCE ("@Path" in content), not _JAX_RS_PATH_RE, because
+        # the value-parsing regex fails for @Path(CONSTANT) and @Path(PREFIX + "/sub").
+        # _JAX_RS_PATH_RE is still used to extract the http_path display string when parseable.
+        if has_jax_rs and "@Path" in content and _JAX_RS_VERB_RE.search(content):
             path_m = _JAX_RS_PATH_RE.search(content)
             verb_m = _JAX_RS_VERB_RE.search(content)
             http_path: str | None = None

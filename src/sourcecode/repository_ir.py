@@ -225,6 +225,14 @@ _SPRING_OTHER: frozenset[str] = frozenset({
 
 _PUBLISH_EVENT_RE = re.compile(r'\.publishEvent\s*\(\s*new\s+(\w+)\s*[(\{]')
 
+# Keycloak SPI event fire pattern: XxxEvent.fire(session, ...)
+_FIRE_EVENT_RE = re.compile(r'\b(\w+Event)\.fire\s*\(')
+
+# Edge types used for subsystem grouping — semantic hierarchy only, not imports
+_SUBSYSTEM_STRUCTURAL_EDGES: frozenset[str] = frozenset({
+    "extends", "implements", "injects", "contained_in",
+})
+
 _HTTP_METHOD_MAP: dict[str, str] = {
     # Spring MVC
     "@GetMapping": "GET",
@@ -859,8 +867,8 @@ def _build_relations(
                     evidence={"type": "structural", "value": f"member of {enclosing}"},
                 ))
 
-    # Fix 5: Event flow edges — publishEvent publishers and @EventListener subscribers.
-    # listens_to_event: method with @EventListener → resolved event parameter type(s).
+    # Event flow edges — listens_to_event and publishes_event.
+    # Spring: method with @EventListener → resolved event parameter type(s).
     for sym in symbols:
         if sym.type == "method" and "@EventListener" in sym.annotations:
             for imp_fqn in sym.imports_used:
@@ -872,8 +880,9 @@ def _build_relations(
                     evidence={"type": "annotation", "value": "@EventListener"},
                 ))
 
-    # publishes_event: class that calls publishEvent(new XxxEvent(...)) → event type FQN.
     _class_syms = [s for s in symbols if s.type in ("class", "interface") and "#" not in s.symbol]
+
+    # Spring: class that calls publishEvent(new XxxEvent(...)) → event type FQN.
     for m in _PUBLISH_EVENT_RE.finditer(source):
         event_simple = m.group(1)
         event_fqn = import_map.get(event_simple, event_simple)
@@ -884,6 +893,32 @@ def _build_relations(
                 type="publishes_event",
                 confidence="medium",
                 evidence={"type": "method_call", "value": f"publishEvent(new {event_simple})"},
+            ))
+
+    # Keycloak SPI: XxxEvent.fire(...) static dispatch → publishes_event.
+    for m in _FIRE_EVENT_RE.finditer(source):
+        event_simple = m.group(1)
+        event_fqn = import_map.get(event_simple, event_simple)
+        for cls_sym in _class_syms:
+            edges.append(RelationEdge(
+                from_symbol=cls_sym.symbol,
+                to_symbol=event_fqn,
+                type="publishes_event",
+                confidence="medium",
+                evidence={"type": "method_call", "value": f"{event_simple}.fire(...)"},
+            ))
+
+    # Keycloak SPI: class implementing EventListenerProvider → listens_to_event.
+    _ELP_IFACE = "EventListenerProvider"
+    for sym in symbols:
+        if sym.type == "class" and _ELP_IFACE in (sym.signature or ""):
+            event_fqn = import_map.get("Event", "org.keycloak.events.Event")
+            edges.append(RelationEdge(
+                from_symbol=sym.symbol,
+                to_symbol=event_fqn,
+                type="listens_to_event",
+                confidence="high",
+                evidence={"type": "signature", "value": f"implements {_ELP_IFACE}"},
             ))
 
     seen: set[tuple[str, str, str]] = set()
@@ -1248,49 +1283,72 @@ def _common_package_prefix(fqns: list[str]) -> str:
 
 
 def _subsystem_label(package_prefix: str) -> str:
-    """Derive short human label from package prefix (last meaningful segment)."""
+    """Derive short human label enforcing minimum meaningful depth.
+
+    For org.keycloak.services → "keycloak.services" (not "services" alone).
+    Avoids single-segment labels like "org" or "keycloak" that convey nothing.
+    """
     parts = [p for p in package_prefix.split(".") if p]
-    # Skip generic top-level segments
     _SKIP = {"com", "org", "net", "io", "java", "javax"}
     meaningful = [p for p in parts if p not in _SKIP]
-    return meaningful[-1] if meaningful else (parts[-1] if parts else package_prefix)
+    if not meaningful:
+        return parts[-1] if parts else package_prefix
+    # Use last two meaningful segments for disambiguation:
+    # org.keycloak.services → ["keycloak", "services"] → "keycloak.services"
+    if len(meaningful) >= 2:
+        return f"{meaningful[-2]}.{meaningful[-1]}"
+    return meaningful[-1]
 
 
-def _detect_subsystems(all_fqns: list[str], relations: list[RelationEdge]) -> list[dict]:
-    """Connected components of the relation graph (Union-Find, graph-only).
+def _canonical_subsystem_pkg(fqn: str) -> str:
+    """Canonical subsystem package for a FQN — minimum depth 3 for org/com/net/io packages.
 
-    Returns labeled subsystem objects instead of raw FQN arrays.
+    org.keycloak.services.FooResource  → org.keycloak.services
+    org.keycloak.FooClass              → org.keycloak
+    com.example.util.Helper            → com.example.util
+    SomeTopLevelClass                  → SomeTopLevelClass
+
+    Never returns a bare TLD ("org", "com") — that collapses all classes into one subsystem.
+    When only 1 lowercase segment exists before the class boundary, grabs one raw segment
+    (even if uppercase) to force at least 2-segment grouping.
     """
-    fqn_set = set(all_fqns)
-    parent: dict[str, str] = {fqn: fqn for fqn in all_fqns}
+    _TOP_LEVEL = {"com", "org", "net", "io", "java", "javax"}
+    parts: list[str] = []
+    for segment in fqn.split("."):
+        if "#" in segment or (segment and segment[0].isupper()):
+            break
+        parts.append(segment)
+    if not parts:
+        return fqn.rsplit(".", 1)[0] if "." in fqn else fqn
+    if parts[0] in _TOP_LEVEL and len(parts) >= 3:
+        return ".".join(parts[:3])
+    # Prevent bare TLD collapse: "org" or "com" alone as subsystem key is meaningless
+    # and groups ALL classes under that TLD into a single giant component.
+    # When only the TLD was collected before hitting a class boundary, grab the next
+    # raw FQN segment (may be uppercase) to produce a 2-segment grouping key.
+    if parts[0] in _TOP_LEVEL and len(parts) == 1:
+        raw = fqn.split(".")
+        if len(raw) >= 2:
+            return f"{raw[0]}.{raw[1].split('#')[0]}"
+    return ".".join(parts)
 
-    def find(x: str) -> str:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
 
-    def union(x: str, y: str) -> None:
-        rx, ry = find(x), find(y)
-        if rx != ry:
-            parent[rx] = ry
+def _detect_subsystems(all_fqns: list[str], relations: list[RelationEdge]) -> list[dict]:  # noqa: ARG001
+    """Group symbols by canonical subsystem package (minimum depth org.keycloak.<module>).
 
-    for edge in relations:
-        f, t = edge.from_symbol, edge.to_symbol
-        if f in fqn_set and t in fqn_set:
-            union(f, t)
-
+    Uses package-prefix grouping instead of Union-Find on relation edges.
+    Union-Find on imports produced one giant component ("org") for large monorepos.
+    Package-prefix grouping at depth 3 yields meaningful module-level subsystems.
+    """
     components: dict[str, list[str]] = {}
     for fqn in all_fqns:
-        root = find(fqn)
-        components.setdefault(root, []).append(fqn)
+        pkg = _canonical_subsystem_pkg(fqn)
+        components.setdefault(pkg, []).append(fqn)
 
     result: list[dict] = []
-    for members in sorted(components.values()):
+    for pkg_prefix, members in sorted(components.items()):
         members = sorted(members)
-        pkg_prefix = _common_package_prefix(members)
         label = _subsystem_label(pkg_prefix)
-        # Summary: first 3 short class names + total count
         short_names = [m.split(".")[-1].split("#")[0] for m in members[:3]]
         summary = ", ".join(short_names)
         if len(members) > 3:
@@ -1408,6 +1466,56 @@ def _bfs_impact_with_paths(
 # ---------------------------------------------------------------------------
 # Phase 5 — Assembly: single output contract
 # ---------------------------------------------------------------------------
+
+def _compute_analysis_gaps(
+    symbols: list[SymbolRecord],
+    spring_summary: dict,
+    route_surface: list[dict],
+    relations: list[RelationEdge],
+) -> list[dict]:
+    """Compute structural analysis gaps — real system failures, not cosmetic issues."""
+    gaps: list[dict] = []
+
+    if not symbols:
+        gaps.append({
+            "area": "symbol_extraction",
+            "reason": "No Java symbols extracted — check path or file access",
+            "impact": "high",
+        })
+        return gaps
+
+    controllers = spring_summary.get("controllers", [])
+    if controllers and not route_surface:
+        gaps.append({
+            "area": "route_surface",
+            "reason": (
+                f"{len(controllers)} controller(s) detected but route_surface is empty — "
+                "JAX-RS @Path or Spring @RequestMapping annotations may be missing"
+            ),
+            "impact": "high",
+        })
+
+    # Detect EventListenerProvider implementations via class signature, not class name.
+    # A class named "CustomProcessor" implementing EventListenerProvider would be missed
+    # by a class-name check but is correctly found via its implements clause in signature.
+    _ELP_IFACE = "EventListenerProvider"
+    elp_impls = [
+        sym.symbol for sym in symbols
+        if sym.type == "class" and _ELP_IFACE in (sym.signature or "")
+    ]
+    event_edges = [e for e in relations if e.type in ("listens_to_event", "publishes_event")]
+    if elp_impls and not event_edges:
+        gaps.append({
+            "area": "event_flow",
+            "reason": (
+                f"{len(elp_impls)} EventListenerProvider implementation(s) found but "
+                "no event flow edges detected"
+            ),
+            "impact": "medium",
+        })
+
+    return gaps
+
 
 def _edge_to_dict(edge: RelationEdge) -> dict:
     return {
@@ -1629,19 +1737,18 @@ def _assemble(
             by_type.setdefault(e.type, []).append(e.from_symbol)
         reverse_graph_out[target] = by_type
 
-    # IC-005: aggregate event flow edges already built in _build_relations
+    # IC-005: aggregate event flow edges already built in _build_relations.
+    # Always emit spring_events (even when empty) so callers don't need key-presence checks.
     _listen_edges = [e for e in sorted_rels if e.type == "listens_to_event"]
     _publish_edges = [e for e in sorted_rels if e.type == "publishes_event"]
-    _spring_events: Optional[dict] = None
-    if _listen_edges or _publish_edges:
-        _spring_events = {
-            "listeners": sorted({e.from_symbol for e in _listen_edges}),
-            "publishers": sorted({e.from_symbol for e in _publish_edges}),
-            "event_types": sorted({e.to_symbol for e in _listen_edges + _publish_edges}),
-            "flow_count": len(_listen_edges) + len(_publish_edges),
-        }
+    _spring_events: dict = {
+        "listeners": sorted({e.from_symbol for e in _listen_edges}),
+        "publishers": sorted({e.from_symbol for e in _publish_edges}),
+        "event_types": sorted({e.to_symbol for e in _listen_edges + _publish_edges}),
+        "flow_count": len(_listen_edges) + len(_publish_edges),
+    }
 
-    return {
+    _base = {
         "schema_version": "final-v1",
         "graph": {
             "nodes": graph_nodes,
@@ -1662,11 +1769,19 @@ def _assemble(
         },
         "subsystems": subsystems,
         "change_set": change_set_out,
-        "route_surface": _build_route_surface(sorted_syms, route_diffs, extends_map={
-            e.from_symbol: e.to_symbol.split(".")[-1]
-            for e in sorted_rels if e.type == "extends"
-        }),
-        **({"spring_events": _spring_events} if _spring_events else {}),
+    }
+
+    _route_surface = _build_route_surface(sorted_syms, route_diffs, extends_map={
+        e.from_symbol: e.to_symbol.split(".")[-1]
+        for e in sorted_rels if e.type == "extends"
+    })
+    _analysis_gaps = _compute_analysis_gaps(sorted_syms, spring_summary, _route_surface, sorted_rels)
+
+    return {
+        **_base,
+        "route_surface": _route_surface,
+        "spring_events": _spring_events,
+        "analysis_gaps": _analysis_gaps,
         "audit": {
             "dropped_fields": dropped_fields,
         },
@@ -1713,7 +1828,12 @@ def _build_route_surface(
             # JAX-RS: class-level @Path is the resource prefix.
             args = sym.annotation_values.get("@Path", "")
             prefixes = _parse_route_paths(args) if args else [""]
-        class_info[simple] = {"fqn": sym.symbol, "prefixes": prefixes, "own_endpoints": []}
+        class_info[simple] = {
+            "fqn": sym.symbol,
+            "prefixes": prefixes,
+            "own_endpoints": [],
+            "has_path_ann": "@Path" in sym.annotations or "@RequestMapping" in sym.annotations,
+        }
 
     routes: list[dict] = []
     seen: set[tuple] = set()
@@ -1732,6 +1852,15 @@ def _build_route_surface(
         # JAX-RS: HTTP verb annotations carry no path; path lives in @Path on the method.
         if ann_name in _JAXRS_HTTP_ANNOTATIONS:
             suffix = _parse_route_path(sym.annotation_values.get("@Path", ""))
+            # Skip JAX-RS routes with no server-side path binding — client proxy interfaces
+            # have HTTP verb annotations but neither a class-level @Path nor a method @Path.
+            # Use has_path_ann (annotation presence) not just prefix value: @Path args may be
+            # unparsed (multi-line, constant expression) yet the class IS a server resource.
+            _cls_entry = class_info.get(cls_simple, {})
+            cls_prefixes = _cls_entry.get("prefixes", [""])
+            cls_has_path = _cls_entry.get("has_path_ann", False)
+            if not suffix and not cls_has_path and all(not p for p in cls_prefixes):
+                continue
         else:
             suffix = _parse_route_path(args)
         method = _parse_route_http_method(ann_name, args) or "GET"
