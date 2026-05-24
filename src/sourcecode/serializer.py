@@ -1324,7 +1324,7 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False, full: bool = False) ->
         for s in _stack_best.values()
     ]
 
-    # Confidence — overall only + anomalies
+    # Confidence — overall only + anomalies + factors (P3: traceability)
     conf_dict: Any = None
     if sm.confidence_summary is not None:
         cs = sm.confidence_summary
@@ -1336,6 +1336,10 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False, full: bool = False) ->
         }
         if cs.anomalies:
             conf_dict["anomalies"] = cs.anomalies
+        # Traceability: expose what drove the score so the caller can understand
+        # why --compact may differ from --agent (architecture analyzer not run)
+        if cs.factors:
+            conf_dict["factors"] = cs.factors
 
     # Analysis gaps
     gaps_list: Any = None
@@ -2097,17 +2101,18 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
         }
         if cs.anomalies:
             conf["anomalies"] = cs.anomalies
+        # Traceability: expose what drove the score (P3 fix — single source of truth)
+        if cs.factors:
+            conf["factors"] = cs.factors
         result["confidence_summary"] = conf
 
     # ── 11. Confidence reasons: actionable explanation of low-confidence sections
+    # NOTE: Do NOT mutate confidence_summary here — rendering must never recalculate
+    # scores. The upgrade logic (low → high when no reasons found) belongs in
+    # ConfidenceAnalyzer, not in the renderer. See confidence_analyzer.py factors.
     _conf_reasons = _confidence_reasons(sm)
     if _conf_reasons:
         result["confidence_reasons"] = _conf_reasons
-    elif (sm.architecture and sm.architecture.requested
-          and sm.architecture.confidence == "low"
-          and "confidence_summary" in result):
-        # No reasons found → low was overly conservative; upgrade to high
-        result["confidence_summary"].setdefault("sections", {})["architecture"] = "high"
 
     # ── 12. Analysis gaps ─────────────────────────────────────────────────────
     analysis_gaps: list[dict[str, Any]] = []

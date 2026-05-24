@@ -1237,6 +1237,7 @@ def main(
         doc_summary=doc_summary,
         file_metrics=file_metrics_records,
         metrics_summary=metrics_summary,
+        extra_excludes=sorted(_extra_excludes) if _extra_excludes else [],
     )
 
     # Populate Java-specific root fields from java stack detection (FIX-6, 7, 8)

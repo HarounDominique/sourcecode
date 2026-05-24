@@ -255,6 +255,13 @@ class ConfidenceAnalyzer:
                 ))
 
         # ── Java test coverage gap check (P2-A) ──────────────────────────────
+        # Distinguish "tests absent" from "tests excluded via --exclude".
+        # Reporting 0 test files as impact="high" when tests were filtered is a
+        # false inference: absence must not be concluded from intentional exclusion.
+        _extra_exc = frozenset(getattr(sm, "extra_excludes", []) or [])
+        _test_exclude_tokens = frozenset({"test", "tests", "spec", "specs", "it", "testing"})
+        _tests_deliberately_excluded = bool(_extra_exc & _test_exclude_tokens)
+
         _java_all = [p for p in sm.file_paths if p.endswith(".java")]
         _java_tests = [
             p for p in _java_all
@@ -264,7 +271,18 @@ class ConfidenceAnalyzer:
         _java_prod = [p for p in _java_all if p not in set(_java_tests)]
         if _java_prod and len(_java_prod) >= 10:
             _ratio = len(_java_tests) / len(_java_prod)
-            if _ratio < 0.05:
+            if not _java_tests and _tests_deliberately_excluded:
+                # Tests exist but were excluded from analysis — don't fabricate absence
+                gaps.append(AnalysisGap(
+                    area="testing",
+                    reason=(
+                        f"Tests excluded from analysis via --exclude flag "
+                        f"({', '.join(sorted(_extra_exc & _test_exclude_tokens))}) — "
+                        f"test coverage not assessed"
+                    ),
+                    impact="low",
+                ))
+            elif _ratio < 0.05:
                 gaps.append(AnalysisGap(
                     area="testing",
                     reason=(
@@ -302,6 +320,9 @@ class ConfidenceAnalyzer:
         # typically reflects missing documentation (no OpenAPI/ADR), not structural uncertainty.
         # In that case, clamp the downgrade to "medium" so that high stack + high entry_points
         # is not contradicted by a docs gap.
+        factors: list[str] = []
+        _pre_arch_overall = overall  # track score before arch factoring for traceability
+
         arch = sm.architecture
         if arch is not None and arch.requested:
             arch_conf_for_overall = arch.confidence
@@ -313,11 +334,31 @@ class ConfidenceAnalyzer:
                 # Architecture could not be inferred — don't let stack alone push to high
                 if overall == "high":
                     overall = "medium"
+            # Traceability: record whether arch analysis changed the score
+            if overall != _pre_arch_overall:
+                factors.append(
+                    f"architecture.confidence={arch_conf_for_overall} (pattern={arch.pattern or 'unknown'}) "
+                    f"→ downgraded from {_pre_arch_overall} to {overall}"
+                )
+            else:
+                factors.append(
+                    f"architecture.confidence={arch_conf_for_overall} (pattern={arch.pattern or 'unknown'}) "
+                    f"→ no change to {overall}"
+                )
+        else:
+            # Architecture analyzer not run — score reflects stack+entry_points only
+            factors.append(
+                "architecture not analyzed — run with --agent for full confidence assessment"
+            )
 
         # Downgrade if gaps are severe
         high_impact_gaps = [g for g in gaps if g.impact == "high"]
         if high_impact_gaps:
+            _pre_gap_overall = overall
             overall = "low" if overall != "high" else "medium"
+            if overall != _pre_gap_overall:
+                gap_areas = ", ".join(g.area for g in high_impact_gaps)
+                factors.append(f"high-impact gaps ({gap_areas}) → downgraded from {_pre_gap_overall} to {overall}")
 
         summary = ConfidenceSummary(
             overall=overall,  # type: ignore[arg-type]
@@ -327,6 +368,7 @@ class ConfidenceAnalyzer:
             soft_signals=soft_signals,
             ignored_signals=ignored_signals,
             anomalies=anomalies,
+            factors=factors,
         )
         return summary, gaps
 

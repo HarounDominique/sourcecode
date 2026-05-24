@@ -141,6 +141,11 @@ _REQUEST_MAPPING_RE = re.compile(
     r'@(?:Request|Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']'
 )
 
+# Regex to collect static final String constants for annotation constant-folding (P1 fix).
+_STATIC_FINAL_STR_RE = re.compile(
+    r'(?:public|protected|private)?\s*static\s+final\s+String\s+(\w+)\s*=\s*"([^"]*)"'
+)
+
 _ENDPOINT_ANNOTATIONS: frozenset[str] = frozenset({
     # Spring MVC
     "@GetMapping", "@PostMapping", "@PutMapping", "@DeleteMapping",
@@ -477,6 +482,10 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
         if parts[-1] != "*":
             import_map[parts[-1]] = fqn
 
+    # P1 fix: pre-scan all static final String constants for annotation constant-folding.
+    # This enables resolution of @RequestMapping("/" + SECTION_KEY) into "/category".
+    _file_constants = _collect_file_constants(source)
+
     symbols: list[SymbolRecord] = []
     depth = 0
     class_stack: list[tuple[str, int]] = []
@@ -484,7 +493,11 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
     pending_ann_values: dict[str, str] = {}
     in_block_comment = False
 
-    for line in source.splitlines():
+    # P1 fix: normalize multiline annotations (e.g. @RequestMapping(\n  value="..."\n))
+    # into single lines so the per-line regex can capture annotation args correctly.
+    _normalized_lines = _normalize_multiline_annotations(source.splitlines())
+
+    for line in _normalized_lines:
         stripped = line.strip()
 
         if in_block_comment:
@@ -508,7 +521,11 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
                 if ann not in pending_anns:
                     pending_anns.append(ann)
                 if ann_args and (ann in _ENDPOINT_ANNOTATIONS or ann in _PERMISSION_ANNOTATIONS or ann in _PATH_ANNOTATIONS):
-                    pending_ann_values[ann] = ann_args.strip()
+                    # P1 fix: attempt to resolve constant expressions before storing.
+                    # Transforms '"/" + SECTION_KEY' → '"/category"' when constant
+                    # is defined in this file. Falls back to original if unresolvable.
+                    resolved_args = _resolve_ann_path_expr(ann_args.strip(), _file_constants)
+                    pending_ann_values[ann] = resolved_args
             depth += net
             _pop_closed(class_stack, depth)
             continue
@@ -1082,6 +1099,140 @@ def _resolve_jaxrs_prefixes(
                 full_prefixes.append(combined)
 
     return full_prefixes if full_prefixes else own_prefixes
+
+
+# ---------------------------------------------------------------------------
+# P1 fix: static constant folding for Spring @RequestMapping annotations
+# ---------------------------------------------------------------------------
+
+def _collect_file_constants(source: str) -> dict[str, str]:
+    """Pre-scan Java source for all static final String constants.
+
+    Returns {simple_name: value} covering all classes in the file.
+    Used by _resolve_ann_path_expr to fold constant references in @RequestMapping args.
+    """
+    constants: dict[str, str] = {}
+    for m in _STATIC_FINAL_STR_RE.finditer(source):
+        constants[m.group(1)] = m.group(2)
+    return constants
+
+
+def _resolve_const_concat(expr: str, constants: dict[str, str]) -> Optional[str]:
+    """Resolve a Java string expression that may use + concatenation and constant refs.
+
+    Handles:
+      "literal"                       → "literal"
+      "/" + SECTION_KEY               → "/category"  (if SECTION_KEY in constants)
+      ClassName.FIELD + "/users"      → "prefix/users"  (looks up FIELD in constants)
+      "a" + UNKNOWN + "b"             → None  (unresolvable → caller keeps original)
+
+    Returns the resolved string value or None if any part cannot be resolved.
+    """
+    expr = expr.strip()
+    # Single string literal — extract content
+    lm = re.match(r'^"([^"]*)"$', expr)
+    if lm:
+        return lm.group(1)
+
+    # No concatenation operator → single constant reference
+    if "+" not in expr:
+        field = expr.split(".")[-1].strip()
+        return constants.get(field)  # None if not in file constants
+
+    # Split on + (handles ClassName.FIELD + "literal" + ... patterns)
+    parts = re.split(r'\s*\+\s*', expr)
+    resolved: list[str] = []
+    for part in parts:
+        part = part.strip()
+        lm2 = re.match(r'^"([^"]*)"$', part)
+        if lm2:
+            resolved.append(lm2.group(1))
+        else:
+            field = part.split(".")[-1].strip()
+            val = constants.get(field)
+            if val is None:
+                return None  # Unresolvable part — abort, preserve original
+            resolved.append(val)
+    return "".join(resolved)
+
+
+def _resolve_ann_path_expr(ann_args: str, constants: dict[str, str]) -> str:
+    """Try to resolve constant references inside annotation args.
+
+    Transforms raw annotation arg string — e.g.:
+      '"/" + AdminCategoryController.SECTION_KEY'
+    into a form _parse_route_paths can extract:
+      '"/category"'
+
+    If resolution fails (cross-file or unparseable), returns ann_args unchanged
+    so the existing literal-extraction fallback still runs.
+    """
+    ann_args = ann_args.strip()
+    if not constants:
+        return ann_args
+
+    # Named parameter forms: value = expr  /  path = expr
+    for key in ("value", "path"):
+        km = re.match(
+            rf'^\s*{key}\s*=\s*(.+?)(\s*,\s*(?:method|produces|consumes|params|headers|name)\b.*)?$',
+            ann_args, re.DOTALL
+        )
+        if km:
+            expr = km.group(1).strip().rstrip(",").strip()
+            resolved = _resolve_const_concat(expr, constants)
+            if resolved is not None:
+                tail = km.group(2) or ""
+                return f'{key} = "{resolved}"{tail}'
+            return ann_args  # Can't resolve, keep original
+
+    # Bare / positional expression: "lit" + CONST or just CONST
+    resolved = _resolve_const_concat(ann_args, constants)
+    if resolved is not None:
+        return f'"{resolved}"'
+    return ann_args
+
+
+def _normalize_multiline_annotations(lines: list[str]) -> list[str]:
+    """Merge multiline annotation spans into a single line.
+
+    Handles annotations split across lines because their args span multiple lines:
+      @RequestMapping(              ← opens paren, doesn't close
+          value = "/add",
+          method = RequestMethod.GET
+      )
+
+    Merges into: '@RequestMapping(value = "/add", method = RequestMethod.GET)'
+    """
+    result: list[str] = []
+    buf: list[str] = []
+    paren_depth = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if buf:
+            # Continuation of a multiline annotation
+            buf.append(stripped)
+            paren_depth += stripped.count("(") - stripped.count(")")
+            if paren_depth <= 0:
+                result.append(" ".join(buf))
+                buf = []
+                paren_depth = 0
+        elif stripped.startswith("@") and "(" in stripped:
+            opens = stripped.count("(")
+            closes = stripped.count(")")
+            if opens > closes:
+                # Unbalanced — start collecting continuation lines
+                buf = [stripped]
+                paren_depth = opens - closes
+            else:
+                result.append(line)
+        else:
+            result.append(line)
+
+    # Flush any dangling buffer (shouldn't happen in well-formed code)
+    if buf:
+        result.extend(buf)
+    return result
 
 
 def _parse_route_path(args_str: str) -> str:
@@ -2135,7 +2286,9 @@ def _build_route_surface(
         _sec = _route_security_from_sym(sym, _cls_sym_for_sec)
 
         for prefix in effective_prefixes:
-            full_path = (prefix + "/" + suffix).replace("//", "/").rstrip("/") or "/"
+            # P1 fix: re.sub collapses any number of consecutive slashes (///, //, etc.)
+            # Single .replace("//", "/") fails for triple-slash from prefix="/" + suffix="/{id}".
+            full_path = re.sub(r"/+", "/", prefix + "/" + suffix).rstrip("/") or "/"
             if not full_path.startswith("/"):
                 full_path = "/" + full_path
 
@@ -2182,7 +2335,8 @@ def _build_route_surface(
                 if parent["own_endpoints"]:
                     for verb, suffix, declaring_sym, stable_id in parent["own_endpoints"]:
                         for prefix in data["prefixes"]:
-                            full_path = (prefix + "/" + suffix).replace("//", "/").rstrip("/") or "/"
+                            # P1 fix: collapse any number of consecutive slashes
+                            full_path = re.sub(r"/+", "/", prefix + "/" + suffix).rstrip("/") or "/"
                             if not full_path.startswith("/"):
                                 full_path = "/" + full_path
                             key = (cls_simple, declaring_sym, verb, prefix)

@@ -547,6 +547,8 @@ class ConfidenceSummary:
     soft_signals: list[str] = field(default_factory=list)   # heuristic, extension-based
     ignored_signals: list[str] = field(default_factory=list)  # tooling dirs, aux manifests
     anomalies: list[str] = field(default_factory=list)
+    # Traceability: what drove the overall score (v1.31+)
+    factors: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -673,3 +675,6 @@ class SourceMap:
     language_version: Optional[str] = None    # "1.8" | "11" | "17"
     spring_profiles: list[str] = field(default_factory=list)
     app_server_hint: Optional[str] = None     # "weblogic" | "wildfly" | "tomcat"
+    # Exclusion context: patterns passed via --exclude; used by ConfidenceAnalyzer
+    # to distinguish "absent" from "excluded from analysis" (v1.31+)
+    extra_excludes: list = field(default_factory=list)  # JSON-serializable; frozenset in analyzer
