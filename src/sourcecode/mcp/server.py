@@ -93,8 +93,14 @@ def get_endpoints(repo_path: str = ".") -> dict:
 
     Maps to: sourcecode endpoints <repo_path>
     Returns: endpoints list with method, path, controller, handler fields;
-             total (int) and undocumented (int) counts.
+             security dict when authorization annotations are present
+             (policy: roles_allowed|permit_all|deny_all|authenticated|...);
+             total (int) and no_security_signal (int) counts.
+             no_security_signal counts endpoints with no recognized auth annotation —
+             repos using framework-level auth (e.g. Keycloak) may show high counts.
     Supports Spring MVC (@GetMapping etc.) and JAX-RS (@GET/@POST etc.).
+    Security annotations detected: @RolesAllowed, @PermitAll, @DenyAll,
+    @Authenticated, @PreAuthorize, @Secured, @SecurityRequirement, @M3FiltroSeguridad.
     repo_path: absolute path to the repository (default: current working directory).
     """
     if not isinstance(repo_path, str):
@@ -135,11 +141,17 @@ def get_delta(repo_path: str = ".", since: str = "HEAD~1") -> dict:
 
 @mcp.tool()
 def get_ir_summary(repo_path: str = ".") -> dict:
-    """Deterministic symbol-level IR summary for Java repositories.
+    """Deterministic symbol-level IR summary for Java repositories. Java only.
 
     Maps to: sourcecode repo-ir <repo_path> --summary-only
-    Returns: analysis summary, impact, and change_set — omits full graph nodes/edges.
-    repo_path: absolute path to the repository (default: current working directory).
+    Returns: reverse_graph (top 10 hubs), route_surface (top 50 endpoints),
+             subsystems (top 15), impact, analysis. Full graph nodes/edges omitted.
+
+    Output is bounded to ~100 KB for LLM safety. For full IR (can exceed 10 MB
+    on large repos), use the CLI: sourcecode repo-ir <path> --output ir.json
+    Use get_compact_context or get_agent_context for non-Java repos.
+
+    repo_path: absolute path to the Java repository (default: current working directory).
     """
     if not isinstance(repo_path, str):
         return _err("repo_path must be a string", "INVALID_ARGUMENT")
@@ -234,6 +246,34 @@ def generate_tests_context(repo_path: str = ".", include_all: bool = False) -> d
     args = ["prepare-context", "generate-tests", repo_path]
     if include_all:
         args.append("--all")
+    return _execute(args)
+
+
+@mcp.tool()
+def get_impact_context(repo_path: str = ".", target: str = "", depth: int = 4) -> dict:
+    """Blast-radius analysis: who calls a class and what breaks if it changes? Java only.
+
+    Maps to: sourcecode impact <target> <repo_path> [--depth <depth>]
+    Returns: direct_callers, indirect_callers, endpoints_affected,
+             transactional_boundaries_touched, risk_score, risk_level, stats.
+
+    Use this when:
+    - Planning a refactor: understand the full call chain before changing a class
+    - PR review: assess blast radius of a changed service or utility class
+    - Incident triage: find all paths that reach a faulty component
+
+    target: class name (simple or FQN) or Java file path. Examples:
+            "UserService", "org.example.UserService", "UserService.java"
+    repo_path: absolute path to the Java repository (default: current working directory).
+    depth: BFS depth for indirect caller traversal (1–8, default: 4).
+    """
+    if not isinstance(repo_path, str):
+        return _err("repo_path must be a string", "INVALID_ARGUMENT")
+    if not isinstance(target, str) or not target.strip():
+        return _err("target must be a non-empty class name or FQN", "INVALID_ARGUMENT")
+    if not isinstance(depth, int) or depth < 1 or depth > 8:
+        return _err("depth must be an integer between 1 and 8", "INVALID_ARGUMENT")
+    args = ["impact", target.strip(), repo_path, "--depth", str(depth)]
     return _execute(args)
 
 

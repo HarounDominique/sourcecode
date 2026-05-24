@@ -536,35 +536,41 @@ class TestReviewPrSuspectedAreas:
     """review-pr now requires a git diff — generic fallback removed."""
 
     def test_review_pr_requires_git_diff(self):
-        # FIXTURE has no uncommitted changes (or no git repo) — must exit 1 with structured error.
-        # When running inside the atlas-cli git tree with no staged changes, error is "no_diff".
-        # When running outside any git repo, error is "no_git_repo". Both are valid.
+        # FIXTURE has no uncommitted changes (or no git repo) — returns structured error.
+        # When running inside the atlas-cli git tree with no staged changes, error is "no_diff"
+        # (exit 0 — no_diff is not a failure, it means no changes to review).
+        # When running outside any git repo, error is "no_git_repo" (exit 1 — true error).
         result = _invoke("prepare-context", "review-pr", str(FIXTURE))
-        assert result.exit_code == 1, result.output
         data = _json(result)
         _git_errors = {"no_git_repo", "no_diff", "git_ref_not_found"}
         assert data.get("error") in _git_errors, f"Expected git error, got: {data}"
         assert "ci_decision" in data
+        # Exit code: 0 for no_diff (no changes = success), 1 for true errors
+        if data.get("error") == "no_diff":
+            assert result.exit_code == 0, f"no_diff must exit 0, got {result.exit_code}"
+        else:
+            assert result.exit_code == 1, f"git error '{data.get('error')}' must exit 1"
 
     def test_review_pr_error_json_is_machine_readable(self):
         result = _invoke("prepare-context", "review-pr", str(FIXTURE))
-        assert result.exit_code == 1
         data = _json(result)
         assert "error" in data
         assert "message" in data
         assert "ci_decision" in data
 
     def test_review_pr_no_diff_error_when_git_but_no_changes(self, monkeypatch):
-        # Simulate: git repo present but no changed files in scope
+        # Simulate: git repo present but no changed files in scope.
+        # no_diff is NOT a failure — it means nothing to review, exit 0 (like delta no_changes).
         from pathlib import Path as _Path
         from sourcecode import prepare_context as _pc
         monkeypatch.setattr(_pc.TaskContextBuilder, "_resolve_git_root", lambda self: _Path(str(FIXTURE)))
         monkeypatch.setattr(_pc.TaskContextBuilder, "_get_pr_scope_files", lambda self, since=None: ([], "git_diff", [], []))
         result = _invoke("prepare-context", "review-pr", str(FIXTURE))
-        assert result.exit_code == 1
         data = _json(result)
         assert data.get("error") == "no_diff"
         assert data.get("ci_decision") == "no_changes"
+        # FIX: no_diff → exit 0 (consistent with delta no_changes); was incorrectly exit 1
+        assert result.exit_code == 0, f"no_diff must exit 0 (not an error), got {result.exit_code}"
 
     def test_review_pr_with_mocked_diff_returns_pr_fields(self, monkeypatch):
         # Simulate: valid git repo with one changed controller file
@@ -720,3 +726,109 @@ class TestBehavioralImpact:
             assert "Repository" not in imp["statement"], f"Impact should not use class names: {imp}"
             assert imp["epistemic_level"] in ("FACT", "STRUCTURAL SIGNAL", "INFERRED (LOW CONFIDENCE)", "OMITTED")
             assert imp["support"]
+
+
+# ===========================================================================
+# P0 — Bounded relevance expansion (compute_context_limit + agent_view --full)
+# ===========================================================================
+
+class TestBoundedRelevanceExpansion:
+    """P0 fix: --full must never return all files. Bounded strategy enforced."""
+
+    def test_compute_context_limit_normal(self):
+        from sourcecode.serializer import compute_context_limit
+        assert compute_context_limit("normal", 20) == 20
+
+    def test_compute_context_limit_full(self):
+        from sourcecode.serializer import compute_context_limit
+        # min(20*2, 50) = 40
+        assert compute_context_limit("full", 20) == 40
+
+    def test_compute_context_limit_deep(self):
+        from sourcecode.serializer import compute_context_limit
+        # min(20*4, 100) = 80
+        assert compute_context_limit("deep", 20) == 80
+
+    def test_compute_context_limit_full_never_exceeds_50(self):
+        from sourcecode.serializer import compute_context_limit
+        # Even with large normal, full caps at 50
+        assert compute_context_limit("full", 40) == 50
+        assert compute_context_limit("full", 100) == 50
+
+    def test_compute_context_limit_deep_never_exceeds_100(self):
+        from sourcecode.serializer import compute_context_limit
+        assert compute_context_limit("deep", 30) == 100
+        assert compute_context_limit("deep", 100) == 100
+
+    def test_expand_relevance_window_normal(self):
+        from sourcecode.serializer import expand_relevance_window
+        files = list(range(100))  # 100 dummy items
+        result = expand_relevance_window(files, "normal", 20)
+        assert len(result) == 20
+
+    def test_expand_relevance_window_full_bounded(self):
+        from sourcecode.serializer import expand_relevance_window
+        files = list(range(100))
+        result = expand_relevance_window(files, "full", 20)
+        assert len(result) == 40
+        assert len(result) <= 50  # never all files
+
+    def test_expand_relevance_window_full_with_fewer_files(self):
+        from sourcecode.serializer import expand_relevance_window
+        files = list(range(10))  # fewer than limit
+        result = expand_relevance_window(files, "full", 20)
+        assert len(result) == 10  # returns what exists, not more
+
+    def _make_sm_with_many_paths(self, n: int):
+        from sourcecode.schema import AnalysisMetadata, SourceMap
+        sm = _make_sm(
+            metadata=AnalysisMetadata(analyzed_path=str(FIXTURE)),
+            file_paths=[f"src/main/java/com/example/Service{i}.java" for i in range(n)],
+        )
+        return sm
+
+    def test_agent_view_full_never_returns_all_files(self):
+        """Core P0 guard: full=True must not produce more files than compute_context_limit."""
+        from sourcecode.serializer import agent_view, compute_context_limit
+        sm = self._make_sm_with_many_paths(200)
+        data = agent_view(sm, full=True)
+        # file_relevance may be absent when all files score below threshold
+        fr = data.get("file_relevance", [])
+        cap = compute_context_limit("full", 20)
+        assert len(fr) <= cap, (
+            f"full=True returned {len(fr)} files but cap is {cap} — unbounded expansion!"
+        )
+
+    def test_agent_view_normal_capped_at_20(self):
+        from sourcecode.serializer import agent_view
+        sm = self._make_sm_with_many_paths(200)
+        data = agent_view(sm, full=False)
+        fr = data.get("file_relevance", [])
+        assert len(fr) <= 20
+
+    def test_agent_view_full_hint_not_say_see_all(self):
+        """Hint must not encourage unbounded expansion."""
+        from sourcecode.serializer import agent_view
+        sm = self._make_sm_with_many_paths(200)
+        data = agent_view(sm, full=True)
+        hint = data.get("file_relevance_hint", "")
+        # Old broken hint said "Use --full to see all." — ensure removed
+        assert "see all" not in hint.lower(), f"Hint still says 'see all': {hint!r}"
+
+    def test_agent_view_deterministic_ordering(self):
+        """Same input → same file order (deterministic)."""
+        from sourcecode.serializer import agent_view
+        sm = self._make_sm_with_many_paths(50)
+        data1 = agent_view(sm, full=True)
+        data2 = agent_view(sm, full=True)
+        assert data1.get("file_relevance") == data2.get("file_relevance")
+
+    def test_output_budget_still_applied(self):
+        """output_budget trim must still fire after relevance fix."""
+        from sourcecode.serializer import agent_view
+        from sourcecode.output_budget import trim_to_budget, BUDGET_AGENT
+        sm = self._make_sm_with_many_paths(200)
+        data = agent_view(sm, full=True)
+        trimmed = trim_to_budget(data, BUDGET_AGENT, label="agent")
+        import json
+        assert len(json.dumps(trimmed).encode()) <= BUDGET_AGENT * 1.05  # 5% tolerance

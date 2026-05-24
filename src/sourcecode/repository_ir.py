@@ -157,7 +157,34 @@ _JAXRS_HTTP_ANNOTATIONS: frozenset[str] = frozenset({
 # Annotations whose args contain a path value and must be captured.
 _PATH_ANNOTATIONS: frozenset[str] = frozenset({"@Path"})
 
-_PERMISSION_ANNOTATIONS: frozenset[str] = frozenset({"@M3FiltroSeguridad"})
+# Security / authorization annotations whose args must be captured.
+# Includes standard Jakarta EE, JAX-RS, Quarkus/MicroProfile, and custom patterns.
+_PERMISSION_ANNOTATIONS: frozenset[str] = frozenset({
+    # Custom (kept for backward compat)
+    "@M3FiltroSeguridad",
+    # Jakarta EE / JAX-RS standard
+    "@RolesAllowed",
+    "@PermitAll",
+    "@DenyAll",
+    # Quarkus / MicroProfile
+    "@Authenticated",
+    "@AuthenticatedWithRoles",
+    # Spring Security
+    "@PreAuthorize",
+    "@PostAuthorize",
+    "@Secured",
+    "@RequiresRoles",
+    "@RequiresPermissions",
+    # OpenAPI
+    "@SecurityRequirement",
+    # Jakarta Servlet
+    "@ServletSecurity",
+})
+
+# Marker-only security annotations that carry no args but still signal access policy.
+_SECURITY_MARKER_ANNOTATIONS: frozenset[str] = frozenset({
+    "@PermitAll", "@DenyAll", "@Authenticated",
+})
 
 _MODIFIER_WORDS: frozenset[str] = frozenset({
     "public", "private", "protected", "static", "final", "abstract",
@@ -1913,6 +1940,68 @@ def _assemble(
 
 
 # ---------------------------------------------------------------------------
+# Route surface security extraction
+# ---------------------------------------------------------------------------
+
+def _route_security_from_sym(
+    method_sym: "Optional[SymbolRecord]",
+    class_sym: "Optional[SymbolRecord]",
+) -> "Optional[dict]":
+    """Extract security policy from method and/or class-level annotations.
+
+    Resolution order (method-level takes precedence):
+      @DenyAll        → {policy: deny_all}
+      @PermitAll      → {policy: permit_all}
+      @RolesAllowed   → {policy: roles_allowed, roles: [...]}
+      @Authenticated  → {policy: authenticated}
+      @PreAuthorize   → {policy: spring_preauthorize, expression: ...}
+      @PostAuthorize  → {policy: spring_postauthorize, expression: ...}
+      @Secured        → {policy: secured, roles: [...]}
+
+    Falls back to class-level annotations if no method-level security found.
+    Returns None if no security signal detected at either level.
+    """
+    import re as _re
+
+    def _extract_from(sym: "SymbolRecord") -> "Optional[dict]":
+        anns = set(sym.annotations)
+        vals = sym.annotation_values
+
+        if "@DenyAll" in anns:
+            return {"policy": "deny_all"}
+        if "@PermitAll" in anns:
+            return {"policy": "permit_all"}
+        if "@RolesAllowed" in anns:
+            raw = vals.get("@RolesAllowed", "")
+            roles = _re.findall(r'"([^"]+)"', raw)
+            return {"policy": "roles_allowed", "roles": roles or [raw.strip('{} "\'')]}
+        if "@Authenticated" in anns or "@AuthenticatedWithRoles" in anns:
+            return {"policy": "authenticated"}
+        for spring_ann in ("@PreAuthorize", "@PostAuthorize"):
+            if spring_ann in anns:
+                raw = vals.get(spring_ann, "")
+                return {"policy": "spring_" + spring_ann[1:].lower(), "expression": raw.strip('"')}
+        if "@Secured" in anns:
+            raw = vals.get("@Secured", "")
+            roles = _re.findall(r'"([^"]+)"', raw)
+            return {"policy": "secured", "roles": roles}
+        if "@M3FiltroSeguridad" in anns:
+            import re as _re2
+            raw = vals.get("@M3FiltroSeguridad", "")
+            m = _re2.search(r'(?:nombreRecurso\s*=\s*)?["\']([^"\']+)["\']', raw)
+            if m:
+                return {"policy": "custom_permission", "required_permission": m.group(1)}
+        return None
+
+    # Method-level first, then class-level fallback
+    for candidate in filter(None, [method_sym, class_sym]):
+        result = _extract_from(candidate)
+        if result is not None:
+            return result
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Route surface helper (Fix 4)
 # ---------------------------------------------------------------------------
 
@@ -1953,10 +2042,13 @@ def _build_route_surface(
     # Phase 1: build per-class metadata (prefixes list) and own endpoint list.
     # "prefixes" is a list to support array @RequestMapping({"/v1/foo", "/v1/bar"}).
     class_info: dict[str, dict] = {}  # simple_name → {fqn, prefixes, own_endpoints}
+    # P1 FIX: class symbol lookup for security annotation inheritance
+    class_sym_by_simple: dict[str, "SymbolRecord"] = {}
     for sym in symbols:
         if sym.type not in ("class", "interface"):
             continue
         simple = sym.symbol.split(".")[-1]
+        class_sym_by_simple[simple] = sym
         prefixes: list[str] = [""]
         if "@RequestMapping" in sym.annotations:
             args = sym.annotation_values.get("@RequestMapping", "")
@@ -2019,6 +2111,10 @@ def _build_route_surface(
                 (method, suffix, sym.symbol, sym.stable_id)
             )
 
+        # P1 FIX: extract security annotations (method-level first, class fallback)
+        _cls_sym_for_sec = class_sym_by_simple.get(cls_simple)
+        _sec = _route_security_from_sym(sym, _cls_sym_for_sec)
+
         for prefix in effective_prefixes:
             full_path = (prefix + "/" + suffix).replace("//", "/").rstrip("/") or "/"
             if not full_path.startswith("/"):
@@ -2027,7 +2123,7 @@ def _build_route_surface(
             key = (sym.symbol, method, prefix)
             if key not in seen:
                 seen.add(key)
-                routes.append({
+                _route_entry: dict = {
                     "symbol": sym.symbol,
                     "controller": cls_fqn,
                     "declaring_class": cls_fqn,
@@ -2036,7 +2132,10 @@ def _build_route_surface(
                     "method": method,
                     "stable_id": sym.stable_id,
                     "inheritance_depth": 0,
-                })
+                }
+                if _sec is not None:
+                    _route_entry["security_annotations"] = _sec
+                routes.append(_route_entry)
 
     # Phase 3: inheritance projection — subclasses with zero own endpoints
     # but with a class-level @RequestMapping prefix inherit parent methods.
@@ -2224,8 +2323,8 @@ def apply_ir_size_limits(
     analysis: dict = ir.get("analysis") or {}
 
     if summary_only:
-        # FIX-P0-3: summary_only must be safe for LLM context windows.
-        # Hard budget: 100 KB. Bound every top-level section, not just graph.
+        # FIX-P0-3 (revised): summary_only must be safe for LLM context windows.
+        # Hard budget: 100 KB. Bound every top-level section including inner lists.
         _SUMMARY_MAX_BYTES = 100_000
 
         n_nodes, n_edges = len(nodes), len(edges)
@@ -2237,17 +2336,32 @@ def apply_ir_size_limits(
                 "remove --summary-only to restore full graph"
             ),
         }
-        # Reverse graph: top 30 hubs by in-degree (most depended-upon)
+
+        # Reverse graph: top 10 hubs by in-degree, capped inner lists to 20 callers each.
+        # BUG-FIX: previously took top 30 keys but did not cap inner lists → each hub
+        # could be 50-140 KB (all callers of KeycloakSession, RealmModel, etc.).
+        def _cap_rg_entry(entry: dict, max_per_list: int = 20) -> dict:
+            """Cap every list inside a reverse_graph entry to max_per_list items."""
+            return {k: (v[:max_per_list] if isinstance(v, list) else v) for k, v in entry.items()}
+
         full_rg: dict = ir.get("reverse_graph") or {}
         if full_rg:
             _rg_sorted = sorted(
                 full_rg.items(),
-                key=lambda x: sum(len(v) for v in x[1].values()),
+                key=lambda x: sum(len(v) for v in x[1].values() if isinstance(v, list)),
                 reverse=True,
             )
-            out["reverse_graph"] = dict(_rg_sorted[:30])
+            out["reverse_graph"] = {
+                k: _cap_rg_entry(v) for k, v in _rg_sorted[:10]
+            }
+            if len(full_rg) > 10:
+                out["reverse_graph_note"] = (
+                    f"Showing 10/{len(full_rg)} reverse-graph hubs (top by in-degree), "
+                    "20 callers each. Remove --summary-only for full graph."
+                )
         else:
             out["reverse_graph"] = {}
+
         out["impact"] = {
             "global_score": (ir.get("impact") or {}).get("global_score", 0),
             "ranked_nodes": ranked[:20],
@@ -2258,7 +2372,7 @@ def apply_ir_size_limits(
             "isolated_changes": (analysis.get("isolated_changes") or [])[:10],
             "validated_changes": (analysis.get("validated_changes") or [])[:10],
         }
-        # Bound subsystems: top 20 by member count
+        # Bound subsystems: top 15 by member count, members capped at 10 each
         raw_subsystems: list = ir.get("subsystems") or []
         if raw_subsystems:
             _ss_sorted = sorted(
@@ -2266,10 +2380,17 @@ def apply_ir_size_limits(
                 key=lambda s: len(s.get("members", [])),
                 reverse=True,
             )
-            out["subsystems"] = _ss_sorted[:20]
-            if len(raw_subsystems) > 20:
+            _ss_capped = []
+            for _ss in _ss_sorted[:15]:
+                _ss_entry = dict(_ss)
+                if isinstance(_ss_entry.get("members"), list) and len(_ss_entry["members"]) > 10:
+                    _ss_entry["members"] = _ss_entry["members"][:10]
+                    _ss_entry["_members_note"] = f"Showing 10/{len(_ss.get('members', []))} members"
+                _ss_capped.append(_ss_entry)
+            out["subsystems"] = _ss_capped
+            if len(raw_subsystems) > 15:
                 out["subsystems_note"] = (
-                    f"Showing 20/{len(raw_subsystems)} subsystems by member count. "
+                    f"Showing 15/{len(raw_subsystems)} subsystems by member count. "
                     "Remove --summary-only for the full list."
                 )
         # Bound change_set: top 30 by impact
@@ -2280,44 +2401,83 @@ def apply_ir_size_limits(
                 f"Showing 30/{len(raw_cs)} changed symbols. "
                 "Remove --summary-only for the full list."
             )
-        # Bound route_surface: top 50 endpoints by path
+        # Bound route_surface: top 50 endpoints.
+        # BUG-FIX: route_surface is a list (not dict) — previous isinstance(dict) check
+        # never triggered, passing all 434 entries unchanged (244 KB on Keycloak).
         raw_rs = ir.get("route_surface")
-        if isinstance(raw_rs, dict):
+        _rs_total = 0
+        if isinstance(raw_rs, list):
+            _rs_total = len(raw_rs)
+            out["route_surface"] = raw_rs[:50]
+            if _rs_total > 50:
+                out["route_surface_note"] = (
+                    f"Showing 50/{_rs_total} endpoints. "
+                    "Remove --summary-only for full route surface."
+                )
+        elif isinstance(raw_rs, dict):
+            # Legacy dict format with "endpoints" sub-key
             raw_eps: list = raw_rs.get("endpoints") or []
-            if len(raw_eps) > 50:
-                out["route_surface"] = {
-                    **raw_rs,
-                    "endpoints": raw_eps[:50],
-                    "_note": (
-                        f"Showing 50/{len(raw_eps)} endpoints. "
-                        "Remove --summary-only for full route surface."
-                    ),
-                }
-        # spring_events: keep as-is (usually small)
-        # analysis_gaps: keep as-is (usually small)
+            _rs_total = len(raw_eps)
+            out["route_surface"] = {
+                **{k: v for k, v in raw_rs.items() if k != "endpoints"},
+                "endpoints": raw_eps[:50],
+            }
+            if _rs_total > 50:
+                out["route_surface"]["_note"] = (
+                    f"Showing 50/{_rs_total} endpoints. "
+                    "Remove --summary-only for full route surface."
+                )
+        # spring_events: cap at 50 (usually small but can grow on large Spring apps)
+        raw_se = ir.get("spring_events")
+        if isinstance(raw_se, list) and len(raw_se) > 50:
+            out["spring_events"] = raw_se[:50]
+            out["spring_events_note"] = f"Showing 50/{len(raw_se)} spring events."
+        # analysis_gaps: keep as-is (always small)
 
-        # Hard byte budget: truncate if still too large
+        # Hard byte budget: trim progressively until under _SUMMARY_MAX_BYTES.
+        # Each pass reduces a specific section; stops as soon as budget is met.
         import json as _json
         _encoded = _json.dumps(out, ensure_ascii=False)
-        if len(_encoded.encode("utf-8")) > _SUMMARY_MAX_BYTES:
-            # Progressively trim large sections until under budget
-            for _trim_key, _trim_limit in [
-                ("reverse_graph", 15), ("subsystems", 10),
-                ("change_set", 10), ("ranked_nodes_trim", 10),
-            ]:
-                if _trim_key == "ranked_nodes_trim":
+        _over_budget = len(_encoded.encode("utf-8")) > _SUMMARY_MAX_BYTES
+        if _over_budget:
+            # Trim schedule: (section, new_limit, inner_list_cap_if_dict)
+            _trim_schedule = [
+                ("route_surface", 30, None),
+                ("reverse_graph", 5, 10),
+                ("route_surface", 15, None),
+                ("subsystems", 8, None),
+                ("change_set", 10, None),
+                ("impact_ranked", 10, None),
+                ("route_surface", 5, None),
+                ("reverse_graph", 2, 5),
+                ("reverse_graph", 0, None),
+            ]
+            for _trim_key, _trim_limit, _inner_cap in _trim_schedule:
+                if _trim_key == "impact_ranked":
                     out["impact"] = {**out["impact"], "ranked_nodes": ranked[:_trim_limit]}
-                elif _trim_key in out and isinstance(out[_trim_key], (dict, list)):
+                elif _trim_key == "reverse_graph" and _trim_limit == 0:
+                    out["reverse_graph"] = {}
+                    out["reverse_graph_note"] = (
+                        "reverse_graph omitted to meet LLM budget. "
+                        "Remove --summary-only for full IR."
+                    )
+                elif _trim_key in out:
                     _val = out[_trim_key]
-                    if isinstance(_val, dict):
+                    if isinstance(_val, dict) and _inner_cap is not None:
+                        out[_trim_key] = {
+                            k: _cap_rg_entry(v, _inner_cap) if isinstance(v, dict) else v
+                            for k, v in list(_val.items())[:_trim_limit]
+                        }
+                    elif isinstance(_val, dict):
                         out[_trim_key] = dict(list(_val.items())[:_trim_limit])
-                    else:
+                    elif isinstance(_val, list):
                         out[_trim_key] = _val[:_trim_limit]
                 _encoded = _json.dumps(out, ensure_ascii=False)
                 if len(_encoded.encode("utf-8")) <= _SUMMARY_MAX_BYTES:
                     break
             out["_budget_note"] = (
-                f"Output truncated to ~{_SUMMARY_MAX_BYTES // 1024}KB for LLM safety. "
+                f"Output trimmed to ~{len(_encoded.encode('utf-8')) // 1024}KB "
+                f"(target {_SUMMARY_MAX_BYTES // 1024}KB) for LLM safety. "
                 "Remove --summary-only or use --output for full IR."
             )
         return out
@@ -2418,16 +2578,92 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
 
     routes = _build_route_surface(all_symbols, route_diffs=None, extends_map=extends_map)
 
+    # Build class-level symbol index for inheriting security annotations.
+    # When a method has no security annotation, fall back to its declaring class.
+    class_sym_map: dict[str, "SymbolRecord"] = {
+        sym.symbol: sym
+        for sym in all_symbols
+        if sym.type in ("class", "interface")
+    }
+
+    def _extract_security(sym: "Optional[SymbolRecord]",
+                          controller_fqn: str) -> "Optional[dict]":
+        """Return a security dict describing the access policy for this endpoint.
+
+        Checks method-level annotations first, then class-level (inheritance).
+        Returns None if no security signal found.
+        """
+        candidates: list["SymbolRecord"] = []
+        if sym:
+            candidates.append(sym)
+        # Also check the declaring class for class-level annotations
+        cls_sym = class_sym_map.get(controller_fqn)
+        if cls_sym and cls_sym is not sym:
+            candidates.append(cls_sym)
+
+        for candidate in candidates:
+            anns = set(candidate.annotations)
+            ann_vals = candidate.annotation_values
+
+            # @DenyAll → blocked
+            if "@DenyAll" in anns:
+                return {"policy": "deny_all"}
+
+            # @PermitAll → public / unauthenticated
+            if "@PermitAll" in anns:
+                return {"policy": "permit_all"}
+
+            # @RolesAllowed → specific roles required
+            if "@RolesAllowed" in anns:
+                raw = ann_vals.get("@RolesAllowed", "")
+                # Extract role names from "\"admin\"" or "{\"admin\", \"user\"}"
+                roles = _re.findall(r'"([^"]+)"', raw)
+                return {"policy": "roles_allowed", "roles": roles or [raw.strip("{} \"\\'")]}
+
+            # @Authenticated / @AuthenticatedWithRoles
+            if "@Authenticated" in anns or "@AuthenticatedWithRoles" in anns:
+                return {"policy": "authenticated"}
+
+            # Spring @PreAuthorize / @PostAuthorize
+            for spring_ann in ("@PreAuthorize", "@PostAuthorize"):
+                if spring_ann in anns:
+                    raw = ann_vals.get(spring_ann, "")
+                    return {"policy": "spring_" + spring_ann[1:].lower(), "expression": raw.strip('"')}
+
+            # @Secured
+            if "@Secured" in anns:
+                raw = ann_vals.get("@Secured", "")
+                roles = _re.findall(r'"([^"]+)"', raw)
+                return {"policy": "secured", "roles": roles}
+
+            # @RequiresRoles / @RequiresPermissions (Shiro)
+            for shiro_ann in ("@RequiresRoles", "@RequiresPermissions"):
+                if shiro_ann in anns:
+                    raw = ann_vals.get(shiro_ann, "")
+                    roles = _re.findall(r'"([^"]+)"', raw)
+                    return {"policy": shiro_ann[1:].lower(), "roles": roles}
+
+            # @SecurityRequirement (OpenAPI)
+            if "@SecurityRequirement" in anns:
+                raw = ann_vals.get("@SecurityRequirement", "")
+                return {"policy": "openapi_security", "spec": raw.strip()}
+
+            # @M3FiltroSeguridad (legacy custom)
+            if "@M3FiltroSeguridad" in anns:
+                filtro_args = ann_vals.get("@M3FiltroSeguridad", "")
+                if filtro_args:
+                    fm = _FILTRO_VAL.search(filtro_args)
+                    if fm:
+                        return {"policy": "custom_permission", "required_permission": fm.group(1)}
+
+        return None
+
     endpoints: list[dict] = []
     for route in routes:
         sym = sym_map.get(route["symbol"])
-        required_permission: Optional[str] = None
-        if sym:
-            filtro_args = sym.annotation_values.get("@M3FiltroSeguridad", "")
-            if filtro_args:
-                fm = _FILTRO_VAL.search(filtro_args)
-                if fm:
-                    required_permission = fm.group(1)
+        controller_fqn = route.get("effective_class", "")
+
+        security_info = _extract_security(sym, controller_fqn)
 
         handler = (
             route["symbol"].split("#")[1]
@@ -2442,12 +2678,24 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             "controller": controller,
             "handler": handler,
         }
-        if required_permission:
-            entry["required_permission"] = required_permission
+        if security_info:
+            entry["security"] = security_info
+            # Backward compat: keep required_permission for custom annotation
+            if security_info.get("policy") == "custom_permission":
+                entry["required_permission"] = security_info["required_permission"]
         endpoints.append(entry)
 
-    undocumented = sum(1 for e in endpoints if "required_permission" not in e)
-    return {"endpoints": endpoints, "total": len(endpoints), "undocumented": undocumented}
+    # "no_security_signal" = no recognized security annotation at method OR class level.
+    # Note: repos may use framework-level security (e.g. Keycloak itself) with no
+    # per-endpoint annotations — this count reflects annotation-based coverage only.
+    no_security_signal = sum(1 for e in endpoints if "security" not in e)
+    return {
+        "endpoints": endpoints,
+        "total": len(endpoints),
+        "no_security_signal": no_security_signal,
+        # Keep legacy field name for backward compat, now means same as no_security_signal
+        "undocumented": no_security_signal,
+    }
 
 
 def find_java_files(root: Path, *, max_files: int = 8000) -> list[str]:
@@ -2473,3 +2721,273 @@ def find_java_files(root: Path, *, max_files: int = 8000) -> list[str]:
             continue
         results.append(rel)
     return results
+
+
+# ---------------------------------------------------------------------------
+# Blast-radius / change-impact analysis
+# ---------------------------------------------------------------------------
+
+def compute_blast_radius(
+    ir: dict,
+    target: str,
+    *,
+    max_depth: int = 4,
+) -> dict:
+    """Compute the blast radius (change impact) of a symbol or class in a repo IR.
+
+    Given a fully built IR dict (from build_repo_ir), identifies:
+    - direct callers (reverse graph depth=1)
+    - indirect callers (reverse graph depth=2+, BFS)
+    - endpoints in route_surface that transitively depend on the target
+    - transactional boundaries touched
+
+    Args:
+        ir:        Full repo IR dict (from build_repo_ir; NOT summary_only trimmed).
+        target:    FQN, simple class name, or file-stem to look up.
+        max_depth: BFS depth limit (default 4).
+
+    Returns a structured blast-radius dict ready for JSON output.
+    """
+    reverse_graph: dict[str, dict[str, list[str]]] = ir.get("reverse_graph") or {}
+    route_surface: list[dict] = ir.get("route_surface") or []
+    graph_nodes: list[dict] = (ir.get("graph") or {}).get("nodes") or []
+
+    # ── 1. Resolve target → one or more FQNs ─────────────────────────────────
+    resolution, matched_fqns = _resolve_target(target, reverse_graph, graph_nodes)
+
+    if not matched_fqns:
+        return {
+            "target": target,
+            "resolution": "not_found",
+            "message": (
+                f"No symbol matching {target!r} found in IR. "
+                "Verify the class name or FQN. "
+                "Run `sourcecode repo-ir <repo> --output ir.json` to inspect available symbols."
+            ),
+            "direct_callers": [],
+            "indirect_callers": [],
+            "endpoints_affected": [],
+            "transactional_boundaries_touched": [],
+            "risk_score": 0.0,
+            "risk_level": "unknown",
+        }
+
+    # ── 2. BFS from target(s) through reverse graph ───────────────────────────
+    # Build a forward-lookup: node → {type → [callers]}
+    # We traverse: who calls target? Who calls those callers? etc.
+    all_affected: dict[str, int] = {}   # fqn → depth at which first found
+    direct_callers: list[str] = []
+    queue: list[tuple[str, int]] = []
+
+    for seed in matched_fqns:
+        callers = _all_callers_from_rg(seed, reverse_graph)
+        for c in callers:
+            if c not in all_affected:
+                all_affected[c] = 1
+                direct_callers.append(c)
+                if max_depth > 1:
+                    queue.append((c, 1))
+
+    # BFS for indirect callers
+    indirect_callers: list[str] = []
+    visited: set[str] = set(matched_fqns) | set(direct_callers)
+
+    while queue:
+        node, depth = queue.pop(0)
+        if depth >= max_depth:
+            continue
+        for caller in _all_callers_from_rg(node, reverse_graph):
+            if caller not in visited:
+                visited.add(caller)
+                all_affected[caller] = depth + 1
+                indirect_callers.append(caller)
+                queue.append((caller, depth + 1))
+
+    # ── 3. Identify affected endpoints from route_surface ─────────────────────
+    affected_classes: set[str] = set(matched_fqns) | set(direct_callers) | set(indirect_callers)
+    # P1 FIX: expand to enclosing classes of field/method FQNs in affected set.
+    # A field like OrderController.orderService in affected_classes means OrderController
+    # (the enclosing class) is also effectively affected for endpoint matching.
+    affected_with_enclosing: set[str] = affected_classes | {
+        _enclosing_class(fqn) for fqn in affected_classes
+    }
+    # Normalize: extract simple class name from FQN for matching
+    affected_simple: set[str] = {_simple_name(fqn) for fqn in affected_with_enclosing}
+
+    endpoints_affected: list[dict] = []
+    for ep in route_surface:
+        # P1 FIX: route surface uses "effective_class"/"controller" not "class",
+        # and "symbol" (FQN) not "handler". Previous code always got empty strings
+        # → endpoints_affected was always [] for every Keycloak-like repo.
+        ep_class = ep.get("effective_class") or ep.get("controller") or ep.get("class") or ""
+        ep_symbol = ep.get("symbol") or ""
+        ep_handler = (
+            ep_symbol.split("#", 1)[1] if "#" in ep_symbol
+            else ep.get("handler") or ""
+        )
+        ep_fqn = ep_symbol or (f"{ep_class}#{ep_handler}" if ep_class and ep_handler else ep_class)
+        # Match if the endpoint class or its simple name is in affected set
+        if (
+            ep_class in affected_with_enclosing
+            or _simple_name(ep_class) in affected_simple
+            or ep_fqn in affected_with_enclosing
+        ):
+            _ep_entry: dict = {
+                "method": ep.get("method", ""),
+                "path": ep.get("path", ""),
+                "class": ep_class,
+                "handler": ep_handler,
+            }
+            # Forward security_annotations when present (P1: route→auth surface linkage)
+            if ep.get("security_annotations"):
+                _ep_entry["security"] = ep["security_annotations"]
+            endpoints_affected.append(_ep_entry)
+
+    # ── 4. Identify transactional boundaries touched ──────────────────────────
+    # A @Transactional class is a boundary if it or its methods are in affected set.
+    txn_nodes: list[str] = []
+    for node_dict in graph_nodes:
+        fqn = node_dict.get("fqn") or ""
+        role = node_dict.get("role") or ""
+        symbol_kind = node_dict.get("symbol_kind") or ""
+        if role == "transaction_boundary" or "Transactional" in (node_dict.get("canonical_name") or ""):
+            if fqn in affected_classes or _enclosing_class(fqn) in affected_classes:
+                txn_nodes.append(fqn)
+        # Also pick up @Transactional service methods that are directly in affected set
+        elif symbol_kind == "method" and fqn in affected_classes:
+            enc = _enclosing_class(fqn)
+            for n2 in graph_nodes:
+                if n2.get("fqn") == enc and n2.get("role") == "transaction_boundary":
+                    txn_nodes.append(fqn)
+                    break
+
+    txn_nodes = sorted(set(txn_nodes))
+
+    # ── 5. Risk score ─────────────────────────────────────────────────────────
+    n_direct   = len(direct_callers)
+    n_indirect = len(indirect_callers)
+    n_ep       = len(endpoints_affected)
+    n_txn      = len(txn_nodes)
+
+    # Score = caller fan-in + endpoint multiplier + txn boundary weight
+    raw_score = (
+        n_direct * 2.0
+        + n_indirect * 0.5
+        + n_ep * 3.0
+        + n_txn * 2.5
+    )
+    risk_score = round(min(raw_score, 100.0), 2)
+
+    if risk_score >= 20 or n_ep >= 3 or n_txn >= 2:
+        risk_level = "high"
+    elif risk_score >= 5 or n_ep >= 1 or n_txn >= 1:
+        risk_level = "medium"
+    elif risk_score > 0:
+        risk_level = "low"
+    else:
+        risk_level = "none"
+
+    # ── 6. Assemble output ───────────────────────────────────────────────────
+    # Summarize indirect callers (cap at 50 to keep output bounded)
+    _indirect_summary = sorted(indirect_callers, key=lambda x: all_affected.get(x, 99))[:50]
+
+    result: dict = {
+        "target": target,
+        "matched_fqns": list(matched_fqns),
+        "resolution": resolution,
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "direct_callers": sorted(direct_callers)[:30],
+        "indirect_callers": _indirect_summary,
+        "endpoints_affected": endpoints_affected,
+        "transactional_boundaries_touched": txn_nodes,
+        "depth_reached": max_depth,
+        "stats": {
+            "direct_caller_count": n_direct,
+            "indirect_caller_count": n_indirect,
+            "endpoints_affected_count": n_ep,
+            "transactional_boundaries_count": n_txn,
+        },
+    }
+    if len(direct_callers) > 30:
+        result["direct_callers_note"] = (
+            f"Showing 30/{n_direct} direct callers. Use --output to inspect full IR."
+        )
+    if len(indirect_callers) > 50:
+        result["indirect_callers_note"] = (
+            f"Showing 50/{n_indirect} indirect callers. Use --output to inspect full IR."
+        )
+    return result
+
+
+def _resolve_target(
+    target: str,
+    reverse_graph: dict[str, dict[str, list[str]]],
+    graph_nodes: list[dict],
+) -> tuple[str, set[str]]:
+    """Resolve a user-provided target string to a set of matching FQNs.
+
+    Resolution order:
+      1. Exact FQN match in reverse_graph keys
+      2. Graph-nodes lookup (fqn exact, then simple-name suffix)
+      3. Suffix match on reverse_graph keys (. separator)
+      4. File stem match (convert path to class-name candidate)
+
+    Returns (resolution_type, set_of_fqns).
+    """
+    # Normalize: strip .java suffix if given a path
+    t = target.strip()
+    if t.endswith(".java"):
+        t = t[:-5]
+    # Convert file path separators to class name
+    t_class = t.replace("/", ".").replace("\\", ".")
+
+    # 1. Exact match
+    if t in reverse_graph:
+        return "exact", {t}
+    if t_class != t and t_class in reverse_graph:
+        return "exact", {t_class}
+
+    # 2. Exact match from graph_nodes
+    all_fqns: set[str] = {n["fqn"] for n in graph_nodes if "fqn" in n}
+    if t in all_fqns:
+        return "exact", {t}
+
+    # 3. Suffix match — e.g. "DefaultKeycloakSession" → "org.keycloak.services.DefaultKeycloakSession"
+    simple = t.split(".")[-1]  # last segment
+    suffix_matches: set[str] = set()
+    for fqn in reverse_graph:
+        if fqn.split(".")[-1] == simple or fqn.endswith(f".{simple}"):
+            suffix_matches.add(fqn)
+    # Also check graph_nodes (nodes not in reverse_graph = no callers, but still valid targets)
+    for fqn in all_fqns:
+        if fqn.split(".")[-1] == simple or fqn.endswith(f".{simple}"):
+            suffix_matches.add(fqn)
+    if suffix_matches:
+        resolution = "exact" if len(suffix_matches) == 1 else "ambiguous"
+        return resolution, suffix_matches
+
+    # 4. Partial substring match (last resort)
+    partial: set[str] = set()
+    t_lower = simple.lower()
+    for fqn in all_fqns:
+        if t_lower in fqn.lower():
+            partial.add(fqn)
+    if partial:
+        return "partial", partial
+
+    return "not_found", set()
+
+
+def _all_callers_from_rg(fqn: str, reverse_graph: dict[str, dict[str, list[str]]]) -> list[str]:
+    """Return all callers of fqn from the reverse graph (all edge types)."""
+    entry = reverse_graph.get(fqn) or {}
+    callers: list[str] = []
+    for fqn_list in entry.values():
+        callers.extend(fqn_list)
+    return callers
+
+
+def _simple_name(fqn: str) -> str:
+    """Extract the simple class name from a fully-qualified name."""
+    return fqn.split(".")[-1].split("#")[0]

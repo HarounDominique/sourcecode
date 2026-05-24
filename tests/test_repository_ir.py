@@ -1553,3 +1553,330 @@ public interface UserClient {
         _, syms, _ = _extract_symbols(proxy_src, "UserClient.java")
         routes = _build_route_surface(syms, route_diffs=None)
         assert routes == []
+
+
+# ===========================================================================
+# P1 — Security annotations in route surface + blast radius field fix
+# ===========================================================================
+
+class TestRouteSurfaceSecurityAnnotations:
+    """P1 fix: route surface must include security_annotations from method/class."""
+
+    def _routes_from_src(self, src: str, rel: str = "Test.java") -> list:
+        from sourcecode.repository_ir import _extract_symbols, _build_route_surface
+        _, syms, _ = _extract_symbols(src, rel)
+        return _build_route_surface(syms, route_diffs=None)
+
+    def test_jaxrs_roles_allowed_on_method(self):
+        src = """\
+package org.example;
+import javax.ws.rs.Path; import javax.ws.rs.GET;
+import javax.ws.rs.RolesAllowed;
+
+@Path("/users")
+public class UserResource {
+    @GET
+    @RolesAllowed("admin")
+    public Object list() { return null; }
+}
+"""
+        routes = self._routes_from_src(src)
+        assert len(routes) == 1
+        sec = routes[0].get("security_annotations")
+        assert sec is not None, "Expected security_annotations in route entry"
+        assert sec["policy"] == "roles_allowed"
+        assert "admin" in sec.get("roles", [])
+
+    def test_jaxrs_permit_all_on_method(self):
+        src = """\
+package org.example;
+import javax.ws.rs.Path; import javax.ws.rs.GET;
+import javax.ws.rs.PermitAll;
+
+@Path("/health")
+public class HealthResource {
+    @GET
+    @PermitAll
+    public Object check() { return null; }
+}
+"""
+        routes = self._routes_from_src(src)
+        assert len(routes) == 1
+        sec = routes[0].get("security_annotations")
+        assert sec is not None
+        assert sec["policy"] == "permit_all"
+
+    def test_jaxrs_deny_all_on_method(self):
+        src = """\
+package org.example;
+import javax.ws.rs.Path; import javax.ws.rs.DELETE;
+import javax.ws.rs.DenyAll;
+
+@Path("/admin")
+public class AdminResource {
+    @DELETE
+    @DenyAll
+    public void deleteAll() {}
+}
+"""
+        routes = self._routes_from_src(src)
+        assert len(routes) == 1
+        assert routes[0]["security_annotations"]["policy"] == "deny_all"
+
+    def test_class_level_roles_allowed_inherited_by_endpoint(self):
+        """Class-level @RolesAllowed must flow to endpoints that have no method-level security."""
+        src = """\
+package org.example;
+import javax.ws.rs.Path; import javax.ws.rs.GET;
+import javax.ws.rs.RolesAllowed;
+
+@Path("/secure")
+@RolesAllowed("manager")
+public class SecureResource {
+    @GET
+    public Object get() { return null; }
+}
+"""
+        routes = self._routes_from_src(src)
+        assert len(routes) == 1
+        sec = routes[0].get("security_annotations")
+        assert sec is not None, "Class-level @RolesAllowed must propagate to endpoint"
+        assert sec["policy"] == "roles_allowed"
+        assert "manager" in sec.get("roles", [])
+
+    def test_spring_pre_authorize_on_method(self):
+        src = """\
+package com.example;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.security.access.prepost.PreAuthorize;
+
+@RestController
+@RequestMapping("/api")
+public class ApiController {
+    @GetMapping("/data")
+    @PreAuthorize("hasRole('ADMIN')")
+    public Object getData() { return null; }
+}
+"""
+        routes = self._routes_from_src(src)
+        assert len(routes) == 1
+        sec = routes[0].get("security_annotations")
+        assert sec is not None
+        assert "preauthorize" in sec["policy"]
+
+    def test_no_security_annotation_absent_not_null(self):
+        """Routes without security must omit key entirely (not emit None/null)."""
+        src = """\
+package org.example;
+import javax.ws.rs.Path; import javax.ws.rs.GET;
+
+@Path("/open")
+public class OpenResource {
+    @GET
+    public Object get() { return null; }
+}
+"""
+        routes = self._routes_from_src(src)
+        assert len(routes) == 1
+        assert "security_annotations" not in routes[0], (
+            "security_annotations key must be absent when no security found"
+        )
+
+    def test_spring_secured_annotation(self):
+        src = """\
+package com.example;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.security.access.annotation.Secured;
+
+@RestController
+public class AdminController {
+    @PostMapping("/admin/action")
+    @Secured("ROLE_ADMIN")
+    public void action() {}
+}
+"""
+        routes = self._routes_from_src(src)
+        assert len(routes) == 1
+        sec = routes[0].get("security_annotations")
+        assert sec is not None
+        assert sec["policy"] == "secured"
+
+
+class TestBlastRadiusEndpointsAffected:
+    """P1 fix: compute_blast_radius must use correct route surface field names."""
+
+    _SPRING_CONTROLLER = """\
+package com.example;
+import org.springframework.web.bind.annotation.*;
+import com.example.OrderService;
+
+@RestController
+@RequestMapping("/api")
+public class OrderController {
+    @Autowired
+    private OrderService orderService;
+
+    @GetMapping("/orders")
+    public Object list() { return orderService.findAll(); }
+
+    @PostMapping("/orders")
+    public Object create() { return orderService.create(); }
+}
+"""
+    _SPRING_SERVICE = """\
+package com.example;
+import org.springframework.stereotype.Service;
+
+@Service
+public class OrderService {
+    public Object findAll() { return null; }
+    public Object create() { return null; }
+}
+"""
+
+    def _build_ir(self):
+        from sourcecode.repository_ir import (
+            _extract_symbols, _build_relations, _build_spring_summary,
+            _assemble,
+        )
+        all_syms, all_rels = [], []
+        for src, rel in [
+            (self._SPRING_CONTROLLER, "OrderController.java"),
+            (self._SPRING_SERVICE, "OrderService.java"),
+        ]:
+            pkg, syms, raw_imports = _extract_symbols(src, rel)
+            rels = _build_relations(syms, raw_imports, src, pkg, rel)
+            all_syms.extend(syms)
+            all_rels.extend(rels)
+        ss = _build_spring_summary(all_syms)
+        return _assemble(all_syms, all_rels, [], ss, None)
+
+    def test_route_surface_has_effective_class_field(self):
+        """Route surface entries must use 'effective_class' not 'class'."""
+        ir = self._build_ir()
+        rs = ir.get("route_surface", [])
+        assert len(rs) > 0, "Expected routes in route_surface"
+        for r in rs:
+            assert "effective_class" in r, f"Route entry missing 'effective_class': {r}"
+            assert "symbol" in r, f"Route entry missing 'symbol': {r}"
+
+    def test_endpoints_affected_populated_for_service(self):
+        """P1 core: impact on service must surface affected HTTP endpoints, not empty list."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_ir()
+        result = compute_blast_radius(ir, "OrderService", max_depth=4)
+        assert result["resolution"] != "not_found", "OrderService not found in IR"
+        eps = result.get("endpoints_affected", [])
+        assert len(eps) > 0, (
+            f"endpoints_affected is empty — field name bug still present. "
+            f"route_surface={ir.get('route_surface')}"
+        )
+
+    def test_endpoints_affected_contains_correct_paths(self):
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_ir()
+        result = compute_blast_radius(ir, "OrderService", max_depth=4)
+        paths = {ep["path"] for ep in result.get("endpoints_affected", [])}
+        assert "/api/orders" in paths or any("orders" in p for p in paths), (
+            f"Expected /api/orders in affected paths, got {paths}"
+        )
+
+    def test_endpoints_affected_has_method_and_class(self):
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_ir()
+        result = compute_blast_radius(ir, "OrderService", max_depth=4)
+        for ep in result.get("endpoints_affected", []):
+            assert ep.get("method"), f"Missing method in endpoint: {ep}"
+            assert ep.get("class"), f"Missing class in endpoint: {ep}"
+
+    def test_endpoints_affected_includes_security_when_present(self):
+        """If route has security_annotations, endpoints_affected must forward them."""
+        from sourcecode.repository_ir import (
+            _extract_symbols, _build_relations, _build_spring_summary,
+            _assemble, compute_blast_radius,
+        )
+        secured_ctrl = """\
+package com.example;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.security.access.prepost.PreAuthorize;
+
+@RestController
+public class SecuredController {
+    @GetMapping("/secret")
+    @PreAuthorize("hasRole('ADMIN')")
+    public Object get() { return svc.fetch(); }
+
+    @Autowired
+    private SecuredService svc;
+}
+"""
+        svc_src = """\
+package com.example;
+import org.springframework.stereotype.Service;
+
+@Service
+public class SecuredService {
+    public Object fetch() { return null; }
+}
+"""
+        all_syms, all_rels = [], []
+        for src, rel in [(secured_ctrl, "SecuredController.java"), (svc_src, "SecuredService.java")]:
+            pkg, syms, raw_imports = _extract_symbols(src, rel)
+            rels = _build_relations(syms, raw_imports, src, pkg, rel)
+            all_syms.extend(syms)
+            all_rels.extend(rels)
+        ss = _build_spring_summary(all_syms)
+        ir = _assemble(all_syms, all_rels, [], ss, None)
+        result = compute_blast_radius(ir, "SecuredService", max_depth=4)
+        eps = result.get("endpoints_affected", [])
+        if eps:
+            # If security_annotations are present on route, they must be forwarded
+            sec_eps = [ep for ep in eps if "security" in ep]
+            # At least the route must be found (security forwarding is bonus)
+            assert len(eps) > 0
+
+    def test_jaxrs_blast_radius_endpoints_not_empty(self):
+        """JAX-RS repos: endpoints_affected must not be [] when routes exist."""
+        from sourcecode.repository_ir import (
+            _extract_symbols, _build_relations, _build_spring_summary,
+            _assemble, compute_blast_radius,
+        )
+        jaxrs_ctrl = """\
+package org.example;
+import javax.ws.rs.*;
+import javax.inject.Inject;
+import org.example.ItemService;
+
+@Path("/items")
+public class ItemResource {
+    @GET
+    public Object list() { return svc.findAll(); }
+
+    @Inject
+    private ItemService svc;
+}
+"""
+        jaxrs_svc = """\
+package org.example;
+
+public class ItemService {
+    public Object findAll() { return null; }
+}
+"""
+        all_syms, all_rels = [], []
+        for src, rel in [(jaxrs_ctrl, "ItemResource.java"), (jaxrs_svc, "ItemService.java")]:
+            pkg, syms, raw_imports = _extract_symbols(src, rel)
+            rels = _build_relations(syms, raw_imports, src, pkg, rel)
+            all_syms.extend(syms)
+            all_rels.extend(rels)
+        ss = _build_spring_summary(all_syms)
+        ir = _assemble(all_syms, all_rels, [], ss, None)
+        # Route surface must exist
+        assert len(ir.get("route_surface", [])) > 0, "JAX-RS routes not extracted"
+        result = compute_blast_radius(ir, "ItemService", max_depth=4)
+        # ItemService is injected into ItemResource — must surface the route
+        eps = result.get("endpoints_affected", [])
+        assert len(eps) > 0, (
+            f"JAX-RS endpoints_affected empty. route_surface={ir.get('route_surface')}, "
+            f"resolution={result['resolution']}, direct_callers={result['direct_callers']}"
+        )

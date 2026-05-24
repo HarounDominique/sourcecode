@@ -166,7 +166,7 @@ Compressed AI-ready context for Java/Spring enterprise codebases.
 # Known subcommand names — tokens matching these are routed as subcommands,
 # not consumed as a repository path.
 _SUBCOMMANDS: frozenset[str] = frozenset(
-    {"telemetry", "prepare-context", "version", "config", "analyze", "repo-ir", "mcp", "endpoints"}
+    {"telemetry", "prepare-context", "version", "config", "analyze", "repo-ir", "mcp", "endpoints", "impact"}
 )
 
 # Mutable container holding the path extracted by _preprocess_argv().
@@ -712,6 +712,35 @@ def main(
         typer.echo(
             "[deprecated] --compress-types is removed: type signatures are rarely extracted "
             "at default depth. Flag ignored.",
+            err=True,
+        )
+
+    # P0-2 FIX: --compact and --full are mutually exclusive.
+    # compact is designed to be a bounded summary; --full removes truncation limits,
+    # which contradicts compact's purpose. Use --agent --full for expanded output.
+    if compact and full:
+        typer.echo(
+            "Error: --compact and --full are mutually exclusive. "
+            "--compact produces a bounded summary; --full removes truncation limits and "
+            "is meant for --agent mode. Use --agent --full for expanded output.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # P0-2 FIX: --full without --compact or --agent has no effect in contract/raw mode.
+    # Warn so the user knows the flag is not doing anything.
+    if full and not compact and not agent:
+        typer.echo(
+            "[warning] --full has no effect in contract/raw mode. "
+            "It only expands mybatis.dto_mappers and transactional_boundaries in "
+            "--compact or --agent mode. Add --agent to get expanded output.",
+            err=True,
+        )
+
+    # P0-2 FIX: --changed-only silently implies --compact; inform the user.
+    if changed_only and not compact and not agent:
+        typer.echo(
+            "[info] --changed-only implies --compact (bounding output to changed files).",
             err=True,
         )
 
@@ -1629,6 +1658,9 @@ def main(
         data = agent_view(sm, full=full)
         if not no_redact:
             data = redact_dict(data)
+        # P0-1: Apply output budget — safety net for large repos.
+        from sourcecode.output_budget import trim_to_budget as _trim, BUDGET_AGENT
+        data = _trim(data, BUDGET_AGENT, label="agent")
         # FIX-P0-2: agent mode must honour --format yaml (previously always emitted JSON).
         if format == "yaml":
             from io import StringIO
@@ -1657,6 +1689,9 @@ def main(
         data = compact_view(sm, no_tree=no_tree, full=full)
         if not no_redact:
             data = redact_dict(data)
+        # P0-1: Apply output budget — safety net for large repos.
+        from sourcecode.output_budget import trim_to_budget as _trim_c, BUDGET_COMPACT
+        data = _trim_c(data, BUDGET_COMPACT, label="compact")
         if format == "yaml":
             from io import StringIO
             from ruamel.yaml import YAML as _YAML
@@ -2191,7 +2226,10 @@ def prepare_context_cmd(
                 _sys.stdout.buffer.write(_err_json.encode("utf-8"))
                 _sys.stdout.buffer.write(b"\n")
                 _sys.stdout.buffer.flush()
-            raise typer.Exit(code=1)
+            # FIX: no_diff (no PR changes) is not an error — exit 0, consistent
+            # with delta's no_changes handling. Only true errors exit non-zero.
+            _review_pr_exit = 0 if output.error_code == "no_diff" else 1
+            raise typer.Exit(code=_review_pr_exit)
         out["review_type"] = "pull_request"
         if output.ci_decision:
             out["ci_decision"] = output.ci_decision
@@ -2272,6 +2310,24 @@ def prepare_context_cmd(
         out["warnings"] = output.warnings
     if llm_prompt:
         out["llm_prompt"] = builder.render_prompt(output)
+
+    # P0-1: Apply output budget per task — safety net for large repos.
+    from sourcecode.output_budget import (
+        trim_to_budget as _pc_trim,
+        BUDGET_FIX_BUG, BUDGET_REVIEW_PR, BUDGET_ONBOARD,
+        BUDGET_EXPLAIN, BUDGET_REFACTOR, BUDGET_DELTA,
+    )
+    _pc_budgets: dict[str, int] = {
+        "fix-bug":         BUDGET_FIX_BUG,
+        "review-pr":       BUDGET_REVIEW_PR,
+        "onboard":         BUDGET_ONBOARD,
+        "explain":         BUDGET_EXPLAIN,
+        "refactor":        BUDGET_REFACTOR,
+        "delta":           BUDGET_DELTA,
+        "generate-tests":  BUDGET_EXPLAIN,
+    }
+    _pc_budget = _pc_budgets.get(task, BUDGET_EXPLAIN)
+    out = _pc_trim(out, _pc_budget, label=task)
 
     if format == "github-comment" and task == "review-pr":
         from sourcecode.pr_comment_renderer import render_github_comment
@@ -2488,6 +2544,115 @@ def repo_ir_cmd(
             # Fallback for wrapped stdout without buffer (e.g. some test harnesses)
             _sys.stdout.write(output)
             _sys.stdout.write("\n")
+
+
+# ── impact (blast-radius / change-impact analysis) ────────────────────────────
+
+@app.command("impact")
+def impact_cmd(
+    target: str = typer.Argument(
+        ...,
+        help=(
+            "Class name (simple or FQN) or file path to analyze impact for. "
+            "Examples: UserService, org.example.UserService, UserService.java"
+        ),
+    ),
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository root to analyze (default: current directory)",
+    ),
+    depth: int = typer.Option(
+        4,
+        "--depth",
+        help="BFS depth for indirect caller traversal (default: 4).",
+        min=1,
+        max=8,
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    include_tests: bool = typer.Option(
+        False,
+        "--include-tests",
+        help="Include test files in analysis (excluded by default).",
+    ),
+) -> None:
+    """Blast-radius analysis: who calls this class and what breaks if it changes?
+
+    \b
+    Builds the repository IR and propagates impact from the target symbol
+    through the reverse dependency graph. Returns:
+      - direct_callers     — classes that directly call or depend on the target
+      - indirect_callers   — transitive callers (BFS, bounded by --depth)
+      - endpoints_affected — HTTP endpoints that transitively depend on the target
+      - transactional_boundaries_touched — @Transactional classes in the call chain
+      - risk_score / risk_level — quantified change risk
+
+    \b
+    Examples:
+      sourcecode impact UserService
+      sourcecode impact org.keycloak.services.DefaultKeycloakSession /path/to/keycloak
+      sourcecode impact UserService --depth 6 --output impact.json
+    """
+    import json as _json
+    import sys as _sys
+
+    from sourcecode.repository_ir import (
+        build_repo_ir, find_java_files, compute_blast_radius,
+    )
+    from sourcecode.output_budget import trim_to_budget as _trim, BUDGET_IMPACT
+
+    root = path.resolve()
+    if not root.is_dir():
+        typer.echo(f"Error: {root} is not a directory", err=True)
+        raise typer.Exit(1)
+
+    file_list = find_java_files(root)
+    if not include_tests:
+        file_list = [f for f in file_list if "/test/" not in f and "/tests/" not in f]
+
+    if not file_list:
+        typer.echo(
+            _json.dumps(
+                {
+                    "target": target,
+                    "resolution": "not_found",
+                    "message": "No Java files found in repository.",
+                    "risk_level": "unknown",
+                },
+                indent=2,
+            )
+        )
+        return
+
+    _prog = Progress()
+    _prog.start(f"building IR ({len(file_list)} files) for impact analysis")
+    try:
+        ir = build_repo_ir(file_list, root)
+    finally:
+        _prog.finish()
+
+    result = compute_blast_radius(ir, target, max_depth=depth)
+    result = _trim(result, BUDGET_IMPACT, label="impact")
+
+    output = _json.dumps(result, indent=2, ensure_ascii=False)
+    if output_path:
+        output_path.write_text(output, encoding="utf-8")
+        typer.echo(f"Impact analysis written to {output_path}", err=True)
+    else:
+        try:
+            _sys.stdout.buffer.write(output.encode("utf-8"))
+            _sys.stdout.buffer.write(b"\n")
+            _sys.stdout.buffer.flush()
+        except AttributeError:
+            _sys.stdout.write(output + "\n")
+
+    # Non-zero exit when target not found
+    if result.get("resolution") == "not_found":
+        raise typer.Exit(code=1)
 
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
@@ -2756,6 +2921,9 @@ def mcp_init(
 @mcp_app.command("status")
 def mcp_status() -> None:
     """Show MCP integration status: dependencies, config files, and connectivity."""
+    import subprocess as _sp
+    import sys as _sys
+    from sourcecode import __version__ as _cli_version
     from sourcecode.mcp.onboarding.detector import detect_clients, is_client_running
     from sourcecode.mcp.onboarding import applier
 
@@ -2763,6 +2931,10 @@ def mcp_status() -> None:
 
     typer.echo("MCP Status")
     typer.echo(sep)
+
+    # FIX-P0-5/P0-6: Show CLI version explicitly so drift is immediately visible.
+    typer.echo(f"CLI version   {_cli_version}   ({_sys.executable})")
+    typer.echo("")
 
     # Stage 1: Dependencies
     try:
@@ -2782,8 +2954,7 @@ def mcp_status() -> None:
 
     # Stage 2: Config files — is sourcecode registered in the client's config?
     # FIX-P0-6: "configured" and "running" are distinct, independent checks.
-    # A client app may be running without sourcecode configured, or configured but not running.
-    # Display each state as a separate labelled field to prevent contradiction.
+    # Also detect external server installs (different Python/executable than CLI).
     typer.echo("Config (sourcecode registered in client config?)")
     for client in clients:
         if not client.app_installed:
@@ -2794,6 +2965,64 @@ def mcp_status() -> None:
         config = applier.read_config(client.config_path)
         if applier.is_installed(config):
             typer.echo(f"  {client.name:<20} ✓ configured   {client.config_path}")
+            # FIX-P0-5: inspect registered command for external-server drift.
+            _registered = config.get("mcpServers", {}).get("sourcecode", {})
+            _reg_cmd = _registered.get("command", "")
+            _reg_args = _registered.get("args", [])
+            # Built-in form: command=sourcecode args=[mcp, serve] (or just the binary)
+            _is_builtin = (
+                _reg_cmd == "sourcecode"
+                or (not _reg_args and _reg_cmd.endswith("/sourcecode"))
+                or (_reg_args and _reg_args[:2] == ["mcp", "serve"])
+            )
+            if _is_builtin:
+                typer.echo(f"    Server:  built-in (sourcecode mcp serve)  version={_cli_version}")
+            else:
+                # External server — different Python or custom server.py
+                typer.echo(f"    Server:  ⚠ EXTERNAL — {_reg_cmd} {' '.join(_reg_args)}")
+                # Try to get the external server's sourcecode version by finding the
+                # sourcecode binary relative to the registered Python executable,
+                # or falling back to probing the Python for the installed package.
+                _ext_ver: str = "unknown"
+                try:
+                    import os as _os
+                    # Strategy 1: look for sourcecode binary next to registered Python
+                    _reg_bin_dir = _os.path.dirname(_reg_cmd)
+                    _sc_sibling = _os.path.join(_reg_bin_dir, "sourcecode")
+                    if _os.path.isfile(_sc_sibling):
+                        _ver_r = _sp.run(
+                            [_sc_sibling, "--version"],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        if _ver_r.returncode == 0 and _ver_r.stdout.strip():
+                            # "sourcecode X.Y.Z" → extract version
+                            _ext_ver = _ver_r.stdout.strip().split()[-1]
+                    # Strategy 2: import via registered Python
+                    if _ext_ver == "unknown":
+                        _ver_r2 = _sp.run(
+                            [_reg_cmd, "-c",
+                             "import sourcecode; print(sourcecode.__version__)"],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        if _ver_r2.returncode == 0 and _ver_r2.stdout.strip():
+                            _ext_ver = _ver_r2.stdout.strip()
+                except Exception:
+                    pass
+                if _ext_ver != "unknown" and _ext_ver != _cli_version:
+                    typer.echo(
+                        f"    ⚠ VERSION DRIFT: external server version={_ext_ver}, "
+                        f"CLI version={_cli_version}"
+                    )
+                    typer.echo(
+                        "    To fix: sourcecode mcp init  (re-register using CLI built-in server)"
+                    )
+                elif _ext_ver != "unknown":
+                    typer.echo(f"    External server version={_ext_ver}  (matches CLI ✓)")
+                else:
+                    typer.echo(
+                        f"    ⚠ Cannot verify external server version (CLI={_cli_version}). "
+                        "Re-run: sourcecode mcp init to switch to built-in server."
+                    )
         else:
             typer.echo(f"  {client.name:<20} ✗ not configured  (app found, but sourcecode entry missing)")
             typer.echo(f"    Fix: sourcecode mcp init --target {client.slug}")

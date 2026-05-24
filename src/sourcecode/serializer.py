@@ -1806,6 +1806,36 @@ def _angular_analysis(sm: "SourceMap") -> "Optional[dict[str, Any]]":
     }
 
 
+def compute_context_limit(mode: str, normal: int = 20) -> int:
+    """Return bounded file-relevance limit for agent context modes.
+
+    Never returns 'all files' — unbounded expansion degrades signal quality
+    by flooding context with low-relevance files before trim_to_budget cuts
+    indiscriminately by byte count rather than relevance rank.
+
+    Modes:
+        normal: TOP_N = normal (default 20)
+        full:   min(normal * 2, 50) — better recall, still bounded
+        deep:   min(normal * 4, 100) — maximum context, explicit opt-in
+    """
+    if mode == "full":
+        return min(normal * 2, 50)
+    if mode == "deep":
+        return min(normal * 4, 100)
+    return normal  # normal mode
+
+
+def expand_relevance_window(files: list, mode: str, normal: int = 20) -> list:
+    """Return a bounded-relevance slice of pre-scored files.
+
+    Assumes files is already sorted descending by score (guaranteed by
+    _file_relevance). Enforces compute_context_limit(mode, normal) cap.
+    Deterministic: same input → same output.
+    """
+    limit = compute_context_limit(mode, normal)
+    return files[:limit]
+
+
 def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
     """Opinionated output for AI agents — structured, noise-free, gap-aware.
 
@@ -1895,15 +1925,22 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
     result["architecture"] = _arch_ctx
 
     # ── 4. File relevance: top-scored files — primary agent value-add ────────
+    # P0 FIX: --full must NOT pass _total_paths as limit (unbounded expansion).
+    # Unbounded expansion floods context with low-relevance files; trim_to_budget
+    # then cuts indiscriminately by byte count, not by relevance rank.
+    # Bounded strategy: normal=20, full=min(20*2,50)=40, deep=min(20*4,100)=80.
     _FR_AGENT_CAP = 20
     _total_paths = len(sm.file_paths)
-    relevant_files = _file_relevance(sm, limit=_FR_AGENT_CAP if not full else _total_paths)
+    _fr_mode = "full" if full else "normal"
+    _fr_limit = compute_context_limit(_fr_mode, _FR_AGENT_CAP)
+    relevant_files = _file_relevance(sm, limit=_fr_limit)
     if relevant_files:
         result["file_relevance"] = relevant_files
-        if not full and _total_paths > _FR_AGENT_CAP:
+        if _total_paths > _fr_limit:
             result["file_relevance_hint"] = (
-                f"Showing top {_FR_AGENT_CAP}/{_total_paths} files by score. "
-                "Use --full to see all."
+                f"Showing top {_fr_limit}/{_total_paths} files by score "
+                f"({'--full' if full else 'normal'} mode, bounded for signal quality). "
+                f"Use --deep for up to {compute_context_limit('deep', _FR_AGENT_CAP)} files."
             )
 
     # ── 5. Monorepo package roles (when available), capped ───────────────────
