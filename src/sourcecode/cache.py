@@ -1,0 +1,470 @@
+"""
+Snapshot cache manager for sourcecode — v2.
+
+Cache layout
+------------
+    ~/.sourcecode/cache/<repo_id>/
+        snapshot-<git_sha>-<flags_hash>.json.gz   ← versioned envelope
+        cas/
+            <blob_hash16>.gz                       ← content-addressed blobs
+
+Schema
+------
+Every snapshot file is a gzip-compressed JSON *envelope*:
+
+    {
+      "sv":     "2",                       // schema version — bump to invalidate all
+      "key":    "abc1234-aabbccdd",        // cache key (git_sha + flags_hash)
+      "ts":     "2026-05-24T22:00:00Z",   // write timestamp (ISO-8601 UTC)
+      "fmt":    "json",                    // output format: "json" | "yaml"
+      "layers": {"heuristic": "...", ...}, // analyzer fingerprints at write time
+      // ── content (one of two forms) ──────────────────────────────────────
+      "snap":   {...},                     // inline fields (small) — JSON mode
+      "cas":    {"file_paths": "<h16>",…}  // large fields deduped into CAS store
+      // — OR —
+      "raw":    "<content string>"         // YAML or unparseable JSON stored as-is
+    }
+
+Content-addressed store (CAS)
+-----------------------------
+Large top-level JSON fields (> _CAS_THRESHOLD bytes) are extracted into the
+``cas/`` directory as individual gzip-compressed blobs identified by a 16-char
+SHA-256 hash of their uncompressed bytes.  Two snapshots that share an
+identical ``file_paths`` array reference the *same* blob — zero duplication.
+
+Eviction / GC
+-------------
+After each write, ``_gc()`` keeps snapshots from the last
+``SOURCECODE_CACHE_KEEP_COMMITS`` distinct git commits (default 5, override via
+env var).  A CAS sweep runs concurrently: blobs unreferenced by any surviving
+snapshot are deleted.
+
+Backward compatibility
+----------------------
+v1 files (raw gzip'd content, no envelope) are detected by the absence of an
+``sv`` key in the decompressed JSON, and served transparently.  Legacy files
+in ``<repo>/.sourcecode-cache/`` are also checked as a final fallback.
+
+Env vars
+--------
+  SOURCECODE_CACHE_DIR          Override global cache base (default: ~/.sourcecode/cache)
+  SOURCECODE_CACHE_KEEP_COMMITS How many git commits to retain (default: 5; 0 = unlimited)
+"""
+from __future__ import annotations
+
+import gzip
+import hashlib
+import json
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+
+# ---------------------------------------------------------------------------
+# Version / constants
+# ---------------------------------------------------------------------------
+
+#: Bump this string to invalidate *all* existing cached snapshots.
+SCHEMA_VERSION: str = "2"
+
+#: Fields eligible for CAS deduplication (applied to top-level JSON dict keys).
+_CAS_FIELDS: frozenset[str] = frozenset([
+    "file_paths",
+    "entry_points",
+    "docs",
+    "dependencies",
+    "graph",
+    "semantic_calls",
+    "semantic_symbols",
+    "architecture",
+    "metrics",
+    "git_history",
+    "env_map",
+    "code_notes",
+])
+
+#: Serialised size threshold (bytes) above which a field is moved to CAS.
+_CAS_THRESHOLD: int = 4096
+
+_DEFAULT_KEEP_COMMITS: int = 5
+
+# Matches "snapshot-<hex_commit>-<hex_flags>.json.gz"
+_SNAPSHOT_RE = re.compile(r"^snapshot-([0-9a-f]+)-[0-9a-f]+\.json\.gz$")
+
+
+# ---------------------------------------------------------------------------
+# Public API — location helpers
+# ---------------------------------------------------------------------------
+
+def repo_id(repo_root: Path) -> str:
+    """Stable 16-char hex identifier derived from the canonical repo path."""
+    return hashlib.sha256(str(repo_root.resolve()).encode()).hexdigest()[:16]
+
+
+def cache_dir(repo_root: Path) -> Path:
+    """
+    Return the per-repo cache directory (``~/.sourcecode/cache/<repo_id>/``).
+
+    Override the base via ``SOURCECODE_CACHE_DIR``.
+    """
+    env_base = os.environ.get("SOURCECODE_CACHE_DIR", "")
+    base: Path = Path(env_base) if env_base else Path.home() / ".sourcecode" / "cache"
+    return base / repo_id(repo_root)
+
+
+# ---------------------------------------------------------------------------
+# Public API — read / write
+# ---------------------------------------------------------------------------
+
+def read(repo_root: Path, cache_key: str) -> Optional[str]:
+    """
+    Return the cached snapshot string for *cache_key*, or ``None`` on miss.
+
+    Lookup order:
+    1. ``<cache_dir>/snapshot-<cache_key>.json.gz``  — v2 envelope (new)
+    2. ``<repo_root>/.sourcecode-cache/snapshot-<cache_key>.json``  — legacy
+    """
+    cache_d = cache_dir(repo_root)
+
+    # ── 1. Global location (.json.gz, v2 envelope or v1 raw) ───────────────
+    gz_path = cache_d / f"snapshot-{cache_key}.json.gz"
+    if gz_path.exists():
+        try:
+            result = _parse_envelope(gz_path.read_bytes(), cache_d)
+            if result is not None:
+                return result
+        except Exception:
+            pass
+        _safe_unlink(gz_path)  # corrupted or version mismatch — evict
+        return None
+
+    # ── 2. Legacy location (<repo>/.sourcecode-cache/*.json) ───────────────
+    legacy = repo_root / ".sourcecode-cache" / f"snapshot-{cache_key}.json"
+    if legacy.exists():
+        try:
+            return legacy.read_text(encoding="utf-8")
+        except Exception:
+            return None
+
+    return None
+
+
+def write(
+    repo_root: Path,
+    cache_key: str,
+    content: str,
+    *,
+    fmt: str = "json",
+    layers: Optional[dict[str, str]] = None,
+) -> None:
+    """
+    Persist *content* as a versioned, optionally CAS-deduped snapshot.
+
+    Parameters
+    ----------
+    repo_root : Path
+        Root directory of the analysed repository.
+    cache_key : str
+        ``"{git_sha}-{flags_hash}"`` identifying this analysis.
+    content : str
+        Final rendered output (JSON or YAML string).
+    fmt : str
+        ``"json"`` or ``"yaml"`` — determines whether CAS extraction applies.
+    layers : dict[str, str], optional
+        Analyzer fingerprints (from ``_compute_analyzer_fingerprints()``).
+        Stored in the envelope for future layer-aware reuse.
+
+    Writes are always best-effort: any failure is silently swallowed.
+    """
+    cache_d = cache_dir(repo_root)
+    dest = cache_d / f"snapshot-{cache_key}.json.gz"
+    try:
+        cache_d.mkdir(parents=True, exist_ok=True)
+        payload = _build_envelope(cache_key, content, fmt, layers or {}, cache_d)
+        dest.write_bytes(payload)
+    except Exception:
+        return  # non-fatal
+
+    _gc(cache_d)
+
+
+# ---------------------------------------------------------------------------
+# Envelope (de)serialisation
+# ---------------------------------------------------------------------------
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _build_envelope(
+    cache_key: str,
+    content: str,
+    fmt: str,
+    layers: dict[str, str],
+    cache_d: Path,
+) -> bytes:
+    """Build a versioned envelope and return gzip-compressed bytes."""
+    envelope: dict[str, Any] = {
+        "sv": SCHEMA_VERSION,
+        "key": cache_key,
+        "ts": _now_iso(),
+        "fmt": fmt,
+        "layers": layers,
+    }
+
+    if fmt == "json":
+        # Try to parse and extract large fields into CAS
+        try:
+            snap_dict = json.loads(content)
+            if isinstance(snap_dict, dict):
+                inline, cas_refs = _cas_extract(snap_dict, cache_d)
+                envelope["snap"] = inline
+                if cas_refs:
+                    envelope["cas"] = cas_refs
+            else:
+                # JSON array or primitive — store as-is
+                envelope["raw"] = content
+        except Exception:
+            envelope["raw"] = content
+    else:
+        # YAML or unknown format — store raw string
+        envelope["raw"] = content
+
+    return gzip.compress(
+        json.dumps(envelope, ensure_ascii=False).encode("utf-8"),
+        compresslevel=6,
+    )
+
+
+def _parse_envelope(data: bytes, cache_d: Path) -> Optional[str]:
+    """
+    Decompress *data*, parse envelope, resolve CAS refs, return content string.
+
+    Returns ``None`` on schema version mismatch, CAS miss, or parse failure.
+    v1 files (no envelope wrapper) are detected and served transparently.
+    """
+    try:
+        raw_bytes = gzip.decompress(data)
+    except Exception:
+        return None
+
+    # ── v1 detection ────────────────────────────────────────────────────────
+    # v1 stored the content string directly (gzip'd UTF-8), not an envelope.
+    # Heuristic: if decompressed bytes are not a JSON object with an "sv" key,
+    # treat as v1 and return the raw bytes as the content string.
+    try:
+        envelope = json.loads(raw_bytes.decode("utf-8"))
+    except Exception:
+        # Not JSON at all (e.g. YAML v1) — return as-is
+        try:
+            return raw_bytes.decode("utf-8")
+        except Exception:
+            return None
+
+    if not isinstance(envelope, dict) or envelope.get("sv") != SCHEMA_VERSION:
+        # dict without "sv" → v1 JSON snapshot; non-matching sv → old envelope
+        # Serve v1 transparently; reject mismatched schema versions as a miss.
+        if isinstance(envelope, dict) and "sv" in envelope:
+            return None  # schema version mismatch
+        # No "sv" at all → v1 format, raw content
+        return raw_bytes.decode("utf-8")
+
+    # ── v2 envelope ─────────────────────────────────────────────────────────
+    if "raw" in envelope:
+        return envelope["raw"]
+
+    if "snap" in envelope:
+        inline: dict[str, Any] = envelope["snap"]
+        cas_refs: dict[str, str] = envelope.get("cas", {})
+        if cas_refs:
+            restored = _cas_restore(inline, cas_refs, cache_d)
+            if restored is None:
+                return None  # CAS miss (blob evicted or corrupted)
+        else:
+            restored = dict(inline)
+        # Re-serialise with the same parameters used by the pipeline.
+        # json.loads → json.dumps round-trips correctly: Python 3.7+ preserves
+        # dict insertion order and the pipeline uses indent=2, ensure_ascii=False.
+        return json.dumps(restored, indent=2, ensure_ascii=False)
+
+    return None  # malformed envelope
+
+
+# ---------------------------------------------------------------------------
+# CAS store
+# ---------------------------------------------------------------------------
+
+def _cas_dir(cache_d: Path) -> Path:
+    return cache_d / "cas"
+
+
+def _cas_path(cache_d: Path, blob_hash: str) -> Path:
+    return _cas_dir(cache_d) / f"{blob_hash}.gz"
+
+
+def _cas_store_blob(cache_d: Path, serialised: str) -> str:
+    """
+    Store *serialised* (a JSON string) in the CAS.  Idempotent.
+
+    Returns the 16-char SHA-256 hex hash that identifies the blob.
+    """
+    raw = serialised.encode("utf-8")
+    blob_hash = hashlib.sha256(raw).hexdigest()[:16]
+    path = _cas_path(cache_d, blob_hash)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(gzip.compress(raw, compresslevel=6))
+    return blob_hash
+
+
+def _cas_load_blob(cache_d: Path, blob_hash: str) -> Optional[str]:
+    """Return the stored JSON string for *blob_hash*, or ``None`` if absent."""
+    path = _cas_path(cache_d, blob_hash)
+    if not path.exists():
+        return None
+    try:
+        return gzip.decompress(path.read_bytes()).decode("utf-8")
+    except Exception:
+        return None
+
+
+def _cas_extract(
+    snap_dict: dict[str, Any],
+    cache_d: Path,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """
+    Walk *snap_dict* top-level fields.  Fields that:
+      - are in ``_CAS_FIELDS``
+      - serialise to more than ``_CAS_THRESHOLD`` bytes
+
+    … are stored as CAS blobs and replaced with their hash in the returned
+    ``cas_refs`` mapping.  Other fields remain inline.
+    """
+    inline: dict[str, Any] = {}
+    cas_refs: dict[str, str] = {}
+
+    for key, value in snap_dict.items():
+        if key in _CAS_FIELDS and value is not None:
+            serialised = json.dumps(value, ensure_ascii=False)
+            if len(serialised.encode("utf-8")) > _CAS_THRESHOLD:
+                blob_hash = _cas_store_blob(cache_d, serialised)
+                cas_refs[key] = blob_hash
+                continue
+        inline[key] = value
+
+    return inline, cas_refs
+
+
+def _cas_restore(
+    inline: dict[str, Any],
+    cas_refs: dict[str, str],
+    cache_d: Path,
+) -> Optional[dict[str, Any]]:
+    """
+    Reconstruct a full snapshot dict by loading CAS blobs for *cas_refs*.
+
+    Returns ``None`` if any blob is missing (treat as cache miss).
+    """
+    result: dict[str, Any] = dict(inline)
+    for field, blob_hash in cas_refs.items():
+        blob_str = _cas_load_blob(cache_d, blob_hash)
+        if blob_str is None:
+            return None  # blob evicted or corrupted → full miss
+        try:
+            result[field] = json.loads(blob_str)
+        except Exception:
+            return None
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Eviction / GC
+# ---------------------------------------------------------------------------
+
+def _gc(cache_d: Path) -> None:
+    """
+    Evict old snapshots and sweep orphaned CAS blobs.
+
+    Keeps snapshots from the last ``SOURCECODE_CACHE_KEEP_COMMITS`` distinct
+    git commits (determined by mtime of files in each commit group).
+    """
+    keep = int(os.environ.get("SOURCECODE_CACHE_KEEP_COMMITS", _DEFAULT_KEEP_COMMITS))
+
+    try:
+        all_snapshots = list(cache_d.glob("snapshot-*.json.gz"))
+        if not all_snapshots:
+            return
+
+        # Group snapshot files by commit SHA
+        groups: dict[str, list[Path]] = {}
+        for f in all_snapshots:
+            m = _SNAPSHOT_RE.match(f.name)
+            if m:
+                groups.setdefault(m.group(1), []).append(f)
+
+        surviving: list[Path]
+
+        if keep <= 0 or len(groups) <= keep:
+            # No eviction needed — but still sweep CAS
+            surviving = all_snapshots
+        else:
+            def _newest_mtime(commit: str) -> float:
+                return max(p.stat().st_mtime for p in groups[commit])
+
+            sorted_commits = sorted(groups, key=_newest_mtime, reverse=True)
+            surviving = []
+            for i, commit in enumerate(sorted_commits):
+                if i < keep:
+                    surviving.extend(groups[commit])
+                else:
+                    for f in groups[commit]:
+                        _safe_unlink(f)
+
+        _gc_cas(cache_d, surviving)
+
+    except Exception:
+        pass  # GC failure is non-fatal
+
+
+def _gc_cas(cache_d: Path, surviving_snapshots: list[Path]) -> None:
+    """
+    Delete CAS blobs not referenced by any snapshot in *surviving_snapshots*.
+
+    Walks each snapshot's ``cas`` dict to collect live hashes; deletes the rest.
+    """
+    cas_d = _cas_dir(cache_d)
+    if not cas_d.exists():
+        return
+
+    try:
+        # Collect all hashes referenced by surviving snapshots
+        referenced: set[str] = set()
+        for snap_path in surviving_snapshots:
+            try:
+                raw = gzip.decompress(snap_path.read_bytes())
+                env = json.loads(raw.decode("utf-8"))
+                if isinstance(env, dict) and "cas" in env:
+                    referenced.update(env["cas"].values())
+            except Exception:
+                pass  # unreadable snapshot — conservatively keep its blobs unknown
+
+        # Delete blobs not referenced by any surviving snapshot
+        for blob in cas_d.glob("*.gz"):
+            if blob.stem not in referenced:
+                _safe_unlink(blob)
+
+    except Exception:
+        pass  # CAS sweep failure is non-fatal
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+def _safe_unlink(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass

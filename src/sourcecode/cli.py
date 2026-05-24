@@ -876,14 +876,16 @@ def main(
         architecture = True  # agents need full architectural signal (M4)
         graph_modules = True  # IC-003: import graph needed for architecture confidence
 
-    # ── GAP-9: Cache check — serve from .sourcecode-cache when git SHA unchanged ──
+    # ── GAP-9: Cache check — serve from global cache when git SHA unchanged ──
+    # Cache is stored in ~/.sourcecode/cache/<repo_id>/ (outside the repo).
+    # Snapshots are gzip-compressed (.json.gz) — ~85 % smaller than plain JSON.
+    # Eviction keeps the last SOURCECODE_CACHE_KEEP_COMMITS commits (default 5).
     import hashlib as _hashlib
     import subprocess as _sub
-    _cache_dir = target / ".sourcecode-cache"
+    from sourcecode import cache as _cache_mod
     _cache_hit_content: Optional[str] = None
     _git_sha = ""
     _cache_key = ""
-    _cache_file: Optional[Path] = None
     if not no_cache:
         try:
             _sha_r = _sub.run(
@@ -921,13 +923,10 @@ def main(
                 )
                 _flags_h = _hashlib.md5(_flags_str.encode()).hexdigest()[:8]
                 _cache_key = f"{_git_sha}-{_flags_h}"
-                _cache_file = _cache_dir / f"snapshot-{_cache_key}.json"
-                if _cache_file.exists():
-                    _cache_hit_content = _cache_file.read_text(encoding="utf-8")
+                _cache_hit_content = _cache_mod.read(target, _cache_key)
         except Exception:
             _git_sha = ""
             _cache_key = ""
-            _cache_file = None
 
     if _cache_hit_content is not None:
         from sourcecode.serializer import write_output
@@ -1762,12 +1761,17 @@ def main(
     write_output(content, output=output)
 
     # GAP-9: Persist to cache for future identical runs (git SHA unchanged)
-    if not no_cache and _cache_key and _cache_file is not None and not _pipeline_error:
-        try:
-            _cache_dir.mkdir(parents=True, exist_ok=True)
-            _cache_file.write_text(content, encoding="utf-8")
-        except Exception:
-            pass
+    # Writes versioned envelope to ~/.sourcecode/cache/<repo_id>/<key>.json.gz.
+    # Large JSON fields are extracted into shared CAS blobs (deduplication).
+    # GC runs inline after each write (keep last N commits + CAS sweep).
+    if not no_cache and _cache_key and not _pipeline_error:
+        _cache_mod.write(
+            target,
+            _cache_key,
+            content,
+            fmt=format,
+            layers=_compute_analyzer_fingerprints(),
+        )
 
     if _pipeline_error:
         raise typer.Exit(code=2)
