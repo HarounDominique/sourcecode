@@ -2,7 +2,7 @@
 
 **AI-ready change intelligence for Java/Spring enterprise monoliths.**
 
-![Version](https://img.shields.io/badge/version-1.31.16-blue)
+![Version](https://img.shields.io/badge/version-1.31.17-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
@@ -40,7 +40,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.31.16
+# sourcecode 1.31.17
 ```
 
 ---
@@ -79,15 +79,24 @@ sourcecode fix-bug /path/to/repo --symptom "NullPointerException in checkout"
 
 Measured against open-source enterprise Java repos:
 
-| Repo | Classes | Cold scan (`--compact`) | Cache hit | Endpoints found |
-|------|---------|------------------------|-----------|----------------|
-| BroadleafCommerce | ~2970 | 2.6s | 0.26s | 130 |
-| Keycloak | ~6363 | 8.4s | 0.27s | 693 |
+| Repo | Java files | Cold scan (`--compact`) | Cache hit | Cache speedup | Endpoints found |
+|------|-----------|------------------------|-----------|---------------|----------------|
+| BroadleafCommerce | 2,985 | 2.9s | 0.20s | ~13x | 130 |
+| Keycloak | 7,885 | 9.0s | 0.27s | ~33x | 693 |
 
-Cache speedup: **30x**. The cache is keyed on file content hashes — invalidated only when source changes.
+The cache is keyed on file content hashes — invalidated only when source changes. Speedup varies by repo size and OS I/O.
 
-**`impact` on a high-fan-in class:**  
-For hub interfaces (2000+ direct dependents), use `--depth 1` — it gives you the direct endpoints in 12s. Default depth=4 can take 90+ seconds on very large repos.
+**Token sizes (measured):**
+
+| Mode | BroadleafCommerce | Keycloak |
+|------|------------------|---------|
+| `--compact` | ~2,900 | ~4,000 |
+| `--agent` | ~4,800 | ~5,500 |
+| `onboard` | ~2,600 | n/a |
+| `fix-bug` (trimmed) | ~27,000 | ~4,600 |
+
+**`impact` on high-fan-in classes:**  
+For hub interfaces (1000+ direct dependents), use `--depth 1` — direct endpoints are already the most actionable signal. Depth=4 on very large repos may take 90+ seconds.
 
 ---
 
@@ -95,7 +104,7 @@ For hub interfaces (2000+ direct dependents), use `--depth 1` — it gives you t
 
 | Flag | Alias | Default | Description |
 |------|-------|---------|-------------|
-| `--compact` | | off | High-signal summary (typically 2000–4000 tokens): stacks, entry points, dependencies, confidence, gaps. Includes `mybatis` and `transactional_boundaries` for Java projects. |
+| `--compact` | | off | High-signal summary (typically 2,500–4,000 tokens for mid-to-large Java repos): stacks, entry points, dependencies, confidence, gaps. Includes `transactional_boundaries` for Spring projects. |
 | `--agent` | | off | Structured JSON for AI agents: project identity, entry points, architecture, dependencies, confidence. More detail than `--compact`. ~4500–5500 tokens. |
 | `--full` | | off | Remove truncation limits on `transactional_boundaries`, `mybatis.dto_mappers`, and other capped lists. |
 | `--git-context` | `-g` | off | Include git activity: recent commits, change hotspots, and uncommitted file count. |
@@ -137,9 +146,10 @@ sourcecode impact OrderService . --depth 2                 # limit BFS depth
 | `candidates` | On partial match: up to 10 FQNs ranked by relevance |
 
 **Best practices:**
-- Target **interfaces**, not implementations: `impact OrderService` > `impact OrderServiceImpl`. Callers depend on the interface contract, not the Impl.
+- Target **interfaces**, not implementations: `impact OrderService` > `impact OrderServiceImpl`. In Spring projects, callers inject the interface via `@Autowired` — the impl has zero direct callers in the graph even though it runs all the code. Querying the impl returns `direct_callers: []` with no error; querying the interface returns the real blast radius.
 - Use `--depth 1` when the target has 200+ callers — direct endpoints are already the most actionable signal.
 - The cache applies to the underlying IR scan — second `impact` run on the same repo is significantly faster.
+- When you get `direct_callers: 0` for a `@Service` or `@Repository` class, that is almost certainly the interface-injection pattern. Re-run with the interface name.
 
 **Supported targets:**
 - Simple class name: `OrderService`
@@ -166,13 +176,15 @@ Extracts all Spring MVC (`@GetMapping`, `@PostMapping`, `@RequestMapping`, etc.)
 ## `repo-ir` — Symbol-level IR
 
 ```bash
-sourcecode repo-ir /path/to/repo
-sourcecode repo-ir /path/to/repo --summary-only          # compact: analysis + impact, no full graph
+sourcecode repo-ir /path/to/repo --summary-only          # recommended: analysis + impact, no full graph (~20K tokens)
 sourcecode repo-ir /path/to/repo --since HEAD~1           # symbol-level diff
-sourcecode repo-ir /path/to/repo --max-nodes 200 --max-edges 500
+sourcecode repo-ir /path/to/repo --files src/.../OrderService.java   # single-file IR
+sourcecode repo-ir /path/to/repo --max-nodes 200 --max-edges 500     # limits forward graph only — see note below
 ```
 
 Builds a deterministic symbol graph: classes, methods, import/injection edges, Spring roles, subsystems. Output is JSON with `graph`, `reverse_graph`, `impact`, `subsystems`, and `route_surface`.
+
+**Size warning:** Without `--summary-only`, output can exceed 1MB for mid-size repos. `--max-nodes`/`--max-edges` limit the forward `graph` section only — the `reverse_graph` section is not bounded by these flags and is the largest component. Always use `--summary-only` unless you need the full graph for downstream tooling.
 
 ---
 
@@ -252,47 +264,103 @@ Note: `sourcecode onboard`, `sourcecode fix-bug`, `sourcecode review-pr`, and `s
 
 ## How to use sourcecode effectively
 
+### Onboarding — new repo, new agent session
+
+```bash
+# Bounded context at session start (~2,500–5,500 tokens)
+sourcecode /repo --compact              # fast overview
+sourcecode /repo --agent               # more detail: file relevance, architecture, event flows
+sourcecode onboard /repo               # task-structured: entry points, key files, gaps
+```
+
+Use `--compact` or `--agent` as first-prompt injection for AI coding agents. Both are bounded and deterministic.
+
+### Impact analysis — before touching a class
+
+```bash
+# Always target the INTERFACE in Spring projects:
+sourcecode impact OrderService /repo           # ✓ correct: 30 callers, 11 endpoints
+sourcecode impact OrderServiceImpl /repo       # ✗ wrong: 0 callers (Spring DI blindness)
+
+# Large hub interfaces — depth=1 is faster and still actionable:
+sourcecode impact KeycloakSession /repo --depth 1
+
+# If you get direct_callers:[] for a @Service class, re-query the interface.
+```
+
+### Bug triage — symptom-driven
+
+```bash
+# Specific symptoms produce the best signal:
+sourcecode fix-bug /repo --symptom "OIDC token refresh fails after realm update"
+sourcecode fix-bug /repo --symptom "NullPointerException in OrderService during checkout"
+
+# Generic symptoms produce noisy output (100s of files) — be specific.
+# Use --output to capture full output without budget truncation.
+sourcecode fix-bug /repo --symptom "payment timeout" --output triage.json
+```
+
+### PR review
+
+```bash
+# JSON for programmatic use:
+sourcecode review-pr /repo --since main --output review.json
+jq '.ci_decision' review.json    # "analysis_success" | "git_ref_error"
+
+# Markdown for GitHub comment:
+sourcecode review-pr /repo --since main --format github-comment
+
+# CI/CD gate — parse risk and test coverage fields:
+jq '{ci_decision, test_coverage_risk, impact_summary}' review.json
+```
+
+### Modernization planning
+
+```bash
+sourcecode modernize /repo
+# high_coupling_nodes: classes most risky to change (by fan-in degree)
+# dead_zone_candidates: classes with zero callers — safe to remove or refactor
+# Note: hotspot_candidates may be empty in annotation-heavy codebases —
+#       check high_coupling_nodes directly for coupling signal.
+```
+
+### Symbol IR for downstream tooling
+
+```bash
+# Always use --summary-only unless you need the full graph:
+sourcecode repo-ir /repo --summary-only --output ir.json   # ~20K tokens
+sourcecode repo-ir /repo --since HEAD~3 --summary-only     # changed symbols only
+
+# Full graph warning: output can exceed 1MB for mid-size repos.
+# --max-nodes/--max-edges only limit the forward graph, not reverse_graph.
+```
+
 ### With AI agents (Claude, GPT-4, etc.)
 
 ```bash
-# Inject bounded context at session start:
-sourcecode /repo --agent | paste-to-agent
+# Start agent session with bounded context:
+sourcecode /repo --agent --output context.json && cat context.json | agent-cli
 
-# For a change task:
-sourcecode impact PaymentService /repo --depth 1 | ask-agent "What are the risks?"
+# For a specific change task, combine context + impact:
+sourcecode /repo --compact > context.json
+sourcecode impact PaymentService /repo --depth 1 >> impact.json
+# Feed both to agent: "Given this context and impact, what are the risks of changing PaymentService?"
 
 # For PR review:
-sourcecode review-pr /repo --since main | ask-agent "Summarize architectural risks"
+sourcecode review-pr /repo --since main --format github-comment
+# Paste directly into GitHub PR description or feed to agent
 ```
 
 ### In CI/CD pipelines
 
 ```bash
-# Always-fresh bounded JSON — deterministic, cacheable by content hash
-sourcecode /repo --compact --no-cache --format json --output context.json
+# Deterministic, content-hash cached — safe to run on every commit
+sourcecode /repo --compact --no-cache --output context.json
 
-# PR gate — parse ci_decision field
+# PR gate
 sourcecode review-pr /repo --since $BASE_REF --output review.json
-jq '.ci_decision' review.json    # "analysis_success" | "git_ref_error" | etc.
-```
-
-### For debugging production issues
-
-```bash
-# Correlate symptom to files
-sourcecode fix-bug /repo --symptom "NullPointerException in PaymentProcessor when cart is empty"
-# → ranked list of files, suspected areas, git commits touching relevant code
-```
-
-### For understanding blast radius
-
-```bash
-# Interface targets give the most complete signal
-sourcecode impact OrderService /repo --depth 2
-# → shows all endpoints, transaction boundaries, and modules affected
-
-# On very large repos or hub classes, depth=1 is faster and still actionable
-sourcecode impact KeycloakSession /repo --depth 1
+DECISION=$(jq -r '.ci_decision' review.json)
+if [ "$DECISION" != "analysis_success" ]; then echo "Review failed: $DECISION"; fi
 ```
 
 ---
@@ -302,8 +370,11 @@ sourcecode impact KeycloakSession /repo --depth 1
 - No runtime analysis — all signals are static (annotation, import graph, file structure)
 - No semantic code understanding — it reads structure, not logic
 - Architecture pattern detection works best for Spring MVC layered apps; SPI/plugin architectures (e.g. Quarkus extension model) are classified as "layered" which may be inaccurate
-- Endpoint recall for JAX-RS subresource locator pattern is ~65% — endpoints mounted dynamically via factory methods are not individually counted
-- `impact` on implementation classes (e.g. `OrderServiceImpl`) reflects callers of the implementation specifically, which is often zero if callers use the interface — prefer targeting the interface
+- Endpoint recall for JAX-RS subresource locator pattern is ~65% — endpoints mounted dynamically via factory methods are not individually counted. JAX-RS sub-resource paths (method-level `@Path` inside a `@Path`-annotated class) are extracted as relative paths, not the fully composed URL.
+- `impact` on implementation classes (e.g. `OrderServiceImpl`) reflects callers of the implementation specifically — **in Spring Boot projects this is almost always zero**, because callers inject the interface via `@Autowired`. Always target the interface (`OrderService`) to get the real blast radius. The tool does not auto-resolve impl → interface. When `direct_callers: []` is returned with `confidence_level: high` for a `@Service` class, treat it as a prompt to re-query the interface.
+- `no_security_signal` on endpoints means no method-level security annotations (`@PreAuthorize`, `@Secured`) were found — it does **not** mean the endpoint is unsecured. Projects using Spring Security filter chains, XML security config, or custom filters will show 100% `no_security_signal` even when fully secured.
+- `hotspot_candidates` in `modernize` output reflects graph coupling, not git churn — in annotation-heavy codebases it is often empty even though real hotspots exist. Check `high_coupling_nodes` directly for the coupling picture.
+- `project_summary` is extracted from the repository README — it may reflect marketing language rather than architectural description
 
 ---
 
