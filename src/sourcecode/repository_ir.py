@@ -2691,6 +2691,60 @@ def apply_ir_size_limits(
         "global_score": (ir.get("impact") or {}).get("global_score", 0),
         "ranked_nodes": ranked,
     }
+
+    # ── Trim reverse_graph to match node/edge limits ──────────────────────────
+    # BUG-P0-02: reverse_graph was never bounded by --max-nodes/--max-edges.
+    # A 26K-node repo (Broadleaf) emits ~3MB of reverse_graph even when
+    # --max-nodes 200 --max-edges 500 is requested.
+    full_rg: dict = ir.get("reverse_graph") or {}
+    if full_rg:
+        # Inner caller-list cap: prevents individual entries from dominating budget.
+        # Formula: max(20, max_nodes // 4) when max_nodes given; 50 otherwise.
+        def _cap_rg_lists(entry: dict, cap: int) -> dict:
+            return {k: (v[:cap] if isinstance(v, list) and len(v) > cap else v)
+                    for k, v in entry.items()}
+
+        if kept_fqns is not None:
+            # max_nodes was applied — restrict reverse_graph to kept nodes only.
+            # Cap inner caller lists proportionally: large max_nodes → more callers shown.
+            _inner_cap = max(20, max_nodes // 4) if max_nodes else 50
+            trimmed_rg: dict = {
+                k: _cap_rg_lists(v, _inner_cap)
+                for k, v in full_rg.items()
+                if k in kept_fqns
+            }
+            out["reverse_graph"] = trimmed_rg
+            _rg_trimmed_count = len(full_rg) - len(trimmed_rg)
+            if _rg_trimmed_count:
+                out["reverse_graph_note"] = (
+                    f"reverse_graph trimmed: {len(trimmed_rg)}/{len(full_rg)} entries "
+                    f"kept (matching --max-nodes {max_nodes} kept nodes), "
+                    f"caller lists capped at {_inner_cap}. "
+                    "Use --output for full reverse_graph."
+                )
+        elif max_edges is not None:
+            # Only max_edges given (no max_nodes): cap reverse_graph keys
+            # proportionally.  Target: at most max_edges keys, sorted by in-degree
+            # (most-connected hubs first) so the most useful entries survive.
+            _rg_limit = max(1, min(max_edges, len(full_rg)))
+            _rg_sorted_keys = sorted(
+                full_rg.keys(),
+                key=lambda k: sum(len(v) for v in full_rg[k].values() if isinstance(v, list)),
+                reverse=True,
+            )
+            _inner_cap = 50
+            out["reverse_graph"] = {
+                k: _cap_rg_lists(full_rg[k], _inner_cap)
+                for k in _rg_sorted_keys[:_rg_limit]
+            }
+            if len(full_rg) > _rg_limit:
+                out["reverse_graph_note"] = (
+                    f"reverse_graph trimmed: {_rg_limit}/{len(full_rg)} entries "
+                    f"kept (top by in-degree, bounded by --max-edges {max_edges}), "
+                    f"caller lists capped at {_inner_cap}. "
+                    "Use --output for full reverse_graph."
+                )
+
     return out
 
 
@@ -2849,7 +2903,9 @@ def compute_blast_radius(
     """
     reverse_graph: dict[str, dict[str, list[str]]] = ir.get("reverse_graph") or {}
     route_surface: list[dict] = ir.get("route_surface") or []
-    graph_nodes: list[dict] = (ir.get("graph") or {}).get("nodes") or []
+    _graph: dict = ir.get("graph") or {}
+    graph_nodes: list[dict] = _graph.get("nodes") or []
+    graph_edges: list[dict] = _graph.get("edges") or []
     subsystems: list[dict] = ir.get("subsystems") or []
 
     # ── 1. Resolve target → one or more FQNs ─────────────────────────────────
@@ -2913,6 +2969,76 @@ def compute_blast_radius(
                 direct_callers.append(c)
                 if _effective_depth > 1:
                     queue.append((c, 1))
+
+    # ── 2a. Interface bridging: Spring DI / CDI / IoC pattern ────────────────
+    # In DI frameworks (Spring, CDI, Guice), callers inject the INTERFACE, not
+    # the Impl.  e.g. `impact OrderServiceImpl` → 0 direct callers, because every
+    # caller wires against OrderService.
+    #
+    # Root cause: implements edges in graph.edges often carry unresolved short-name
+    # `to` values (e.g. "OrderService" not FQN), so _build_reverse_adjacency drops
+    # them (to_symbol ∉ all_fqns).  The reverse_graph["...OrderService"] therefore
+    # has no "implements" key — we cannot scan it from the reverse side.
+    #
+    # Fix: scan FORWARD graph edges for type=implements FROM our matched classes.
+    # Resolve the `to` value (short or FQN) against reverse_graph keys via suffix
+    # matching.  Gather non-structural callers of those interface keys and merge
+    # them into direct_callers.
+    _iface_bridging: list[dict] = []  # [{interface, caller_count}] for output metadata
+
+    _target_is_interface = any(
+        n.get("symbol_kind") == "interface" or n.get("type") == "interface"
+        for n in graph_nodes
+        if n.get("fqn") in matched_fqns
+    )
+
+    if not _target_is_interface and graph_edges:
+        # Build suffix→FQN lookup for reverse_graph keys (one-time, O(n))
+        _rg_suffix_map: dict[str, list[str]] = {}
+        for _rg_key in reverse_graph:
+            _sfx = _simple_name(_rg_key)
+            _rg_suffix_map.setdefault(_sfx, []).append(_rg_key)
+
+        _BRIDGE_SKIP = frozenset({
+            "implements", "extends", "contained_in", "annotated_with"
+        })
+
+        for _edge in graph_edges:
+            if _edge.get("type") != "implements":
+                continue
+            _from = _edge.get("from") or ""
+            if _from not in matched_fqns:
+                continue
+            # Resolve `to` (may be short name like "OrderService" or full FQN)
+            _to_raw = _edge.get("to") or ""
+            _to_simple = _simple_name(_to_raw)
+            _candidate_iface_keys: list[str] = []
+            if _to_raw in reverse_graph:
+                _candidate_iface_keys = [_to_raw]
+            else:
+                _candidate_iface_keys = _rg_suffix_map.get(_to_simple, [])
+
+            for _iface_fqn in _candidate_iface_keys:
+                _rg_entry = reverse_graph[_iface_fqn]
+                _iface_callers = [
+                    c
+                    for _etype, _clist in _rg_entry.items()
+                    if _etype not in _BRIDGE_SKIP
+                    for c in _clist
+                    if c not in matched_fqns
+                ]
+                if not _iface_callers:
+                    continue
+                _iface_bridging.append({
+                    "interface": _iface_fqn,
+                    "caller_count": len(_iface_callers),
+                })
+                for c in _iface_callers:
+                    if c not in all_affected:
+                        all_affected[c] = 1
+                        direct_callers.append(c)
+                        if _effective_depth > 1:
+                            queue.append((c, 1))
 
     # BFS for indirect callers
     indirect_callers: list[str] = []
@@ -3142,6 +3268,13 @@ def compute_blast_radius(
     if n_modules > 1:
         _parts.append(f"impact crosses {n_modules} modules")
 
+    if _iface_bridging:
+        _iface_names = [b["interface"].split(".")[-1] for b in _iface_bridging]
+        _parts.append(
+            f"callers resolved via interface{'s' if len(_iface_names) > 1 else ''} "
+            f"({', '.join(_iface_names)}) — Spring/CDI DI pattern"
+        )
+
     if not _parts:
         explanation = f"No callers or dependents found for {target!r}. Low-risk isolated change."
     else:
@@ -3181,6 +3314,13 @@ def compute_blast_radius(
     }
     if _candidates_out:
         out["candidates"] = _candidates_out
+    if _iface_bridging:
+        out["via_interface_resolution"] = _iface_bridging
+        out["via_interface_note"] = (
+            "Target is a concrete class injected via interface(s) in DI frameworks "
+            "(Spring/CDI/Guice). direct_callers includes callers of the implemented "
+            "interface(s) — these are the real production dependents."
+        )
     if len(direct_callers) > 30:
         out["direct_callers_note"] = (
             f"Showing 30/{n_direct} direct callers. Use --output to inspect full IR."
