@@ -1101,7 +1101,8 @@ def _architecture_context(sm: SourceMap) -> dict[str, Any]:
         else:
             ctx["no_layers_detected"] = True
         if arch.bounded_contexts:
-            ctx["bounded_contexts"] = [bc.name for bc in arch.bounded_contexts]
+            # BUG-04 fix: deduplicate — same package root can be detected N times
+            ctx["bounded_contexts"] = list(dict.fromkeys(bc.name for bc in arch.bounded_contexts))
         if arch.ddd_layers_detected:
             ctx["ddd_layers_detected"] = arch.ddd_layers_detected
         if arch.confidence == "low" and not pattern:
@@ -1328,11 +1329,12 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False, full: bool = False) ->
     conf_dict: Any = None
     if sm.confidence_summary is not None:
         cs = sm.confidence_summary
+        _sections = _section_confidence(sm)
         conf_dict = {
             "overall": cs.overall,
             "stack": cs.stack_confidence,
             "entry_points": cs.entry_point_confidence,
-            "sections": _section_confidence(sm),
+            "sections": _sections,
         }
         if cs.anomalies:
             conf_dict["anomalies"] = cs.anomalies
@@ -1340,6 +1342,16 @@ def compact_view(sm: SourceMap, *, no_tree: bool = False, full: bool = False) ->
         # why --compact may differ from --agent (architecture analyzer not run)
         if cs.factors:
             conf_dict["factors"] = cs.factors
+        # BUG-07 fix: ensure overall is consistent with sections.architecture.
+        # In --compact mode the ConfidenceAnalyzer builds sm_for_conf without
+        # architecture (not yet analyzed), so overall stays "high" based on
+        # stack+entry_points alone.  But _section_confidence reads the real
+        # sm.architecture — if that section is "low", overall cannot be "high".
+        if _sections.get("architecture") == "low" and conf_dict["overall"] == "high":
+            conf_dict["overall"] = "medium"
+            _factors = list(conf_dict.get("factors") or [])
+            _factors.append("architecture.confidence=low → overall capped at medium (consistency fix)")
+            conf_dict["factors"] = _factors
 
     # Analysis gaps
     gaps_list: Any = None

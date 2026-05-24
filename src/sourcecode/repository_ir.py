@@ -2833,7 +2833,12 @@ def compute_blast_radius(
     - direct callers (reverse graph depth=1)
     - indirect callers (reverse graph depth=2+, BFS)
     - endpoints in route_surface that transitively depend on the target
+    - mappers / persistence paths (repositories, DAOs, @Mapper interfaces) in the blast cone
+    - security surface affected (security policies on touched endpoints)
+    - cross_module_impact: which subsystems are hit
     - transactional boundaries touched
+    - risk_score / risk_level / confidence_score / confidence_level
+    - explanation: short human-readable rationale
 
     Args:
         ir:        Full repo IR dict (from build_repo_ir; NOT summary_only trimmed).
@@ -2845,12 +2850,15 @@ def compute_blast_radius(
     reverse_graph: dict[str, dict[str, list[str]]] = ir.get("reverse_graph") or {}
     route_surface: list[dict] = ir.get("route_surface") or []
     graph_nodes: list[dict] = (ir.get("graph") or {}).get("nodes") or []
+    subsystems: list[dict] = ir.get("subsystems") or []
 
     # ── 1. Resolve target → one or more FQNs ─────────────────────────────────
     resolution, matched_fqns = _resolve_target(target, reverse_graph, graph_nodes)
 
     if not matched_fqns:
-        return {
+        # Build a short candidate list to help the user
+        _candidates = _blast_radius_candidates(target, reverse_graph, graph_nodes)
+        result: dict = {
             "target": target,
             "resolution": "not_found",
             "message": (
@@ -2861,17 +2869,41 @@ def compute_blast_radius(
             "direct_callers": [],
             "indirect_callers": [],
             "endpoints_affected": [],
+            "mappers_affected": [],
+            "security_surface_affected": [],
+            "cross_module_impact": [],
             "transactional_boundaries_touched": [],
             "risk_score": 0.0,
             "risk_level": "unknown",
+            "confidence_score": 0.0,
+            "confidence_level": "low",
+            "explanation": f"Target {target!r} not found in IR.",
         }
+        if _candidates:
+            result["candidates"] = _candidates
+        return result
+
+    # When resolution is ambiguous/partial, surface ordered candidates alongside results
+    _candidates_out: list[dict] = []
+    if resolution in ("ambiguous", "partial"):
+        _candidates_out = _blast_radius_candidates(target, reverse_graph, graph_nodes)
 
     # ── 2. BFS from target(s) through reverse graph ───────────────────────────
-    # Build a forward-lookup: node → {type → [callers]}
-    # We traverse: who calls target? Who calls those callers? etc.
     all_affected: dict[str, int] = {}   # fqn → depth at which first found
     direct_callers: list[str] = []
     queue: list[tuple[str, int]] = []
+
+    # BUG-02 fix: hub-class guard.  If any seed has > 500 direct callers (e.g.
+    # KeycloakSession with 2023 importers), deep BFS is O(n^depth) and collapses
+    # to 70-91s at depth=4.  Cap effective depth to 1 for hub classes so the
+    # direct-caller list is still accurate but we skip the catastrophic expansion.
+    _HUB_CALLER_THRESHOLD = 500
+    _effective_depth = max_depth
+    for seed in matched_fqns:
+        _seed_callers = _all_callers_from_rg(seed, reverse_graph)
+        if len(_seed_callers) > _HUB_CALLER_THRESHOLD and max_depth > 1:
+            _effective_depth = 1
+            break
 
     for seed in matched_fqns:
         callers = _all_callers_from_rg(seed, reverse_graph)
@@ -2879,7 +2911,7 @@ def compute_blast_radius(
             if c not in all_affected:
                 all_affected[c] = 1
                 direct_callers.append(c)
-                if max_depth > 1:
+                if _effective_depth > 1:
                     queue.append((c, 1))
 
     # BFS for indirect callers
@@ -2888,7 +2920,7 @@ def compute_blast_radius(
 
     while queue:
         node, depth = queue.pop(0)
-        if depth >= max_depth:
+        if depth >= _effective_depth:
             continue
         for caller in _all_callers_from_rg(node, reverse_graph):
             if caller not in visited:
@@ -2899,9 +2931,7 @@ def compute_blast_radius(
 
     # ── 3. Identify affected endpoints from route_surface ─────────────────────
     affected_classes: set[str] = set(matched_fqns) | set(direct_callers) | set(indirect_callers)
-    # P1 FIX: expand to enclosing classes of field/method FQNs in affected set.
-    # A field like OrderController.orderService in affected_classes means OrderController
-    # (the enclosing class) is also effectively affected for endpoint matching.
+    # Expand to enclosing classes of field/method FQNs in affected set.
     affected_with_enclosing: set[str] = affected_classes | {
         _enclosing_class(fqn) for fqn in affected_classes
     }
@@ -2910,9 +2940,6 @@ def compute_blast_radius(
 
     endpoints_affected: list[dict] = []
     for ep in route_surface:
-        # P1 FIX: route surface uses "effective_class"/"controller" not "class",
-        # and "symbol" (FQN) not "handler". Previous code always got empty strings
-        # → endpoints_affected was always [] for every Keycloak-like repo.
         ep_class = ep.get("effective_class") or ep.get("controller") or ep.get("class") or ""
         ep_symbol = ep.get("symbol") or ""
         ep_handler = (
@@ -2920,7 +2947,6 @@ def compute_blast_radius(
             else ep.get("handler") or ""
         )
         ep_fqn = ep_symbol or (f"{ep_class}#{ep_handler}" if ep_class and ep_handler else ep_class)
-        # Match if the endpoint class or its simple name is in affected set
         if (
             ep_class in affected_with_enclosing
             or _simple_name(ep_class) in affected_simple
@@ -2932,13 +2958,109 @@ def compute_blast_radius(
                 "class": ep_class,
                 "handler": ep_handler,
             }
-            # Forward security_annotations when present (P1: route→auth surface linkage)
             if ep.get("security_annotations"):
                 _ep_entry["security"] = ep["security_annotations"]
             endpoints_affected.append(_ep_entry)
 
-    # ── 4. Identify transactional boundaries touched ──────────────────────────
-    # A @Transactional class is a boundary if it or its methods are in affected set.
+    # ── 4. Mappers / persistence paths ────────────────────────────────────────
+    # Identify class-level @Repository, @Mapper, DAO, mapper_interface nodes
+    # in the blast cone.  Method-level symbols are excluded — only class declarations
+    # are surfaced so the list stays actionable (one entry per persistence class).
+    _MAPPER_ROLES = frozenset({"repository"})
+    _MAPPER_NAME_PATTERNS = re.compile(
+        r"(?:Repository|Mapper|Dao|DAO|Store|JdbcTemplate|JpaRepository)", re.IGNORECASE
+    )
+    mappers_affected: list[dict] = []
+    _seen_mapper_fqns: set[str] = set()
+    for node_dict in graph_nodes:
+        fqn = node_dict.get("fqn") or ""
+        if not fqn:
+            continue
+        # Restrict to class/interface-level symbols only (not methods/fields)
+        _sym_kind = node_dict.get("symbol_kind") or node_dict.get("type") or ""
+        _is_class_level = _sym_kind in (
+            "class", "interface", "enum", "mapper_interface", "", "other"
+        ) and "#" not in fqn and "." not in fqn.split(".")[-1]
+        if not _is_class_level:
+            continue
+        node_enc = _enclosing_class(fqn)
+        in_blast = fqn in affected_with_enclosing or node_enc in affected_with_enclosing
+        if not in_blast:
+            continue
+        role = node_dict.get("role") or ""
+        canonical = node_dict.get("canonical_name") or fqn
+        symbol_kind = node_dict.get("symbol_kind") or ""
+        # Match by role or by name pattern (mapper_interface, DAO, Repository suffixes)
+        is_mapper = (
+            role in _MAPPER_ROLES
+            or symbol_kind == "mapper_interface"
+            or bool(_MAPPER_NAME_PATTERNS.search(_simple_name(fqn)))
+        )
+        if is_mapper and fqn not in _seen_mapper_fqns:
+            _seen_mapper_fqns.add(fqn)
+            _mapper_entry: dict = {
+                "fqn": fqn,
+                "role": role or "mapper",
+                "source_file": node_dict.get("source_file") or "",
+            }
+            if canonical != fqn:
+                _mapper_entry["canonical_name"] = canonical
+            mappers_affected.append(_mapper_entry)
+
+    mappers_affected = sorted(mappers_affected, key=lambda m: m["fqn"])[:20]
+
+    # ── 5. Security surface affected ─────────────────────────────────────────
+    # Collect distinct security policies from endpoints_affected + any affected classes
+    # that carry security annotations in graph_nodes.
+    security_surface_affected: list[dict] = []
+    _seen_sec_keys: set[str] = set()
+
+    for ep in endpoints_affected:
+        sec = ep.get("security")
+        if sec and isinstance(sec, dict):
+            policy = sec.get("policy") or ""
+            roles = sec.get("roles") or sec.get("spec") or ""
+            _key = f"{ep.get('path','')}|{policy}|{roles}"
+            if _key not in _seen_sec_keys:
+                _seen_sec_keys.add(_key)
+                security_surface_affected.append({
+                    "endpoint": f"{ep.get('method','')} {ep.get('path','')}".strip(),
+                    "policy": policy,
+                    "roles": roles,
+                })
+
+    security_surface_affected = security_surface_affected[:15]
+
+    # ── 6. Cross-module impact ────────────────────────────────────────────────
+    # Map affected FQNs → subsystem, count impacted members per subsystem.
+    _module_hits: dict[str, int] = {}
+    _module_fqns: dict[str, list[str]] = {}
+    for fqn in affected_with_enclosing:
+        pkg = _canonical_subsystem_pkg(fqn)
+        if not pkg:
+            continue
+        _module_hits[pkg] = _module_hits.get(pkg, 0) + 1
+        _module_fqns.setdefault(pkg, []).append(fqn)
+
+    # Enrich with subsystem labels from IR
+    _subsys_label_map: dict[str, str] = {}
+    for ss in subsystems:
+        pkg_key = ss.get("package_prefix") or ss.get("pkg") or ""
+        label = ss.get("label") or ss.get("name") or pkg_key
+        if pkg_key:
+            _subsys_label_map[pkg_key] = label
+
+    cross_module_impact: list[dict] = []
+    for pkg, count in sorted(_module_hits.items(), key=lambda x: -x[1]):
+        label = _subsys_label_map.get(pkg) or _subsystem_label(pkg)
+        cross_module_impact.append({
+            "module": label,
+            "package_prefix": pkg,
+            "affected_symbol_count": count,
+        })
+    cross_module_impact = cross_module_impact[:10]
+
+    # ── 7. Transactional boundaries touched ───────────────────────────────────
     txn_nodes: list[str] = []
     for node_dict in graph_nodes:
         fqn = node_dict.get("fqn") or ""
@@ -2947,7 +3069,6 @@ def compute_blast_radius(
         if role == "transaction_boundary" or "Transactional" in (node_dict.get("canonical_name") or ""):
             if fqn in affected_classes or _enclosing_class(fqn) in affected_classes:
                 txn_nodes.append(fqn)
-        # Also pick up @Transactional service methods that are directly in affected set
         elif symbol_kind == "method" and fqn in affected_classes:
             enc = _enclosing_class(fqn)
             for n2 in graph_nodes:
@@ -2957,18 +3078,23 @@ def compute_blast_radius(
 
     txn_nodes = sorted(set(txn_nodes))
 
-    # ── 5. Risk score ─────────────────────────────────────────────────────────
+    # ── 8. Risk score ─────────────────────────────────────────────────────────
     n_direct   = len(direct_callers)
     n_indirect = len(indirect_callers)
     n_ep       = len(endpoints_affected)
     n_txn      = len(txn_nodes)
+    n_mappers  = len(mappers_affected)
+    n_modules  = len(cross_module_impact)
+    n_sec      = len(security_surface_affected)
 
-    # Score = caller fan-in + endpoint multiplier + txn boundary weight
     raw_score = (
         n_direct * 2.0
         + n_indirect * 0.5
         + n_ep * 3.0
         + n_txn * 2.5
+        + n_mappers * 1.5
+        + n_modules * 1.0
+        + n_sec * 2.0
     )
     risk_score = round(min(raw_score, 100.0), 2)
 
@@ -2981,19 +3107,66 @@ def compute_blast_radius(
     else:
         risk_level = "none"
 
-    # ── 6. Assemble output ───────────────────────────────────────────────────
-    # Summarize indirect callers (cap at 50 to keep output bounded)
+    # ── 9. Confidence score ───────────────────────────────────────────────────
+    # Reflects IR completeness and resolution quality.
+    # exact match = high; suffix/ambiguous = medium; partial = low
+    _res_conf = {"exact": 1.0, "ambiguous": 0.7, "partial": 0.4}.get(resolution, 0.3)
+    # Penalize small graphs (< 10 nodes = sparse IR = low confidence)
+    _graph_size = len(graph_nodes)
+    _graph_conf = min(1.0, _graph_size / 50.0)  # saturates at 50+ nodes
+    # Penalize empty reverse graph (no edges = no real traversal)
+    _rg_populated = 1.0 if reverse_graph else 0.3
+    confidence_score = round((_res_conf * 0.5 + _graph_conf * 0.3 + _rg_populated * 0.2), 2)
+
+    if confidence_score >= 0.75:
+        confidence_level = "high"
+    elif confidence_score >= 0.45:
+        confidence_level = "medium"
+    else:
+        confidence_level = "low"
+
+    # ── 10. Explanation ───────────────────────────────────────────────────────
+    _parts: list[str] = []
+    if n_direct:
+        _parts.append(f"{n_direct} direct caller{'s' if n_direct != 1 else ''}")
+    if n_indirect:
+        _parts.append(f"{n_indirect} indirect caller{'s' if n_indirect != 1 else ''}")
+    if n_ep:
+        _parts.append(f"{n_ep} endpoint{'s' if n_ep != 1 else ''} exposed")
+    if n_txn:
+        _parts.append(f"{n_txn} transactional boundary{'s' if n_txn != 1 else ''} touched")
+    if n_mappers:
+        _parts.append(f"{n_mappers} persistence path{'s' if n_mappers != 1 else ''} in blast cone")
+    if n_sec:
+        _parts.append(f"{n_sec} security-gated endpoint{'s' if n_sec != 1 else ''} affected")
+    if n_modules > 1:
+        _parts.append(f"impact crosses {n_modules} modules")
+
+    if not _parts:
+        explanation = f"No callers or dependents found for {target!r}. Low-risk isolated change."
+    else:
+        explanation = f"Risk={risk_level.upper()}: {'; '.join(_parts)}."
+        if confidence_level != "high":
+            explanation += f" (confidence={confidence_level}: IR may be incomplete)"
+
+    # ── 11. Assemble output ───────────────────────────────────────────────────
     _indirect_summary = sorted(indirect_callers, key=lambda x: all_affected.get(x, 99))[:50]
 
-    result: dict = {
+    out: dict = {
         "target": target,
-        "matched_fqns": list(matched_fqns),
+        "matched_fqns": list(sorted(matched_fqns)),
         "resolution": resolution,
         "risk_score": risk_score,
         "risk_level": risk_level,
+        "confidence_score": confidence_score,
+        "confidence_level": confidence_level,
+        "explanation": explanation,
         "direct_callers": sorted(direct_callers)[:30],
         "indirect_callers": _indirect_summary,
         "endpoints_affected": endpoints_affected,
+        "mappers_affected": mappers_affected,
+        "security_surface_affected": security_surface_affected,
+        "cross_module_impact": cross_module_impact,
         "transactional_boundaries_touched": txn_nodes,
         "depth_reached": max_depth,
         "stats": {
@@ -3001,17 +3174,67 @@ def compute_blast_radius(
             "indirect_caller_count": n_indirect,
             "endpoints_affected_count": n_ep,
             "transactional_boundaries_count": n_txn,
+            "mappers_affected_count": n_mappers,
+            "modules_affected_count": n_modules,
+            "security_surface_count": n_sec,
         },
     }
+    if _candidates_out:
+        out["candidates"] = _candidates_out
     if len(direct_callers) > 30:
-        result["direct_callers_note"] = (
+        out["direct_callers_note"] = (
             f"Showing 30/{n_direct} direct callers. Use --output to inspect full IR."
         )
     if len(indirect_callers) > 50:
-        result["indirect_callers_note"] = (
+        out["indirect_callers_note"] = (
             f"Showing 50/{n_indirect} indirect callers. Use --output to inspect full IR."
         )
-    return result
+    return out
+
+
+def _blast_radius_candidates(
+    target: str,
+    reverse_graph: dict[str, dict[str, list[str]]],
+    graph_nodes: list[dict],
+) -> list[dict]:
+    """Return up to 10 candidate FQNs ordered by relevance for fuzzy target matches.
+
+    Ranking: exact suffix > partial name > in-degree (fan-in = likely important class).
+    """
+    t_lower = target.strip().lower()
+    if t_lower.endswith(".java"):
+        t_lower = t_lower[:-5]
+    simple_lower = t_lower.split(".")[-1]
+
+    all_fqns: list[str] = list({n["fqn"] for n in graph_nodes if "fqn" in n})
+    # Build in-degree map for relevance ranking
+    in_deg: dict[str, int] = {}
+    for entry in reverse_graph.values():
+        for callers in entry.values():
+            for c in callers:
+                in_deg[c] = in_deg.get(c, 0) + 1
+
+    scored: list[tuple[float, str]] = []
+    for fqn in all_fqns:
+        fqn_lower = fqn.lower()
+        simple_fqn = _simple_name(fqn).lower()
+        score = 0.0
+        if simple_fqn == simple_lower:
+            score += 10.0   # exact simple-name match
+        elif simple_lower in simple_fqn:
+            score += 5.0    # prefix/suffix match
+        elif simple_lower in fqn_lower:
+            score += 2.0    # substring
+        if score == 0.0:
+            continue
+        score += min(in_deg.get(fqn, 0) * 0.1, 2.0)  # fan-in bonus (capped)
+        scored.append((score, fqn))
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [
+        {"fqn": fqn, "relevance_score": round(s, 2)}
+        for s, fqn in scored[:10]
+    ]
 
 
 def _resolve_target(
@@ -3074,10 +3297,17 @@ def _resolve_target(
 
 
 def _all_callers_from_rg(fqn: str, reverse_graph: dict[str, dict[str, list[str]]]) -> list[str]:
-    """Return all callers of fqn from the reverse graph (all edge types)."""
+    """Return all callers of fqn from the reverse graph (all edge types).
+
+    BUG-01 fix: skip 'contained_in' edges — those represent structural membership
+    (method→enclosing class), not actual callers.  Without this, an Impl class
+    with 91 own methods would show 91 "direct callers" and inflate risk to HIGH.
+    """
     entry = reverse_graph.get(fqn) or {}
     callers: list[str] = []
-    for fqn_list in entry.values():
+    for edge_type, fqn_list in entry.items():
+        if edge_type == "contained_in":
+            continue  # structural membership, not a caller
         callers.extend(fqn_list)
     return callers
 

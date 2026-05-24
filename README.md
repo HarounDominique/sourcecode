@@ -1,6 +1,6 @@
 # sourcecode
 
-**Deterministic, behavior-aware codebase context for AI agents and PR review.**
+**AI-ready change intelligence for Java/Spring enterprise monoliths.**
 
 ![Version](https://img.shields.io/badge/version-1.31.15-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
@@ -9,11 +9,13 @@
 
 ## What is it?
 
-`sourcecode` analyzes a repository and produces structured JSON or YAML designed to be fed directly to AI agents or language models. It solves the "stuff the whole repo into the prompt" problem by extracting a deterministic, high-signal summary: stack detection, entry points, dependencies, git hotspots, inline annotations, and confidence metadata.
+`sourcecode` analyzes a Java/Spring repository and produces structured JSON designed to be fed directly to AI agents or used in CI/CD pipelines. It solves two hard problems:
 
-For PR review specifically, `sourcecode` extracts **execution paths**: ordered chains from entry point through service to data access, with runtime signals (auth guards, cache short-circuits, async execution) anchored to the specific step where they affect behavior. A reviewer sees _what the system does_ under this change, not just which files changed.
+**1. "What breaks if I change X?"** — `sourcecode impact ClassName /repo` traverses the reverse dependency graph and returns every HTTP endpoint, transactional boundary, and downstream module affected by a change. In seconds, not hours.
 
-Optimized for Java/Spring Boot monorepos. Works on any codebase.
+**2. "What does this codebase do before I touch it?"** — `sourcecode onboard /repo` produces a bounded, AI-ready context bundle: entry points, architecture, key files, confidence, and gaps. Feed it directly to Claude/GPT-4 as a system prompt.
+
+**Optimized for:** Spring Boot / Spring MVC monoliths. Works with JAX-RS (Quarkus, Jersey) at ~65% endpoint recall. Works on any codebase for stack detection and onboarding context.
 
 ---
 
@@ -46,47 +48,46 @@ sourcecode version
 ## Quickstart
 
 ```bash
-# High-signal summary (1000–3000 tokens depending on repo size) — recommended starting point
+# High-signal summary (typically 2000–4000 tokens depending on repo size)
 sourcecode --compact
 
 # Add git hotspots and uncommitted file count
 sourcecode --compact --git-context
 
-# Analyze a specific path
-sourcecode /path/to/repo --compact
-
-# Copy result to clipboard
-sourcecode --compact --copy
-
-# Structured output for AI agents (identity, entry points, dependencies, confidence)
+# Structured output for AI agents — bounded, noise-free, ready to inject
 sourcecode --agent
 
-# Only process git-modified files (forces compact output)
-sourcecode --changed-only
+# Blast radius: what breaks if this class changes?
+sourcecode impact OrderService /path/to/repo
+
+# REST endpoint surface
+sourcecode endpoints /path/to/repo
+
+# Onboard to an unfamiliar codebase
+sourcecode onboard /path/to/repo
+
+# PR review: risk, test gaps, changed modules
+sourcecode review-pr /path/to/repo --since main
+
+# Bug triage: risk-ranked files by symptom
+sourcecode fix-bug /path/to/repo --symptom "NullPointerException in checkout"
 ```
 
-Example output for a Spring Boot project (`--compact`):
+---
 
-```json
-{
-  "project_type": "api",
-  "stacks": [{ "stack": "java", "detection_method": "manifest", "confidence": "high",
-               "primary": true, "frameworks": ["Spring Boot", "MyBatis"] }],
-  "entry_points": {
-    "bootstrap": ["src/main/java/io/spring/RealWorldApplication.java"],
-    "security":  ["src/main/java/io/spring/api/security/WebSecurityConfig.java"],
-    "controllers": { "count": 8, "sample": ["src/main/java/io/spring/api/ArticleApi.java"] }
-  },
-  "key_dependencies": [
-    { "name": "org.mybatis.spring.boot:mybatis-spring-boot-starter",
-      "version": "2.2.2", "risk_flags": ["spring-boot-2.x-eol"] }
-  ],
-  "language_version": "11",
-  "deployment": { "spring_boot_version": "2.6.3", "packaging": "jar" },
-  "mybatis": { "mapper_interfaces": 4, "xml_files": 4 },
-  "confidence_summary": { "overall": "high", "stack": "high", "entry_points": "high" }
-}
-```
+## Real-world benchmarks
+
+Measured against open-source enterprise Java repos (v1.31.15, macOS M-series):
+
+| Repo | Classes | Cold scan (`--compact`) | Cache hit | Endpoints found |
+|------|---------|------------------------|-----------|----------------|
+| BroadleafCommerce | ~2970 | 2.6s | 0.26s | 130 |
+| Keycloak | ~6363 | 8.4s | 0.27s | 693 |
+
+Cache speedup: **30x**. The cache is keyed on file content hashes — invalidated only when source changes.
+
+**`impact` on a high-fan-in class:**  
+For hub interfaces (2000+ direct dependents), use `--depth 1` — it gives you the direct endpoints in 12s. Default depth=4 can take 90+ seconds on very large repos.
 
 ---
 
@@ -94,251 +95,249 @@ Example output for a Spring Boot project (`--compact`):
 
 | Flag | Alias | Default | Description |
 |------|-------|---------|-------------|
-| `--compact` | | off | High-signal summary (1000–3000 tokens): stacks, entry points, dependencies, risk flags, confidence, gaps. Includes `security_surface`, `mybatis`, and `transactional_boundaries` for Java projects. |
-| `--agent` | | off | Structured noise-free JSON for AI agents: identity, entry points, dependencies, confidence, gaps. Auto-enables dependency, env-var, and code-notes analysis. |
+| `--compact` | | off | High-signal summary (typically 2000–4000 tokens): stacks, entry points, dependencies, confidence, gaps. Includes `mybatis` and `transactional_boundaries` for Java projects. |
+| `--agent` | | off | Structured JSON for AI agents: project identity, entry points, architecture, dependencies, confidence. More detail than `--compact`. ~4500–5500 tokens. |
 | `--full` | | off | Remove truncation limits on `transactional_boundaries`, `mybatis.dto_mappers`, and other capped lists. |
-| `--git-context` | `-g` | off | Include git activity: recent commits, change hotspots, and uncommitted changes. |
-| `--changed-only` | | off | Limit output to git-modified files (staged, unstaged, untracked). Forces compact output. |
+| `--git-context` | `-g` | off | Include git activity: recent commits, change hotspots, and uncommitted file count. |
+| `--changed-only` | | off | Limit output to git-modified files (staged, unstaged, untracked). |
 | `--depth` | | `4` | File tree traversal depth (1–20). Java/Maven projects auto-adjust to 12. |
 | `--format` | `-f` | `json` | Output format: `json` or `yaml`. |
 | `--output` | `-o` | stdout | Write output to a file instead of stdout. |
-| `--copy` | `-c` | off | Copy output to clipboard after a successful run. No-op when `--output` is set or clipboard is unavailable. |
-| `--no-redact` | | off | Disable automatic secret redaction. Output may contain sensitive values. |
+| `--no-cache` | | off | Bypass scan cache and force a fresh analysis. |
+| `--copy` | `-c` | off | Copy output to clipboard after a successful run. |
+| `--no-redact` | | off | Disable automatic secret redaction. |
 | `--version` | `-v` | — | Show version and exit. |
 
 ---
 
-## `prepare-context` — task-specific context
+## `impact` — Blast-radius analysis
 
-Generates a focused context bundle for a specific AI coding task. More targeted than `--compact`: each task re-ranks files according to its own signal priorities.
-
-```bash
-sourcecode prepare-context TASK [PATH] [OPTIONS]
-```
-
-### Tasks
-
-| Task | What it surfaces | Primary use |
-|------|-----------------|-------------|
-| `explain` | Architecture, entry points, key dependencies | Onboarding an LLM to a new project |
-| `onboard` | Full structural context: entry points, architecture, key files, dependencies | New developer or agent joining the codebase |
-| `fix-bug` | Files ranked by risk (annotations, churn, uncommitted changes), suspected areas | Debugging session |
-| `refactor` | Structural problems, improvement opportunities, high-annotation files | Code quality review |
-| `generate-tests` | Source files without test pairs, coverage gap analysis | Writing missing tests |
-| `review-pr` | Execution paths with per-step runtime signals, security/transactional impact, test coverage gaps | Pre-merge behavior review |
-| `delta` | Changed files with multi-hop impact analysis, structural import graph, system-level impact summary | Incremental CI/review context |
-
-### Options
-
-| Option | Description |
-|--------|-------------|
-| `--since REF` | Git ref for `delta` task (e.g. `HEAD~3`, `main`, `v1.2.0`). Required for `delta`; ignored for other tasks. |
-| `--symptom TEXT` | *(fix-bug only)* Keyword hint for the bug — boosts matching files and surfaces related code notes. |
-| `--format TEXT` | Output format: `json` (default) \| `github-comment` (Markdown PR comment, `review-pr` only). |
-| `--llm-prompt` | Append a ready-to-use LLM prompt to the output. |
-| `--dry-run` | Show what would be analyzed without running it. |
-| `--copy` / `-c` | Copy output to clipboard after a successful run. |
-| `--output` / `-o` | Write output to a file. |
-| `--task-help` | List all tasks with descriptions and exit. |
-
-### Examples
+**Who calls this class, and what breaks if it changes?**
 
 ```bash
-# Explain the current repo
-sourcecode prepare-context explain
-
-# Focus on bug-prone files, with a symptom hint
-sourcecode prepare-context fix-bug --symptom "NullPointerException in OrderService"
-
-# Incremental context: files changed since branch diverged from main
-sourcecode prepare-context delta . --since main
-
-# Onboard with a ready-to-paste LLM prompt
-sourcecode prepare-context onboard --llm-prompt
-
-# PR analysis as a GitHub Markdown comment (paste directly into PR)
-sourcecode prepare-context review-pr --since main --format github-comment
-
-# List all tasks
-sourcecode prepare-context --task-help
-```
-
----
-
-## `delta` — incremental impact analysis
-
-The `delta` task is the recommended mode for CI pipelines and PR reviews. It goes beyond listing changed files: it builds a structural import graph and propagates impact transitively up to 3 hops.
-
-```bash
-sourcecode prepare-context delta [PATH] --since REF
+sourcecode impact ClassName /path/to/repo
+sourcecode impact org.example.OrderService /path/to/repo   # FQN also accepted
+sourcecode impact OrderService . --depth 2                 # limit BFS depth
 ```
 
 **Output fields:**
 
 | Field | Description |
 |-------|-------------|
-| `changed_files` | Files modified in the git range |
-| `relevant_files` | Changed files + files pulled in by the import graph (scored by artifact type and hop distance) |
-| `impact_summary` | Human-readable summary: artifact types changed and active risk areas |
-| `affected_modules` | DDD domain modules touched by the change |
-| `risk_areas` | Per-area severity breakdown (`security`, `api`, `persistence`, etc.) |
-| `change_type` | Closed taxonomy: `behavioral_change`, `structural_change`, `configuration_change`, `dependency_change`, `security_change` |
-| `system_impact` | Subsystems affected, behavioral changes, runtime impact notes |
-| `dependency_graph_summary` | Verified structural import edges (hop 1–3) and `propagation_depth`. **Only real imports — no heuristics, no test files.** |
-| `impact_score_per_file` | Per-file numeric impact score (0–1) |
-| `since` | The git ref used |
-| `gaps` | What the analysis could not determine |
+| `direct_callers` | Classes that directly import or inject the target |
+| `indirect_callers` | Transitive callers up to `--depth` (default: 4) |
+| `endpoints_affected` | HTTP endpoints whose call chain includes the target |
+| `transactional_boundaries_touched` | `@Transactional` classes in the blast cone |
+| `mappers_affected` | `@Repository` / `@Mapper` / DAO classes in the blast cone |
+| `security_surface_affected` | Security policies on affected endpoints |
+| `cross_module_impact` | Subsystems touched, ordered by affected symbol count |
+| `risk_score` | 0–100 quantified change risk |
+| `confidence_score` | 0–1 confidence in the analysis |
+| `explanation` | Human-readable risk summary |
+| `candidates` | On partial match: up to 10 FQNs ranked by relevance |
 
-**How the import graph works:**
+**Best practices:**
+- Target **interfaces**, not implementations: `impact OrderService` > `impact OrderServiceImpl`. Callers depend on the interface contract, not the Impl.
+- Use `--depth 1` when the target has 200+ callers — direct endpoints are already the most actionable signal.
+- The cache applies to the underlying IR scan — second `impact` run on the same repo is significantly faster.
 
-1. Each changed file is classified by artifact type (`controller`, `service`, `repository`, `security`, `spring_config`, etc.).
-2. A BFS traversal walks the import graph **repo-wide** (not restricted to the same module), up to 3 hops deep.
-3. `dependency_graph_summary.edges` only contains verified `import` / `@Autowired` / constructor-injection relationships. Test files and heuristic proximity matches are excluded from edges (they appear in `relevant_files` only if they have real imports of changed files).
-4. Score decays 30% per hop: a directly-changed `SecurityConfig.java` scores 0.90; its direct importer scores 0.63; a transitive importer scores 0.44.
+**Supported targets:**
+- Simple class name: `OrderService`
+- Fully-qualified name: `org.broadleafcommerce.core.order.service.OrderService`
+- File path: `src/main/java/.../OrderService.java`
+
+---
+
+## `endpoints` — REST API surface
 
 ```bash
-# Changed service → controller → facade (3 hops)
-sourcecode prepare-context delta . --since main
+sourcecode endpoints /path/to/repo
+sourcecode endpoints /path/to/repo --output endpoints.json
+```
 
-# Output includes:
-# dependency_graph_summary.edges:
-#   hop-1: OrderService.java → OrderRepository.java
-#   hop-2: OrderRepository.java → OrderController.java
-#   hop-3: OrderController.java → OrderFacade.java
-# propagation_depth: 3
+Extracts all Spring MVC (`@GetMapping`, `@PostMapping`, `@RequestMapping`, etc.) and JAX-RS (`@GET`, `@POST`, `@Path`) endpoint methods. Returns HTTP method, path, controller class, and handler method.
+
+**Scope limitations:**
+- JAX-RS subresource locators (endpoints mounted dynamically without class-level `@Path`) are not counted as standalone endpoints — they appear in `impact` output when transitively reached.
+- Security context on endpoints reflects method-level annotations (`@PreAuthorize`, `@Secured`). Class-level or programmatic security shows as `no_security_signal`.
+
+---
+
+## `repo-ir` — Symbol-level IR
+
+```bash
+sourcecode repo-ir /path/to/repo
+sourcecode repo-ir /path/to/repo --summary-only          # compact: analysis + impact, no full graph
+sourcecode repo-ir /path/to/repo --since HEAD~1           # symbol-level diff
+sourcecode repo-ir /path/to/repo --max-nodes 200 --max-edges 500
+```
+
+Builds a deterministic symbol graph: classes, methods, import/injection edges, Spring roles, subsystems. Output is JSON with `graph`, `reverse_graph`, `impact`, `subsystems`, and `route_surface`.
+
+---
+
+## `onboard` — [OSS Core] Codebase orientation
+
+```bash
+sourcecode onboard /path/to/repo
+```
+
+Entry points, architecture summary, key files, confidence level, and gaps. Designed to be injected as AI agent context at the start of a session.
+
+---
+
+## `review-pr` — [Pro] PR review context
+
+```bash
+sourcecode review-pr /path/to/repo --since main
+sourcecode review-pr /path/to/repo --since HEAD~3
+```
+
+Changed files, risk ranking, test coverage gaps, affected modules, and blast radius of changed classes. Returns a structured `ci_decision` field for CI/CD integration.
+
+**Test coverage note:** Coverage gaps are detected by stem matching (e.g. `OrderService.java` ↔ `OrderServiceTest.java`). Tests in the same diff are counted.
+
+---
+
+## `fix-bug` — [Pro] Bug triage context
+
+```bash
+sourcecode fix-bug /path/to/repo --symptom "NullPointerException in checkout"
+```
+
+Risk-ranked file list correlated to the symptom: keyword extraction, path matching, content matching, and git commit correlation. Output includes `symptom_explain` with the full evidence chain.
+
+---
+
+## `modernize` — [Pro] Modernization planning
+
+```bash
+sourcecode modernize /path/to/repo
+```
+
+Identifies high-coupling nodes (high fan-in = risky to change), dead zone candidates (isolated symbols), and subsystem tangles. 
+
+**Interpreting output:** `hotspot_candidates` is a subset of `high_coupling_nodes` filtered to service/repository/controller roles. In annotation-heavy codebases, the highest-coupled nodes are often annotation types or JPA entities — check `high_coupling_nodes` directly for the full coupling picture.
+
+---
+
+## `prepare-context` — Task-specific context
+
+Low-level access to all tasks with full options:
+
+```bash
+sourcecode prepare-context TASK [PATH] [OPTIONS]
+```
+
+| Task | What it surfaces |
+|------|-----------------|
+| `explain` | Architecture, entry points, key dependencies |
+| `onboard` | Full structural context for new agents/developers |
+| `fix-bug` | Files ranked by symptom correlation, risk, annotations |
+| `refactor` | Structural issues, improvement opportunities |
+| `generate-tests` | Source files without test pairs, coverage gap analysis |
+| `review-pr` | PR diff with risk ranking, test gaps, module impact |
+| `delta` | Incremental context: git-changed files + transitive import graph |
+
+```bash
+sourcecode prepare-context fix-bug --symptom "NullPointerException in OrderService"
+sourcecode prepare-context review-pr --since main --format github-comment
+sourcecode prepare-context onboard --llm-prompt
+sourcecode prepare-context --task-help    # list all tasks
+```
+
+Note: `sourcecode onboard`, `sourcecode fix-bug`, `sourcecode review-pr`, and `sourcecode modernize` are shorthand aliases for the corresponding `prepare-context` tasks — output is identical.
+
+---
+
+## How to use sourcecode effectively
+
+### With AI agents (Claude, GPT-4, etc.)
+
+```bash
+# Inject bounded context at session start:
+sourcecode /repo --agent | paste-to-agent
+
+# For a change task:
+sourcecode impact PaymentService /repo --depth 1 | ask-agent "What are the risks?"
+
+# For PR review:
+sourcecode review-pr /repo --since main | ask-agent "Summarize architectural risks"
+```
+
+### In CI/CD pipelines
+
+```bash
+# Always-fresh bounded JSON — deterministic, cacheable by content hash
+sourcecode /repo --compact --no-cache --format json --output context.json
+
+# PR gate — parse ci_decision field
+sourcecode review-pr /repo --since $BASE_REF --output review.json
+jq '.ci_decision' review.json    # "analysis_success" | "git_ref_error" | etc.
+```
+
+### For debugging production issues
+
+```bash
+# Correlate symptom to files
+sourcecode fix-bug /repo --symptom "NullPointerException in PaymentProcessor when cart is empty"
+# → ranked list of files, suspected areas, git commits touching relevant code
+```
+
+### For understanding blast radius
+
+```bash
+# Interface targets give the most complete signal
+sourcecode impact OrderService /repo --depth 2
+# → shows all endpoints, transaction boundaries, and modules affected
+
+# On very large repos or hub classes, depth=1 is faster and still actionable
+sourcecode impact KeycloakSession /repo --depth 1
 ```
 
 ---
 
-## `review-pr` — behavior-aware PR analysis
+## What sourcecode does NOT do
 
-Extracts **execution paths**: ordered chains from entry point through service to data access layer, with runtime signals anchored to the specific step where they affect behavior.
-
-```bash
-sourcecode prepare-context review-pr [PATH] --since REF
-# or against uncommitted working-tree changes:
-sourcecode prepare-context review-pr
-```
-
-**`execution_paths` schema:**
-
-```json
-{
-  "execution_paths": [
-    {
-      "name": "Order",
-      "entry_point": {
-        "step": "OrderController.createOrder",
-        "notes": [
-          { "note": "condition: authorization check present (@PreAuthorize / @Secured)",
-            "epistemic_level": "STRUCTURAL SIGNAL" }
-        ]
-      },
-      "path": [
-        {
-          "step": "ShippingService.process",
-          "notes": [
-            { "note": "branch: Spring cache annotation present — downstream call may be short-circuited",
-              "epistemic_level": "STRUCTURAL SIGNAL" },
-            { "note": "async: @Async annotation present — runs in separate thread",
-              "epistemic_level": "STRUCTURAL SIGNAL" }
-          ]
-        },
-        { "step": "OrderRepository.save", "notes": [] }
-      ],
-      "end_state": "DB write",
-      "end_state_epistemic_level": "INFERRED (LOW CONFIDENCE)"
-    }
-  ]
-}
-```
-
-**Path rules:**
-
-- One path per changed entry point — most-evident downstream call, not all branches
-- Each step requires direct code evidence: field injection, constructor param, method call, or type annotation
-- `notes` are scanned from that step's own source file — no cross-contamination between steps
-- Path terminates where evidence ends; no gap-filling by naming convention or module similarity
-
-**Runtime signals detected per step:**
-
-| Signal | Example code | Note emitted | Epistemic level |
-|--------|-------------|--------------|-----------------|
-| Auth guard | `@PreAuthorize`, `@Secured` | `condition: authorization check present (@PreAuthorize / @Secured)` | `STRUCTURAL SIGNAL` |
-| Auth context read | `isAuthenticated()`, `SecurityContextHolder` | `condition: reads authentication context` | `STRUCTURAL SIGNAL` |
-| Feature flag | `featureFlag.isEnabled()`, `FeatureToggle` | `condition: feature flag gates execution` | `INFERRED (LOW CONFIDENCE)` |
-| Null/empty guard | `if (x == null) return` | `condition: null/empty guard with early return` | `STRUCTURAL SIGNAL` |
-| Spring cache | `@Cacheable`, `@CacheEvict` | `branch: Spring cache annotation present — downstream call may be short-circuited` | `STRUCTURAL SIGNAL` |
-| Manual cache | `cache.get()`, `cacheManager.` | `branch: manual cache lookup detected — downstream call may be short-circuited` | `INFERRED (LOW CONFIDENCE)` |
-| Optional absence | `Optional<>`, `.orElseThrow()` | `branch: Optional type in use — result may be absent` | `STRUCTURAL SIGNAL` |
-| Async thread | `@Async` | `async: @Async annotation present — runs in separate thread` | `STRUCTURAL SIGNAL` |
-| CompletableFuture | `CompletableFuture`, `.supplyAsync()` | `async: CompletableFuture detected — non-blocking execution` | `STRUCTURAL SIGNAL` |
-| Event publishing | `publishEvent()`, `applicationEventPublisher` | `async: Spring application event emitted` | `STRUCTURAL SIGNAL` |
-| Kafka | `kafkaTemplate.`, `KafkaProducer` | `async: Kafka producer detected` | `STRUCTURAL SIGNAL` |
-| RabbitMQ | `rabbitTemplate.`, `amqpTemplate.` | `async: RabbitMQ producer detected` | `STRUCTURAL SIGNAL` |
-
-**Epistemic contract:**
-
-Every output field in `review-pr` carries an explicit `epistemic_level`:
-
-| Level | Meaning |
-|-------|---------|
-| `FACT` | Directly observed in diff (file present, config changed) |
-| `STRUCTURAL SIGNAL` | Annotation or type-system evidence in source (`@Service`, `@Transactional`, injection) |
-| `INFERRED (LOW CONFIDENCE)` | Heuristic pattern match — no full structural proof |
-| `OMITTED` | Insufficient evidence — field not emitted |
-
-No field blends certainty levels without labeling. `end_state` (e.g. `"DB write"`) is always accompanied by `end_state_epistemic_level: "INFERRED (LOW CONFIDENCE)"` — it is a keyword-match heuristic, not an AST-verified fact.
-
-**Other `review-pr` output fields:**
-
-| Field | Description |
-|-------|-------------|
-| `review_hotspots` | Top changed files ranked by impact score |
-| `suggested_review_order` | Security → API → Service → Persistence → Config |
-| `security_impact` | Changed security-classified files (`epistemic_level: STRUCTURAL SIGNAL`) + risk note (`INFERRED (LOW CONFIDENCE)`) |
-| `transactional_impact` | Changed service/business-logic files with possible transaction boundary effect |
-| `test_coverage_risk` | Changed source files with no corresponding test (`epistemic_level: INFERRED (LOW CONFIDENCE)`) |
-| `affected_modules` | DDD domain modules touched by the change |
+- No runtime analysis — all signals are static (annotation, import graph, file structure)
+- No semantic code understanding — it reads structure, not logic
+- Architecture pattern detection works best for Spring MVC layered apps; SPI/plugin architectures (e.g. Quarkus extension model) are classified as "layered" which may be inaccurate
+- Endpoint recall for JAX-RS subresource locator pattern is ~65% — endpoints mounted dynamically via factory methods are not individually counted
+- `impact` on implementation classes (e.g. `OrderServiceImpl`) reflects callers of the implementation specifically, which is often zero if callers use the interface — prefer targeting the interface
 
 ---
 
 ## Output schema
 
-All outputs include a `confidence_summary` block with `overall`, `stack`, and `entry_points` confidence levels (`high` / `medium` / `low`), plus an `analysis_gaps` list describing what could not be analyzed and why.
+All outputs include:
+- `schema_version`: output format version
+- `confidence_summary`: `overall`, `stack`, `entry_points` confidence levels (`high`/`medium`/`low`)
+- `analysis_gaps`: list of what could not be analyzed and why
 
-### Java/Spring-specific fields
-
-When a Java manifest (`pom.xml` or `build.gradle`) is detected, the output includes additional fields:
+### Java/Spring-specific fields (when detected)
 
 | Field | Description |
 |-------|-------------|
 | `language_version` | Java version from `maven.compiler.source` or equivalent |
 | `deployment.spring_boot_version` | Spring Boot version |
 | `deployment.packaging` | `jar` or `war` |
-| `deployment.app_server_hint` | `weblogic`, `wildfly`, etc. (when detectable) |
-| `security_surface.resource_names` | Values of `@M3FiltroSeguridad(nombreRecurso=...)` annotations across all controllers |
 | `mybatis` | Mapper interface / XML file pairing summary |
 | `transactional_boundaries` | Classes annotated with `@Transactional` |
-| `deployment_risks` | Static risk flags: `spring-boot-2.x-eol`, `legacy-java-runtime`, `legacy-app-server-deployment` |
+| `deployment_risks` | Static risk flags: `spring-boot-2.x-eol`, `legacy-java-runtime` |
 
 ---
 
 ## Telemetry
 
-Anonymous, opt-in telemetry collects: version, OS, commands used, flags, duration, repo size range, and errors. No source code, paths, secrets, or output content is ever collected.
+Anonymous, opt-in. Collects: version, OS, commands, flags, duration, repo size range, errors. No source code, paths, secrets, or output content.
 
 ```bash
-sourcecode telemetry status    # current setting
-sourcecode telemetry enable    # opt in
-sourcecode telemetry disable   # opt out (permanent)
+sourcecode telemetry status
+sourcecode telemetry enable
+sourcecode telemetry disable
 ```
 
-Alternatively, set the environment variable:
-
-```bash
-export SOURCECODE_TELEMETRY=0
-```
+Or: `export SOURCECODE_TELEMETRY=0`
 
 ---
 

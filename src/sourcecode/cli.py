@@ -166,7 +166,12 @@ Compressed AI-ready context for Java/Spring enterprise codebases.
 # Known subcommand names — tokens matching these are routed as subcommands,
 # not consumed as a repository path.
 _SUBCOMMANDS: frozenset[str] = frozenset(
-    {"telemetry", "prepare-context", "version", "config", "analyze", "repo-ir", "mcp", "endpoints", "impact"}
+    {
+        "telemetry", "prepare-context", "version", "config", "analyze",
+        "repo-ir", "mcp", "endpoints", "impact",
+        # Enterprise workflow commands
+        "onboard", "modernize", "fix-bug", "review-pr",
+    }
 )
 
 # Mutable container holding the path extracted by _preprocess_argv().
@@ -2392,6 +2397,23 @@ def telemetry_disable() -> None:
     typer.echo("Re-enable at any time: sourcecode telemetry enable")
 
 
+def _serialize_dict(data: dict, format: str) -> str:
+    """Serialize *data* to JSON or YAML string.  BUG-06 helper — shared by repo-ir and endpoints."""
+    if format == "yaml":
+        from io import StringIO
+        from ruamel.yaml import YAML as _YAML
+        _y = _YAML()
+        _y.default_flow_style = False
+        _y.representer.add_representer(
+            type(None),
+            lambda d, v: d.represent_scalar("tag:yaml.org,2002:null", "null"),
+        )
+        _s = StringIO()
+        _y.dump(data, _s)
+        return _s.getvalue()
+    return json.dumps(data, indent=2, ensure_ascii=False)
+
+
 # ── repo-ir ───────────────────────────────────────────────────────────────────
 
 @app.command("repo-ir")
@@ -2436,12 +2458,19 @@ def repo_ir_cmd(
         "--summary-only",
         help="Omit full graph.nodes/edges; keep analysis summary, impact, and change_set (<300KB typical)",
     ),
+    format: str = typer.Option(
+        "json",
+        "--format",
+        "-f",
+        help="Output format: json (default) or yaml.",
+        show_default=True,
+    ),
 ) -> None:
     """Deterministic symbol-level IR for Java repositories.
 
     \b
     Extracts symbols, relations, Spring roles, and (with --since) symbol-level diffs.
-    Output is JSON: graph{nodes,edges}, analysis, impact, subsystems, change_set.
+    Output is JSON or YAML: graph{nodes,edges}, analysis, impact, subsystems, change_set.
 
     \b
     Size control:
@@ -2509,7 +2538,7 @@ def repo_ir_cmd(
         max_edges=max_edges,
         summary_only=summary_only,
     )
-    output = _json.dumps(ir, indent=2, ensure_ascii=False)
+    output = _serialize_dict(ir, format)
 
     if output_path:
         output_path.write_text(output, encoding="utf-8")
@@ -2673,6 +2702,13 @@ def endpoints_cmd(
         None, "--output", "-o",
         help="Write output to a file instead of stdout.",
     ),
+    format: str = typer.Option(
+        "json",
+        "--format",
+        "-f",
+        help="Output format: json (default) or yaml.",
+        show_default=True,
+    ),
 ) -> None:
     """Extract REST API endpoint surface from Java source files.
 
@@ -2686,6 +2722,7 @@ def endpoints_cmd(
       sourcecode endpoints .
       sourcecode endpoints /path/to/repo
       sourcecode endpoints . --output endpoints.json
+      sourcecode endpoints . --format yaml
     """
     import sys as _sys
 
@@ -2695,7 +2732,7 @@ def endpoints_cmd(
         raise typer.Exit(code=1)
 
     data = _extract_java_endpoints(target)
-    output = json.dumps(data, indent=2, ensure_ascii=False)
+    output = _serialize_dict(data, format)
 
     if output_path is not None:
         output_path.write_text(output, encoding="utf-8")
@@ -2707,6 +2744,360 @@ def endpoints_cmd(
         _sys.stdout.buffer.write(output.encode("utf-8"))
         _sys.stdout.buffer.write(b"\n")
         _sys.stdout.buffer.flush()
+
+
+# ── Enterprise Workflow Commands ──────────────────────────────────────────────
+#
+# These are the five canonical enterprise workflows.  Each is a thin wrapper
+# around prepare-context (or impact) with an intent-clear name so that users
+# and agents can pick the right workflow without reading docs.
+#
+# Tier: OSS Core (onboard), Pro (impact/modernize/fix-bug), Pro (review-pr)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command("onboard")
+def onboard_cmd(
+    ctx: typer.Context,
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository root to onboard (default: current directory)",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    llm_prompt: bool = typer.Option(
+        False, "--llm-prompt",
+        help="Append a ready-to-use LLM prompt to the output.",
+    ),
+    copy: bool = typer.Option(
+        False, "--copy", "-c",
+        help="Copy output to clipboard after a successful run.",
+    ),
+) -> None:
+    """[OSS Core] Onboard an unfamiliar codebase: architecture, entry points, hotspots, risks.
+
+    \b
+    Answers: "What is this repo and where do I start?"
+
+    Builds full project context optimised for a new developer or agent that
+    has never seen this codebase.  Surfaces architecture summary, subsystems,
+    key entry points, hotspots, and tech-debt signals.
+
+    \b
+    Workflow:
+      sourcecode onboard .
+      sourcecode onboard /path/to/repo --llm-prompt
+      sourcecode onboard . --output onboard.json
+
+    \b
+    Related workflows:
+      sourcecode impact <target>   — What breaks if I touch this?
+      sourcecode review-pr         — Risk-rank a pending PR
+      sourcecode modernize .       — Where should I refactor first?
+      sourcecode fix-bug           — Where does this symptom live?
+    """
+    ctx.invoke(
+        prepare_context_cmd,
+        task="onboard",
+        path=path,
+        llm_prompt=llm_prompt,
+        copy=copy,
+        output_path=output_path,
+        since=None,
+        task_help=False,
+        dry_run=False,
+        symptom=None,
+        format=None,
+        debug_perf=False,
+        fast=False,
+    )
+
+
+@app.command("review-pr")
+def review_pr_cmd(
+    ctx: typer.Context,
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository root (default: current directory)",
+    ),
+    since: Optional[str] = typer.Option(
+        None, "--since",
+        help="Git ref baseline for diff (e.g. origin/main, HEAD~3).",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    format: Optional[str] = typer.Option(
+        None, "--format",
+        help="Output format: json (default) | github-comment",
+    ),
+    copy: bool = typer.Option(
+        False, "--copy", "-c",
+        help="Copy output to clipboard after a successful run.",
+    ),
+) -> None:
+    """[Pro] PR review: blast radius, risk ranking, execution paths, security/txn impact.
+
+    \b
+    Answers: "What does this PR break and how risky is it?"
+
+    Computes a diff-based change impact report: changed symbols, BFS propagation
+    through the call graph, affected endpoints, transactional boundaries,
+    security surface, and a per-file risk ranking.
+
+    \b
+    Requires either --since or a git diff to be present.
+
+    \b
+    Workflow:
+      sourcecode review-pr --since origin/main
+      sourcecode review-pr . --since main --format github-comment
+      sourcecode review-pr . --since HEAD~3 --output review.json
+
+    \b
+    Related workflows:
+      sourcecode impact <target>   — Single-symbol blast radius
+      sourcecode onboard .         — Full architecture onboarding
+    """
+    ctx.invoke(
+        prepare_context_cmd,
+        task="review-pr",
+        path=path,
+        since=since,
+        format=format,
+        copy=copy,
+        output_path=output_path,
+        llm_prompt=False,
+        task_help=False,
+        dry_run=False,
+        symptom=None,
+        debug_perf=False,
+        fast=False,
+    )
+
+
+@app.command("fix-bug")
+def fix_bug_cmd(
+    ctx: typer.Context,
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository root (default: current directory)",
+    ),
+    symptom: Optional[str] = typer.Option(
+        None, "--symptom", "-s",
+        help="Keyword hint for the bug (boosts matching files and surfaces related annotations).",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    copy: bool = typer.Option(
+        False, "--copy", "-c",
+        help="Copy output to clipboard after a successful run.",
+    ),
+) -> None:
+    """[Pro] Bug triage: risk-ranked files, suspected areas, related annotations.
+
+    \b
+    Answers: "Where in this codebase should I look to fix this symptom?"
+
+    Surfaces the most likely files/classes related to a bug symptom.
+    Ranks by risk score, annotation signals (@Transactional, security annotations),
+    and structural coupling.  Output is bounded and LLM-ready.
+
+    \b
+    Workflow:
+      sourcecode fix-bug --symptom "NullPointerException in UserService"
+      sourcecode fix-bug . --symptom "401 on /api/orders"
+      sourcecode fix-bug . --output bug-context.json
+
+    \b
+    Related workflows:
+      sourcecode impact <target>   — Propagate impact from a specific class
+      sourcecode onboard .         — Full architecture context first
+    """
+    ctx.invoke(
+        prepare_context_cmd,
+        task="fix-bug",
+        path=path,
+        symptom=symptom,
+        copy=copy,
+        output_path=output_path,
+        since=None,
+        llm_prompt=False,
+        task_help=False,
+        dry_run=False,
+        format=None,
+        debug_perf=False,
+        fast=False,
+    )
+
+
+@app.command("modernize")
+def modernize_cmd(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository root to analyze (default: current directory)",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    copy: bool = typer.Option(
+        False, "--copy", "-c",
+        help="Copy output to clipboard after a successful run.",
+    ),
+) -> None:
+    """[Pro] Modernization planning: coupling, dead zones, risky modules, refactor candidates.
+
+    \b
+    Answers: "Where should I refactor first, and what's safest to touch?"
+
+    Analyzes the repo for:
+      - High-coupling modules (high in-degree + out-degree nodes)
+      - Dead zones (isolated symbols with no callers)
+      - Risk hotspots (high fan-in + security annotations + transaction boundaries)
+      - Cross-module dependency tangles
+      - Subsystem summary with member counts
+
+    Output is bounded and structured for both human review and LLM planning.
+
+    \b
+    Workflow:
+      sourcecode modernize .
+      sourcecode modernize /path/to/repo --output modernize.json
+
+    \b
+    Related workflows:
+      sourcecode onboard .         — Architecture overview first
+      sourcecode impact <target>   — Verify impact before touching a hotspot
+    """
+    import json as _json
+    import sys as _sys
+    from sourcecode.repository_ir import build_repo_ir, find_java_files, apply_ir_size_limits
+    from sourcecode.output_budget import trim_to_budget, BUDGET_ONBOARD
+
+    root = path.resolve()
+    if not root.is_dir():
+        typer.echo(f"Error: {root} is not a directory", err=True)
+        raise typer.Exit(1)
+
+    file_list = find_java_files(root)
+    if not file_list:
+        typer.echo(_json.dumps({
+            "error": "No Java files found in repository.",
+            "path": str(root),
+        }, indent=2))
+        return
+
+    _prog = Progress()
+    _prog.start(f"building IR ({len(file_list)} files) for modernization analysis")
+    try:
+        ir = build_repo_ir(file_list, root)
+    finally:
+        _prog.finish()
+
+    graph_nodes: list = (ir.get("graph") or {}).get("nodes") or []
+    subsystems: list = ir.get("subsystems") or []
+    reverse_graph: dict = ir.get("reverse_graph") or {}
+
+    # High-coupling nodes: high in_degree (many dependents = risky to change)
+    coupling_nodes = sorted(
+        [n for n in graph_nodes if n.get("in_degree", 0) >= 3],
+        key=lambda n: (-n.get("in_degree", 0), n.get("fqn", "")),
+    )[:20]
+
+    # Dead zones: symbols with zero in-degree AND zero out-degree (isolated)
+    dead_zones = sorted(
+        [n for n in graph_nodes
+         if n.get("in_degree", 0) == 0 and n.get("out_degree", 0) == 0
+         and n.get("type") in ("class", "interface")],
+        key=lambda n: n.get("fqn", ""),
+    )[:20]
+
+    # Hotspot candidates: high in-degree service/repository nodes
+    hotspots = [
+        {
+            "fqn": n["fqn"],
+            "role": n.get("role", "other"),
+            "in_degree": n.get("in_degree", 0),
+            "out_degree": n.get("out_degree", 0),
+        }
+        for n in coupling_nodes
+        if n.get("role") in ("service", "repository", "controller")
+    ][:15]
+
+    # Cross-module tangles: subsystems with high member count
+    tangle_modules = sorted(
+        [s for s in subsystems if len(s.get("members") or []) >= 5],
+        key=lambda s: -len(s.get("members") or []),
+    )[:10]
+
+    result = {
+        "workflow": "modernize",
+        "path": str(root),
+        "summary": {
+            "total_classes": len([n for n in graph_nodes if n.get("type") in ("class", "interface")]),
+            "total_subsystems": len(subsystems),
+            "high_coupling_nodes": len(coupling_nodes),
+            "dead_zone_candidates": len(dead_zones),
+        },
+        "hotspot_candidates": hotspots,
+        "high_coupling_nodes": [
+            {"fqn": n["fqn"], "in_degree": n.get("in_degree", 0), "role": n.get("role", "other")}
+            for n in coupling_nodes
+        ],
+        "dead_zone_candidates": [
+            {"fqn": n["fqn"], "type": n.get("type", ""), "role": n.get("role", "other")}
+            for n in dead_zones
+        ],
+        "subsystem_summary": [
+            {
+                "label": s.get("label") or s.get("name") or "",
+                "package_prefix": s.get("package_prefix") or s.get("pkg") or "",
+                "member_count": len(s.get("members") or []),
+            }
+            for s in subsystems[:15]
+        ],
+        "cross_module_tangles": [
+            {
+                "label": s.get("label") or s.get("name") or "",
+                "member_count": len(s.get("members") or []),
+            }
+            for s in tangle_modules
+        ],
+        # BUG-05 fix: don't recommend "Start with hotspot_candidates" when the list is empty.
+        # hotspots filters by role=service/repository/controller; annotation types and
+        # value objects end up in high_coupling_nodes instead.
+        "recommendation": (
+            (
+                "Start with hotspot_candidates (high fan-in = highest blast radius). "
+                if hotspots else
+                "high_coupling_nodes shows the most-referenced classes — start there. "
+            )
+            + "Dead zones are safe to remove or refactor. "
+            + "Cross-module tangles indicate coupling worth decomposing."
+        ),
+    }
+
+    result = trim_to_budget(result, BUDGET_ONBOARD, label="modernize")
+    output = _json.dumps(result, indent=2, ensure_ascii=False)
+
+    if output_path:
+        output_path.write_text(output, encoding="utf-8")
+        typer.echo(f"Modernization analysis written to {output_path}", err=True)
+    else:
+        try:
+            _sys.stdout.buffer.write(output.encode("utf-8"))
+            _sys.stdout.buffer.write(b"\n")
+            _sys.stdout.buffer.flush()
+        except AttributeError:
+            _sys.stdout.write(output + "\n")
+
+    if copy:
+        _copy_to_clipboard(output)
 
 
 # ── version ───────────────────────────────────────────────────────────────────

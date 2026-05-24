@@ -1312,7 +1312,14 @@ class TaskContextBuilder:
                 f for f in sorted(_delta_files or set())
                 if not self._is_test(f) and self._is_source(f)
             ]
-            _test_stems = {Path(p).stem for p in test_set}
+            # BUG-03 fix: normalize test stems by stripping Test/IT/Tests suffixes.
+            # Without this, RedirectUtils.java is not matched to RedirectUtilsTest.java
+            # → false positive "no test coverage" on a file that IS tested.
+            _test_stems = {
+                Path(p).stem
+                .removesuffix("Tests").removesuffix("Test").removesuffix("IT")
+                for p in test_set
+            } | {Path(p).stem for p in test_set}
             _untested_changed = [f for f in _changed_src if Path(f).stem not in _test_stems]
             _test_risk_level = (
                 "high" if len(_untested_changed) > 3

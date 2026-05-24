@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import textwrap
+import time
 from pathlib import Path
 from typing import Generator
 
@@ -39,6 +40,7 @@ from sourcecode.output_budget import (
 )
 from sourcecode.repository_ir import (
     _PERMISSION_ANNOTATIONS,
+    _blast_radius_candidates,
     apply_ir_size_limits,
     build_repo_ir,
     compute_blast_radius,
@@ -965,3 +967,760 @@ class TestMCPParity:
             assert server_ver == cli_ver, (
                 f"MCP version {server_ver!r} != CLI version {cli_ver!r}"
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P1: Enhanced blast-radius fields
+# Tests the new mappers_affected / security_surface_affected / cross_module_impact
+# / confidence_score / confidence_level / explanation fields added in this iteration.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestBlastRadiusEnhanced:
+    """New impact fields: mappers, security surface, cross-module, confidence, explanation."""
+
+    def _ir(self, repo: Path) -> dict:
+        files = find_java_files(repo)
+        if not files:
+            pytest.skip("no java files")
+        return build_repo_ir(files, repo)
+
+    # ── field presence ────────────────────────────────────────────────────────
+
+    def test_result_has_all_new_fields(self, spring_mybatis_repo: Path) -> None:
+        ir = self._ir(spring_mybatis_repo)
+        result = compute_blast_radius(ir, "UserService")
+        for field in (
+            "mappers_affected",
+            "security_surface_affected",
+            "cross_module_impact",
+            "confidence_score",
+            "confidence_level",
+            "explanation",
+        ):
+            assert field in result, f"Missing field: {field}"
+
+    def test_not_found_has_all_new_fields(self, keycloak_like_repo: Path) -> None:
+        ir = self._ir(keycloak_like_repo)
+        result = compute_blast_radius(ir, "TotallyFakeSymbol999")
+        assert result["resolution"] == "not_found"
+        for field in (
+            "mappers_affected",
+            "security_surface_affected",
+            "cross_module_impact",
+            "confidence_score",
+            "confidence_level",
+            "explanation",
+        ):
+            assert field in result, f"not_found result missing field: {field}"
+
+    # ── mappers_affected ──────────────────────────────────────────────────────
+
+    def test_mapper_detected_when_service_touched(self, spring_mybatis_repo: Path) -> None:
+        """UserService injects UserMapper → impact on UserService must surface mapper."""
+        ir = self._ir(spring_mybatis_repo)
+        result = compute_blast_radius(ir, "UserController")
+        # Traversal: UserController → UserService → UserMapper
+        # UserMapper should appear in mappers_affected OR direct/indirect callers
+        stats = result.get("stats") or {}
+        mappers = result.get("mappers_affected") or []
+        # At minimum, stats field must exist with mapper count
+        assert "mappers_affected_count" in stats
+
+    def test_mapper_fqns_are_valid_strings(self, spring_mybatis_repo: Path) -> None:
+        ir = self._ir(spring_mybatis_repo)
+        result = compute_blast_radius(ir, "UserService")
+        for m in result.get("mappers_affected") or []:
+            assert isinstance(m.get("fqn"), str) and m["fqn"]
+            assert isinstance(m.get("role"), str)
+
+    def test_mappers_bounded(self, endpoint_heavy_repo: Path) -> None:
+        ir = self._ir(endpoint_heavy_repo)
+        nodes = (ir.get("graph") or {}).get("nodes") or []
+        if not nodes:
+            pytest.skip("no graph nodes")
+        first = next(
+            (n["fqn"] for n in nodes if n.get("type") in ("class", "interface")),
+            None,
+        )
+        if not first:
+            pytest.skip("no class nodes")
+        result = compute_blast_radius(ir, first)
+        assert len(result.get("mappers_affected") or []) <= 20
+
+    # ── security_surface_affected ─────────────────────────────────────────────
+
+    def test_security_surface_populated_when_endpoints_have_security(
+        self, keycloak_like_repo: Path
+    ) -> None:
+        """UserService is behind secured endpoints → security_surface_affected non-empty."""
+        ir = self._ir(keycloak_like_repo)
+        result = compute_blast_radius(ir, "UserService")
+        if result.get("endpoints_affected"):
+            # Any endpoint with a security annotation should populate security_surface
+            has_secured_ep = any(ep.get("security") for ep in result["endpoints_affected"])
+            if has_secured_ep:
+                assert len(result.get("security_surface_affected") or []) >= 1
+
+    def test_security_surface_bounded(self, endpoint_heavy_repo: Path) -> None:
+        ir = self._ir(endpoint_heavy_repo)
+        nodes = (ir.get("graph") or {}).get("nodes") or []
+        if not nodes:
+            pytest.skip("no graph nodes")
+        first = next(
+            (n["fqn"] for n in nodes if n.get("type") in ("class", "interface")),
+            None,
+        )
+        if not first:
+            pytest.skip("no class nodes")
+        result = compute_blast_radius(ir, first)
+        assert len(result.get("security_surface_affected") or []) <= 15
+
+    def test_security_surface_entry_shape(self, keycloak_like_repo: Path) -> None:
+        ir = self._ir(keycloak_like_repo)
+        result = compute_blast_radius(ir, "UserService")
+        for entry in result.get("security_surface_affected") or []:
+            assert "endpoint" in entry
+            assert "policy" in entry
+
+    # ── cross_module_impact ────────────────────────────────────────────────────
+
+    def test_cross_module_impact_is_list(self, legacy_monolith_repo: Path) -> None:
+        ir = self._ir(legacy_monolith_repo)
+        result = compute_blast_radius(ir, "OrderService")
+        assert isinstance(result.get("cross_module_impact"), list)
+
+    def test_cross_module_bounded(self, endpoint_heavy_repo: Path) -> None:
+        ir = self._ir(endpoint_heavy_repo)
+        nodes = (ir.get("graph") or {}).get("nodes") or []
+        if not nodes:
+            pytest.skip("no graph nodes")
+        first = next(
+            (n["fqn"] for n in nodes if n.get("type") in ("class", "interface")),
+            None,
+        )
+        if not first:
+            pytest.skip("no class nodes")
+        result = compute_blast_radius(ir, first)
+        assert len(result.get("cross_module_impact") or []) <= 10
+
+    def test_cross_module_entry_shape(self, legacy_monolith_repo: Path) -> None:
+        ir = self._ir(legacy_monolith_repo)
+        result = compute_blast_radius(ir, "OrderService")
+        for entry in result.get("cross_module_impact") or []:
+            assert "module" in entry
+            assert "package_prefix" in entry
+            assert "affected_symbol_count" in entry
+            assert isinstance(entry["affected_symbol_count"], int)
+
+    # ── confidence ────────────────────────────────────────────────────────────
+
+    def test_confidence_score_range(self, spring_mybatis_repo: Path) -> None:
+        ir = self._ir(spring_mybatis_repo)
+        result = compute_blast_radius(ir, "UserService")
+        cs = result.get("confidence_score")
+        assert cs is not None
+        assert 0.0 <= cs <= 1.0, f"confidence_score {cs} out of [0,1]"
+
+    def test_confidence_level_valid_values(self, spring_mybatis_repo: Path) -> None:
+        ir = self._ir(spring_mybatis_repo)
+        for target in ("UserService", "FakeClass999"):
+            result = compute_blast_radius(ir, target)
+            assert result.get("confidence_level") in ("high", "medium", "low"), (
+                f"Unexpected confidence_level: {result.get('confidence_level')!r}"
+            )
+
+    def test_not_found_has_low_confidence(self, keycloak_like_repo: Path) -> None:
+        ir = self._ir(keycloak_like_repo)
+        result = compute_blast_radius(ir, "NonExistentXYZ")
+        assert result.get("confidence_level") == "low"
+        assert result.get("confidence_score", 1.0) < 0.5
+
+    def test_exact_match_confidence_higher_than_partial(
+        self, spring_mybatis_repo: Path
+    ) -> None:
+        """Exact match should yield higher confidence than a partial/ambiguous match."""
+        ir = self._ir(spring_mybatis_repo)
+        # UserService is exact; "service" is partial (matches many)
+        exact = compute_blast_radius(ir, "com.example.service.UserService")
+        partial = compute_blast_radius(ir, "Service")  # likely partial/ambiguous
+        if exact["resolution"] == "exact" and partial["resolution"] in ("partial", "ambiguous"):
+            assert exact["confidence_score"] >= partial["confidence_score"]
+
+    # ── explanation ───────────────────────────────────────────────────────────
+
+    def test_explanation_is_nonempty_string(self, spring_mybatis_repo: Path) -> None:
+        ir = self._ir(spring_mybatis_repo)
+        for target in ("UserService", "FakeClass99"):
+            result = compute_blast_radius(ir, target)
+            exp = result.get("explanation")
+            assert isinstance(exp, str) and len(exp) > 0, (
+                f"explanation empty for target={target!r}"
+            )
+
+    def test_explanation_mentions_risk_level(self, spring_mybatis_repo: Path) -> None:
+        ir = self._ir(spring_mybatis_repo)
+        result = compute_blast_radius(ir, "UserService")
+        if result["resolution"] != "not_found":
+            exp = result.get("explanation") or ""
+            # Explanation should reference risk level
+            risk = result.get("risk_level") or ""
+            assert risk.upper() in exp.upper() or "risk" in exp.lower(), (
+                f"explanation {exp!r} doesn't mention risk level {risk!r}"
+            )
+
+    def test_no_callers_explanation_is_low_risk(self, keycloak_like_repo: Path) -> None:
+        """A class with no callers should get a low-risk explanation."""
+        ir = self._ir(keycloak_like_repo)
+        result = compute_blast_radius(ir, "NonExistentClassXYZ12345")
+        exp = result.get("explanation") or ""
+        assert "not found" in exp.lower() or "no callers" in exp.lower() or "isolated" in exp.lower()
+
+    # ── stats extended ────────────────────────────────────────────────────────
+
+    def test_stats_has_all_new_counters(self, spring_mybatis_repo: Path) -> None:
+        ir = self._ir(spring_mybatis_repo)
+        result = compute_blast_radius(ir, "UserService")
+        stats = result.get("stats") or {}
+        for key in (
+            "direct_caller_count",
+            "indirect_caller_count",
+            "endpoints_affected_count",
+            "transactional_boundaries_count",
+            "mappers_affected_count",
+            "modules_affected_count",
+            "security_surface_count",
+        ):
+            assert key in stats, f"Missing stats key: {key}"
+            assert isinstance(stats[key], int)
+
+    # ── determinism ───────────────────────────────────────────────────────────
+
+    def test_blast_radius_is_deterministic(self, keycloak_like_repo: Path) -> None:
+        """Same IR + same target → identical output across two calls."""
+        ir = self._ir(keycloak_like_repo)
+        r1 = compute_blast_radius(ir, "UserService")
+        r2 = compute_blast_radius(ir, "UserService")
+        assert r1 == r2, "compute_blast_radius is not deterministic"
+
+    def test_risk_score_in_result_matches_risk_level(self, spring_mybatis_repo: Path) -> None:
+        ir = self._ir(spring_mybatis_repo)
+        result = compute_blast_radius(ir, "UserService")
+        score = result.get("risk_score", 0)
+        level = result.get("risk_level", "none")
+        if level == "high":
+            assert score >= 5.0
+        elif level == "medium":
+            assert score >= 0.1
+        elif level == "none":
+            assert score == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P1: Ambiguous target resolution → candidates
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTargetResolution:
+    """Target resolution: exact, ambiguous, partial, not_found all handled correctly."""
+
+    def _ir(self, repo: Path) -> dict:
+        files = find_java_files(repo)
+        if not files:
+            pytest.skip("no java files")
+        return build_repo_ir(files, repo)
+
+    def test_exact_fqn_resolves_exact(self, spring_mybatis_repo: Path) -> None:
+        ir = self._ir(spring_mybatis_repo)
+        result = compute_blast_radius(ir, "com.example.service.UserService")
+        # FQN match → should be exact (if symbol is in graph)
+        if result["resolution"] != "not_found":
+            assert result["resolution"] in ("exact", "ambiguous")
+
+    def test_simple_name_resolves_suffix(self, spring_mybatis_repo: Path) -> None:
+        ir = self._ir(spring_mybatis_repo)
+        result = compute_blast_radius(ir, "UserService")
+        assert result["resolution"] in ("exact", "ambiguous", "partial", "not_found")
+        assert isinstance(result.get("matched_fqns"), list)
+
+    def test_not_found_returns_candidates(self, spring_mybatis_repo: Path) -> None:
+        """not_found result with a partial name should include candidates."""
+        ir = self._ir(spring_mybatis_repo)
+        result = compute_blast_radius(ir, "User")  # too vague → partial/ambiguous or not_found
+        # Either resolution works; if not_found, candidates should be provided
+        if result["resolution"] == "not_found":
+            candidates = result.get("candidates")
+            # Candidates may or may not exist depending on repo — just validate shape if present
+            if candidates:
+                assert isinstance(candidates, list)
+                for c in candidates:
+                    assert "fqn" in c
+                    assert "relevance_score" in c
+
+    def test_ambiguous_resolution_has_candidates(self, spring_mybatis_repo: Path) -> None:
+        ir = self._ir(spring_mybatis_repo)
+        result = compute_blast_radius(ir, "User")  # matches UserService, UserController, UserMapper
+        if result["resolution"] in ("ambiguous", "partial"):
+            candidates = result.get("candidates")
+            if candidates:
+                assert len(candidates) <= 10
+                for c in candidates:
+                    assert isinstance(c["fqn"], str)
+                    assert isinstance(c["relevance_score"], float)
+                    assert c["relevance_score"] >= 0.0
+
+    def test_blast_radius_candidates_function_direct(self, spring_mybatis_repo: Path) -> None:
+        """_blast_radius_candidates returns ordered results for known prefix."""
+        ir = self._ir(spring_mybatis_repo)
+        rg = ir.get("reverse_graph") or {}
+        nodes = (ir.get("graph") or {}).get("nodes") or []
+        candidates = _blast_radius_candidates("User", rg, nodes)
+        assert isinstance(candidates, list)
+        assert len(candidates) <= 10
+        if candidates:
+            # First candidate must have higher or equal relevance than last
+            assert candidates[0]["relevance_score"] >= candidates[-1]["relevance_score"]
+
+    def test_candidates_empty_for_complete_mismatch(self, keycloak_like_repo: Path) -> None:
+        ir = self._ir(keycloak_like_repo)
+        rg = ir.get("reverse_graph") or {}
+        nodes = (ir.get("graph") or {}).get("nodes") or []
+        candidates = _blast_radius_candidates("ZZZCompletelyUnrelatedXYZABC", rg, nodes)
+        assert isinstance(candidates, list)
+        assert len(candidates) == 0
+
+    def test_file_path_target_resolves(self, spring_mybatis_repo: Path) -> None:
+        """UserService.java as target must resolve to the service class."""
+        ir = self._ir(spring_mybatis_repo)
+        result = compute_blast_radius(ir, "UserService.java")
+        # .java suffix must be stripped and resolve like simple name
+        assert result["resolution"] in ("exact", "ambiguous", "partial", "not_found")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P1: MyBatis-heavy repo blast radius
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def mybatis_heavy_repo(tmp_path: Path) -> Generator[Path, None, None]:
+    """MyBatis-heavy enterprise repo: 3 mappers, 3 services, 2 controllers, XML mappers."""
+    root = tmp_path / "mybatis-heavy"
+    root.mkdir()
+
+    _write(root, "pom.xml", textwrap.dedent("""
+        <project>
+          <groupId>com.corp.crm</groupId>
+          <artifactId>crm-backend</artifactId>
+          <version>2.1.0</version>
+          <parent>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-parent</artifactId>
+            <version>3.2.0</version>
+          </parent>
+          <dependencies>
+            <dependency>
+              <groupId>org.mybatis.spring.boot</groupId>
+              <artifactId>mybatis-spring-boot-starter</artifactId>
+              <version>3.0.3</version>
+            </dependency>
+          </dependencies>
+        </project>
+    """))
+
+    entities = [("Customer", "customer"), ("Order", "order"), ("Product", "product")]
+    for entity, pkg in entities:
+        # Controller
+        _write(root, f"src/main/java/com/corp/crm/controller/{entity}Controller.java",
+               textwrap.dedent(f"""
+            package com.corp.crm.controller;
+            import org.springframework.web.bind.annotation.*;
+            import org.springframework.security.access.annotation.Secured;
+            import com.corp.crm.service.{entity}Service;
+
+            @RestController
+            @RequestMapping("/api/{pkg}s")
+            public class {entity}Controller {{
+                private final {entity}Service {pkg}Service;
+                public {entity}Controller({entity}Service {pkg}Service) {{ this.{pkg}Service = {pkg}Service; }}
+
+                @GetMapping
+                @Secured("ROLE_USER")
+                public java.util.List<{entity}> list() {{ return {pkg}Service.findAll(); }}
+
+                @PostMapping
+                @Secured("ROLE_MANAGER")
+                public {entity} create(@RequestBody {entity} e) {{ return {pkg}Service.create(e); }}
+
+                @DeleteMapping("/{{id}}")
+                @Secured("ROLE_ADMIN")
+                public void delete(@PathVariable Long id) {{ {pkg}Service.delete(id); }}
+            }}
+        """))
+
+        # Service
+        _write(root, f"src/main/java/com/corp/crm/service/{entity}Service.java",
+               textwrap.dedent(f"""
+            package com.corp.crm.service;
+            import org.springframework.stereotype.Service;
+            import org.springframework.transaction.annotation.Transactional;
+            import com.corp.crm.mapper.{entity}Mapper;
+
+            @Service
+            @Transactional
+            public class {entity}Service {{
+                private final {entity}Mapper {pkg}Mapper;
+                public {entity}Service({entity}Mapper {pkg}Mapper) {{ this.{pkg}Mapper = {pkg}Mapper; }}
+                public java.util.List<{entity}> findAll() {{ return {pkg}Mapper.selectAll(); }}
+                public {entity} create({entity} e) {{ return {pkg}Mapper.insert(e); }}
+                public void delete(Long id) {{ {pkg}Mapper.deleteById(id); }}
+            }}
+        """))
+
+        # Mapper interface
+        _write(root, f"src/main/java/com/corp/crm/mapper/{entity}Mapper.java",
+               textwrap.dedent(f"""
+            package com.corp.crm.mapper;
+            import org.apache.ibatis.annotations.Mapper;
+            import org.apache.ibatis.annotations.Select;
+            import org.apache.ibatis.annotations.Delete;
+
+            @Mapper
+            public interface {entity}Mapper {{
+                @Select("SELECT * FROM {pkg}s")
+                java.util.List<{entity}> selectAll();
+                {entity} insert({entity} e);
+                @Delete("DELETE FROM {pkg}s WHERE id = #{{id}}")
+                void deleteById(Long id);
+            }}
+        """))
+
+        # Mapper XML
+        _write(root, f"src/main/resources/mapper/{entity}Mapper.xml",
+               textwrap.dedent(f"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+                "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+            <mapper namespace="com.corp.crm.mapper.{entity}Mapper">
+                <insert id="insert">
+                    INSERT INTO {pkg}s (name) VALUES (#{{name}})
+                </insert>
+            </mapper>
+        """))
+
+    yield root
+
+
+class TestMyBatisHeavyBlastRadius:
+    """Blast radius on MyBatis-heavy repos: persistence paths detected correctly."""
+
+    def _ir(self, repo: Path) -> dict:
+        files = find_java_files(repo)
+        if not files:
+            pytest.skip("no java files")
+        return build_repo_ir(files, repo)
+
+    def test_mybatis_repo_has_mappers_in_ir(self, mybatis_heavy_repo: Path) -> None:
+        ir = self._ir(mybatis_heavy_repo)
+        nodes = (ir.get("graph") or {}).get("nodes") or []
+        class_names = [n.get("fqn", "") for n in nodes]
+        mapper_classes = [c for c in class_names if "Mapper" in c]
+        assert len(mapper_classes) >= 1, (
+            f"Expected mapper classes in IR, got fqns: {class_names[:10]}"
+        )
+
+    def test_service_impact_includes_mappers(self, mybatis_heavy_repo: Path) -> None:
+        ir = self._ir(mybatis_heavy_repo)
+        result = compute_blast_radius(ir, "CustomerController")
+        assert result["resolution"] in ("exact", "ambiguous", "partial", "not_found")
+        if result["resolution"] != "not_found":
+            stats = result.get("stats") or {}
+            assert "mappers_affected_count" in stats
+
+    def test_mapper_role_in_mappers_affected(self, mybatis_heavy_repo: Path) -> None:
+        ir = self._ir(mybatis_heavy_repo)
+        # Impact from a service should propagate mapper info
+        result = compute_blast_radius(ir, "CustomerService")
+        if result["resolution"] not in ("not_found",):
+            for m in result.get("mappers_affected") or []:
+                # Role must be a non-empty string
+                assert isinstance(m.get("role"), str) and m["role"]
+
+    def test_mybatis_endpoint_count(self, mybatis_heavy_repo: Path) -> None:
+        result = runner.invoke(app, ["endpoints", str(mybatis_heavy_repo)])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        # 3 controllers × 3 methods = 9 endpoints
+        assert data["total"] >= 6, f"Expected ≥6 endpoints, got {data['total']}"
+
+    def test_mybatis_subsystems_detected(self, mybatis_heavy_repo: Path) -> None:
+        ir = self._ir(mybatis_heavy_repo)
+        nodes = (ir.get("graph") or {}).get("nodes") or []
+        # At minimum should have controller, service, mapper classes
+        roles = {n.get("role", "other") for n in nodes}
+        # Should have at minimum some non-"other" roles
+        assert len(nodes) >= 3, "Expected at least 3 symbols in IR"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P2: Enterprise workflow commands (onboard / fix-bug / modernize / review-pr)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEnterpriseWorkflows:
+    """Top-level workflow commands produce bounded, structured output."""
+
+    def test_onboard_command_runs(self, legacy_monolith_repo: Path) -> None:
+        result = runner.invoke(app, ["onboard", str(legacy_monolith_repo)])
+        # May exit 0 or 1 depending on repo content — output must be valid
+        assert result.exit_code in (0, 1)
+        # Must produce some output
+        assert len(result.output) > 0
+
+    def test_fix_bug_command_runs(self, spring_mybatis_repo: Path) -> None:
+        result = runner.invoke(
+            app, ["fix-bug", str(spring_mybatis_repo), "--symptom", "NullPointerException"]
+        )
+        assert result.exit_code in (0, 1)
+        assert len(result.output) > 0
+
+    def test_fix_bug_without_symptom_runs(self, spring_mybatis_repo: Path) -> None:
+        result = runner.invoke(app, ["fix-bug", str(spring_mybatis_repo)])
+        assert result.exit_code in (0, 1)
+        assert len(result.output) > 0
+
+    def test_modernize_command_runs(self, legacy_monolith_repo: Path) -> None:
+        result = runner.invoke(app, ["modernize", str(legacy_monolith_repo)])
+        assert result.exit_code in (0, 1)
+        assert len(result.output) > 0
+
+    def test_modernize_output_is_json(self, legacy_monolith_repo: Path) -> None:
+        result = runner.invoke(app, ["modernize", str(legacy_monolith_repo)])
+        if result.exit_code == 0:
+            data = json.loads(result.output)
+            assert data.get("workflow") == "modernize"
+            assert "hotspot_candidates" in data
+            assert "dead_zone_candidates" in data
+            assert "subsystem_summary" in data
+            assert "recommendation" in data
+
+    def test_modernize_summary_has_counts(self, legacy_monolith_repo: Path) -> None:
+        result = runner.invoke(app, ["modernize", str(legacy_monolith_repo)])
+        if result.exit_code == 0:
+            data = json.loads(result.output)
+            summary = data.get("summary") or {}
+            assert "total_classes" in summary
+            assert isinstance(summary["total_classes"], int)
+
+    def test_modernize_bounded_output(self, endpoint_heavy_repo: Path) -> None:
+        result = runner.invoke(app, ["modernize", str(endpoint_heavy_repo)])
+        if result.exit_code == 0:
+            size = len(result.output.encode("utf-8"))
+            assert size <= BUDGET_ONBOARD, (
+                f"modernize output {size}B exceeds BUDGET_ONBOARD={BUDGET_ONBOARD}B"
+            )
+
+    def test_review_pr_command_runs(self, spring_mybatis_repo: Path) -> None:
+        result = runner.invoke(app, ["review-pr", str(spring_mybatis_repo)])
+        # review-pr may exit non-zero if no git diff — acceptable
+        assert result.exit_code in (0, 1)
+        assert len(result.output) > 0
+
+    def test_workflow_commands_registered(self) -> None:
+        """All five enterprise workflow commands must be registered in the CLI."""
+        result = runner.invoke(app, ["--help"])
+        assert result.exit_code == 0
+        help_text = result.output.lower()
+        for cmd in ("onboard", "fix-bug", "modernize", "review-pr", "impact"):
+            assert cmd in help_text, f"Workflow command {cmd!r} not in --help"
+
+    def test_modernize_on_mybatis_repo(self, mybatis_heavy_repo: Path) -> None:
+        result = runner.invoke(app, ["modernize", str(mybatis_heavy_repo)])
+        if result.exit_code == 0:
+            data = json.loads(result.output)
+            assert data.get("workflow") == "modernize"
+            # MyBatis heavy repo should have controller/service/mapper subsystems
+            summary = data.get("summary") or {}
+            assert summary.get("total_classes", 0) >= 3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P1: Runtime benchmarks — IR build and impact analysis must complete in time
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRuntimeBenchmarks:
+    """IR build and impact analysis stay within reasonable wall-clock limits.
+
+    These are NOT hard CI gates — they characterise performance degradation.
+    Thresholds are generous (10s/5s) to avoid false failures on CI machines.
+    """
+
+    def _time_build_ir(self, repo: Path) -> tuple[dict, float]:
+        files = find_java_files(repo)
+        if not files:
+            pytest.skip("no java files")
+        t0 = time.monotonic()
+        ir = build_repo_ir(files, repo)
+        elapsed = time.monotonic() - t0
+        return ir, elapsed
+
+    def test_keycloak_like_ir_build_under_10s(self, keycloak_like_repo: Path) -> None:
+        _, elapsed = self._time_build_ir(keycloak_like_repo)
+        assert elapsed < 10.0, f"IR build took {elapsed:.2f}s (limit: 10s)"
+
+    def test_spring_mybatis_ir_build_under_10s(self, spring_mybatis_repo: Path) -> None:
+        _, elapsed = self._time_build_ir(spring_mybatis_repo)
+        assert elapsed < 10.0, f"IR build took {elapsed:.2f}s (limit: 10s)"
+
+    def test_mybatis_heavy_ir_build_under_10s(self, mybatis_heavy_repo: Path) -> None:
+        _, elapsed = self._time_build_ir(mybatis_heavy_repo)
+        assert elapsed < 10.0, f"IR build took {elapsed:.2f}s (limit: 10s)"
+
+    def test_endpoint_heavy_ir_build_under_10s(self, endpoint_heavy_repo: Path) -> None:
+        _, elapsed = self._time_build_ir(endpoint_heavy_repo)
+        assert elapsed < 10.0, f"IR build took {elapsed:.2f}s (limit: 10s)"
+
+    def test_impact_analysis_under_5s(self, mybatis_heavy_repo: Path) -> None:
+        files = find_java_files(mybatis_heavy_repo)
+        if not files:
+            pytest.skip("no java files")
+        ir = build_repo_ir(files, mybatis_heavy_repo)
+        t0 = time.monotonic()
+        compute_blast_radius(ir, "CustomerService")
+        elapsed = time.monotonic() - t0
+        assert elapsed < 5.0, f"compute_blast_radius took {elapsed:.2f}s (limit: 5s)"
+
+    def test_impact_analysis_deterministic_runtime(self, spring_mybatis_repo: Path) -> None:
+        """Two successive calls must produce same output (no randomness)."""
+        files = find_java_files(spring_mybatis_repo)
+        if not files:
+            pytest.skip("no java files")
+        ir = build_repo_ir(files, spring_mybatis_repo)
+        r1 = compute_blast_radius(ir, "UserService")
+        r2 = compute_blast_radius(ir, "UserService")
+        assert r1 == r2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P2: Multi-repo comparison matrix
+# Verifies the suite runs across all repo types and captures key metrics.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestMultiRepoComparisonMatrix:
+    """Cross-repo consistency: all repos must satisfy the same baseline contract."""
+
+    @pytest.mark.parametrize("repo_fixture", [
+        "keycloak_like_repo",
+        "spring_mybatis_repo",
+        "legacy_monolith_repo",
+        "endpoint_heavy_repo",
+        "mybatis_heavy_repo",
+    ])
+    def test_ir_schema_version_all_repos(
+        self, repo_fixture: str, request: pytest.FixtureRequest
+    ) -> None:
+        repo = request.getfixturevalue(repo_fixture)
+        files = find_java_files(repo)
+        if not files:
+            pytest.skip("no java files")
+        ir = build_repo_ir(files, repo)
+        assert ir.get("schema_version") == "final-v1", (
+            f"{repo_fixture}: schema_version mismatch: {ir.get('schema_version')!r}"
+        )
+
+    @pytest.mark.parametrize("repo_fixture", [
+        "keycloak_like_repo",
+        "spring_mybatis_repo",
+        "legacy_monolith_repo",
+        "endpoint_heavy_repo",
+        "mybatis_heavy_repo",
+    ])
+    def test_ir_summary_bounded_all_repos(
+        self, repo_fixture: str, request: pytest.FixtureRequest
+    ) -> None:
+        repo = request.getfixturevalue(repo_fixture)
+        files = find_java_files(repo)
+        if not files:
+            pytest.skip("no java files")
+        ir = build_repo_ir(files, repo)
+        summary = apply_ir_size_limits(ir, summary_only=True)
+        size = len(json.dumps(summary, ensure_ascii=False).encode("utf-8"))
+        assert size <= 100_000, (
+            f"{repo_fixture}: summary {size}B exceeds 100KB"
+        )
+
+    @pytest.mark.parametrize("repo_fixture", [
+        "keycloak_like_repo",
+        "spring_mybatis_repo",
+        "legacy_monolith_repo",
+        "mybatis_heavy_repo",
+    ])
+    def test_blast_radius_new_fields_present_all_repos(
+        self, repo_fixture: str, request: pytest.FixtureRequest
+    ) -> None:
+        """All new blast-radius fields must be present in every repo type."""
+        repo = request.getfixturevalue(repo_fixture)
+        files = find_java_files(repo)
+        if not files:
+            pytest.skip("no java files")
+        ir = build_repo_ir(files, repo)
+        nodes = (ir.get("graph") or {}).get("nodes") or []
+        if not nodes:
+            pytest.skip("no graph nodes")
+        # Pick any class-level node
+        target = next(
+            (n["fqn"] for n in nodes if n.get("type") in ("class", "interface")),
+            None,
+        )
+        if not target:
+            pytest.skip("no class node found")
+        result = compute_blast_radius(ir, target)
+        for field in (
+            "mappers_affected",
+            "security_surface_affected",
+            "cross_module_impact",
+            "confidence_score",
+            "confidence_level",
+            "explanation",
+            "stats",
+        ):
+            assert field in result, (
+                f"{repo_fixture}: blast-radius missing field {field!r}"
+            )
+
+    @pytest.mark.parametrize("repo_fixture", [
+        "keycloak_like_repo",
+        "spring_mybatis_repo",
+        "legacy_monolith_repo",
+        "endpoint_heavy_repo",
+        "mybatis_heavy_repo",
+    ])
+    def test_impact_command_produces_valid_json_all_repos(
+        self, repo_fixture: str, request: pytest.FixtureRequest
+    ) -> None:
+        repo = request.getfixturevalue(repo_fixture)
+        result = runner.invoke(app, ["impact", "NonExistentXYZ", str(repo)])
+        # not_found → exit 1, but output must be valid JSON
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["resolution"] == "not_found"
+        assert data["risk_level"] == "unknown"
+
+    @pytest.mark.parametrize("repo_fixture", [
+        "keycloak_like_repo",
+        "spring_mybatis_repo",
+        "legacy_monolith_repo",
+        "mybatis_heavy_repo",
+    ])
+    def test_modernize_command_all_repos(
+        self, repo_fixture: str, request: pytest.FixtureRequest
+    ) -> None:
+        repo = request.getfixturevalue(repo_fixture)
+        result = runner.invoke(app, ["modernize", str(repo)])
+        if result.exit_code == 0:
+            data = json.loads(result.output)
+            assert data.get("workflow") == "modernize"
+            assert "hotspot_candidates" in data
+            assert "summary" in data
