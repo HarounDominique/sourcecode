@@ -1949,14 +1949,22 @@ def _route_security_from_sym(
 ) -> "Optional[dict]":
     """Extract security policy from method and/or class-level annotations.
 
+    Canonical single-source-of-truth security extractor.
+    All security extraction (route_surface, endpoint_surface, MCP) uses this function.
+    No independent re-extraction elsewhere.
+
     Resolution order (method-level takes precedence):
-      @DenyAll        → {policy: deny_all}
-      @PermitAll      → {policy: permit_all}
-      @RolesAllowed   → {policy: roles_allowed, roles: [...]}
-      @Authenticated  → {policy: authenticated}
-      @PreAuthorize   → {policy: spring_preauthorize, expression: ...}
-      @PostAuthorize  → {policy: spring_postauthorize, expression: ...}
-      @Secured        → {policy: secured, roles: [...]}
+      @DenyAll                → {policy: deny_all}
+      @PermitAll              → {policy: permit_all}
+      @RolesAllowed           → {policy: roles_allowed, roles: [...]}
+      @Authenticated          → {policy: authenticated}
+      @PreAuthorize           → {policy: spring_preauthorize, expression: ...}
+      @PostAuthorize          → {policy: spring_postauthorize, expression: ...}
+      @Secured                → {policy: secured, roles: [...]}
+      @RequiresRoles          → {policy: requiresroles, roles: [...]}
+      @RequiresPermissions    → {policy: requirespermissions, roles: [...]}
+      @SecurityRequirement    → {policy: openapi_security, spec: ...}
+      @M3FiltroSeguridad      → {policy: custom_permission, required_permission: ...}
 
     Falls back to class-level annotations if no method-level security found.
     Returns None if no security signal detected at either level.
@@ -1985,6 +1993,17 @@ def _route_security_from_sym(
             raw = vals.get("@Secured", "")
             roles = _re.findall(r'"([^"]+)"', raw)
             return {"policy": "secured", "roles": roles}
+        # Apache Shiro annotations
+        for shiro_ann in ("@RequiresRoles", "@RequiresPermissions"):
+            if shiro_ann in anns:
+                raw = vals.get(shiro_ann, "")
+                roles = _re.findall(r'"([^"]+)"', raw)
+                return {"policy": shiro_ann[1:].lower(), "roles": roles}
+        # OpenAPI security requirement
+        if "@SecurityRequirement" in anns:
+            raw = vals.get("@SecurityRequirement", "")
+            return {"policy": "openapi_security", "spec": raw.strip()}
+        # Custom legacy annotation
         if "@M3FiltroSeguridad" in anns:
             import re as _re2
             raw = vals.get("@M3FiltroSeguridad", "")
@@ -2529,18 +2548,18 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
     """Extract REST endpoint surface from Java source files.
 
     Canonical endpoint extractor — uses IR symbol extraction + _build_route_surface().
-    Single source of truth for endpoint data; replaces the standalone regex extractor
-    that previously lived in cli.py.
+    Security extraction delegated to _route_security_from_sym (single source of truth);
+    results stored in route["security_annotations"] by _build_route_surface.
 
     Returns JSON-serializable dict:
-      {endpoints: [{method, path, controller, handler, required_permission?}], total, undocumented}
+      {endpoints: [{method, path, controller, handler, security?, required_permission?}],
+       total, no_security_signal, undocumented}
     """
     import re as _re
     from typing import Any as _Any
     from sourcecode.path_filters import is_test_path
 
     _EXTENDS_FROM_SIG = _re.compile(r'\bextends\s+(\w+)')
-    _FILTRO_VAL = _re.compile(r'(?:nombreRecurso\s*=\s*)?["\']([^"\']+)["\']')
 
     # Exclude REST client proxy modules — they use JAX-RS annotations for client-side
     # proxy generation (RESTEasy, MicroProfile REST Client) and are NOT server resources.
@@ -2555,7 +2574,6 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
     )
 
     all_symbols: list[SymbolRecord] = []
-    sym_map: dict[str, SymbolRecord] = {}
     extends_map: dict[str, str] = {}
 
     for jf in java_files:
@@ -2570,7 +2588,6 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
         _, symbols, _ = _extract_symbols(source, rel)
         for sym in symbols:
             all_symbols.append(sym)
-            sym_map[sym.symbol] = sym
             if sym.type in ("class", "interface"):
                 m = _EXTENDS_FROM_SIG.search(sym.signature or "")
                 if m:
@@ -2578,99 +2595,19 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
 
     routes = _build_route_surface(all_symbols, route_diffs=None, extends_map=extends_map)
 
-    # Build class-level symbol index for inheriting security annotations.
-    # When a method has no security annotation, fall back to its declaring class.
-    class_sym_map: dict[str, "SymbolRecord"] = {
-        sym.symbol: sym
-        for sym in all_symbols
-        if sym.type in ("class", "interface")
-    }
-
-    def _extract_security(sym: "Optional[SymbolRecord]",
-                          controller_fqn: str) -> "Optional[dict]":
-        """Return a security dict describing the access policy for this endpoint.
-
-        Checks method-level annotations first, then class-level (inheritance).
-        Returns None if no security signal found.
-        """
-        candidates: list["SymbolRecord"] = []
-        if sym:
-            candidates.append(sym)
-        # Also check the declaring class for class-level annotations
-        cls_sym = class_sym_map.get(controller_fqn)
-        if cls_sym and cls_sym is not sym:
-            candidates.append(cls_sym)
-
-        for candidate in candidates:
-            anns = set(candidate.annotations)
-            ann_vals = candidate.annotation_values
-
-            # @DenyAll → blocked
-            if "@DenyAll" in anns:
-                return {"policy": "deny_all"}
-
-            # @PermitAll → public / unauthenticated
-            if "@PermitAll" in anns:
-                return {"policy": "permit_all"}
-
-            # @RolesAllowed → specific roles required
-            if "@RolesAllowed" in anns:
-                raw = ann_vals.get("@RolesAllowed", "")
-                # Extract role names from "\"admin\"" or "{\"admin\", \"user\"}"
-                roles = _re.findall(r'"([^"]+)"', raw)
-                return {"policy": "roles_allowed", "roles": roles or [raw.strip("{} \"\\'")]}
-
-            # @Authenticated / @AuthenticatedWithRoles
-            if "@Authenticated" in anns or "@AuthenticatedWithRoles" in anns:
-                return {"policy": "authenticated"}
-
-            # Spring @PreAuthorize / @PostAuthorize
-            for spring_ann in ("@PreAuthorize", "@PostAuthorize"):
-                if spring_ann in anns:
-                    raw = ann_vals.get(spring_ann, "")
-                    return {"policy": "spring_" + spring_ann[1:].lower(), "expression": raw.strip('"')}
-
-            # @Secured
-            if "@Secured" in anns:
-                raw = ann_vals.get("@Secured", "")
-                roles = _re.findall(r'"([^"]+)"', raw)
-                return {"policy": "secured", "roles": roles}
-
-            # @RequiresRoles / @RequiresPermissions (Shiro)
-            for shiro_ann in ("@RequiresRoles", "@RequiresPermissions"):
-                if shiro_ann in anns:
-                    raw = ann_vals.get(shiro_ann, "")
-                    roles = _re.findall(r'"([^"]+)"', raw)
-                    return {"policy": shiro_ann[1:].lower(), "roles": roles}
-
-            # @SecurityRequirement (OpenAPI)
-            if "@SecurityRequirement" in anns:
-                raw = ann_vals.get("@SecurityRequirement", "")
-                return {"policy": "openapi_security", "spec": raw.strip()}
-
-            # @M3FiltroSeguridad (legacy custom)
-            if "@M3FiltroSeguridad" in anns:
-                filtro_args = ann_vals.get("@M3FiltroSeguridad", "")
-                if filtro_args:
-                    fm = _FILTRO_VAL.search(filtro_args)
-                    if fm:
-                        return {"policy": "custom_permission", "required_permission": fm.group(1)}
-
-        return None
+    # Security extraction: _build_route_surface already calls _route_security_from_sym
+    # and stores the result as route["security_annotations"].
+    # No independent re-extraction here — _route_security_from_sym is the single
+    # source of truth for security policy extraction.
 
     endpoints: list[dict] = []
     for route in routes:
-        sym = sym_map.get(route["symbol"])
-        controller_fqn = route.get("effective_class", "")
-
-        security_info = _extract_security(sym, controller_fqn)
-
         handler = (
             route["symbol"].split("#")[1]
             if "#" in route["symbol"]
             else route["symbol"].rsplit(".", 1)[-1]
         )
-        controller = route["effective_class"].split(".")[-1]
+        controller = route.get("effective_class", "").split(".")[-1]
 
         entry: dict = {
             "method": route["method"],
@@ -2678,6 +2615,9 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             "controller": controller,
             "handler": handler,
         }
+        # Use security_annotations already extracted by _build_route_surface
+        # via the canonical _route_security_from_sym extractor.
+        security_info = route.get("security_annotations")
         if security_info:
             entry["security"] = security_info
             # Backward compat: keep required_permission for custom annotation
