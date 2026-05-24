@@ -2,7 +2,7 @@
 
 **AI-ready change intelligence for Java/Spring enterprise monoliths.**
 
-![Version](https://img.shields.io/badge/version-1.31.15-blue)
+![Version](https://img.shields.io/badge/version-1.31.16-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
@@ -40,7 +40,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.31.15
+# sourcecode 1.31.16
 ```
 
 ---
@@ -77,7 +77,7 @@ sourcecode fix-bug /path/to/repo --symptom "NullPointerException in checkout"
 
 ## Real-world benchmarks
 
-Measured against open-source enterprise Java repos (v1.31.15, macOS M-series):
+Measured against open-source enterprise Java repos:
 
 | Repo | Classes | Cold scan (`--compact`) | Cache hit | Endpoints found |
 |------|---------|------------------------|-----------|----------------|
