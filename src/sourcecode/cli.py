@@ -423,7 +423,7 @@ def main(
             "High-signal summary (typically 1000–3000 tokens depending on repo size): "
             "stacks, entry points, dependency summary, confidence, and gaps. "
             "Includes security_surface (when @M3FiltroSeguridad detected), mybatis (when MyBatis framework detected), and transactional_boundaries for Java projects. "
-            "Use --agent for maximum signal or --slim (when available) for minimal token footprint."
+            "Use --agent for maximum signal."
         ),
     ),
     dependencies: bool = typer.Option(
