@@ -1131,6 +1131,23 @@ def _detect_role(path: str, contract: FileContract) -> str:
     if any(n.startswith("use") and len(n) > 3 and n[3:4].isupper() for n in export_names):
         return "hook"
 
+    # Angular-specific roles (.ts files): detect by stem suffix before generic checks.
+    # Must run before the "service" path-keyword check to prevent misclassification.
+    if ext == ".ts":
+        _ts_last = Path(path).stem.lower().rsplit(".", 1)[-1]
+        _NG_ROLE_MAP = {
+            "component":   "component",
+            "pipe":        "pipe",
+            "directive":   "directive",
+            "guard":       "guard",
+            "interceptor": "interceptor",
+            "resolver":    "resolver",
+            "module":      "module",
+            "service":     "service",
+        }
+        if _ts_last in _NG_ROLE_MAP:
+            return _NG_ROLE_MAP[_ts_last]
+
     # Route / page
     if any(x in path_lower for x in ["/routes/", "/route.", "/pages/", "/api/", "/handlers/"]):
         return "route"

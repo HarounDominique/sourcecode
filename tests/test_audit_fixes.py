@@ -814,12 +814,19 @@ class TestTelemetrySchema:
             )
 
     def test_telemetry_invalid_action_returns_error_with_valid_list(self):
+        import json
+        from mcp.types import CallToolResult
         from sourcecode.mcp.server import telemetry
         result = telemetry("unknown_action")
-        assert result["success"] is False
-        assert result["error"] is not None
+        assert isinstance(result, CallToolResult), (
+            f"expected CallToolResult, got {type(result).__name__}"
+        )
+        assert result.isError is True, "isError must be True for tool failures"
+        payload = json.loads(result.content[0].text)
+        assert payload["success"] is False
+        assert payload["error"] is not None
         # Error message must enumerate valid actions
-        msg = result["error"]["message"]
+        msg = payload["error"]["message"]
         for action in ("status", "enable", "disable"):
             assert action in msg, (
                 f"telemetry error message must list valid action '{action}': {msg!r}"

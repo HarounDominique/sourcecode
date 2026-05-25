@@ -238,6 +238,21 @@ def _preprocess_argv() -> None:
     _sys.argv = _sys.argv[:1] + modified
 
 
+def _emit_error_json(error: str, message: str, **context: object) -> None:
+    """Write a structured JSON error envelope to stderr.
+
+    Format: {"error": "<code>", "message": "<human text>", ...<context>}
+    All CLI validation and runtime errors must go through this helper so that
+    agents and tools can parse stderr reliably regardless of error type.
+    """
+    import json as _json
+    import sys as _sys
+    payload: dict[str, object] = {"error": error, "message": message}
+    payload.update(context)
+    _sys.stderr.write(_json.dumps(payload, ensure_ascii=False) + "\n")
+    _sys.stderr.flush()
+
+
 def _copy_to_clipboard(content: str) -> bool:
     """Copy text to system clipboard. Returns True on success, False otherwise (never raises)."""
     import subprocess
@@ -751,21 +766,30 @@ def main(
 
     # Validate format choices
     if format not in FORMAT_CHOICES:
-        typer.echo(
-            f"Error: invalid value '{format}' for --format. Valid options: {', '.join(FORMAT_CHOICES)}",
-            err=True,
+        _emit_error_json(
+            "invalid_flag_value",
+            f"Invalid value '{format}' for --format. Valid values: {', '.join(FORMAT_CHOICES)}.",
+            flag="--format",
+            value=format,
+            valid_values=list(FORMAT_CHOICES),
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
     if graph_detail not in GRAPH_DETAIL_CHOICES:
-        typer.echo(
-            f"Error: invalid value '{graph_detail}' for --graph-detail. Valid options: {', '.join(GRAPH_DETAIL_CHOICES)}",
-            err=True,
+        _emit_error_json(
+            "invalid_flag_value",
+            f"Invalid value '{graph_detail}' for --graph-detail. Valid values: {', '.join(GRAPH_DETAIL_CHOICES)}.",
+            flag="--graph-detail",
+            value=graph_detail,
+            valid_values=list(GRAPH_DETAIL_CHOICES),
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
     if docs_depth not in DOCS_DEPTH_CHOICES:
-        typer.echo(
-            f"Error: invalid value '{docs_depth}' for --docs-depth. Valid options: {', '.join(DOCS_DEPTH_CHOICES)}",
-            err=True,
+        _emit_error_json(
+            "invalid_flag_value",
+            f"Invalid value '{docs_depth}' for --docs-depth. Valid values: {', '.join(DOCS_DEPTH_CHOICES)}.",
+            flag="--docs-depth",
+            value=docs_depth,
+            valid_values=list(DOCS_DEPTH_CHOICES),
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
@@ -775,10 +799,18 @@ def main(
     _raw_path_input = _detected_path[0]
     target = Path(_raw_path_input).resolve()
     if not target.exists():
-        typer.echo(f"Error: directory '{_raw_path_input}' does not exist.", err=True)
+        _emit_error_json(
+            "directory_not_found",
+            f"Directory '{_raw_path_input}' does not exist.",
+            path=_raw_path_input,
+        )
         raise typer.Exit(code=1)
     if not target.is_dir():
-        typer.echo(f"Error: '{_raw_path_input}' is not a directory.", err=True)
+        _emit_error_json(
+            "not_a_directory",
+            f"Path '{_raw_path_input}' is not a directory.",
+            path=_raw_path_input,
+        )
         raise typer.Exit(code=1)
 
     # Normalize mode aliases
@@ -1201,6 +1233,15 @@ def main(
         workspace_root = target / workspace.path
         if not workspace_root.exists() or not workspace_root.is_dir():
             continue
+        # BUG-2: skip workspaces explicitly excluded via --exclude.
+        # Without this guard, excluded frontend/backend modules still contribute
+        # their stacks and entry_points, causing architecture_summary to describe
+        # stacks that were intentionally filtered out.
+        if _extra_excludes:
+            _ws_norm = workspace.path.replace("\\", "/").strip("/")
+            _ws_parts = frozenset(_ws_norm.split("/"))
+            if _ws_parts & _extra_excludes:
+                continue
         _ws_topology = RepoClassifier().classify(workspace_root)
         workspace_scanner = AdaptiveScanner(workspace_root, topology=_ws_topology, base_depth=depth)
         workspace_tree = filter_sensitive_files(workspace_scanner.scan_tree())

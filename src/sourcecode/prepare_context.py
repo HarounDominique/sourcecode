@@ -589,6 +589,15 @@ _ARTIFACT_CHANGE_EFFECT: dict[str, str] = {
     "documentation":  "documentation file (no runtime impact)",
     "ide_noise":      "IDE/tooling artifact (no application impact)",
     "source":         "application source file (role could not be confirmed from code signals)",
+    # Angular-specific artifact types (detected before Java/Spring heuristics)
+    "ng_component":   "UI presentation layer (Angular @Component)",
+    "ng_pipe":        "data transformation layer (Angular @Pipe)",
+    "ng_directive":   "DOM behavior layer (Angular @Directive)",
+    "ng_guard":       "navigation guard (Angular CanActivate / CanActivateFn)",
+    "ng_interceptor": "HTTP middleware layer (Angular HttpInterceptor)",
+    "ng_resolver":    "data pre-fetch layer (Angular Resolve)",
+    "ng_service":     "Angular injectable service (@Injectable)",
+    "ng_module":      "Angular feature module (@NgModule)",
 }
 
 # Maps frontend symptom keywords → backend terms likely to contain the root cause.
@@ -2710,6 +2719,29 @@ class TaskContextBuilder:
         ):
             return {"artifact_type": "entrypoint", "risk_areas": ["api", "config"], "impact_level": "critical", "is_noise": False, "module": module, "confidence": "high"}
 
+        # Angular-specific artifact detection (.ts files only).
+        # Must run BEFORE the Java/Spring heuristics so that *.component.ts,
+        # *.pipe.ts, etc. are never misclassified as "service" or "security".
+        # Detection is pure-path/stem — no file reads, fully deterministic.
+        if suffix == ".ts":
+            # Stem may be multi-part: "causa-denegacion-form.component" → last part is the Angular type
+            _ts_last = stem_lower.rsplit(".", 1)[-1]  # "component", "pipe", etc.
+            _NG_SUFFIX_MAP = {
+                "component":   ("ng_component",   ["ui"],               "medium"),
+                "pipe":        ("ng_pipe",         ["ui"],               "low"),
+                "directive":   ("ng_directive",    ["ui"],               "medium"),
+                "guard":       ("ng_guard",        ["security", "auth"], "high"),
+                "interceptor": ("ng_interceptor",  ["api"],              "medium"),
+                "resolver":    ("ng_resolver",     ["api"],              "low"),
+                "module":      ("ng_module",       ["config"],           "medium"),
+            }
+            if _ts_last in _NG_SUFFIX_MAP:
+                _ng_atype, _ng_risks, _ng_impact = _NG_SUFFIX_MAP[_ts_last]
+                return {"artifact_type": _ng_atype, "risk_areas": _ng_risks, "impact_level": _ng_impact, "is_noise": False, "module": module, "confidence": "high"}
+            # Angular service: stem ends with ".service" or equals "service"
+            if _ts_last == "service":
+                return {"artifact_type": "ng_service", "risk_areas": ["business_logic"], "impact_level": "medium", "is_noise": False, "module": module, "confidence": "high"}
+
         # Security surface (extended: interceptor, filter, cors, acl)
         _SECURITY_KW = ("security", "auth", "jwt", "token", "permission", "role",
                          "credential", "encrypt", "decrypt", "oauth", "saml", "ldap",
@@ -2724,9 +2756,11 @@ class TaskContextBuilder:
         if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _API_KW):
             return {"artifact_type": "controller", "risk_areas": ["api"], "impact_level": "high", "is_noise": False, "module": module, "confidence": "high"}
 
-        # Business logic / services (extended: facade, usecase, aspect, listener, component)
+        # Business logic / services (extended: facade, usecase, aspect, listener)
+        # NOTE: "component" intentionally removed — Angular *.component.ts files
+        # are caught above by the Angular-specific block before reaching here.
         _SERVICE_KW = ("service", "serviceimpl", "servicefacade", "facade", "usecase",
-                       "interactor", "aspect", "listener", "subscriber", "eventhandler", "component")
+                       "interactor", "aspect", "listener", "subscriber", "eventhandler")
         if suffix in _CODE_EXTS and any(kw in stem_lower for kw in _SERVICE_KW):
             return {"artifact_type": "service", "risk_areas": ["transactions", "business_logic"], "impact_level": "high", "is_noise": False, "module": module, "confidence": "high"}
 
