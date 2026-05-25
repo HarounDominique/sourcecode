@@ -3275,6 +3275,8 @@ def compute_blast_radius(
         confidence_level = "low"
 
     # ── 10. Explanation ───────────────────────────────────────────────────────
+    _bfs_truncated = _effective_depth < max_depth
+
     _parts: list[str] = []
     if n_direct:
         _parts.append(f"{n_direct} direct caller{'s' if n_direct != 1 else ''}")
@@ -3296,6 +3298,14 @@ def compute_blast_radius(
         _parts.append(
             f"callers resolved via interface{'s' if len(_iface_names) > 1 else ''} "
             f"({', '.join(_iface_names)}) — Spring/CDI DI pattern"
+        )
+
+    # Transparency: hub-class BFS truncation must appear in explanation so the
+    # text and JSON are semantically identical (indirect_callers=[] is not a lie).
+    if _bfs_truncated:
+        _parts.append(
+            f"indirect BFS skipped (hub class: {n_direct} direct callers "
+            f"exceed {_HUB_CALLER_THRESHOLD} threshold; indirect_callers not computed)"
         )
 
     if not _parts:
@@ -3324,10 +3334,12 @@ def compute_blast_radius(
         "security_surface_affected": security_surface_affected,
         "cross_module_impact": cross_module_impact,
         "transactional_boundaries_touched": txn_nodes,
-        "depth_reached": max_depth,
+        "depth_reached": _effective_depth,  # actual BFS depth used, not the requested max
+        "bfs_truncated": _bfs_truncated,
         "stats": {
             "direct_caller_count": n_direct,
             "indirect_caller_count": n_indirect,
+            "indirect_callers_computed": not _bfs_truncated,
             "endpoints_affected_count": n_ep,
             "transactional_boundaries_count": n_txn,
             "mappers_affected_count": n_mappers,
@@ -3343,6 +3355,14 @@ def compute_blast_radius(
             "Target is a concrete class injected via interface(s) in DI frameworks "
             "(Spring/CDI/Guice). direct_callers includes callers of the implemented "
             "interface(s) — these are the real production dependents."
+        )
+    if _bfs_truncated:
+        out["bfs_truncation_reason"] = "hub_class_depth_cap"
+        out["bfs_truncation_note"] = (
+            f"Indirect BFS capped at depth=1: target has {n_direct} direct callers "
+            f"(>{_HUB_CALLER_THRESHOLD} threshold). indirect_callers is empty by design — "
+            "not because no indirect callers exist. Use a lower-fan-in entry point "
+            "for full transitive traversal."
         )
     if len(direct_callers) > 30:
         out["direct_callers_note"] = (

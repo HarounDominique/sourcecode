@@ -1979,7 +1979,7 @@ def agent_view(sm: SourceMap, *, full: bool = False) -> dict[str, Any]:
             result["file_relevance_hint"] = (
                 f"Showing top {_fr_limit}/{_total_paths} files by score "
                 f"({'--full' if full else 'normal'} mode, bounded for signal quality). "
-                f"Use --deep for up to {compute_context_limit('deep', _FR_AGENT_CAP)} files."
+                f"Use --full for up to {compute_context_limit('full', _FR_AGENT_CAP)} files."
             )
 
     # ── 5. Monorepo package roles (when available), capped ───────────────────

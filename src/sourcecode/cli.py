@@ -1960,7 +1960,11 @@ def _serialize_relevant_file(f: Any) -> dict:
     d = {k: v for k, v in _asdict(f).items() if v != "" and v is not None}
     reason = d.pop("reason", "") or ""
     why = d.pop("why", "") or ""
-    d.pop("score", None)  # score removed from public output (internal ranking only)
+    # Expose score as a rounded float so agents can rank/filter files deterministically.
+    # Kept as "score" (0.0–1.0 normalized relevance) — higher = more relevant.
+    raw_score = d.pop("score", None)
+    if raw_score is not None:
+        d["score"] = round(float(raw_score), 4)
     explanation = _make_explanation(reason, why)
     if explanation:
         d["explanation"] = explanation
@@ -2146,6 +2150,26 @@ def prepare_context_cmd(
             err=True,
         )
         raise typer.Exit(code=1)
+
+    # Validate --format: only "json" and "github-comment" are valid for prepare-context.
+    # "yaml" is intentionally NOT supported here (use main command for yaml output).
+    # Invalid values must error loudly — silently falling through to JSON is a lie.
+    _PC_FORMAT_CHOICES = ("json", "github-comment")
+    if format is not None and format not in _PC_FORMAT_CHOICES:
+        typer.echo(
+            f"Error: invalid value '{format}' for --format. "
+            f"Valid options: {', '.join(_PC_FORMAT_CHOICES)}.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    # github-comment only renders for review-pr; warn and normalize for other tasks.
+    if format == "github-comment" and task != "review-pr":
+        typer.echo(
+            f"[warning] --format github-comment is only supported for the review-pr task. "
+            f"Outputting JSON for '{task}'.",
+            err=True,
+        )
+        format = "json"
 
     target = path.resolve()
     if not target.exists() or not target.is_dir():

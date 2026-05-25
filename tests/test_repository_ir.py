@@ -1880,3 +1880,253 @@ public class ItemService {
             f"JAX-RS endpoints_affected empty. route_surface={ir.get('route_surface')}, "
             f"resolution={result['resolution']}, direct_callers={result['direct_callers']}"
         )
+
+
+class TestBfsTransparencyAndTruncation:
+    """P0 fix: hub-class BFS truncation must be explicit in JSON and explanation.
+
+    Invariant: explanation text and JSON fields must be semantically identical.
+    No silent empty arrays. No lying depth_reached.
+    """
+
+    def _build_hub_ir(self, n_callers: int = 600):
+        """Build IR where HubClass has n_callers direct callers.
+
+        HubClass → n_callers CallerN classes each importing it.
+        Enough to trigger hub-class guard (_HUB_CALLER_THRESHOLD = 500).
+        """
+        from sourcecode.repository_ir import (
+            _extract_symbols, _build_relations, _build_spring_summary, _assemble,
+        )
+        sources = []
+        hub_src = """\
+package com.example;
+public class HubClass {
+    public Object doWork() { return null; }
+}
+"""
+        sources.append((hub_src, "HubClass.java"))
+        for i in range(n_callers):
+            caller_src = f"""\
+package com.example.callers;
+import com.example.HubClass;
+import org.springframework.stereotype.Service;
+
+@Service
+public class Caller{i} {{
+    private HubClass hub;
+    public void run() {{ hub.doWork(); }}
+}}
+"""
+            sources.append((caller_src, f"Caller{i}.java"))
+
+        all_syms, all_rels = [], []
+        for src, rel in sources:
+            pkg, syms, raw_imports = _extract_symbols(src, rel)
+            rels = _build_relations(syms, raw_imports, src, pkg, rel)
+            all_syms.extend(syms)
+            all_rels.extend(rels)
+        ss = _build_spring_summary(all_syms)
+        return _assemble(all_syms, all_rels, [], ss, None)
+
+    def _build_small_ir(self, n_callers: int = 3):
+        """Build IR where TargetClass has only n_callers — below hub threshold."""
+        from sourcecode.repository_ir import (
+            _extract_symbols, _build_relations, _build_spring_summary, _assemble,
+        )
+        sources = []
+        target_src = """\
+package com.example;
+public class TargetClass {
+    public Object execute() { return null; }
+}
+"""
+        sources.append((target_src, "TargetClass.java"))
+        for i in range(n_callers):
+            caller_src = f"""\
+package com.example;
+import com.example.TargetClass;
+import org.springframework.stereotype.Service;
+
+@Service
+public class SmallCaller{i} {{
+    private TargetClass target;
+    public void run() {{ target.execute(); }}
+}}
+"""
+            sources.append((caller_src, f"SmallCaller{i}.java"))
+        # Add a second-level caller for indirect_callers
+        l2_src = """\
+package com.example.l2;
+import com.example.SmallCaller0;
+
+public class Level2Caller {
+    private SmallCaller0 sc;
+    public void go() { sc.run(); }
+}
+"""
+        sources.append((l2_src, "Level2Caller.java"))
+
+        all_syms, all_rels = [], []
+        for src, rel in sources:
+            pkg, syms, raw_imports = _extract_symbols(src, rel)
+            rels = _build_relations(syms, raw_imports, src, pkg, rel)
+            all_syms.extend(syms)
+            all_rels.extend(rels)
+        ss = _build_spring_summary(all_syms)
+        return _assemble(all_syms, all_rels, [], ss, None)
+
+    # ── Hub-class guard tests ────────────────────────────────────────────────
+
+    def test_hub_class_bfs_truncated_is_true(self):
+        """When direct callers > 500, bfs_truncated must be True."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_hub_ir(n_callers=600)
+        result = compute_blast_radius(ir, "HubClass", max_depth=4)
+        assert result.get("bfs_truncated") is True, (
+            f"bfs_truncated must be True for hub class. Got: {result.get('bfs_truncated')}"
+        )
+
+    def test_hub_class_depth_reached_is_one(self):
+        """depth_reached must reflect actual BFS depth used, not requested max."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_hub_ir(n_callers=600)
+        result = compute_blast_radius(ir, "HubClass", max_depth=4)
+        assert result.get("depth_reached") == 1, (
+            f"depth_reached must be 1 for hub class (max_depth=4 requested but guard capped it). "
+            f"Got: {result.get('depth_reached')}"
+        )
+
+    def test_hub_class_truncation_reason_set(self):
+        """bfs_truncation_reason must be 'hub_class_depth_cap' when guard fires."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_hub_ir(n_callers=600)
+        result = compute_blast_radius(ir, "HubClass", max_depth=4)
+        assert result.get("bfs_truncation_reason") == "hub_class_depth_cap", (
+            f"Expected bfs_truncation_reason='hub_class_depth_cap'. "
+            f"Got: {result.get('bfs_truncation_reason')}"
+        )
+
+    def test_hub_class_truncation_note_present(self):
+        """bfs_truncation_note must be present and mention indirect_callers."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_hub_ir(n_callers=600)
+        result = compute_blast_radius(ir, "HubClass", max_depth=4)
+        note = result.get("bfs_truncation_note") or ""
+        assert "indirect_callers" in note, (
+            f"bfs_truncation_note must explain indirect_callers semantics. Got: {note!r}"
+        )
+
+    def test_hub_class_indirect_callers_computed_false(self):
+        """stats.indirect_callers_computed must be False for hub class."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_hub_ir(n_callers=600)
+        result = compute_blast_radius(ir, "HubClass", max_depth=4)
+        stats = result.get("stats", {})
+        assert stats.get("indirect_callers_computed") is False, (
+            f"stats.indirect_callers_computed must be False for hub class. "
+            f"Got: {stats.get('indirect_callers_computed')}"
+        )
+
+    def test_hub_class_explanation_mentions_truncation(self):
+        """Explanation must mention indirect BFS was skipped — no silent truncation."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_hub_ir(n_callers=600)
+        result = compute_blast_radius(ir, "HubClass", max_depth=4)
+        explanation = result.get("explanation", "")
+        assert "indirect" in explanation.lower() and (
+            "skipped" in explanation.lower() or "capped" in explanation.lower()
+            or "not computed" in explanation.lower()
+        ), (
+            f"Explanation must mention indirect BFS truncation. Got: {explanation!r}"
+        )
+
+    def test_hub_class_direct_callers_still_correct(self):
+        """Hub-class guard must NOT affect direct_callers — only indirect BFS."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_hub_ir(n_callers=600)
+        result = compute_blast_radius(ir, "HubClass", max_depth=4)
+        n_direct = result["stats"]["direct_caller_count"]
+        assert n_direct >= 600, (
+            f"direct_caller_count must reflect all callers even when BFS truncated. "
+            f"Got: {n_direct}"
+        )
+
+    # ── Non-hub: no truncation ──────────────────────────────────────────────
+
+    def test_non_hub_bfs_truncated_is_false(self):
+        """Below hub threshold: bfs_truncated must be False."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_small_ir(n_callers=3)
+        result = compute_blast_radius(ir, "TargetClass", max_depth=4)
+        assert result.get("bfs_truncated") is False, (
+            f"bfs_truncated must be False for small-fan-in class. "
+            f"Got: {result.get('bfs_truncated')}"
+        )
+
+    def test_non_hub_depth_reached_equals_max(self):
+        """Below hub threshold: depth_reached must equal requested max_depth."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_small_ir(n_callers=3)
+        result = compute_blast_radius(ir, "TargetClass", max_depth=4)
+        assert result.get("depth_reached") == 4, (
+            f"depth_reached must be 4 for non-hub class. Got: {result.get('depth_reached')}"
+        )
+
+    def test_non_hub_no_truncation_keys(self):
+        """Below hub threshold: truncation keys must not appear in output."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_small_ir(n_callers=3)
+        result = compute_blast_radius(ir, "TargetClass", max_depth=4)
+        assert "bfs_truncation_reason" not in result, (
+            "bfs_truncation_reason must only appear when truncation occurs"
+        )
+        assert "bfs_truncation_note" not in result, (
+            "bfs_truncation_note must only appear when truncation occurs"
+        )
+
+    def test_non_hub_indirect_callers_computed_true(self):
+        """Below hub threshold: stats.indirect_callers_computed must be True."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_small_ir(n_callers=3)
+        result = compute_blast_radius(ir, "TargetClass", max_depth=4)
+        stats = result.get("stats", {})
+        assert stats.get("indirect_callers_computed") is True, (
+            f"stats.indirect_callers_computed must be True for non-hub. "
+            f"Got: {stats.get('indirect_callers_computed')}"
+        )
+
+    # ── Consistency invariant ───────────────────────────────────────────────
+
+    def test_explanation_json_consistency_hub(self):
+        """Invariant: explanation and JSON must be semantically consistent.
+
+        If bfs_truncated=True → explanation must NOT imply indirect callers were computed.
+        If bfs_truncated=False → explanation may reference indirect_caller_count from stats.
+        """
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_hub_ir(n_callers=600)
+        result = compute_blast_radius(ir, "HubClass", max_depth=4)
+
+        # JSON says truncated
+        assert result["bfs_truncated"] is True
+        # indirect_callers array is empty (not computed)
+        assert result["indirect_callers"] == []
+        # stats reflects this
+        assert result["stats"]["indirect_callers_computed"] is False
+        assert result["stats"]["indirect_caller_count"] == 0
+        # explanation is consistent: mentions truncation, does NOT claim X indirect callers
+        explanation = result["explanation"]
+        assert "indirect" in explanation.lower(), (
+            "Explanation must reference indirect BFS state when truncated"
+        )
+
+    def test_not_found_always_has_bfs_truncated_false(self):
+        """not_found results always have bfs_truncated=False (BFS never ran)."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_small_ir(n_callers=1)
+        result = compute_blast_radius(ir, "NonExistentClass", max_depth=4)
+        assert result["resolution"] == "not_found"
+        # not_found path sets these explicitly
+        assert result.get("indirect_callers") == []
+        assert result.get("direct_callers") == []
