@@ -2,7 +2,7 @@
 
 **AI-ready change intelligence for Java/Spring enterprise monoliths.**
 
-![Version](https://img.shields.io/badge/version-1.31.24-blue)
+![Version](https://img.shields.io/badge/version-1.31.25-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
@@ -40,7 +40,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.31.24
+# sourcecode 1.31.25
 ```
 
 ---

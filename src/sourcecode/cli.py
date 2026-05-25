@@ -2655,6 +2655,12 @@ def repo_ir_cmd(
         help="Output format: json (default) or yaml.",
         show_default=True,
     ),
+    copy: bool = typer.Option(
+        False,
+        "--copy",
+        "-c",
+        help="Copy output to system clipboard after a successful run. No-op when --output is used or clipboard is unavailable.",
+    ),
 ) -> None:
     """Deterministic symbol-level IR for Java repositories.
 
@@ -2764,6 +2770,9 @@ def repo_ir_cmd(
             # Fallback for wrapped stdout without buffer (e.g. some test harnesses)
             _sys.stdout.write(output)
             _sys.stdout.write("\n")
+        if copy:
+            if _copy_to_clipboard(output):
+                typer.echo("✓ copied to clipboard", err=True)
 
 
 # ── impact (blast-radius / change-impact analysis) ────────────────────────────
@@ -2798,6 +2807,12 @@ def impact_cmd(
         False,
         "--include-tests",
         help="Include test files in analysis (excluded by default).",
+    ),
+    copy: bool = typer.Option(
+        False,
+        "--copy",
+        "-c",
+        help="Copy output to system clipboard after a successful run. No-op when --output is used or clipboard is unavailable.",
     ),
 ) -> None:
     """Blast-radius analysis: who calls this class and what breaks if it changes?
@@ -2869,6 +2884,9 @@ def impact_cmd(
             _sys.stdout.buffer.flush()
         except AttributeError:
             _sys.stdout.write(output + "\n")
+        if copy:
+            if _copy_to_clipboard(output):
+                typer.echo("✓ copied to clipboard", err=True)
 
     # Non-zero exit when target not found
     if result.get("resolution") == "not_found":
@@ -2898,6 +2916,12 @@ def endpoints_cmd(
         "-f",
         help="Output format: json (default) or yaml.",
         show_default=True,
+    ),
+    copy: bool = typer.Option(
+        False,
+        "--copy",
+        "-c",
+        help="Copy output to system clipboard after a successful run. No-op when --output is used or clipboard is unavailable.",
     ),
 ) -> None:
     """Extract REST API endpoint surface from Java source files.
@@ -2934,6 +2958,9 @@ def endpoints_cmd(
         _sys.stdout.buffer.write(output.encode("utf-8"))
         _sys.stdout.buffer.write(b"\n")
         _sys.stdout.buffer.flush()
+        if copy:
+            if _copy_to_clipboard(output):
+                typer.echo("✓ copied to clipboard", err=True)
 
 
 # ── Enterprise Workflow Commands ──────────────────────────────────────────────
