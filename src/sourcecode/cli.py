@@ -876,16 +876,30 @@ def main(
         architecture = True  # agents need full architectural signal (M4)
         graph_modules = True  # IC-003: import graph needed for architecture confidence
 
-    # ── GAP-9: Cache check — serve from global cache when git SHA unchanged ──
-    # Cache is stored in ~/.sourcecode/cache/<repo_id>/ (outside the repo).
-    # Snapshots are gzip-compressed (.json.gz) — ~85 % smaller than plain JSON.
-    # Eviction keeps the last SOURCECODE_CACHE_KEEP_COMMITS commits (default 5).
+    # ── Two-layer cache ────────────────────────────────────────────────────────
+    # L1 (core): (repo, commit, analysis_flags) → pre-computed view data dict
+    #            key  = core-<git_sha>-<analysis_hash>.json.gz
+    # L2 (view): (core_hash, view_flags)        → final rendered string
+    #            key  = view-<core_hash16>-<view_hash>.json.gz
+    #
+    # Lookup order: L2 exact hit → L1 hit + view rebuild → full analysis
+    # Write order:  full analysis → write L1 core → write L2 view
+    #
+    # Flags split:
+    #   core (analysis) — affect WHAT is analysed; same core for any view
+    #   view            — affect HOW it's presented; same view for any format variant
     import hashlib as _hashlib
     import subprocess as _sub
     from sourcecode import cache as _cache_mod
+
     _cache_hit_content: Optional[str] = None
     _git_sha = ""
-    _cache_key = ""
+    _core_key = ""
+    _view_key = ""
+    _core_hash = ""
+    _core_flags_str = ""
+    _view_flags_str = ""
+
     if not no_cache:
         try:
             _sha_r = _sub.run(
@@ -896,37 +910,112 @@ def main(
             # Only cache when target IS the git repo root (not a subdir of one),
             # to avoid polluting sub-project directories used in tests.
             if _git_sha and (target / ".git").exists():
-                # Include every output-affecting flag so different flag combos never collide
-                # Include version so cache is invalidated on sourcecode upgrades
                 from sourcecode import __version__ as _sc_version
-                # FIX-P0-1: cache key must include ALL analysis-affecting flags.
-                # Previously missing: exclude, depth, rank_by, symbol, entrypoints_only,
-                # no_redact, graph_detail, docs_depth, max_nodes, graph_edges,
-                # max_importers, emit_graph.
-                # Use effective_depth (not raw depth) so Java auto-adjustment is captured.
                 _excl_key = (
                     ",".join(sorted(e.strip() for e in exclude.split(",") if e.strip()))
                     if exclude else ""
                 )
-                _flags_str = (
+
+                # ── Core (analysis) flags: affect which analyzers run + scan config ──
+                # Use effective_depth (not raw depth) so Java auto-adjustment is captured.
+                _core_flags_str = (
                     f"v={_sc_version},"
-                    f"c={compact},ag={agent},fmt={format},full={full},"
-                    f"co={changed_only},dep={dependencies},gm={graph_modules},"
+                    f"dep={dependencies},gm={graph_modules},"
                     f"docs={docs},fm={full_metrics},sem={semantics},"
                     f"arch={architecture},gc={git_context},em={env_map},"
-                    f"cn={code_notes},tree={tree},mode={mode},"
-                    f"ex={_excl_key},depth={effective_depth},"
+                    f"cn={code_notes},mode={mode},"
+                    f"ex={_excl_key},depth={effective_depth}"
+                )
+                _core_h = _hashlib.md5(_core_flags_str.encode()).hexdigest()[:8]
+                _core_key = f"{_git_sha}-{_core_h}"
+
+                # ── View flags: output presentation only (no re-analysis needed) ──
+                _view_flags_str = (
+                    f"c={compact},ag={agent},fmt={format},full={full},"
+                    f"co={changed_only},tree={tree},nt={no_tree},"
                     f"rb={rank_by},sym={symbol},ep={entrypoints_only},"
                     f"nr={no_redact},gd={graph_detail},dd={docs_depth},"
                     f"mn={max_nodes},ge={graph_edges},mi={max_importers},"
                     f"eg={emit_graph}"
                 )
-                _flags_h = _hashlib.md5(_flags_str.encode()).hexdigest()[:8]
-                _cache_key = f"{_git_sha}-{_flags_h}"
-                _cache_hit_content = _cache_mod.read(target, _cache_key)
+                _view_h = _hashlib.md5(_view_flags_str.encode()).hexdigest()[:8]
+
+                # ── Lookup ──────────────────────────────────────────────────────
+                # Step 1: try L1 to obtain the core_hash needed for L2 key
+                _l1_result = _cache_mod.read_core(target, _core_key)
+                if _l1_result is not None:
+                    _core_dict_l1, _core_hash = _l1_result
+                    _view_key = f"{_core_hash}-{_view_h}"
+
+                    # Step 2: try L2 (exact view match)
+                    _cache_hit_content = _cache_mod.read_view(target, _view_key)
+
+                    # Step 3: L1 hit but L2 miss → rebuild view from core dict
+                    if _cache_hit_content is None:
+                        try:
+                            from sourcecode.serializer import build_view_from_core as _bvfc
+                            _rebuilt = _bvfc(
+                                _core_dict_l1,
+                                compact=compact,
+                                agent=agent,
+                                full=full,
+                                no_tree=no_tree,
+                                tree=tree,
+                            )
+                            if _rebuilt is not None:
+                                # Apply redaction
+                                if not no_redact:
+                                    from sourcecode.redactor import redact_dict as _red_l1
+                                    _rebuilt = _red_l1(_rebuilt)
+                                # Apply output budget
+                                if agent:
+                                    from sourcecode.output_budget import (
+                                        trim_to_budget as _trim_l1,
+                                        BUDGET_AGENT,
+                                    )
+                                    _rebuilt = _trim_l1(_rebuilt, BUDGET_AGENT, label="agent")
+                                elif compact:
+                                    from sourcecode.output_budget import (
+                                        trim_to_budget as _trim_l1c,
+                                        BUDGET_COMPACT,
+                                    )
+                                    _rebuilt = _trim_l1c(_rebuilt, BUDGET_COMPACT, label="compact")
+                                # Serialize
+                                if format == "yaml":
+                                    from io import StringIO as _SIO_L1
+                                    from ruamel.yaml import YAML as _YAML_L1
+                                    _yl1 = _YAML_L1()
+                                    _yl1.default_flow_style = False
+                                    _yl1.representer.add_representer(
+                                        type(None),
+                                        lambda d, v: d.represent_scalar(
+                                            "tag:yaml.org,2002:null", "null"
+                                        ),
+                                    )
+                                    _sl1 = _SIO_L1()
+                                    _yl1.dump(_rebuilt, _sl1)
+                                    _cache_hit_content = _sl1.getvalue()
+                                else:
+                                    import json as _json_l1
+                                    _cache_hit_content = _json_l1.dumps(
+                                        _rebuilt, indent=2, ensure_ascii=False
+                                    )
+                                # Cache rebuilt view in L2
+                                if _cache_hit_content:
+                                    _cache_mod.write_view(
+                                        target,
+                                        _view_key,
+                                        _cache_hit_content,
+                                        fmt=format,
+                                    )
+                        except Exception:
+                            _cache_hit_content = None  # rebuild failed → full analysis
+
         except Exception:
             _git_sha = ""
-            _cache_key = ""
+            _core_key = ""
+            _view_key = ""
+            _core_hash = ""
 
     if _cache_hit_content is not None:
         from sourcecode.serializer import write_output
@@ -1760,18 +1849,37 @@ def main(
     _progress.finish()
     write_output(content, output=output)
 
-    # GAP-9: Persist to cache for future identical runs (git SHA unchanged)
-    # Writes versioned envelope to ~/.sourcecode/cache/<repo_id>/<key>.json.gz.
-    # Large JSON fields are extracted into shared CAS blobs (deduplication).
-    # GC runs inline after each write (keep last N commits + CAS sweep).
-    if not no_cache and _cache_key and not _pipeline_error:
-        _cache_mod.write(
-            target,
-            _cache_key,
-            content,
-            fmt=format,
-            layers=_compute_analyzer_fingerprints(),
-        )
+    # Persist to two-layer cache (git SHA unchanged → re-use on next run).
+    #
+    # L1 (core): stores pre-computed compact+agent+standard views at max
+    #   fidelity so any subsequent view can be derived without re-analysis.
+    # L2 (view): stores the exact rendered string for this flag combination.
+    #
+    # GC runs after L2 write to evict old commits and orphaned blobs/views.
+    if not no_cache and _core_key and not _pipeline_error:
+        try:
+            from sourcecode.serializer import core_view as _core_view_fn
+            _core_dict_write = _core_view_fn(sm)
+            _written_core_hash = _cache_mod.write_core(target, _core_key, _core_dict_write)
+
+            # Compute view key using the just-written core hash
+            if _written_core_hash:
+                if not _view_key:
+                    # _view_key not set (L1 was also a miss); compute it now
+                    _wvh = _hashlib.md5(_view_flags_str.encode()).hexdigest()[:8]
+                    _view_key = f"{_written_core_hash}-{_wvh}"
+                _cache_mod.write_view(
+                    target,
+                    _view_key,
+                    content,
+                    fmt=format,
+                    layers=_compute_analyzer_fingerprints(),
+                )
+                # Trigger GC (evict old commits + orphaned views + CAS blobs)
+                from sourcecode.cache import cache_dir as _cdir, _gc as _run_gc
+                _run_gc(_cdir(target))
+        except Exception:
+            pass  # non-fatal: cache write failure
 
     if _pipeline_error:
         raise typer.Exit(code=2)

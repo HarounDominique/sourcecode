@@ -2290,6 +2290,119 @@ def standard_view(sm: SourceMap, *, include_tree: bool = False) -> dict[str, Any
     return result
 
 
+# ---------------------------------------------------------------------------
+# Two-layer cache: core_view + build_view_from_core
+# ---------------------------------------------------------------------------
+
+#: Bump to invalidate all L1 core caches when the core format changes.
+CORE_VIEW_VERSION: str = "1"
+
+#: Fields that standard_view omits from file_tree when no_tree is active.
+_TREE_FIELDS: frozenset[str] = frozenset({"file_tree", "file_paths"})
+
+#: transactional_boundaries truncation threshold for full=False compact view.
+_TXN_COMPACT_CAP = 10
+
+
+def core_view(sm: SourceMap) -> dict[str, Any]:
+    """Pre-compute all view variants for L1 (core) cache.
+
+    Stores compact, agent, and standard views at **maximum fidelity**
+    (full=True, include_tree=True).  View-specific flags (compact/agent,
+    format, no_tree, full, redaction, budget) are applied later when
+    building the L2 view from this core — they never affect core content.
+
+    Schema::
+
+        {
+          "_cv":       "<CORE_VIEW_VERSION>",
+          "_compact":  compact_view(sm, no_tree=False, full=True),
+          "_agent":    agent_view(sm, full=True),
+          "_standard": standard_view(sm, include_tree=True),
+        }
+    """
+    return {
+        "_cv": CORE_VIEW_VERSION,
+        "_compact": compact_view(sm, no_tree=False, full=True),
+        "_agent": agent_view(sm, full=True),
+        "_standard": standard_view(sm, include_tree=True),
+    }
+
+
+def build_view_from_core(
+    core: dict[str, Any],
+    *,
+    compact: bool = False,
+    agent: bool = False,
+    full: bool = False,
+    no_tree: bool = False,
+    tree: bool = False,
+) -> Optional[dict[str, Any]]:
+    """Derive a view dict from an L1 core dict (skip full re-analysis).
+
+    Returns the view dict (before redaction / budget / serialisation) or
+    ``None`` when the core format is unrecognised or data is missing —
+    the caller must fall back to a full analysis run.
+
+    Parameters
+    ----------
+    core:
+        Dict returned by :func:`core_view` (stored in L1 cache).
+    compact / agent:
+        Which view mode to reconstruct (mutually exclusive; both False =
+        standard view).
+    full:
+        When *False* and *compact* is True, truncate transactional_boundaries
+        to ``_TXN_COMPACT_CAP`` entries (mirrors compact_view behaviour).
+    no_tree / tree:
+        Control file_tree / file_paths inclusion in standard / compact views.
+    """
+    if not isinstance(core, dict) or core.get("_cv") != CORE_VIEW_VERSION:
+        return None  # stale or unknown core format → full re-analysis
+
+    if agent:
+        data = core.get("_agent")
+        if not isinstance(data, dict):
+            return None
+        return data  # agent_view never includes file_tree/file_paths
+
+    if compact:
+        data = core.get("_compact")
+        if not isinstance(data, dict):
+            return None
+        # compact_view stores max-fidelity data; apply flag filters
+        if no_tree:
+            data = {k: v for k, v in data.items() if k not in _TREE_FIELDS}
+        if not full:
+            # Truncate transactional_boundaries to _TXN_COMPACT_CAP when stored
+            # with full=True (mirrors _transactional_summary(full=False) logic).
+            txn = data.get("transactional_boundaries")
+            if isinstance(txn, dict):
+                classes = txn.get("classes") or []
+                count = txn.get("count", len(classes))
+                if count > _TXN_COMPACT_CAP and not txn.get("truncated"):
+                    data = dict(data)
+                    data["transactional_boundaries"] = {
+                        **txn,
+                        "classes": classes[:_TXN_COMPACT_CAP],
+                        "truncated": True,
+                        "note": (
+                            f"showing {_TXN_COMPACT_CAP} of {count}; "
+                            f"use --full to see all {count}"
+                        ),
+                    }
+        return data
+
+    # Standard view
+    data = core.get("_standard")
+    if not isinstance(data, dict):
+        return None
+    want_tree = tree and not no_tree
+    if not want_tree:
+        data = {k: v for k, v in data.items() if k not in _TREE_FIELDS}
+    return data
+
+
 def contract_view(
     sm: SourceMap,
     *,

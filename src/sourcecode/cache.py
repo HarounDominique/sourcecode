@@ -69,6 +69,9 @@ from typing import Any, Optional
 #: Bump this string to invalidate *all* existing cached snapshots.
 SCHEMA_VERSION: str = "2"
 
+#: Bump to invalidate all L1 core caches (independent of snapshot version).
+CORE_SCHEMA_VERSION: str = "1"
+
 #: Fields eligible for CAS deduplication (applied to top-level JSON dict keys).
 _CAS_FIELDS: frozenset[str] = frozenset([
     "file_paths",
@@ -93,10 +96,17 @@ _DEFAULT_KEEP_COMMITS: int = 5
 # Matches "snapshot-<hex_commit>-<hex_flags>.json.gz"
 _SNAPSHOT_RE = re.compile(r"^snapshot-([0-9a-f]+)-[0-9a-f]+\.json\.gz$")
 
+# Matches "core-<hex_commit>-<hex_analysis>.json.gz"
+_CORE_RE = re.compile(r"^core-([0-9a-f]+)-[0-9a-f]+\.json\.gz$")
+
+# Matches "view-<hex_core_hash16>-<hex_view_flags>.json.gz"
+_VIEW_RE = re.compile(r"^view-([0-9a-f]{16})-[0-9a-f]+\.json\.gz$")
+
 
 # ---------------------------------------------------------------------------
 # Public API — location helpers
 # ---------------------------------------------------------------------------
+
 
 def repo_id(repo_root: Path) -> str:
     """Stable 16-char hex identifier derived from the canonical repo path."""
@@ -188,6 +198,138 @@ def write(
         return  # non-fatal
 
     _gc(cache_d)
+
+
+# ---------------------------------------------------------------------------
+# Layer 1 — Core Analysis cache
+# ---------------------------------------------------------------------------
+
+def read_core(repo_root: Path, core_key: str) -> Optional[tuple[dict[str, Any], str]]:
+    """Read core analysis artifacts from L1 cache.
+
+    Returns ``(core_dict, core_hash)`` on hit, or ``None`` on miss.
+    ``core_hash`` is the 16-char SHA-256 of the stored core JSON, used as
+    the L2 view-key prefix so that different views of the same core share
+    a common ancestry without a full re-analysis.
+    """
+    cache_d = cache_dir(repo_root)
+    gz_path = cache_d / f"core-{core_key}.json.gz"
+    if not gz_path.exists():
+        return None
+    try:
+        raw_bytes = gzip.decompress(gz_path.read_bytes())
+        envelope = json.loads(raw_bytes.decode("utf-8"))
+    except Exception:
+        _safe_unlink(gz_path)
+        return None
+
+    if not isinstance(envelope, dict):
+        _safe_unlink(gz_path)
+        return None
+    if envelope.get("csv") != CORE_SCHEMA_VERSION:
+        _safe_unlink(gz_path)  # schema mismatch — evict
+        return None
+
+    core_data = envelope.get("data")
+    core_hash = envelope.get("hash", "")
+    if not isinstance(core_data, dict) or not core_hash:
+        _safe_unlink(gz_path)
+        return None
+
+    return core_data, core_hash
+
+
+def write_core(repo_root: Path, core_key: str, core_data: dict[str, Any]) -> str:
+    """Persist core analysis dict to L1 cache.
+
+    Returns the 16-char SHA-256 hash of the core JSON (the L2 key prefix).
+    Writes are always best-effort; failures are silently swallowed.
+
+    File layout::
+
+        ~/.sourcecode/cache/<repo_id>/core-<core_key>.json.gz
+
+    Envelope schema::
+
+        { "csv": "1",       // CORE_SCHEMA_VERSION
+          "key": "...",     // core_key passed in
+          "hash": "<h16>",  // SHA-256[:16] of core JSON — used as L2 prefix
+          "ts":  "...",     // ISO-8601 UTC write time
+          "data": {...} }   // core_view(sm) dict
+    """
+    core_json = json.dumps(core_data, ensure_ascii=False)
+    core_hash = hashlib.sha256(core_json.encode()).hexdigest()[:16]
+
+    cache_d = cache_dir(repo_root)
+    dest = cache_d / f"core-{core_key}.json.gz"
+    try:
+        cache_d.mkdir(parents=True, exist_ok=True)
+        envelope: dict[str, Any] = {
+            "csv": CORE_SCHEMA_VERSION,
+            "key": core_key,
+            "hash": core_hash,
+            "ts": _now_iso(),
+            "data": core_data,
+        }
+        payload = gzip.compress(
+            json.dumps(envelope, ensure_ascii=False).encode("utf-8"),
+            compresslevel=6,
+        )
+        dest.write_bytes(payload)
+    except Exception:
+        pass
+
+    return core_hash
+
+
+# ---------------------------------------------------------------------------
+# Layer 2 — Derived View cache
+# ---------------------------------------------------------------------------
+
+def read_view(repo_root: Path, view_key: str) -> Optional[str]:
+    """Read a rendered view string from L2 cache.
+
+    Views are stored as ``view-{view_key}.json.gz`` using the same
+    envelope+CAS format as snapshot files.  Returns the content string
+    (JSON or YAML) or ``None`` on miss.
+    """
+    cache_d = cache_dir(repo_root)
+    gz_path = cache_d / f"view-{view_key}.json.gz"
+    if not gz_path.exists():
+        return None
+    try:
+        result = _parse_envelope(gz_path.read_bytes(), cache_d)
+        if result is not None:
+            return result
+    except Exception:
+        pass
+    _safe_unlink(gz_path)
+    return None
+
+
+def write_view(
+    repo_root: Path,
+    view_key: str,
+    content: str,
+    *,
+    fmt: str = "json",
+    layers: Optional[dict[str, str]] = None,
+) -> None:
+    """Persist a rendered view string to L2 cache as ``view-{view_key}.json.gz``.
+
+    Reuses the envelope+CAS infrastructure so large fields (file_paths,
+    graph, docs …) are automatically deduplicated with other snapshots/views.
+    Writes are always best-effort; GC is **not** triggered here — callers
+    that want eviction should invoke ``_gc(cache_dir(repo_root))`` explicitly.
+    """
+    cache_d = cache_dir(repo_root)
+    dest = cache_d / f"view-{view_key}.json.gz"
+    try:
+        cache_d.mkdir(parents=True, exist_ok=True)
+        payload = _build_envelope(view_key, content, fmt, layers or {}, cache_d)
+        dest.write_bytes(payload)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -384,31 +526,39 @@ def _cas_restore(
 # ---------------------------------------------------------------------------
 
 def _gc(cache_d: Path) -> None:
-    """
-    Evict old snapshots and sweep orphaned CAS blobs.
+    """Evict old snapshots/cores/views and sweep orphaned CAS blobs.
 
-    Keeps snapshots from the last ``SOURCECODE_CACHE_KEEP_COMMITS`` distinct
-    git commits (determined by mtime of files in each commit group).
+    Keeps snapshots and cores from the last ``SOURCECODE_CACHE_KEEP_COMMITS``
+    distinct git commits (determined by newest mtime within each commit group).
+    Views are then pruned: a view survives only when its core-hash prefix
+    matches a core file in the surviving set.
     """
     keep = int(os.environ.get("SOURCECODE_CACHE_KEEP_COMMITS", _DEFAULT_KEEP_COMMITS))
 
     try:
         all_snapshots = list(cache_d.glob("snapshot-*.json.gz"))
-        if not all_snapshots:
+        all_cores = list(cache_d.glob("core-*.json.gz"))
+        all_views = list(cache_d.glob("view-*.json.gz"))
+
+        if not all_snapshots and not all_cores and not all_views:
             return
 
-        # Group snapshot files by commit SHA
+        # Group snapshot + core files by commit SHA
         groups: dict[str, list[Path]] = {}
         for f in all_snapshots:
             m = _SNAPSHOT_RE.match(f.name)
+            if m:
+                groups.setdefault(m.group(1), []).append(f)
+        for f in all_cores:
+            m = _CORE_RE.match(f.name)
             if m:
                 groups.setdefault(m.group(1), []).append(f)
 
         surviving: list[Path]
 
         if keep <= 0 or len(groups) <= keep:
-            # No eviction needed — but still sweep CAS
-            surviving = all_snapshots
+            # No eviction needed — but still sweep views + CAS
+            surviving = all_snapshots + all_cores
         else:
             def _newest_mtime(commit: str) -> float:
                 return max(p.stat().st_mtime for p in groups[commit])
@@ -422,10 +572,44 @@ def _gc(cache_d: Path) -> None:
                     for f in groups[commit]:
                         _safe_unlink(f)
 
-        _gc_cas(cache_d, surviving)
+        # Prune view files whose core hash is no longer in the surviving set
+        _gc_views(cache_d, surviving, all_views)
+
+        # Sweep orphaned CAS blobs (surviving snapshots + view files may ref them)
+        surviving_with_views = surviving + [v for v in all_views if v.exists()]
+        _gc_cas(cache_d, surviving_with_views)
 
     except Exception:
         pass  # GC failure is non-fatal
+
+
+def _gc_views(cache_d: Path, surviving: list[Path], all_views: list[Path]) -> None:
+    """Delete view files not traceable to a surviving core.
+
+    Collects the ``hash`` field from every surviving core envelope, then
+    deletes view files whose filename core-hash prefix is absent from that
+    set.  View files with unrecognisable names are left untouched.
+    """
+    if not all_views:
+        return
+
+    # Collect live core hashes from surviving core-*.json.gz files
+    live_hashes: set[str] = set()
+    for path in surviving:
+        if not path.name.startswith("core-"):
+            continue
+        try:
+            env = json.loads(gzip.decompress(path.read_bytes()).decode("utf-8"))
+            h = env.get("hash", "")
+            if h:
+                live_hashes.add(h)
+        except Exception:
+            pass  # unreadable core — conservatively keep its views unknown
+
+    for vp in all_views:
+        m = _VIEW_RE.match(vp.name)
+        if m and m.group(1) not in live_hashes:
+            _safe_unlink(vp)
 
 
 def _gc_cas(cache_d: Path, surviving_snapshots: list[Path]) -> None:
