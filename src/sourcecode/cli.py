@@ -3193,6 +3193,21 @@ def modernize_cmd(
     subsystems: list = ir.get("subsystems") or []
     reverse_graph: dict = ir.get("reverse_graph") or {}
 
+    # Git churn: commit frequency per file in last 90 days → proxy for volatility
+    from sourcecode.contract_pipeline import _get_git_churn
+    _java_rel_paths = [
+        str(Path(p).relative_to(root)).replace("\\", "/") if Path(p).is_absolute() else p.replace("\\", "/")
+        for p in file_list
+    ]
+    _file_churn: dict[str, int] = _get_git_churn(root, _java_rel_paths)
+
+    # Build fqn → churn mapping via source_file field on graph nodes
+    _fqn_churn: dict[str, int] = {}
+    for _n in graph_nodes:
+        _src = (_n.get("source_file") or "").replace("\\", "/")
+        if _src and _src in _file_churn:
+            _fqn_churn[_n["fqn"]] = _file_churn[_src]
+
     # High-coupling nodes: high in_degree (many dependents = risky to change)
     coupling_nodes = sorted(
         [n for n in graph_nodes if n.get("in_degree", 0) >= 3],
@@ -3207,17 +3222,42 @@ def modernize_cmd(
         key=lambda n: n.get("fqn", ""),
     )[:20]
 
-    # Hotspot candidates: high in-degree service/repository nodes
-    hotspots = [
-        {
-            "fqn": n["fqn"],
-            "role": n.get("role", "other"),
-            "in_degree": n.get("in_degree", 0),
-            "out_degree": n.get("out_degree", 0),
-        }
-        for n in coupling_nodes
-        if n.get("role") in ("service", "repository", "controller")
-    ][:15]
+    # Hotspot candidates: high in-degree service/repository/controller nodes,
+    # ranked by composite score (in_degree × 2 + git_churn) for volatility signal.
+    _HOTSPOT_ROLES = frozenset({"service", "repository", "controller", "entity"})
+    _hotspot_candidates = [
+        n for n in coupling_nodes if n.get("role") in _HOTSPOT_ROLES
+    ]
+    # Also include high-coupling nodes with name-based role inference even if
+    # they didn't appear in coupling_nodes (in_degree >= 1 is sufficient here)
+    _seen_hotspot_fqns = {n["fqn"] for n in _hotspot_candidates}
+    for _n in graph_nodes:
+        if (_n.get("fqn") not in _seen_hotspot_fqns
+                and _n.get("role") in _HOTSPOT_ROLES
+                and _n.get("in_degree", 0) >= 1
+                and _fqn_churn.get(_n["fqn"], 0) >= 3):
+            _hotspot_candidates.append(_n)
+            _seen_hotspot_fqns.add(_n["fqn"])
+
+    _max_churn = max(_fqn_churn.values(), default=1)
+    hotspots = sorted(
+        [
+            {
+                "fqn": n["fqn"],
+                "role": n.get("role", "other"),
+                "in_degree": n.get("in_degree", 0),
+                "out_degree": n.get("out_degree", 0),
+                "git_churn_90d": _fqn_churn.get(n["fqn"], 0),
+                "hotspot_score": round(
+                    n.get("in_degree", 0) * 2.0
+                    + (_fqn_churn.get(n["fqn"], 0) / _max_churn) * 5.0,
+                    2,
+                ),
+            }
+            for n in _hotspot_candidates
+        ],
+        key=lambda h: (-h["hotspot_score"], h["fqn"]),
+    )[:15]
 
     # Cross-module tangles: subsystems with high member count
     tangle_modules = sorted(
