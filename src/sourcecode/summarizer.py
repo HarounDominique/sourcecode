@@ -203,34 +203,78 @@ class ProjectSummarizer:
         __import__("re").IGNORECASE,
     )
 
+    # Patterns that indicate license notices or user-facing marketing text.
+    # These describe what the product does FOR users or its licensing terms,
+    # not the codebase architecture.
+    _LICENSE_MARKETING_RE = __import__("re").compile(
+        r"\bfair[- ]use\b"                        # Fair Use license
+        r"|\bcommunity edition\b"                 # product tier labels
+        r"|\benterprise edition\b"
+        r"|\bcommercial licen[sc]e\b"
+        r"|\bsource.available\b"
+        r"|\bavailable to companies\b"            # license restriction
+        r"|\bunder \$\d+[MK]\b"                   # revenue threshold
+        r"|\bimportant:\s"                        # WARNING/IMPORTANT caveats
+        r"|\badd authentication to\b"             # user-facing "add X to Y" marketing
+        r"|\bno need to deal with\b"
+        r"|\bwith minimum effort\b"
+        r"|\bsign up\b.*\bevaluation\b"
+        r"|\bcontact us\b.*\bmore information\b",
+        __import__("re").IGNORECASE,
+    )
+
     def _extract_first_useful_paragraph(self, content: str) -> str | None:
+        """Extract the first paragraph that describes the project architecture, not its license or marketing."""
         import re as _re
         _BADGE_RE = _re.compile(r"^\[?!\[")  # [![badge](...)] or ![img](...)
         _LINK_ONLY_RE = _re.compile(r"^\[.*?\]\(.*?\)$")  # pure link line
-        lines: list[str] = []
+
+        paragraphs: list[str] = []
+        current_lines: list[str] = []
         in_code_block = False
+
         for raw_line in content.splitlines():
             line = raw_line.strip()
             if line.startswith("```"):
                 in_code_block = not in_code_block
                 continue
-            if in_code_block or not line or line.startswith(("#", "<!--", ">")):
-                if lines:
-                    break
+            if in_code_block:
                 continue
-            # Skip badge-only lines and pure-link lines — they are metadata, not descriptions
-            if _BADGE_RE.match(line) or (not lines and _LINK_ONLY_RE.match(line)):
+            if not line or line.startswith(("#", "<!--", ">")):
+                if current_lines:
+                    paragraphs.append(" ".join(current_lines).strip())
+                    current_lines = []
                 continue
-            lines.append(line)
-        if not lines:
-            return None
-        paragraph = " ".join(lines).strip()
-        # Reject paragraphs that are startup/setup snippets, not domain descriptions.
-        # Count how many startup signals appear; >1 means the paragraph is instructions.
-        _startup_hits = len(self._STARTUP_RE.findall(paragraph))
-        if _startup_hits >= 2:
-            return None
-        return paragraph
+            if _BADGE_RE.match(line) or _LINK_ONLY_RE.match(line):
+                if current_lines:
+                    paragraphs.append(" ".join(current_lines).strip())
+                    current_lines = []
+                continue
+            current_lines.append(line)
+        if current_lines:
+            paragraphs.append(" ".join(current_lines).strip())
+
+        _MD_LINK_RE = _re.compile(r"\[.+?\]\(.+?\)")
+        for paragraph in paragraphs[:6]:  # Check up to 6 paragraphs
+            if not paragraph:
+                continue
+            # Reject very short fragments (< 30 chars) — likely just a section title
+            if len(paragraph) < 30:
+                continue
+            # Reject startup/setup snippets
+            _startup_hits = len(self._STARTUP_RE.findall(paragraph))
+            if _startup_hits >= 2:
+                continue
+            # Reject license notices and user-facing marketing text
+            if self._LICENSE_MARKETING_RE.search(paragraph):
+                continue
+            # Reject link-list paragraphs (docs/navigation sections):
+            # if more than 2 markdown links dominate the paragraph, it's a nav section
+            _link_count = len(_MD_LINK_RE.findall(paragraph))
+            if _link_count > 2 and _link_count * 30 > len(paragraph):
+                continue
+            return paragraph
+        return None
 
     _TYPE_LABELS: dict[str, str] = {
         "cli": "CLI",

@@ -1093,7 +1093,18 @@ def _resolve_jaxrs_prefixes(
 
     for parent_simple, locator_path in locator_map[cls_simple]:
         parent_full = _resolve_jaxrs_prefixes(parent_simple, class_info, locator_map, new_visited)
-        for pp in parent_full:
+        # Skip implementation/unrooted parents: if the parent resolves to only empty
+        # prefixes AND has no class-level @Path annotation, it is a concrete impl class
+        # (e.g. DefaultClientsApi implements ClientsApi) that duplicates a locator method
+        # from its interface. Including it would produce spurious short paths like /{id}
+        # alongside the correctly-resolved full path. The interface version is already
+        # in the locator_map and will produce the correct full path.
+        _parent_has_path_ann = class_info.get(parent_simple, {}).get("has_path_ann", False)
+        _non_empty_parent = [p for p in parent_full if p]
+        if not _non_empty_parent and not _parent_has_path_ann:
+            continue
+        use_parent_paths = _non_empty_parent if _non_empty_parent else parent_full
+        for pp in use_parent_paths:
             for op in own_prefixes:
                 combined = _join_path_segments(pp, locator_path, op)
                 full_prefixes.append(combined)
@@ -2832,6 +2843,18 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             if security_info.get("policy") == "custom_permission":
                 entry["required_permission"] = security_info["required_permission"]
         endpoints.append(entry)
+
+    # Filter out endpoints whose path looks like a Java FQN (e.g. dynamic admin routing
+    # in frameworks like Broadleaf Commerce where @AdminSection registers entity class
+    # FQNs as URL segments). These are not real REST paths — they are resolved at
+    # runtime by the framework. Including them pollutes the endpoint surface with 20+
+    # garbage entries that confuse agents and break endpoint count accuracy.
+    # Pattern: path segment that matches a Java package hierarchy (org.foo.Bar).
+    import re as _re_fqn
+    _FQN_PATH_RE = _re_fqn.compile(
+        r"/(org|com|net|io|edu)\.[a-z][a-z0-9]*\.[a-zA-Z]",
+    )
+    endpoints = [e for e in endpoints if not _FQN_PATH_RE.search(e.get("path", ""))]
 
     # "no_security_signal" = no recognized security annotation at method OR class level.
     # Note: repos may use framework-level security (e.g. Keycloak itself) with no

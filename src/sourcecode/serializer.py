@@ -1771,24 +1771,47 @@ def _angular_analysis(sm: "SourceMap") -> "Optional[dict[str, Any]]":
                 if val and val not in route_paths:
                     route_paths.append(val)
 
-    # Angular version from package.json
+    # Angular version from package.json — check root first, then subdirectories.
+    # In monorepos (Java + Angular), the Angular package.json is in a subdirectory
+    # like frontend/ and not at the repo root. We probe candidate locations.
     angular_version: Optional[str] = None
-    pkg_json = root / "package.json"
-    if pkg_json.exists():
+
+    def _read_angular_version_from_pkg(pkg_path: Path) -> Optional[str]:
+        """Extract @angular/core version from a package.json file."""
         try:
-            pkg = _json.loads(pkg_json.read_text(encoding="utf-8", errors="replace"))
-            # Use `or {}` so explicit `null` values in package.json don't
-            # raise TypeError when unpacking (BUG-4).
+            pkg = _json.loads(pkg_path.read_text(encoding="utf-8", errors="replace"))
             deps = {
                 **(pkg.get("dependencies") or {}),
                 **(pkg.get("devDependencies") or {}),
                 **(pkg.get("peerDependencies") or {}),
             }
             av = deps.get("@angular/core")
-            if av:
-                angular_version = av.lstrip("^~>=")
+            if av and isinstance(av, str):
+                return av.lstrip("^~>=")
         except Exception:
             pass
+        return None
+
+    # 1. Try root package.json first (fastest, most common for pure Angular projects)
+    _root_pkg = root / "package.json"
+    if _root_pkg.exists():
+        angular_version = _read_angular_version_from_pkg(_root_pkg)
+
+    # 2. If not found at root, search subdirectory package.json files.
+    # Limit to ts_files-derived subdirs to avoid scanning the whole repo.
+    if angular_version is None and ts_files:
+        _candidate_dirs: set[str] = set()
+        for ts_rel in ts_files[:200]:  # sample first 200 ts files
+            parts = ts_rel.replace("\\", "/").split("/")
+            if len(parts) >= 2:
+                _candidate_dirs.add(parts[0])  # top-level subdir (e.g. "frontend")
+        for subdir in sorted(_candidate_dirs):
+            _sub_pkg = root / subdir / "package.json"
+            if _sub_pkg.exists():
+                _v = _read_angular_version_from_pkg(_sub_pkg)
+                if _v:
+                    angular_version = _v
+                    break
 
     # Also check angular.json for entry point
     entry_point: Optional[str] = None
