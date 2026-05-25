@@ -1,19 +1,23 @@
 """Contract tests for sourcecode.mcp.server MCP tools.
 
-All tools must return the canonical output contract:
+Success contract (dict returned, FastMCP wraps with isError=False):
   {"success": bool, "data": dict | str | None, "error": {"code": str, "message": str} | None}
 
-data is the parsed JSON object from the CLI output, not a shell string.
+Failure contract (CallToolResult with isError=True per MCP spec §tool-result):
+  CallToolResult.isError == True
+  CallToolResult.content[0].text == JSON{"success": false, "data": null, "error": {...}}
 
 Requires: pip install sourcecode[mcp]
 """
 import json
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 mcp_pkg = pytest.importorskip("mcp", reason="mcp extra not installed — skip MCP tool tests")
 
+from mcp.types import CallToolResult, TextContent  # noqa: E402
 from sourcecode.mcp import server  # noqa: E402 — after importorskip guard
 
 _PARSED_OUTPUT = {"project": {"primary_stack": "python"}}
@@ -30,17 +34,23 @@ def _assert_success(result: dict) -> None:
     json.dumps(result)
 
 
-def _assert_failure(result: dict, expected_code: str | None = None) -> None:
-    assert isinstance(result, dict)
-    assert set(result.keys()) == _SUCCESS_KEYS, f"unexpected keys: {set(result.keys())}"
-    assert result["success"] is False
-    assert result["data"] is None
-    assert isinstance(result["error"], dict)
-    assert "code" in result["error"]
-    assert "message" in result["error"]
+def _assert_failure(result: Any, expected_code: str | None = None) -> None:
+    """Assert tool returned CallToolResult with isError=True per MCP spec §tool-result."""
+    assert isinstance(result, CallToolResult), (
+        f"expected CallToolResult, got {type(result).__name__}"
+    )
+    assert result.isError is True, "isError must be True for tool failures"
+    assert len(result.content) == 1, "failure result must carry exactly one content item"
+    text = result.content[0]
+    assert isinstance(text, TextContent), f"content[0] must be TextContent, got {type(text).__name__}"
+    payload = json.loads(text.text)
+    assert payload["success"] is False
+    assert payload["data"] is None
+    assert isinstance(payload["error"], dict)
+    assert "code" in payload["error"]
+    assert "message" in payload["error"]
     if expected_code:
-        assert result["error"]["code"] == expected_code
-    json.dumps(result)
+        assert payload["error"]["code"] == expected_code
 
 
 # --- get_compact_context ---
@@ -82,7 +92,8 @@ def test_get_compact_context_failure():
     with patch(_RUNNER_PATH, side_effect=RuntimeError("boom")):
         result = server.get_compact_context("/some/repo")
     _assert_failure(result, "EXECUTION_FAILED")
-    assert "boom" in result["error"]["message"]
+    payload = json.loads(result.content[0].text)
+    assert "boom" in payload["error"]["message"]
 
 
 # --- get_agent_context ---
@@ -328,11 +339,32 @@ def test_no_extra_keys_on_success():
 
 
 def test_no_extra_keys_on_failure():
+    """Runtime failures return CallToolResult with isError=True per MCP spec §tool-result."""
     with patch(_RUNNER_PATH, side_effect=RuntimeError("x")):
         r = server.get_compact_context("/p")
-    assert set(r.keys()) == _SUCCESS_KEYS
+    assert isinstance(r, CallToolResult)
+    assert r.isError is True
 
 
 def test_no_extra_keys_on_validation_error():
+    """Validation failures return CallToolResult with isError=True per MCP spec §tool-result."""
     r = server.get_module_context("/p", "")
-    assert set(r.keys()) == _SUCCESS_KEYS
+    assert isinstance(r, CallToolResult)
+    assert r.isError is True
+
+
+def test_get_impact_context_nonexistent_class_returns_is_error():
+    """Tool call with nonexistent class returns isError=True per MCP spec §tool-result.
+
+    When the subprocess exits non-zero (class not found), the MCP response must
+    carry isError=True so AI agents distinguish errors from successful results.
+    """
+    with patch(_RUNNER_PATH, side_effect=RuntimeError("class 'NonExistentClass12345' not found")):
+        result = server.get_impact_context("/some/repo", target="NonExistentClass12345")
+    assert isinstance(result, CallToolResult), (
+        f"expected CallToolResult, got {type(result).__name__}"
+    )
+    assert result.isError is True, "isError must be True when target class does not exist"
+    payload = json.loads(result.content[0].text)
+    assert payload["success"] is False
+    assert "NonExistentClass12345" in payload["error"]["message"]

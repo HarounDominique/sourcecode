@@ -10,10 +10,12 @@ data is the parsed JSON object from the CLI output, not a shell string.
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
 
 from sourcecode import __version__ as _sourcecode_version
 from sourcecode.mcp.runner import run_command
@@ -30,15 +32,35 @@ def _ok(data: Any) -> dict:
     return {"success": True, "data": data, "error": None}
 
 
-def _err(message: str, code: str = "EXECUTION_FAILED") -> dict:
-    return {"success": False, "data": None, "error": {"code": code, "message": message}}
+def _err(message: str, code: str = "EXECUTION_FAILED") -> CallToolResult:
+    """Return an MCP tool-error result with isError=True per MCP spec §tool-result."""
+    payload = {"success": False, "data": None, "error": {"code": code, "message": message}}
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(payload))],
+        isError=True,
+    )
 
 
-def _execute(args: list[str]) -> dict:
+def _execute(args: list[str]) -> dict | CallToolResult:
     try:
-        return _ok(run_command(args))
+        result = run_command(args)
     except RuntimeError as exc:
         return _err(str(exc))
+    # If CLI output itself signals failure via success:false, propagate as isError=True
+    if isinstance(result, dict) and result.get("success") is False:
+        payload = {
+            "success": False,
+            "data": None,
+            "error": result.get("error") or {
+                "code": "EXECUTION_FAILED",
+                "message": "Command returned success=false",
+            },
+        }
+        return CallToolResult(
+            content=[TextContent(type="text", text=json.dumps(payload))],
+            isError=True,
+        )
+    return _ok(result)
 
 
 @mcp.tool()

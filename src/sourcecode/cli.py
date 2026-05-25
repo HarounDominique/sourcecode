@@ -1776,8 +1776,21 @@ def main(
         if changed_only and _allowed_changed_files:
             # GAP-5: preserve full entry_points for architecture context even in
             # --changed-only mode. Only filter file_paths and code_notes.
+            # ALWAYS-INCLUDE: security-const files must stay in file_paths even when
+            # not in the git diff — they resolve Java constant references used in
+            # @M3FiltroSeguridad annotations (read-only anchors, not diff output).
+            def _is_always_include_ref(p: str) -> bool:
+                name = p.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+                if name.endswith("Const.java") or name.endswith("Constants.java"):
+                    return True
+                parts = p.replace("\\", "/").lower().split("/")
+                return any(seg in ("security", "seguridad", "constantes") for seg in parts)
+
             sm = _replace(sm,
-                file_paths=[p for p in sm.file_paths if p in _allowed_changed_files],
+                file_paths=[
+                    p for p in sm.file_paths
+                    if p in _allowed_changed_files or _is_always_include_ref(p)
+                ],
                 code_notes=[n for n in sm.code_notes if n.path in _allowed_changed_files],
             )
         data = compact_view(sm, no_tree=no_tree, full=full)

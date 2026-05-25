@@ -248,3 +248,85 @@ def test_fix_bug_why_field_populated(tmp_path: Path) -> None:
     assert "FIXME" in top.why or "annotation" in top.why, (
         f"Expected FIXME signal in why, got: {top.why!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Bug 5 — --changed-only always includes security-const files
+# ---------------------------------------------------------------------------
+
+def test_contract_pipeline_changed_only_always_includes_const_files(tmp_path: Path) -> None:
+    """--changed-only must include *Const.java files regardless of diff status.
+
+    These are read-only reference anchors: included in the analysis to resolve
+    constant references but not marked as is_changed (not part of diff output).
+    """
+    from sourcecode.contract_pipeline import ContractPipeline
+
+    changed = ["src/OrderService.java"]
+    const_file = "src/security/SeguridadRecursosConst.java"
+    all_files = changed + [const_file]
+
+    for f in all_files:
+        p = tmp_path / f
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("public class Placeholder {}")
+
+    cp = ContractPipeline(max_files=100)
+    contracts, _ = cp.run(
+        tmp_path,
+        all_files,
+        changed_only=True,
+        allowed_changed_files=set(changed),
+    )
+
+    contract_paths = {c.path for c in contracts}
+    assert const_file in contract_paths, (
+        "Const file must be always-included even when absent from diff"
+    )
+    # Read-only anchor — must NOT be marked as changed
+    const_contract = next(c for c in contracts if c.path == const_file)
+    assert not const_contract.is_changed, "Const file is read-only anchor: is_changed must be False"
+
+
+def test_changed_only_resource_names_unresolved_le5(tmp_path: Path) -> None:
+    """With --changed-only active, resource_names_unresolved must be <= 5.
+
+    The always-include logic ensures *Const.java files remain in file_paths for
+    constant resolution even when they are absent from the git diff.
+    """
+    from sourcecode.serializer import _security_surface_from_eps
+
+    # Create the const file on disk (not in the git diff)
+    const_dir = tmp_path / "src" / "security"
+    const_dir.mkdir(parents=True)
+    (const_dir / "SeguridadRecursosConst.java").write_text(
+        "public class SeguridadRecursosConst {\n"
+        '    public static final String REC_PEDIDOS = "PEDIDOS";\n'
+        '    public static final String REC_USUARIOS = "USUARIOS";\n'
+        '    public static final String REC_FACTURAS = "FACTURAS";\n'
+        "}\n"
+    )
+    rel_const = "src/security/SeguridadRecursosConst.java"
+
+    class _MockEP:
+        def __init__(self, evidence: str) -> None:
+            self.evidence = evidence
+
+    eps = [
+        _MockEP('nombreRecurso="SeguridadRecursosConst.REC_PEDIDOS"'),
+        _MockEP('nombreRecurso="SeguridadRecursosConst.REC_USUARIOS"'),
+        _MockEP('nombreRecurso="SeguridadRecursosConst.REC_FACTURAS"'),
+    ]
+
+    # Baseline (--changed-only WITHOUT always-include): const file absent → unresolved
+    without = _security_surface_from_eps(eps, root=tmp_path, file_paths=[])
+    n_without = len((without or {}).get("resource_names_unresolved", []))
+    assert n_without >= 1, "Baseline: absent const file must produce unresolved names"
+
+    # After fix (always-include): const file in file_paths → resolved
+    with_const = _security_surface_from_eps(eps, root=tmp_path, file_paths=[rel_const])
+    n_with = len((with_const or {}).get("resource_names_unresolved", []))
+    assert n_with <= 5, (
+        f"resource_names_unresolved must be <=5 when const file is always-included, got {n_with}"
+    )
+    assert n_with == 0, f"All 3 constants must resolve, got {n_with} unresolved"

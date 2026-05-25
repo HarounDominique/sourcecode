@@ -242,7 +242,27 @@ class ContractPipeline:
         ]
 
         if changed_only:
-            src_paths = [p for p in src_paths if p in changed_files]
+            def _is_always_include_ref(p: str) -> bool:
+                """Always include security-const files regardless of diff status.
+
+                These are read-only reference anchors: they resolve Java constant
+                references (e.g. SeguridadRecursosConst.REC_X) used in security
+                annotations.  They do NOT appear in diff output because
+                contract.is_changed is set from ``changed_files`` only (line below).
+                Criteria per bug-spec:
+                  - name ends with Const.java or Constants.java
+                  - any path segment is: security | seguridad | constantes
+                """
+                name = p.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+                if name.endswith("Const.java") or name.endswith("Constants.java"):
+                    return True
+                parts = p.replace("\\", "/").lower().split("/")
+                return any(seg in ("security", "seguridad", "constantes") for seg in parts)
+
+            src_paths = [
+                p for p in src_paths
+                if p in changed_files or _is_always_include_ref(p)
+            ]
 
         # Apply max_files cap — bypass when symbol search to ensure defining files are found.
         # A symbol query over a large repo needs all files; result set is small after filtering.
