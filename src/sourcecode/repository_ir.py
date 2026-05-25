@@ -14,6 +14,7 @@ No inference, approximation, or heuristics.
 
 from __future__ import annotations
 
+import random
 import re
 import subprocess
 from collections import deque
@@ -217,6 +218,11 @@ _JAVA_ROLE_MAP: dict[str, str] = {
     "@Component": "component",
     "@Configuration": "config",
     "@Bean": "config",
+    # JPA / Hibernate
+    "@Entity": "entity",
+    "@MappedSuperclass": "entity",
+    "@Embeddable": "entity",
+    "@Table": "entity",
     # CDI / Jakarta EE
     "@ApplicationScoped": "service",
     "@RequestScoped": "service",
@@ -226,6 +232,9 @@ _JAVA_ROLE_MAP: dict[str, str] = {
     "@Dependent": "component",
     "@Named": "component",
     "@Produces": "component",
+    "@Stateless": "service",
+    "@Stateful": "service",
+    "@MessageDriven": "service",
     # JAX-RS
     "@Provider": "provider",
     "@Consumes": "controller",
@@ -233,6 +242,11 @@ _JAVA_ROLE_MAP: dict[str, str] = {
     "@QuarkusMain": "entrypoint",
     "@QuarkusTest": "test",
     "@QuarkusIntegrationTest": "test",
+    "@RegisterForReflection": "component",
+    # Spring Security / AOP
+    "@Aspect": "config",
+    "@EnableWebSecurity": "config",
+    "@EnableMethodSecurity": "config",
 }
 
 # Backward-compatible alias — external callers may reference this name.
@@ -744,6 +758,36 @@ def _java_role(annotations: list[str]) -> str:
         if role:
             return role
     return "unknown"
+
+
+# Name-suffix patterns for role inference when annotations are absent.
+# Ordered: more specific patterns first.
+_JAVA_NAME_ROLE_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"(?:Controller|Resource|Endpoint|Handler|Servlet|Filter|Action)$"), "controller"),
+    (re.compile(r"(?:ServiceImpl|ServiceBean|ServiceFacade|Facade)$"), "service"),
+    (re.compile(r"(?:Service|Manager|Processor|Coordinator|Orchestrator|UseCase|Interactor)$"), "service"),
+    (re.compile(r"(?:RepositoryImpl|DaoImpl|DAOImpl)$"), "repository"),
+    (re.compile(r"(?:Repository|Dao|DAO|Store|Persistence|JpaRepository|CrudRepository)$"), "repository"),
+    (re.compile(r"(?:Entity|Model|Domain|Vo|ValueObject|Record)$"), "entity"),
+    (re.compile(r"(?:Config|Configuration|Configurer|AutoConfiguration|Properties|Settings)$"), "config"),
+    (re.compile(r"(?:Factory|Builder|Provider|Supplier|Creator|Generator)$"), "provider"),
+    (re.compile(r"(?:Listener|Observer|Handler|EventHandler|MessageListener|Consumer)$"), "component"),
+    (re.compile(r"(?:Util|Utils|Helper|Helpers|Converter|Transformer|Mapper|Adapter)$"), "component"),
+    (re.compile(r"(?:Exception|Error)$"), "other"),
+    (re.compile(r"(?:Test|Tests|Spec|IT|IntegrationTest)$"), "test"),
+]
+
+
+def _java_role_from_name(simple_name: str) -> str:
+    """Infer role from Java class simple name when annotations don't classify it.
+
+    Returns 'other' (never 'unknown') — callers use 'unknown' to mean
+    'not classified at all'; 'other' means 'classified but no interesting role'.
+    """
+    for pattern, role in _JAVA_NAME_ROLE_PATTERNS:
+        if pattern.search(simple_name):
+            return role
+    return "other"
 
 
 # Backward-compatible alias used by external callers and serializer.
@@ -1849,7 +1893,7 @@ def _assemble(
     sorted_rels = sorted(relations, key=lambda e: (e.from_symbol, e.type, e.to_symbol))
     sorted_changed = sorted(changed_symbols, key=lambda c: c.symbol)
 
-    # Java role map: fqn → role (annotation evidence + JAX-RS @Path heuristic)
+    # Java role map: fqn → role (annotation evidence + JAX-RS @Path heuristic + name fallback)
     spring_role_map: dict[str, str] = {}
     for sym in sorted_syms:
         if sym.type in ("class", "interface"):
@@ -1857,6 +1901,10 @@ def _assemble(
             # JAX-RS resource: class-level @Path without a recognized annotation → controller
             if role == "unknown" and "@Path" in sym.annotations:
                 role = "controller"
+            # Name-based fallback: when annotations provide no signal, infer from class name
+            if role == "unknown":
+                simple = sym.symbol.split(".")[-1].split("#")[0]
+                role = _java_role_from_name(simple)
             spring_role_map[sym.symbol] = role
 
     # Degree maps (graph-derived)
@@ -2976,12 +3024,19 @@ def compute_blast_radius(
     # KeycloakSession with 2023 importers), deep BFS is O(n^depth) and collapses
     # to 70-91s at depth=4.  Cap effective depth to 1 for hub classes so the
     # direct-caller list is still accurate but we skip the catastrophic expansion.
+    # Instead of omitting indirect callers entirely, we do a sampled BFS: pick
+    # _SAMPLE_SIZE random direct callers, run depth-2 BFS from those, then scale
+    # up to estimate total indirect reach.
     _HUB_CALLER_THRESHOLD = 500
+    _HUB_SAMPLE_SIZE = 20
+    _HUB_SAMPLE_DEPTH = 2
     _effective_depth = max_depth
+    _hub_class_guard = False
     for seed in matched_fqns:
         _seed_callers = _all_callers_from_rg(seed, reverse_graph)
         if len(_seed_callers) > _HUB_CALLER_THRESHOLD and max_depth > 1:
             _effective_depth = 1
+            _hub_class_guard = True
             break
 
     for seed in matched_fqns:
@@ -3077,6 +3132,35 @@ def compute_blast_radius(
                 all_affected[caller] = depth + 1
                 indirect_callers.append(caller)
                 queue.append((caller, depth + 1))
+
+    # Sampled BFS for hub classes: direct BFS was capped at depth=1, so
+    # indirect_callers is empty.  Sample _HUB_SAMPLE_SIZE random direct callers,
+    # run depth-_HUB_SAMPLE_DEPTH BFS from those, and scale up to estimate reach.
+    _indirect_sampled = False
+    _indirect_estimated_count: int | None = None
+    if _hub_class_guard and direct_callers:
+        _n_direct = len(direct_callers)
+        _k = min(_HUB_SAMPLE_SIZE, _n_direct)
+        _sample_seeds = random.sample(direct_callers, _k)
+        _sample_visited: set[str] = set(matched_fqns) | set(direct_callers)
+        _sample_queue: list[tuple[str, int]] = [(c, 1) for c in _sample_seeds]
+        _sample_indirect: list[str] = []
+        while _sample_queue:
+            _snode, _sdepth = _sample_queue.pop(0)
+            if _sdepth >= _HUB_SAMPLE_DEPTH:
+                continue
+            for _scaller in _all_callers_from_rg(_snode, reverse_graph):
+                if _scaller not in _sample_visited:
+                    _sample_visited.add(_scaller)
+                    all_affected[_scaller] = _sdepth + 1
+                    _sample_indirect.append(_scaller)
+                    _sample_queue.append((_scaller, _sdepth + 1))
+        if _sample_indirect:
+            indirect_callers = _sample_indirect
+            _indirect_sampled = True
+            # Scale: sample covered _k of _n_direct seeds; extrapolate linearly
+            _scale = _n_direct / _k
+            _indirect_estimated_count = round(len(_sample_indirect) * _scale)
 
     # ── 3. Identify affected endpoints from route_surface ─────────────────────
     affected_classes: set[str] = set(matched_fqns) | set(direct_callers) | set(indirect_callers)
@@ -3301,12 +3385,20 @@ def compute_blast_radius(
         )
 
     # Transparency: hub-class BFS truncation must appear in explanation so the
-    # text and JSON are semantically identical (indirect_callers=[] is not a lie).
+    # text and JSON are semantically identical.
     if _bfs_truncated:
-        _parts.append(
-            f"indirect BFS skipped (hub class: {n_direct} direct callers "
-            f"exceed {_HUB_CALLER_THRESHOLD} threshold; indirect_callers not computed)"
-        )
+        if _indirect_sampled and _indirect_estimated_count is not None:
+            _parts.append(
+                f"indirect callers sampled ({_HUB_SAMPLE_SIZE} of {n_direct} seeds, "
+                f"depth={_HUB_SAMPLE_DEPTH}): {n_indirect} found in sample, "
+                f"~{_indirect_estimated_count} estimated total"
+            )
+        else:
+            _parts.append(
+                f"indirect BFS skipped (hub class: {n_direct} direct callers "
+                f"exceed {_HUB_CALLER_THRESHOLD} threshold; no indirect callers reachable "
+                "from sample — graph may be a terminal sink)"
+            )
 
     if not _parts:
         explanation = f"No callers or dependents found for {target!r}. Low-risk isolated change."
@@ -3339,7 +3431,8 @@ def compute_blast_radius(
         "stats": {
             "direct_caller_count": n_direct,
             "indirect_caller_count": n_indirect,
-            "indirect_callers_computed": not _bfs_truncated,
+            "indirect_callers_computed": not _bfs_truncated or _indirect_sampled,
+            "indirect_callers_sampled": _indirect_sampled,
             "endpoints_affected_count": n_ep,
             "transactional_boundaries_count": n_txn,
             "mappers_affected_count": n_mappers,
@@ -3347,6 +3440,14 @@ def compute_blast_radius(
             "security_surface_count": n_sec,
         },
     }
+    if _indirect_sampled and _indirect_estimated_count is not None:
+        out["indirect_callers_estimated_count"] = _indirect_estimated_count
+        out["indirect_callers_sample_note"] = (
+            f"indirect_callers contains a sample (BFS depth={_HUB_SAMPLE_DEPTH} from "
+            f"{min(_HUB_SAMPLE_SIZE, n_direct)} of {n_direct} direct callers). "
+            f"Estimated total indirect reach: ~{_indirect_estimated_count}. "
+            "Actual count may differ; use a lower-fan-in entry point for exact traversal."
+        )
     if _candidates_out:
         out["candidates"] = _candidates_out
     if _iface_bridging:
@@ -3358,12 +3459,19 @@ def compute_blast_radius(
         )
     if _bfs_truncated:
         out["bfs_truncation_reason"] = "hub_class_depth_cap"
-        out["bfs_truncation_note"] = (
-            f"Indirect BFS capped at depth=1: target has {n_direct} direct callers "
-            f"(>{_HUB_CALLER_THRESHOLD} threshold). indirect_callers is empty by design — "
-            "not because no indirect callers exist. Use a lower-fan-in entry point "
-            "for full transitive traversal."
-        )
+        if _indirect_sampled:
+            out["bfs_truncation_note"] = (
+                f"Full BFS capped at depth=1 (hub class: {n_direct} direct callers "
+                f">{_HUB_CALLER_THRESHOLD}). indirect_callers is a sampled estimate — "
+                f"BFS from {min(_HUB_SAMPLE_SIZE, n_direct)} random seeds at depth={_HUB_SAMPLE_DEPTH}."
+            )
+        else:
+            out["bfs_truncation_note"] = (
+                f"Indirect BFS capped at depth=1: target has {n_direct} direct callers "
+                f"(>{_HUB_CALLER_THRESHOLD} threshold). indirect_callers is empty — "
+                "no indirect callers reachable from sampled seeds (terminal sink or sparse graph). "
+                "Use a lower-fan-in entry point for full transitive traversal."
+            )
     if len(direct_callers) > 30:
         out["direct_callers_note"] = (
             f"Showing 30/{n_direct} direct callers. Use --output to inspect full IR."

@@ -300,6 +300,7 @@ class ProjectSummarizer:
 
         # Stack with frameworks — keep brief, skip internal module listings
         non_tooling_stacks = self._filter_non_tooling_stacks(sm)
+        primary = None
         if non_tooling_stacks:
             primary = self._select_summary_primary_stack(non_tooling_stacks)
             frameworks = [fw.name for fw in primary.frameworks[:2]]
@@ -312,6 +313,30 @@ class ProjectSummarizer:
         domains = self._extract_business_domains(sm.file_paths)
         if domains:
             parts.append(f"Domains: {', '.join(domains)}")
+
+        # Quantitative structural suffix for Java projects — adds concrete scale signals
+        # that README descriptions omit (class count, transactional boundary count).
+        if primary is not None and primary.stack.lower() == "java":
+            quant_parts: list[str] = []
+            java_files = sum(
+                1 for p in sm.file_paths if p.endswith(".java")
+            )
+            if java_files >= 50:
+                quant_parts.append(f"{java_files:,} Java classes")
+            txn_classes: list[str] = []
+            for stack in non_tooling_stacks:
+                txn_classes.extend(getattr(stack, "transactional_classes", []))
+            n_txn = len(set(txn_classes))
+            if n_txn > 0:
+                quant_parts.append(f"{n_txn} transactional boundaries")
+            ep_controllers = [
+                ep for ep in sm.entry_points
+                if ep.kind in ("controller", "rest_controller", "rest", "endpoint")
+            ]
+            if ep_controllers:
+                quant_parts.append(f"{len(ep_controllers)} controller entry points")
+            if quant_parts:
+                parts.append(", ".join(quant_parts))
 
         return ". ".join(parts) + "."
 

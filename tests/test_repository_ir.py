@@ -2130,3 +2130,99 @@ public class Level2Caller {
         # not_found path sets these explicitly
         assert result.get("indirect_callers") == []
         assert result.get("direct_callers") == []
+
+    def _build_hub_ir_with_callers_of_callers(self, n_direct: int = 600, n_indirect_each: int = 3):
+        """Build IR where HubClass has n_direct callers, each called by n_indirect_each more.
+
+        HubClass ← Caller0..CallerN ← SubCallerN_0..SubCallerN_2
+        Creates indirect callers reachable via sampled BFS.
+        """
+        from sourcecode.repository_ir import (
+            _extract_symbols, _build_relations, _build_spring_summary, _assemble,
+        )
+        sources = []
+        hub_src = """\
+package com.example;
+public class HubClass {
+    public Object doWork() { return null; }
+}
+"""
+        sources.append((hub_src, "HubClass.java"))
+        for i in range(n_direct):
+            caller_src = f"""\
+package com.example.callers;
+import com.example.HubClass;
+import org.springframework.stereotype.Service;
+
+@Service
+public class Caller{i} {{
+    private HubClass hub;
+    public void run() {{ hub.doWork(); }}
+}}
+"""
+            sources.append((caller_src, f"Caller{i}.java"))
+            for j in range(n_indirect_each):
+                sub_src = f"""\
+package com.example.sub;
+import com.example.callers.Caller{i};
+public class SubCaller{i}_{j} {{
+    private Caller{i} caller;
+    public void act() {{ caller.run(); }}
+}}
+"""
+                sources.append((sub_src, f"SubCaller{i}_{j}.java"))
+
+        all_syms, all_rels = [], []
+        for src, rel in sources:
+            pkg, syms, raw_imports = _extract_symbols(src, rel)
+            rels = _build_relations(syms, raw_imports, src, pkg, rel)
+            all_syms.extend(syms)
+            all_rels.extend(rels)
+        ss = _build_spring_summary(all_syms)
+        return _assemble(all_syms, all_rels, [], ss, None)
+
+    def test_hub_sampled_bfs_populates_indirect_callers(self):
+        """Hub class with callers-of-callers: sampled BFS finds and returns indirect callers."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_hub_ir_with_callers_of_callers(n_direct=600, n_indirect_each=3)
+        result = compute_blast_radius(ir, "HubClass", max_depth=4)
+
+        assert result["bfs_truncated"] is True, "Hub guard must fire"
+        # sampled BFS must have found indirect callers
+        assert len(result["indirect_callers"]) > 0, (
+            "Sampled BFS must find indirect callers when callers-of-callers exist"
+        )
+        assert result["stats"]["indirect_callers_sampled"] is True
+        assert result["stats"]["indirect_callers_computed"] is True
+        # Estimated count must be present and positive
+        assert "indirect_callers_estimated_count" in result
+        assert result["indirect_callers_estimated_count"] > 0
+        # Sample note must be present
+        assert "indirect_callers_sample_note" in result
+        # Explanation must mention sampling
+        explanation = result["explanation"]
+        assert "sampled" in explanation.lower()
+        assert "estimated" in explanation.lower()
+
+    def test_hub_sampled_bfs_empty_when_no_callers_of_callers(self):
+        """Hub class whose callers have no further callers: sampled BFS returns empty."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_hub_ir(n_callers=600)  # callers don't call each other
+        result = compute_blast_radius(ir, "HubClass", max_depth=4)
+
+        assert result["bfs_truncated"] is True
+        # No indirect callers reachable from sample
+        assert result["indirect_callers"] == []
+        assert result["stats"]["indirect_callers_sampled"] is False
+        assert result["stats"]["indirect_callers_computed"] is False
+        # No estimate fields when sample finds nothing
+        assert "indirect_callers_estimated_count" not in result
+        assert "indirect_callers_sample_note" not in result
+
+    def test_hub_sampled_stats_are_consistent(self):
+        """stats.indirect_caller_count reflects actual returned list length."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = self._build_hub_ir_with_callers_of_callers(n_direct=600, n_indirect_each=2)
+        result = compute_blast_radius(ir, "HubClass", max_depth=4)
+
+        assert result["stats"]["indirect_caller_count"] == len(result["indirect_callers"])

@@ -245,7 +245,7 @@ class TestSummarizerMarkdownClean:
         result = self._extract(
             "![logo](example-logo.png)\n"
             "\n"
-            "Real description here.\n"
+            "Real description of the project architecture and its components.\n"
         )
         assert result is not None
         assert "![](" not in result or "Real description" in result
