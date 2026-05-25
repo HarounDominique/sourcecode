@@ -280,7 +280,7 @@ class ArchitectureAnalyzer:
                 })
 
         # Step 4: bounded context inference
-        bounded_contexts = self._infer_bounded_contexts(domains, graph)
+        bounded_contexts = self._infer_bounded_contexts(domains, graph, sm.file_paths)
 
         # Overall confidence — based on domain quality, not raw count
         confidence: Literal["high", "medium", "low"]
@@ -703,11 +703,78 @@ class ArchitectureAnalyzer:
         ]
         return result[:16]
 
+    @staticmethod
+    def _maven_module_bounded_contexts(file_paths: list[str]) -> list[BoundedContext]:
+        """Priority 0: extract bounded contexts from Maven module directory names.
+
+        Maven multi-module projects have structure: <module>/src/main/java/...
+        The module directory name is a strong bounded context signal
+        (e.g. broadleaf-order, keycloak-services → order, services).
+        Strips common project-name prefixes (longest common prefix across modules).
+        Returns empty list when fewer than 2 distinct modules are found.
+        """
+        import re as _re
+        _MAVEN_SRC = "src/main/java/"
+        _MAVEN_TEST = "src/test/java/"
+        module_names: dict[str, list[str]] = {}  # module_name → [files]
+        for p in file_paths:
+            norm = p.replace("\\", "/")
+            for marker in (_MAVEN_SRC, _MAVEN_TEST):
+                idx = norm.find(marker)
+                if idx > 0:
+                    # Everything before the marker is the module path
+                    module_path = norm[:idx].rstrip("/")
+                    # Take the last path segment as module name
+                    module_seg = module_path.split("/")[-1] if "/" in module_path else module_path
+                    if module_seg:
+                        module_names.setdefault(module_seg, []).append(p)
+                    break
+
+        if len(module_names) < 2:
+            return []
+
+        # Strip common project-name prefix (e.g. "keycloak-", "broadleaf-")
+        # by finding longest common prefix across all module names
+        all_names = sorted(module_names)
+        common = ""
+        for i, ch in enumerate(all_names[0]):
+            if all(n[i:i+1] == ch for n in all_names[1:]):
+                common += ch
+            else:
+                break
+        # Only strip prefix up to last '-' (avoid stripping into meaningful segment)
+        prefix_to_strip = common[:common.rfind("-") + 1] if "-" in common else ""
+
+        _GENERIC_EXTENDED = _GENERIC_NAMES | {
+            "api", "impl", "base", "test", "tests", "main", "java",
+            "integration", "parent", "bom", "platform",
+        }
+        bc_list: list[BoundedContext] = []
+        for raw_name, files in sorted(module_names.items()):
+            clean = raw_name[len(prefix_to_strip):] if prefix_to_strip else raw_name
+            # Remove trailing -api, -impl, -core suffixes
+            clean = _re.sub(r"-(api|impl|core|base|common|parent|test)$", "", clean)
+            if not clean or clean in _GENERIC_EXTENDED:
+                continue
+            bc_list.append(BoundedContext(
+                name=clean,
+                modules=files[:20],  # cap file list
+                confidence="high",
+            ))
+        return bc_list
+
     def _infer_bounded_contexts(
         self,
         domains: list[ArchitectureDomain],
         graph: Optional[ModuleGraph],
+        file_paths: list[str] | None = None,
     ) -> list[BoundedContext]:
+        # Priority 0: Maven module names — strong bounded context signal for Java projects
+        if file_paths:
+            maven_bcs = self._maven_module_bounded_contexts(file_paths)
+            if maven_bcs:
+                return maven_bcs
+
         # Priority 1: use graph SCCs when available
         if graph is not None:
             sccs = self._find_sccs(graph)
