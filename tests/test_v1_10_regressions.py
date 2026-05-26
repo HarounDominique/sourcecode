@@ -537,15 +537,16 @@ class TestReviewPrSuspectedAreas:
 
     def test_review_pr_requires_git_diff(self):
         # FIXTURE has no uncommitted changes (or no git repo) — returns structured error.
-        # When running inside the atlas-cli git tree with no staged changes, error is "no_diff"
-        # (exit 0 — no_diff is not a failure, it means no changes to review).
+        # When running inside the atlas-cli git tree with no staged changes:
+        #   - no_diff_source: no --since and no staged/unstaged changes (clean tree) → exit 1
+        #   - no_diff: scope resolved but empty → exit 0
         # When running outside any git repo, error is "no_git_repo" (exit 1 — true error).
         result = _invoke("prepare-context", "review-pr", str(FIXTURE))
         data = _json(result)
-        _git_errors = {"no_git_repo", "no_diff", "git_ref_not_found"}
+        _git_errors = {"no_git_repo", "no_diff", "no_diff_source", "git_ref_not_found"}
         assert data.get("error") in _git_errors, f"Expected git error, got: {data}"
         assert "ci_decision" in data
-        # Exit code: 0 for no_diff (no changes = success), 1 for true errors
+        # Exit code: 0 for no_diff (no changes = success), 1 for all other errors
         if data.get("error") == "no_diff":
             assert result.exit_code == 0, f"no_diff must exit 0, got {result.exit_code}"
         else:

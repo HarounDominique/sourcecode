@@ -1134,6 +1134,27 @@ class TaskContextBuilder:
         # No-git and invalid-ref cases were already handled in step 0 (early returns).
         if task_name == "review-pr":
             if not _pr_scope_files:
+                # Distinguish: no_staged_changes (CI, no --since) vs no_diff (empty range)
+                if _pr_scope_source == "no_staged_changes":
+                    _no_diff_msg = (
+                        "No --since ref provided and no staged changes found. "
+                        "Use --since <ref>"
+                    )
+                    return TaskOutput(
+                        task="review-pr", goal=spec.goal,
+                        project_summary=None, architecture_summary=None,
+                        relevant_files=[], suspected_areas=[],
+                        improvement_opportunities=[], test_gaps=[],
+                        key_dependencies=[], code_notes_summary=None,
+                        limitations=[], confidence="low",
+                        error_code="no_diff_source",
+                        error_message=_no_diff_msg,
+                        gaps=[_no_diff_msg],
+                        ci_decision="no_diff_source",
+                        scope_source=_pr_scope_source,
+                        scope_files=[],
+                        repo_root=str(_pr_git_root),
+                    )
                 _no_diff_hint = "review-pr requires changed files or --since <ref>."
                 return TaskOutput(
                     task="review-pr", goal=spec.goal,
@@ -1220,6 +1241,76 @@ class TaskContextBuilder:
                 delta_files=None,
                 symptom=symptom if task_name == "fix-bug" else None,
             )
+
+        # ── Fast-mode fallback: never return empty relevant_files when source files exist ──
+        # When --fast is active on a large repo, all_paths may be restricted to a handful of
+        # changed/noise files that all get filtered out by _rank_files. Inject fallback signals:
+        # 1. detected entry points (already computed, zero I/O cost)
+        # 2. recently committed files (git log -10 --name-only)
+        # 3. files matching symptom keywords in path (when fix-bug + --symptom)
+        if fast and not relevant_files and task_name not in ("delta", "review-pr"):
+            import subprocess as _sp_fb
+            _fb_seen: set[str] = set()
+            _fb_candidates: list[RelevantFile] = []
+
+            # 1. Entry points from detection
+            for _ep in entry_points:
+                _ep_path = _ep.path.replace("\\", "/")
+                if _ep_path not in _fb_seen and (self.root / _ep_path).exists():
+                    _fb_candidates.append(RelevantFile(
+                        path=_ep_path,
+                        role="entrypoint",
+                        score=0.5,
+                        reason="fast-mode fallback: detected entry point",
+                        why="entry_point signal from manifest/annotation detection",
+                    ))
+                    _fb_seen.add(_ep_path)
+
+            # 2. Recently committed files (git log -10 --name-only)
+            try:
+                _gl_r = _sp_fb.run(
+                    ["git", "log", "--name-only", "--pretty=format:", "-10"],
+                    capture_output=True, text=True, cwd=str(self.root), timeout=5,
+                )
+                for _gl_f in _gl_r.stdout.splitlines():
+                    _gl_f = _gl_f.strip().replace("\\", "/")
+                    if (not _gl_f or _gl_f in _fb_seen):
+                        continue
+                    if Path(_gl_f).suffix.lower() not in _ALL_EXTENSIONS:
+                        continue
+                    if not (self.root / _gl_f).exists():
+                        continue
+                    _fb_candidates.append(RelevantFile(
+                        path=_gl_f,
+                        role="source",
+                        score=0.3,
+                        reason="fast-mode fallback: recently committed file (git log -10)",
+                        why="recent commit history signal",
+                    ))
+                    _fb_seen.add(_gl_f)
+            except Exception:
+                pass
+
+            # 3. Symptom keyword path matches (fix-bug only)
+            if task_name == "fix-bug" and symptom:
+                import re as _re_fb
+                _fb_kws = [w.lower() for w in _re_fb.split(r"[\s\W]+", symptom) if len(w) > 2]
+                for _fb_p in all_paths:
+                    if _fb_p in _fb_seen:
+                        continue
+                    if Path(_fb_p).suffix.lower() not in _ALL_EXTENSIONS:
+                        continue
+                    if any(kw in _fb_p.lower() for kw in _fb_kws):
+                        _fb_candidates.append(RelevantFile(
+                            path=_fb_p,
+                            role="source",
+                            score=0.2,
+                            reason=f"fast-mode fallback: path matches symptom ({symptom!r})",
+                            why="symptom keyword in file path",
+                        ))
+                        _fb_seen.add(_fb_p)
+
+            relevant_files = _fb_candidates[:20]
 
         # ── IC-006: fix-bug suspected_areas — recompute from ranked files + bug notes ──
         # relevant_files is now ranked by RankingEngine (git churn, fan_in, centrality, notes).
@@ -2569,24 +2660,15 @@ class TaskContextBuilder:
             if DiffSourceType.WORKTREE_STAGED.value not in sources:
                 sources.append(DiffSourceType.WORKTREE_STAGED.value)
 
-        # ── HEAD~1 fallback — working tree clean, surface last commit ────────
-        # Without --since: if no unstaged/staged changes exist, fall back to the
-        # last committed diff so a clean tree never silently returns no_changes.
+        # ── FIX-P1: no --since + clean working tree → no_staged_changes signal ──
+        # Previously: silently fell back to HEAD~1 diff, masking a missing --since.
+        # Now: emit "no_staged_changes" scope so the caller can return no_diff_source
+        # (exit 1) and prompt the user to provide --since.
+        # Rationale: in CI, the tree is always clean; without --since there is no
+        # meaningful diff to review. Local dev should stage changes before review-pr.
         if since is None and not committed_files and not uncommitted_files:
-            head_ok = _run("git", "rev-parse", "--verify", "HEAD~1")
-            if head_ok is not None:  # HEAD~1 exists
-                head_committed = _run("git", "diff", "--name-only", "--relative", "HEAD~1..HEAD")
-                if head_committed:
-                    committed_files = head_committed
-                    sources.append(DiffSourceType.HEAD_MINUS_1.value)
-            else:
-                # First commit — no HEAD~1; diff against git empty tree
-                _GIT_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-                first_committed = _run("git", "diff", "--name-only", "--relative",
-                                       _GIT_EMPTY_TREE, "HEAD")
-                if first_committed:
-                    committed_files = first_committed
-                    sources.append("initial_commit")
+            # Return sentinel — step 5d converts this to no_diff_source (exit 1).
+            return [], "no_staged_changes", [], []
 
         # ── Drop paths outside self.root ──────────────────────────────────────
         def _drop_outside(lst: list[str]) -> list[str]:

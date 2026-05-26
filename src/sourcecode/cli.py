@@ -739,12 +739,15 @@ def main(
     # compact is designed to be a bounded summary; --full removes truncation limits,
     # which contradicts compact's purpose. Use --agent --full for expanded output.
     if compact and full:
-        typer.echo(
-            "Error: --compact and --full are mutually exclusive. "
-            "--compact produces a bounded summary; --full removes truncation limits and "
-            "is meant for --agent mode. Use --agent --full for expanded output.",
-            err=True,
-        )
+        import json as _json_flags, sys as _sys_flags
+        _sys_flags.stdout.write(_json_flags.dumps({
+            "error": "incompatible_flags",
+            "message": "--compact and --full are mutually exclusive. "
+                       "--compact produces a bounded summary; --full removes truncation limits "
+                       "and is meant for --agent mode. Use --agent --full for expanded output.",
+            "exit_code": 1,
+        }, ensure_ascii=False) + "\n")
+        _sys_flags.stdout.flush()
         raise typer.Exit(code=1)
 
     # P0-2 FIX: --full without --compact or --agent has no effect in contract/raw mode.

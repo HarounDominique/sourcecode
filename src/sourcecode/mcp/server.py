@@ -453,6 +453,36 @@ def get_impact_context(repo_path: str = ".", target: str = "", depth: int = 4) -
         )
 
 
+@mcp.tool()
+def modernize_context(repo_path: str = ".", format: str = "json") -> dict:
+    """Analyzes codebase for modernization opportunities: dead zones, hotspot scores, upgrade candidates.
+
+    Maps to: sourcecode modernize <repo_path>
+    Returns: hotspot_candidates (high fan-in + git churn), dead_zone_candidates (isolated classes),
+             high_coupling_nodes, subsystem_summary, cross_module_tangles, recommendation.
+
+    Best for: refactor planning, identifying where to start, finding safe removal candidates.
+    Use get_compact_context or get_agent_context first for project orientation.
+
+    repo_path: absolute path to the Java repository (default: current working directory).
+    format: output format — "json" (default). Only json is supported; yaml is not available
+            for modernize output.
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        if not isinstance(format, str) or format not in ("json", "yaml"):
+            return _err("format must be 'json' or 'yaml'", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        return _execute(["modernize", repo_path])
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
 _TELEMETRY_ACTIONS = frozenset({"status", "enable", "disable"})
 
 
