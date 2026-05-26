@@ -158,9 +158,12 @@ def get_endpoints(repo_path: str = ".") -> dict:
     Returns: endpoints list with method, path, controller, handler fields;
              security dict when authorization annotations are present
              (policy: roles_allowed|permit_all|deny_all|authenticated|...);
-             total (int) and no_security_signal (int) counts.
-             no_security_signal counts endpoints with no recognized auth annotation —
-             repos using framework-level auth (e.g. Keycloak) may show high counts.
+             total (int), no_security_signal (int), and security_model (str) fields.
+             no_security_signal counts endpoints with no recognized auth annotation.
+             security_model values: "filter_based" (centralized Spring Security config —
+             high no_security_signal is expected and does NOT mean endpoints are unprotected),
+             "annotation_based" (per-endpoint annotations only), "mixed" (both),
+             "unknown" (no security signals detected).
     Supports Spring MVC (@GetMapping etc.) and JAX-RS (@GET/@POST etc.).
     Security annotations detected: @RolesAllowed, @PermitAll, @DenyAll,
     @Authenticated, @PreAuthorize, @Secured, @SecurityRequirement, @M3FiltroSeguridad.

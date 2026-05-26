@@ -1127,10 +1127,14 @@ def main(
 
     # --compact implicitly enables lightweight analysis passes so that
     # dependency_summary, env_summary and code_notes_summary are never null.
+    # architecture=True is also enabled so that architecture.confidence is
+    # consistent with --agent (which auto-enables architecture).  The
+    # ArchitectureAnalyzer is path-based and adds negligible latency.
     if compact:
         dependencies = True
         env_map = True
         code_notes = True
+        architecture = True
 
     dependency_analyzer = DependencyAnalyzer() if dependencies else None
     graph_analyzer = GraphAnalyzer() if graph_modules else None

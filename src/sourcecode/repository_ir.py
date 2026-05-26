@@ -192,6 +192,15 @@ _SECURITY_MARKER_ANNOTATIONS: frozenset[str] = frozenset({
     "@PermitAll", "@DenyAll", "@Authenticated",
 })
 
+# Annotations on config classes that indicate a centralized security filter chain
+# (Spring Security / Spring Boot).  When present, per-endpoint no_security_signal
+# is expected and does NOT mean endpoints are unprotected.
+_FILTER_SECURITY_ANNOTATIONS: frozenset[str] = frozenset({
+    "@EnableWebSecurity",
+    "@EnableMethodSecurity",
+    "@EnableGlobalMethodSecurity",
+})
+
 _MODIFIER_WORDS: frozenset[str] = frozenset({
     "public", "private", "protected", "static", "final", "abstract",
     "synchronized", "native", "strictfp", "transient", "volatile", "default",
@@ -1711,6 +1720,7 @@ def _detect_subsystems(all_fqns: list[str], relations: list[RelationEdge]) -> li
             "label": label,
             "package_prefix": pkg_prefix,
             "member_count": len(members),
+            "members": members,
             "summary": summary,
         })
     return result
@@ -2132,17 +2142,47 @@ def _assemble(
         "change_set": change_set_out,
     }
 
-    _route_surface = _build_route_surface(sorted_syms, route_diffs, extends_map={
+    _extends_map = {
         e.from_symbol: e.to_symbol.split(".")[-1]
         for e in sorted_rels if e.type == "extends"
-    })
+    }
+    _route_surface = _build_route_surface(sorted_syms, route_diffs, extends_map=_extends_map)
     _analysis_gaps = _compute_analysis_gaps(sorted_syms, spring_summary, _route_surface, sorted_rels)
+
+    # Detect filter-based security model for the assembled IR.
+    # Stored here so CIR projections (project_endpoint_surface) can read it without
+    # re-parsing symbols.
+    _class_syms_asm = [s for s in sorted_syms if s.type in ("class", "interface")]
+    _filter_based_asm = (
+        any(
+            ann in _FILTER_SECURITY_ANNOTATIONS
+            for sym in _class_syms_asm
+            for ann in sym.annotations
+        )
+        or any(
+            _extends_map.get(sym.symbol, "") == "WebSecurityConfigurerAdapter"
+            for sym in _class_syms_asm
+        )
+    )
+    _has_ann_sec_asm = any(
+        r.get("security_annotations") for r in _route_surface
+        if isinstance(r, dict)
+    )
+    if _filter_based_asm and _has_ann_sec_asm:
+        _security_model_asm = "mixed"
+    elif _filter_based_asm:
+        _security_model_asm = "filter_based"
+    elif _has_ann_sec_asm:
+        _security_model_asm = "annotation_based"
+    else:
+        _security_model_asm = "unknown"
 
     return {
         **_base,
         "route_surface": _route_surface,
         "spring_events": _spring_events,
         "analysis_gaps": _analysis_gaps,
+        "security_model": _security_model_asm,
         "audit": {
             "dropped_fields": dropped_fields,
         },
@@ -2908,10 +2948,39 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
     # Note: repos may use framework-level security (e.g. Keycloak itself) with no
     # per-endpoint annotations — this count reflects annotation-based coverage only.
     no_security_signal = sum(1 for e in endpoints if "security" not in e)
+
+    # Detect filter-based security: centralized Spring Security config class.
+    # When present, high no_security_signal is expected — security is enforced by
+    # the filter chain, not per-endpoint annotations.
+    _class_syms = [s for s in all_symbols if s.type in ("class", "interface")]
+    _filter_based = (
+        # Config class annotated with EnableWebSecurity / EnableMethodSecurity
+        any(
+            ann in _FILTER_SECURITY_ANNOTATIONS
+            for sym in _class_syms
+            for ann in sym.annotations
+        )
+        # Class extends WebSecurityConfigurerAdapter (pre-Spring 5.7 style)
+        or any(
+            extends_map.get(sym.symbol, "") == "WebSecurityConfigurerAdapter"
+            for sym in _class_syms
+        )
+    )
+    _has_annotation_security = any("security" in e for e in endpoints)
+    if _filter_based and _has_annotation_security:
+        security_model = "mixed"
+    elif _filter_based:
+        security_model = "filter_based"
+    elif _has_annotation_security:
+        security_model = "annotation_based"
+    else:
+        security_model = "unknown"
+
     return {
         "endpoints": endpoints,
         "total": len(endpoints),
         "no_security_signal": no_security_signal,
+        "security_model": security_model,
         # Keep legacy field name for backward compat, now means same as no_security_signal
         "undocumented": no_security_signal,
     }

@@ -332,6 +332,7 @@ def ir_dict_to_canonical(
         "spring_events": ir.get("spring_events") or {},
         "score_basis": (ir.get("impact") or {}).get("score_basis", "none"),
         "reverse_graph_size": len(ir.get("reverse_graph") or {}),
+        "security_model": ir.get("security_model", "unknown"),
     }
 
     cir_hash = _compute_cir_hash(
@@ -452,6 +453,7 @@ def project_endpoint_surface(cir: CanonicalRepositoryIR) -> dict:
         "endpoints": endpoints,
         "total": len(endpoints),
         "no_security_signal": no_security_signal,
+        "security_model": cir.metadata.get("security_model", "unknown"),
         # Legacy field alias — same count, kept for backward compat
         "undocumented": no_security_signal,
     }
