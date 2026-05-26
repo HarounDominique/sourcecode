@@ -388,6 +388,9 @@ class TaskOutput:
     deployment_risks: list[str] = field(default_factory=list)
     deployment: Optional[dict] = None
     entry_points_structured: Optional[dict] = None
+    # P0-2: fast-mode truncation transparency
+    truncated: bool = False
+    truncated_reason: Optional[str] = None
 
 
 @dataclass
@@ -1991,6 +1994,21 @@ class TaskContextBuilder:
                 untested.sort(key=lambda p: (len(p.split("/")), p))
                 test_gaps = untested[:15]
 
+        # P0-2: fast mode truncation transparency for generate-tests.
+        # When --fast is active the test-gap discovery block is skipped entirely,
+        # so test_gaps stays []. Without a signal the receiver interprets [] as
+        # "no gaps", which is incorrect. Emit explicit truncation metadata and
+        # downgrade confidence so the agent knows the analysis is incomplete.
+        _fast_truncated = fast and task_name == "generate-tests"
+        _fast_truncated_reason = "fast mode skips test gap discovery" if _fast_truncated else None
+        if _fast_truncated:
+            import sys as _sys_warn
+            _sys_warn.stderr.write(
+                "[warn] prepare-context generate-tests --fast: test gap discovery skipped. "
+                "Output will contain truncated=true and confidence=low.\n"
+            )
+            _sys_warn.stderr.flush()
+
         # ── 8. Confidence + gaps ──────────────────────────────────────────────
         from sourcecode.confidence_analyzer import ConfidenceAnalyzer
         from dataclasses import asdict as _asdict
@@ -2012,6 +2030,9 @@ class TaskContextBuilder:
 
         conf_summary, analysis_gaps = ConfidenceAnalyzer().analyze(sm_for_conf)
         confidence = conf_summary.overall
+        # P0-2: fast-mode truncation overrides confidence to signal incomplete analysis
+        if _fast_truncated:
+            confidence = "low"
         _has_mybatis = any(
             f.name == "MyBatis"
             for s in stacks
@@ -2130,6 +2151,9 @@ class TaskContextBuilder:
             deployment_risks=_cb_deploy_risks,
             deployment=_cb_deployment,
             entry_points_structured=_cb_bootstrap,
+            # P0-2: fast-mode truncation transparency
+            truncated=_fast_truncated,
+            truncated_reason=_fast_truncated_reason,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:

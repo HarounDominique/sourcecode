@@ -760,8 +760,11 @@ def main(
             err=True,
         )
 
-    # P0-2 FIX: --changed-only silently implies --compact; inform the user.
-    if changed_only and not compact and not agent:
+    # P1-2 FIX: --changed-only silently implies --compact; inform only on TTY.
+    # PowerShell 5.1 interprets any stderr write (even with exit 0) as NativeCommandError.
+    # Gate on isatty() so pipeline consumers never see informational noise on stderr.
+    import sys as _sys_tty
+    if changed_only and not compact and not agent and _sys_tty.stderr.isatty():
         typer.echo(
             "[info] --changed-only implies --compact (bounding output to changed files).",
             err=True,
@@ -2184,7 +2187,11 @@ def prepare_context_cmd(
 
     target = path.resolve()
     if not target.exists() or not target.is_dir():
-        typer.echo(f"Error: '{target}' is not a valid directory.", err=True)
+        _emit_error_json(
+            "invalid_path",
+            f"'{target}' is not a valid directory.",
+            path=str(target),
+        )
         raise typer.Exit(code=1)
 
     if dry_run:
@@ -2316,6 +2323,13 @@ def prepare_context_cmd(
         out["improvement_opportunities"] = output.improvement_opportunities
     if _task_include("test_gaps") and output.test_gaps:
         out["test_gaps"] = output.test_gaps
+    # P0-2: fast-mode truncation transparency — always emit when truncated, even if test_gaps is []
+    # Use `is True` (strict) so MagicMock objects in tests don't trigger this branch.
+    if getattr(output, "truncated", False) is True:
+        out["truncated"] = True
+        _tr = getattr(output, "truncated_reason", None)
+        if isinstance(_tr, str) and _tr:
+            out["truncated_reason"] = _tr
     if _task_include("code_notes_summary") and output.code_notes_summary:
         out["code_notes_summary"] = output.code_notes_summary
     if _task_include("changed_files") and output.changed_files:
@@ -2704,7 +2718,11 @@ def repo_ir_cmd(
 
     root = path.resolve()
     if not root.is_dir():
-        typer.echo(f"Error: {root} is not a directory", err=True)
+        _emit_error_json(
+            "invalid_path",
+            f"'{root}' is not a valid directory.",
+            path=str(root),
+        )
         raise typer.Exit(1)
 
     if files:
@@ -2856,7 +2874,11 @@ def impact_cmd(
 
     root = path.resolve()
     if not root.is_dir():
-        typer.echo(f"Error: {root} is not a directory", err=True)
+        _emit_error_json(
+            "invalid_path",
+            f"'{root}' is not a valid directory.",
+            path=str(root),
+        )
         raise typer.Exit(1)
 
     file_list = find_java_files(root)
@@ -2959,7 +2981,11 @@ def endpoints_cmd(
 
     target = path.resolve()
     if not target.exists() or not target.is_dir():
-        typer.echo(f"Error: '{target}' is not a valid directory.", err=True)
+        _emit_error_json(
+            "invalid_path",
+            f"'{target}' is not a valid directory.",
+            path=str(target),
+        )
         raise typer.Exit(code=1)
 
     data = _extract_java_endpoints(target)
@@ -3075,7 +3101,10 @@ def review_pr_cmd(
         help="Copy output to clipboard after a successful run.",
     ),
 ) -> None:
-    """[Pro] PR review: blast radius, risk ranking, execution paths, security/txn impact.
+    """[Pro*] PR review: blast radius, risk ranking, execution paths, security/txn impact.
+
+    Note: [Pro*] label is reserved for a future licensing gate. This command currently
+    runs without authentication. Behavior may change in a future version.
 
     \b
     Answers: "What does this PR break and how risky is it?"
@@ -3135,7 +3164,10 @@ def fix_bug_cmd(
         help="Copy output to clipboard after a successful run.",
     ),
 ) -> None:
-    """[Pro] Bug triage: risk-ranked files, suspected areas, related annotations.
+    """[Pro*] Bug triage: risk-ranked files, suspected areas, related annotations.
+
+    Note: [Pro*] label is reserved for a future licensing gate. This command currently
+    runs without authentication. Behavior may change in a future version.
 
     \b
     Answers: "Where in this codebase should I look to fix this symptom?"
@@ -3187,7 +3219,10 @@ def modernize_cmd(
         help="Copy output to clipboard after a successful run.",
     ),
 ) -> None:
-    """[Pro] Modernization planning: coupling, dead zones, risky modules, refactor candidates.
+    """[Pro*] Modernization planning: coupling, dead zones, risky modules, refactor candidates.
+
+    Note: [Pro*] label is reserved for a future licensing gate. This command currently
+    runs without authentication. Behavior may change in a future version.
 
     \b
     Answers: "Where should I refactor first, and what's safest to touch?"
@@ -3218,7 +3253,11 @@ def modernize_cmd(
 
     root = path.resolve()
     if not root.is_dir():
-        typer.echo(f"Error: {root} is not a directory", err=True)
+        _emit_error_json(
+            "invalid_path",
+            f"'{root}' is not a valid directory.",
+            path=str(root),
+        )
         raise typer.Exit(1)
 
     file_list = find_java_files(root)
@@ -3443,6 +3482,24 @@ def mcp_serve() -> None:
     from sourcecode.mcp.server import mcp as _mcp
 
     log = logging.getLogger(__name__)
+
+    # P0-1: Strip UTF-8 BOM from stdin.buffer before the MCP server reads it.
+    # PowerShell 5.1 on Windows writes \xEF\xBB\xBF at the start of stdin,
+    # which breaks JSON parsing at line 1 column 1.
+    # peek(3) loads bytes into BufferedReader's internal buffer without consuming;
+    # read(3) discards only if the prefix is the UTF-8 BOM sequence.
+    # No-op on Linux/macOS/Git Bash where stdin never starts with a BOM.
+    # Guard: CliRunner / test stubs replace sys.stdin with StringIO (no .buffer).
+    try:
+        _stdin_buf = getattr(_sys.stdin, "buffer", None)
+        if _stdin_buf is not None and hasattr(_stdin_buf, "peek"):
+            _bom_prefix = _stdin_buf.peek(3)[:3]
+            if _bom_prefix == b"\xef\xbb\xbf":
+                _stdin_buf.read(3)
+                log.info("sourcecode-mcp stripped UTF-8 BOM from stdin (PowerShell 5.1 workaround)")
+    except Exception:
+        pass  # Never abort server startup over BOM detection
+
     log.info("sourcecode-mcp starting (stdio transport)")
     try:
         _mcp.run()
