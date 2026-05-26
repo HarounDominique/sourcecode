@@ -1952,6 +1952,10 @@ def main(
             if _copy_to_clipboard(content):
                 typer.echo("✓ copied to clipboard", err=True)
 
+    # 8. One-time MCP setup nudge (stderr only — does not affect exit code or stdout)
+    from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
+    _nudge()
+
 
 # ── prepare-context output helpers ────────────────────────────────────────────
 
@@ -2554,6 +2558,9 @@ def prepare_context_cmd(
             if _copy_to_clipboard(_pc_content):
                 typer.echo("✓ copied to clipboard", err=True)
 
+    from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
+    _nudge()
+
 
 # ── Telemetry commands ────────────────────────────────────────────────────────
 
@@ -2899,6 +2906,9 @@ def impact_cmd(
     if result.get("resolution") == "not_found":
         raise typer.Exit(code=1)
 
+    from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
+    _nudge()
+
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
@@ -2968,6 +2978,9 @@ def endpoints_cmd(
         if copy:
             if _copy_to_clipboard(output):
                 typer.echo("✓ copied to clipboard", err=True)
+
+    from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
+    _nudge()
 
 
 # ── Enterprise Workflow Commands ──────────────────────────────────────────────
@@ -3573,6 +3586,10 @@ def mcp_init(
 
     typer.echo("")
     typer.echo("  Remove:  sourcecode mcp remove")
+
+    # Clear nudge flag: next run finds is_installed=True → no nudge.
+    from sourcecode.mcp_nudge import clear_nudge_flag as _clear_nudge
+    _clear_nudge()
 
 
 @mcp_app.command("status")
