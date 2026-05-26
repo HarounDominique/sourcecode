@@ -556,11 +556,11 @@ class TestFlagSemantics:
     """Flag interactions are honest, deterministic, and clearly documented."""
 
     def test_compact_full_conflict_is_error(self, keycloak_like_repo: Path) -> None:
-        """--compact --full must exit 2 with a clear error message."""
+        """--compact --full must exit 1 with a clear error message (P0-1 fix: all errors → 1)."""
         result = runner.invoke(
             app, [str(keycloak_like_repo), "--compact", "--full"]
         )
-        assert result.exit_code == 2
+        assert result.exit_code == 1
         assert "mutually exclusive" in result.output.lower() or \
                "mutually exclusive" in (result.stderr or "").lower()
 

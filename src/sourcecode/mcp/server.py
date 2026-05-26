@@ -10,8 +10,10 @@ data is the parsed JSON object from the CLI output, not a shell string.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
+import re
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -63,6 +65,29 @@ def _execute(args: list[str]) -> dict | CallToolResult:
     return _ok(result)
 
 
+_DEFAULT_TESTS_TIMEOUT_MS = 15_000
+
+# Regex for MINGW paths: /c/some/path → C:/some/path
+_MINGW_PATH_RE = re.compile(r"^/([a-zA-Z])(/.*)?$")
+
+
+def _normalize_repo_path(path: str) -> str:
+    """Normalize repo_path for cross-platform compatibility (P0-2).
+
+    Handles two Windows-specific formats:
+    - MINGW/Git-Bash: /c/Users/... → C:/Users/...
+    - Backslash:       C:\\Users\\... → C:/Users/...
+    Forward-slash paths (C:/Users/... or /unix/path) pass through unchanged.
+    """
+    m = _MINGW_PATH_RE.match(path)
+    if m:
+        drive = m.group(1).upper()
+        rest = m.group(2) or "/"
+        path = f"{drive}:{rest}"
+    path = path.replace("\\", "/")
+    return path
+
+
 @mcp.tool()
 def get_compact_context(repo_path: str = ".", git_context: bool = False) -> dict:
     """Compact human/LLM summary of a repository (~1000-3000 tokens). USE THIS FIRST.
@@ -76,14 +101,22 @@ def get_compact_context(repo_path: str = ".", git_context: bool = False) -> dict
     repo_path: absolute path to the repository (default: current working directory).
     git_context: include git log and branch context in the analysis.
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    if not isinstance(git_context, bool):
-        return _err("git_context must be boolean", "INVALID_ARGUMENT")
-    args = [repo_path, "--compact"]
-    if git_context:
-        args.append("--git-context")
-    return _execute(args)
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        if not isinstance(git_context, bool):
+            return _err("git_context must be boolean", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        args = [repo_path, "--compact"]
+        if git_context:
+            args.append("--git-context")
+        return _execute(args)
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 @mcp.tool()
@@ -99,14 +132,22 @@ def get_agent_context(repo_path: str = ".", git_context: bool = False) -> dict:
     repo_path: absolute path to the repository (default: current working directory).
     git_context: include git log and branch context in the analysis.
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    if not isinstance(git_context, bool):
-        return _err("git_context must be boolean", "INVALID_ARGUMENT")
-    args = [repo_path, "--agent"]
-    if git_context:
-        args.append("--git-context")
-    return _execute(args)
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        if not isinstance(git_context, bool):
+            return _err("git_context must be boolean", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        args = [repo_path, "--agent"]
+        if git_context:
+            args.append("--git-context")
+        return _execute(args)
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 @mcp.tool()
@@ -125,9 +166,17 @@ def get_endpoints(repo_path: str = ".") -> dict:
     @Authenticated, @PreAuthorize, @Secured, @SecurityRequirement, @M3FiltroSeguridad.
     repo_path: absolute path to the repository (default: current working directory).
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    return _execute(["endpoints", repo_path])
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        return _execute(["endpoints", repo_path])
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 @mcp.tool()
@@ -138,12 +187,20 @@ def get_module_context(repo_path: str = ".", module: str = "") -> dict:
     repo_path: absolute path to the repository root.
     module: subdirectory name relative to repo_path (e.g. 'src/auth', 'api', 'core').
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    if not isinstance(module, str) or not module.strip():
-        return _err("module must be a non-empty string", "INVALID_ARGUMENT")
-    module_path = os.path.join(repo_path, module)
-    return _execute([module_path, "--compact"])
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        if not isinstance(module, str) or not module.strip():
+            return _err("module must be a non-empty string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        module_path = repo_path.rstrip("/") + "/" + module.strip("/")
+        return _execute([module_path, "--compact"])
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 @mcp.tool()
@@ -154,11 +211,19 @@ def get_delta(repo_path: str = ".", since: str = "HEAD~1") -> dict:
     repo_path: absolute path to the repository (default: current working directory).
     since: git ref to diff against (e.g. HEAD~3, main, origin/main).
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    if not isinstance(since, str) or not since.strip():
-        return _err("since must be a non-empty git ref", "INVALID_ARGUMENT")
-    return _execute(["prepare-context", "delta", repo_path, "--since", since])
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        if not isinstance(since, str) or not since.strip():
+            return _err("since must be a non-empty git ref", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        return _execute(["prepare-context", "delta", repo_path, "--since", since])
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 @mcp.tool()
@@ -175,9 +240,17 @@ def get_ir_summary(repo_path: str = ".") -> dict:
 
     repo_path: absolute path to the Java repository (default: current working directory).
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    return _execute(["repo-ir", repo_path, "--summary-only"])
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        return _execute(["repo-ir", repo_path, "--summary-only"])
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 @mcp.tool()
@@ -190,12 +263,20 @@ def fix_bug_context(repo_path: str = ".", symptom: str = "") -> dict:
     symptom: optional error message or class name to focus the file ranking
              (e.g. "NullPointerException in EstructuraRrHhRestController").
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    args = ["prepare-context", "fix-bug", repo_path]
-    if symptom and isinstance(symptom, str) and symptom.strip():
-        args.extend(["--symptom", symptom.strip()])
-    return _execute(args)
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        args = ["prepare-context", "fix-bug", repo_path]
+        if symptom and isinstance(symptom, str) and symptom.strip():
+            args.extend(["--symptom", symptom.strip()])
+        return _execute(args)
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 @mcp.tool()
@@ -208,12 +289,20 @@ def review_pr_context(repo_path: str = ".", since: str = "") -> dict:
     since: git ref to diff against (e.g. HEAD~3, main, origin/main).
            If omitted, diffs against uncommitted changes or HEAD~1 fallback.
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    args = ["prepare-context", "review-pr", repo_path]
-    if since and isinstance(since, str) and since.strip():
-        args.extend(["--since", since.strip()])
-    return _execute(args)
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        args = ["prepare-context", "review-pr", repo_path]
+        if since and isinstance(since, str) and since.strip():
+            args.extend(["--since", since.strip()])
+        return _execute(args)
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 @mcp.tool()
@@ -223,9 +312,17 @@ def onboard_context(repo_path: str = ".") -> dict:
     Maps to: sourcecode prepare-context onboard <repo_path>
     repo_path: absolute path to the repository (default: current working directory).
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    return _execute(["prepare-context", "onboard", repo_path])
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        return _execute(["prepare-context", "onboard", repo_path])
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 @mcp.tool()
@@ -236,9 +333,17 @@ def explain_context(repo_path: str = ".") -> dict:
     Returns: project summary, architecture, entry points, key dependencies.
     repo_path: absolute path to the repository (default: current working directory).
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    return _execute(["prepare-context", "explain", repo_path])
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        return _execute(["prepare-context", "explain", repo_path])
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 @mcp.tool()
@@ -249,9 +354,17 @@ def refactor_context(repo_path: str = ".") -> dict:
     Returns: structural issues, coupling hotspots, improvement opportunities.
     repo_path: absolute path to the repository (default: current working directory).
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    return _execute(["prepare-context", "refactor", repo_path])
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        return _execute(["prepare-context", "refactor", repo_path])
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 @mcp.tool()
@@ -260,15 +373,45 @@ def generate_tests_context(repo_path: str = ".", include_all: bool = False) -> d
 
     Maps to: sourcecode prepare-context generate-tests <repo_path> [--all]
     Returns: test_gaps list of untested files ranked by risk.
+            On large repos (>2000 classes) analysis is bounded by SOURCECODE_TESTS_TIMEOUT_MS
+            (default: 15000 ms). If timeout elapses, returns truncated=true with partial results.
     repo_path: absolute path to the repository (default: current working directory).
     include_all: return full test_gaps list without truncating to top 20.
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    args = ["prepare-context", "generate-tests", repo_path]
-    if include_all:
-        args.append("--all")
-    return _execute(args)
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        if not isinstance(include_all, bool):
+            return _err("include_all must be boolean", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        args = ["prepare-context", "generate-tests", repo_path]
+        if include_all:
+            args.append("--all")
+
+        # P0-3: timeout guard — large repos can stall the stdio transport indefinitely.
+        timeout_ms = int(os.environ.get("SOURCECODE_TESTS_TIMEOUT_MS", str(_DEFAULT_TESTS_TIMEOUT_MS)))
+        timeout_s = timeout_ms / 1000.0
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(_execute, args)
+        done, _not_done = concurrent.futures.wait([future], timeout=timeout_s)
+        if _not_done:
+            executor.shutdown(wait=False)
+            return _ok({
+                "truncated": True,
+                "truncated_reason": f"timeout_{timeout_ms // 1000}s" if timeout_ms >= 1000 else f"timeout_{timeout_ms}ms",
+                "files_analyzed": 0,
+                "results": [],
+            })
+        executor.shutdown(wait=False)
+        return future.result()
+
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 @mcp.tool()
@@ -289,14 +432,22 @@ def get_impact_context(repo_path: str = ".", target: str = "", depth: int = 4) -
     repo_path: absolute path to the Java repository (default: current working directory).
     depth: BFS depth for indirect caller traversal (1–8, default: 4).
     """
-    if not isinstance(repo_path, str):
-        return _err("repo_path must be a string", "INVALID_ARGUMENT")
-    if not isinstance(target, str) or not target.strip():
-        return _err("target must be a non-empty class name or FQN", "INVALID_ARGUMENT")
-    if not isinstance(depth, int) or depth < 1 or depth > 8:
-        return _err("depth must be an integer between 1 and 8", "INVALID_ARGUMENT")
-    args = ["impact", target.strip(), repo_path, "--depth", str(depth)]
-    return _execute(args)
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        if not isinstance(target, str) or not target.strip():
+            return _err("target must be a non-empty class name or FQN", "INVALID_ARGUMENT")
+        if not isinstance(depth, int) or depth < 1 or depth > 8:
+            return _err("depth must be an integer between 1 and 8", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        args = ["impact", target.strip(), repo_path, "--depth", str(depth)]
+        return _execute(args)
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
 
 
 _TELEMETRY_ACTIONS = frozenset({"status", "enable", "disable"})

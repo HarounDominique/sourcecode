@@ -745,7 +745,7 @@ def main(
             "is meant for --agent mode. Use --agent --full for expanded output.",
             err=True,
         )
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=1)
 
     # P0-2 FIX: --full without --compact or --agent has no effect in contract/raw mode.
     # Warn so the user knows the flag is not doing anything.
@@ -3549,6 +3549,7 @@ def mcp_init(
         raise typer.Exit(code=1)
 
     typer.echo("MCP integration active.")
+    typer.echo("  Note:    repo_path debe usar forward slashes: C:/Users/... o /ruta/unix")
     typer.echo("")
 
     # Post-write: validate config and warn if client not running
@@ -3696,6 +3697,7 @@ def mcp_status() -> None:
     typer.echo(sep)
     typer.echo("  Note:    'configured' and 'running' are checked independently.")
     typer.echo("           A running app still needs restart after first-time config.")
+    typer.echo("  Path:    repo_path debe usar forward slashes: C:/Users/... o /ruta/unix")
     typer.echo("  Setup:   sourcecode mcp init")
     typer.echo("  Remove:  sourcecode mcp remove")
 
