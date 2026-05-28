@@ -1118,7 +1118,7 @@ class DependencyAnalyzer:
         try:
             tree = ET.parse(pom)
         except (ET.ParseError, OSError):
-            return [], ["java: error al parsear pom.xml"]
+            return [], ["java: error parsing pom.xml"]
 
         root_elem = tree.getroot()
         ns_match = re.match(r"\{[^}]+\}", root_elem.tag)
@@ -1217,10 +1217,10 @@ class DependencyAnalyzer:
                 try:
                     content = gradle_file.read_text(encoding="utf-8", errors="replace")
                 except OSError:
-                    return [], [f"gradle: error al leer {filename}"]
+                    return [], [f"gradle: error reading {filename}"]
                 props = self._parse_gradle_properties(root, content)
                 records = self._parse_gradle_dependencies(content, props, filename)
-                return records, ["gradle: sin lockfile compatible; dependencias transitivas no disponibles"]
+                return records, ["gradle: no compatible lockfile found; transitive dependencies unavailable"]
         return [], []
 
     def _parse_gradle_properties(self, root: Path, content: str) -> dict[str, str]:

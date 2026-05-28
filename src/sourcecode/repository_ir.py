@@ -1697,6 +1697,9 @@ def _canonical_subsystem_pkg(fqn: str) -> str:
     (even if uppercase) to force at least 2-segment grouping.
     """
     _TOP_LEVEL = {"com", "org", "net", "io", "java", "javax"}
+    # Well-known framework namespaces that are not application boundaries;
+    # go one level deeper (depth 5) so callers get the actual app module.
+    _FRAMEWORK_NS = {"springframework", "apache", "eclipse", "google", "jetbrains"}
     parts: list[str] = []
     for segment in fqn.split("."):
         if "#" in segment or (segment and segment[0].isupper()):
@@ -1705,6 +1708,8 @@ def _canonical_subsystem_pkg(fqn: str) -> str:
     if not parts:
         return fqn.rsplit(".", 1)[0] if "." in fqn else fqn
     if parts[0] in _TOP_LEVEL and len(parts) >= 3:
+        if len(parts) >= 5 and len(parts) > 3 and parts[1] in _FRAMEWORK_NS:
+            return ".".join(parts[:5])
         return ".".join(parts[:3])
     # Prevent bare TLD collapse: "org" or "com" alone as subsystem key is meaningless
     # and groups ALL classes under that TLD into a single giant component.
@@ -3338,7 +3343,7 @@ def compute_blast_radius(
             _seen_mapper_fqns.add(fqn)
             _mapper_entry: dict = {
                 "fqn": fqn,
-                "role": role or "mapper",
+                "role": role or ("mapper" if symbol_kind == "mapper_interface" else "repository"),
                 "source_file": node_dict.get("source_file") or "",
             }
             if canonical != fqn:

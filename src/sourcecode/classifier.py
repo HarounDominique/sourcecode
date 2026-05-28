@@ -118,6 +118,10 @@ class TypeClassifier:
         ):
             return "webapp"
 
+        _SERVERSIDE_TEMPLATE_FRAMEWORKS = frozenset({"Thymeleaf", "FreeMarker"})
+        if framework_names & _SERVERSIDE_TEMPLATE_FRAMEWORKS:
+            return "web_mvc"
+
         if framework_names & _API_FRAMEWORKS:
             return "api"
 

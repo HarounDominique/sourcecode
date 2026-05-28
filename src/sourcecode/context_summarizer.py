@@ -28,6 +28,7 @@ _STACK_LABELS: dict[str, str] = {
 
 _TYPE_LABELS: dict[str, str] = {
     "api": "REST API",
+    "web_mvc": "Spring MVC web app",
     "webapp": "Web app",
     "fullstack": "Full-stack app",
     "cli": "CLI tool",

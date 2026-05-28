@@ -23,6 +23,7 @@ _MAX_ANNOTATION_ENTRY_POINTS = 1000
 _REST_CONTROLLER_RE = re.compile(r'@RestController\b')
 _MVC_CONTROLLER_RE = re.compile(r'@Controller\b')
 _REQUEST_MAPPING_RE = re.compile(r'@RequestMapping\b')
+_ANY_MAPPING_RE = re.compile(r'@(?:Request|Get|Post|Put|Delete|Patch)Mapping\b')
 _CONTROLLER_ADVICE_RE = re.compile(r'@ControllerAdvice\b')
 _WEB_FILTER_RE = re.compile(r'@WebFilter\b')
 _FILTER_BEAN_RE = re.compile(r'FilterRegistrationBean\b')
@@ -298,6 +299,10 @@ class JavaDetector(AbstractDetector):
             frameworks.append(FrameworkDetection(name="Jakarta EE", source=source))
         if "mybatis" in text:
             frameworks.append(FrameworkDetection(name="MyBatis", source=source))
+        if "thymeleaf" in text:
+            frameworks.append(FrameworkDetection(name="Thymeleaf", source=source))
+        if "freemarker" in text:
+            frameworks.append(FrameworkDetection(name="FreeMarker", source=source))
         if "spring-boot-starter-security" in text or "spring-security-core" in text:
             frameworks.append(FrameworkDetection(name="Spring Security", source=source))
         if "spring-boot-starter-data-jpa" in text or "spring-data-jpa" in text:
@@ -470,7 +475,7 @@ class JavaDetector(AbstractDetector):
                 path=rel_path, stack="java", kind="exception_handler",
                 source="annotation", confidence="medium",
             )]
-        if _MVC_CONTROLLER_RE.search(content) and _REQUEST_MAPPING_RE.search(content):
+        if _MVC_CONTROLLER_RE.search(content) and _ANY_MAPPING_RE.search(content):
             http_path_match = _HTTP_PATH_RE.search(content)
             http_path = http_path_match.group(1) if http_path_match else None
             verb_match = _REQUEST_METHOD_VERB_RE.search(content)

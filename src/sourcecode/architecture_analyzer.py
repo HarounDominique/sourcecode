@@ -152,14 +152,15 @@ LAYER_PATTERNS: dict[str, dict[str, list[str]]] = {
 
 # Higher value = wins when score ties
 _PATTERN_PRIORITY: dict[str, int] = {
-    "cqrs":       8,
-    "clean":      7,
-    "onion":      6,
-    "hexagonal":  5,
-    "monorepo":   4,
-    "mvc":        3,
-    "layered":    2,
-    "fullstack":  1,
+    "cqrs":               8,
+    "clean":              7,
+    "onion":              6,
+    "hexagonal":          5,
+    "monorepo":           4,
+    "spring_mvc_layered": 3,
+    "mvc":                3,
+    "layered":            2,
+    "fullstack":          1,
 }
 
 
@@ -248,9 +249,9 @@ class ArchitectureAnalyzer:
         pattern, layers = self._detect_layers(filtered)
         if pattern in (None, "flat", "unknown"):
             if pattern == "flat":
-                limitations.append("Patron de capas no detectado: proyecto con estructura plana")
+                limitations.append("Layer pattern not detected: project has a flat directory structure")
             elif pattern == "unknown":
-                limitations.append("Patron de capas no reconocido: estructura de directorios sin senales claras")
+                limitations.append("Unrecognized layer pattern: directory structure has no clear architectural signals")
 
         # Step 3b: monorepo override — workspace config is hard evidence.
         # Overrides all weak inferred patterns; only truly specialised patterns
@@ -269,7 +270,7 @@ class ArchitectureAnalyzer:
                 pattern = "monorepo"
                 layers = mono_layers
                 limitations.append(
-                    "Workspace config detectado — arquitectura refleja topologia de paquetes"
+                    "Workspace config detected — architecture reflects package topology"
                 )
                 ws_files = [p for p in sm.file_paths if p.split("/")[-1] in _WORKSPACE_CONFIG_FILES]
                 evidence.append({
@@ -570,27 +571,75 @@ class ArchitectureAnalyzer:
                 ))
             return best_pattern, layers
 
-        # 2. Microservices structural detection (before file-naming heuristics)
+        # 2. Spring domain-module detection (petclinic-style: deep common prefix + feature dirs)
+        spring_result = self._detect_spring_domain_modules(source_paths)
+        if spring_result is not None:
+            return spring_result
+
+        # 3. Microservices structural detection (before file-naming heuristics)
         microservices_result = self._detect_microservices(source_paths)
         if microservices_result is not None:
             return microservices_result
 
-        # 3. Functional file-naming heuristic: *_analyzer.py, cli.py, schema.py, …
+        # 5. Functional file-naming heuristic: *_analyzer.py, cli.py, schema.py, …
         func_result = self._detect_layered_functional(source_paths)
         if func_result is not None:
             return func_result
 
-        # 4. Modular sub-package heuristic: ≥2 distinct named sub-packages
+        # 6. Modular sub-package heuristic: ≥2 distinct named sub-packages
         modular_result = self._detect_modular(source_paths)
         if modular_result is not None:
             return modular_result
 
-        # 5. Fallback: flat (shallow) vs truly unknown (deep but unrecognised)
+        # 7. Fallback: flat (shallow) vs truly unknown (deep but unrecognised)
         max_depth = max(
             (len(p.replace("\\", "/").split("/")) - 1 for p in source_paths),
             default=0,
         )
         return ("flat" if max_depth <= 2 else "unknown"), []
+
+    def _detect_spring_domain_modules(
+        self, paths: list[str]
+    ) -> Optional[tuple[str, list[ArchitectureLayer]]]:
+        """Detect Spring Boot domain-organized packages (petclinic-style).
+
+        When all source paths share a deep common package prefix
+        (e.g. src/main/java/org/springframework/samples/petclinic/),
+        strips that prefix and detects feature/domain modules in the remainder.
+        Requires ≥3 distinct domain directories to avoid false positives.
+        """
+        if len(paths) < 6:
+            return None
+
+        parts_list = [p.replace("\\", "/").split("/") for p in paths]
+        min_depth = min(len(p) for p in parts_list)
+        common_depth = 0
+        for i in range(min_depth - 1):
+            seg = parts_list[0][i]
+            if all(pl[i] == seg for pl in parts_list):
+                common_depth = i + 1
+            else:
+                break
+
+        if common_depth < 3:
+            return None
+
+        module_files: dict[str, list[str]] = {}
+        for orig, pl in zip(paths, parts_list):
+            remaining = pl[common_depth:]
+            if remaining and remaining[0] not in _GENERIC_NAMES:
+                module_files.setdefault(remaining[0], []).append(orig)
+
+        meaningful = {k: v for k, v in module_files.items() if len(v) >= 2}
+        if len(meaningful) < 3:
+            return None
+
+        return "spring_mvc_layered", [
+            ArchitectureLayer(
+                name=k, pattern="spring_mvc_layered", files=v, confidence="medium"
+            )
+            for k, v in meaningful.items()
+        ]
 
     def _detect_microservices(
         self, paths: list[str]

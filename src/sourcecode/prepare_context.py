@@ -981,12 +981,18 @@ class TaskContextBuilder:
 
             dep_records, dep_summary = DependencyAnalyzer().analyze(self.root)
             primary_eco = stacks[0].stack if stacks else ""
-            direct = [
+            _direct_raw = [
                 d for d in dep_records
                 if d.scope != "transitive" and d.source in {"manifest", "lockfile"}
                 and (d.role or "unknown") in {"runtime", "parsing", "serialization", "observability", "infra"}
                 and d.scope not in {"dev"}
             ]
+            _seen_dep: set[str] = set()
+            direct = []
+            for _d in _direct_raw:
+                if _d.name not in _seen_dep:
+                    _seen_dep.add(_d.name)
+                    direct.append(_d)
             # Rank by framework centrality: core infra (ORM, Spring) > serialization > other.
             # Penalise vendored tooling (closure-compiler, shaded utilities) so that
             # Hibernate/JPA/Solr appear before minor build-time dependencies.
