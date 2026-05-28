@@ -88,6 +88,27 @@ def _normalize_repo_path(path: str) -> str:
     return path
 
 
+def _check_repo_path(path: str) -> "CallToolResult | None":
+    """H-05: Validate repo_path exists and is a directory before executing.
+
+    Returns a structured CallToolResult(isError=True) when the path is invalid,
+    or None when the path is valid. Must be called after _normalize_repo_path().
+    Early validation prevents the MCP server from hanging when the CLI exits
+    non-zero with an empty stdout (error went to stderr, not captured by runner).
+    """
+    if not os.path.exists(path):
+        return _err(
+            f"directory_not_found: '{path}' does not exist.",
+            "DIRECTORY_NOT_FOUND",
+        )
+    if not os.path.isdir(path):
+        return _err(
+            f"not_a_directory: '{path}' is not a directory.",
+            "NOT_A_DIRECTORY",
+        )
+    return None
+
+
 @mcp.tool()
 def get_compact_context(repo_path: str = ".", git_context: bool = False) -> dict:
     """Compact human/LLM summary of a repository (~1000-3000 tokens). USE THIS FIRST.
@@ -108,6 +129,9 @@ def get_compact_context(repo_path: str = ".", git_context: bool = False) -> dict
         if not isinstance(git_context, bool):
             return _err("git_context must be boolean", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         args = [repo_path, "--compact"]
         if git_context:
             args.append("--git-context")
@@ -139,6 +163,9 @@ def get_agent_context(repo_path: str = ".", git_context: bool = False) -> dict:
         if not isinstance(git_context, bool):
             return _err("git_context must be boolean", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         args = [repo_path, "--agent"]
         if git_context:
             args.append("--git-context")
@@ -174,6 +201,9 @@ def get_endpoints(repo_path: str = ".") -> dict:
         if not isinstance(repo_path, str):
             return _err("repo_path must be a string", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         return _execute(["endpoints", repo_path])
     except Exception as exc:
         return _err(
@@ -197,6 +227,9 @@ def get_module_context(repo_path: str = ".", module: str = "") -> dict:
         if not isinstance(module, str) or not module.strip():
             return _err("module must be a non-empty string", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         module_path = repo_path.rstrip("/") + "/" + module.strip("/")
         return _execute([module_path, "--compact"])
     except Exception as exc:
@@ -221,6 +254,9 @@ def get_delta(repo_path: str = ".", since: str = "HEAD~1") -> dict:
         if not isinstance(since, str) or not since.strip():
             return _err("since must be a non-empty git ref", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         return _execute(["prepare-context", "delta", repo_path, "--since", since])
     except Exception as exc:
         return _err(
@@ -248,6 +284,9 @@ def get_ir_summary(repo_path: str = ".") -> dict:
         if not isinstance(repo_path, str):
             return _err("repo_path must be a string", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         return _execute(["repo-ir", repo_path, "--summary-only"])
     except Exception as exc:
         return _err(
@@ -271,6 +310,9 @@ def fix_bug_context(repo_path: str = ".", symptom: str = "") -> dict:
         if not isinstance(repo_path, str):
             return _err("repo_path must be a string", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         args = ["prepare-context", "fix-bug", repo_path]
         if symptom and isinstance(symptom, str) and symptom.strip():
             args.extend(["--symptom", symptom.strip()])
@@ -297,6 +339,9 @@ def review_pr_context(repo_path: str = ".", since: str = "") -> dict:
         if not isinstance(repo_path, str):
             return _err("repo_path must be a string", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         args = ["prepare-context", "review-pr", repo_path]
         if since and isinstance(since, str) and since.strip():
             args.extend(["--since", since.strip()])
@@ -320,6 +365,9 @@ def onboard_context(repo_path: str = ".") -> dict:
         if not isinstance(repo_path, str):
             return _err("repo_path must be a string", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         return _execute(["prepare-context", "onboard", repo_path])
     except Exception as exc:
         return _err(
@@ -341,6 +389,9 @@ def explain_context(repo_path: str = ".") -> dict:
         if not isinstance(repo_path, str):
             return _err("repo_path must be a string", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         return _execute(["prepare-context", "explain", repo_path])
     except Exception as exc:
         return _err(
@@ -362,6 +413,9 @@ def refactor_context(repo_path: str = ".") -> dict:
         if not isinstance(repo_path, str):
             return _err("repo_path must be a string", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         return _execute(["prepare-context", "refactor", repo_path])
     except Exception as exc:
         return _err(
@@ -388,6 +442,9 @@ def generate_tests_context(repo_path: str = ".", include_all: bool = False) -> d
         if not isinstance(include_all, bool):
             return _err("include_all must be boolean", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         args = ["prepare-context", "generate-tests", repo_path]
         if include_all:
             args.append("--all")
@@ -444,6 +501,9 @@ def get_impact_context(repo_path: str = ".", target: str = "", depth: int = 4) -
         if not isinstance(depth, int) or depth < 1 or depth > 8:
             return _err("depth must be an integer between 1 and 8", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         args = ["impact", target.strip(), repo_path, "--depth", str(depth)]
         return _execute(args)
     except Exception as exc:
@@ -475,6 +535,9 @@ def modernize_context(repo_path: str = ".", format: str = "json") -> dict:
         if not isinstance(format, str) or format not in ("json", "yaml"):
             return _err("format must be 'json' or 'yaml'", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
         return _execute(["modernize", repo_path])
     except Exception as exc:
         return _err(

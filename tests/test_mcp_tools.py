@@ -23,6 +23,16 @@ from sourcecode.mcp import server  # noqa: E402 — after importorskip guard
 _PARSED_OUTPUT = {"project": {"primary_stack": "python"}}
 _SUCCESS_KEYS = frozenset({"success", "data", "error"})
 _RUNNER_PATH = "sourcecode.mcp.server.run_command"
+_CHECK_PATH = "sourcecode.mcp.server._check_repo_path"
+
+
+@pytest.fixture(autouse=True)
+def _bypass_path_check(monkeypatch):
+    """Unit tests use fake paths like /some/repo that don't exist on disk.
+    Bypass the filesystem check so tests only need to mock run_command.
+    H-05 path validation is covered by test_bug_fixes_v13130.py with real paths.
+    """
+    monkeypatch.setattr("sourcecode.mcp.server._check_repo_path", lambda p: None)
 
 
 def _assert_success(result: dict) -> None:

@@ -1524,6 +1524,31 @@ def _get_git_old_content(git_root: Path, rel_path: str, since: str) -> Optional[
     return None
 
 
+def _get_git_changed_files(root: "Path", since: str) -> "Optional[frozenset[str]]":
+    """H-04: Return set of paths changed between `since` and HEAD, or None on failure.
+
+    One `git diff --name-only` call replaces O(n) `git show` calls — only files
+    in the returned set need old-content fetched for symbol diff computation.
+    Returns None when git is unavailable or the ref cannot be resolved; the
+    caller must fall back to the original per-file fetch in that case.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", since, "HEAD"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return frozenset(p.strip() for p in result.stdout.splitlines() if p.strip())
+    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Phase 5 — Evidence Engine
 # ---------------------------------------------------------------------------
@@ -2511,6 +2536,12 @@ def build_repo_ir(
     all_changed: list[ChangedSymbol] = []
     all_route_diffs: list[dict] = []
 
+    # H-04: prefetch changed-file list once; avoids O(n) `git show` calls.
+    # _since_changed=None means git unavailable → fall back to per-file fetch.
+    _since_changed: "Optional[frozenset[str]]" = None
+    if since:
+        _since_changed = _get_git_changed_files(root, since)
+
     for rel_path in sorted(file_paths):
         abs_path = root / rel_path
         try:
@@ -2520,7 +2551,11 @@ def build_repo_ir(
 
         old_source: Optional[str] = None
         if since:
-            old_source = _get_git_old_content(root, rel_path, since)
+            # Only fetch old content for files known to have changed.
+            # Unchanged files have no diff entries — skip git show entirely.
+            _file_changed = _since_changed is None or rel_path in _since_changed
+            if _file_changed:
+                old_source = _get_git_old_content(root, rel_path, since)
 
         package, symbols, raw_imports = _extract_symbols(source, rel_path)
         relations = _build_relations(symbols, raw_imports, source, package, rel_path)
@@ -2529,7 +2564,8 @@ def build_repo_ir(
             _, old_symbols, _ = _extract_symbols(old_source, rel_path)
             all_changed.extend(_diff_symbols(old_symbols, symbols))
             all_route_diffs.extend(_diff_routes(old_symbols, symbols))
-        elif since:
+        elif since and (_since_changed is None or rel_path in _since_changed):
+            # File is new in since..HEAD (not in old ref) — treat as added.
             for sym in symbols:
                 all_changed.append(ChangedSymbol(
                     symbol=sym.symbol,

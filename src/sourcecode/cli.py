@@ -171,6 +171,8 @@ _SUBCOMMANDS: frozenset[str] = frozenset(
         "repo-ir", "mcp", "endpoints", "impact",
         # Enterprise workflow commands
         "onboard", "modernize", "fix-bug", "review-pr",
+        # License
+        "activate",
     }
 )
 
@@ -251,6 +253,35 @@ def _emit_error_json(error: str, message: str, **context: object) -> None:
     payload.update(context)
     _sys.stderr.write(_json.dumps(payload, ensure_ascii=False) + "\n")
     _sys.stderr.flush()
+
+
+# H-06: Intercept Click-level UsageError (unknown options, bad args) and emit JSON.
+# Click's default show() writes "Error: No such option: --foo" as plain text.
+# Automation consumers need JSON on stderr regardless of how the error originated.
+try:
+    import click.exceptions as _click_exc
+
+    def _json_click_usage_error_show(self: Any, file: Any = None) -> None:  # type: ignore[override]
+        import json as _je
+        import sys as _jse
+        _code_map = {
+            "NoSuchOption": "invalid_option",
+            "BadOptionUsage": "invalid_option",
+            "BadParameter": "bad_parameter",
+            "MissingParameter": "missing_required",
+            "BadArgumentUsage": "bad_argument",
+        }
+        code = _code_map.get(type(self).__name__, "invalid_option")
+        payload: dict[str, object] = {"error": code, "message": self.format_message()}
+        _opt = getattr(self, "option_name", None) or getattr(self, "param_hint", None)
+        if _opt:
+            payload["flag"] = str(_opt).strip("'\"")
+        _jse.stderr.write(_je.dumps(payload, ensure_ascii=False) + "\n")
+        _jse.stderr.flush()
+
+    _click_exc.UsageError.show = _json_click_usage_error_show  # type: ignore[method-assign]
+except Exception:
+    pass  # click unavailable — plain-text fallback
 
 
 def _copy_to_clipboard(content: str) -> bool:
@@ -2165,6 +2196,12 @@ def prepare_context_cmd(
         )
         raise typer.Exit(code=1)
 
+    # Pro gate: generate-tests and delta require an active Pro license.
+    _PRO_TASKS: frozenset[str] = frozenset({"generate-tests", "delta"})
+    if task in _PRO_TASKS:
+        from sourcecode.license import require_pro as _require_pro
+        _require_pro(task)
+
     # Validate --format: only "json" and "github-comment" are valid for prepare-context.
     # "yaml" is intentionally NOT supported here (use main command for yaml output).
     # Invalid values must error loudly — silently falling through to JSON is a lie.
@@ -2222,7 +2259,49 @@ def prepare_context_cmd(
             _sys.stderr.flush()
     _t0 = _time.perf_counter()
     try:
-        output = builder.build(task, since=since, symptom=symptom, fast=fast, include_config=include_config, all_gaps=all_gaps)
+        # H-02: apply timeout for generate-tests — large repos can stall indefinitely.
+        # Mirrors SOURCECODE_TESTS_TIMEOUT_MS used by the MCP generate_tests_context tool.
+        if task == "generate-tests" and not fast:
+            import concurrent.futures as _cf
+            import os as _os_gt
+            _timeout_ms = int(_os_gt.environ.get("SOURCECODE_TESTS_TIMEOUT_MS", "30000"))
+            _timeout_s = _timeout_ms / 1000.0
+            _ex = _cf.ThreadPoolExecutor(max_workers=1)
+            _fut = _ex.submit(
+                builder.build, task,
+                since=since, symptom=symptom, fast=fast,
+                include_config=include_config, all_gaps=all_gaps,
+            )
+            _done_set, _nd_set = _cf.wait([_fut], timeout=_timeout_s)
+            _ex.shutdown(wait=False)
+            if _nd_set:
+                import sys as _sys_gt
+                if _sys_gt.stderr.isatty():
+                    _sys_gt.stderr.write(
+                        f"[generate-tests] timeout after {_timeout_ms}ms — returning partial result\n"
+                    )
+                    _sys_gt.stderr.flush()
+                from sourcecode.prepare_context import TaskOutput as _TO
+                output = _TO(
+                    task=task,
+                    goal=TASKS[task].goal,
+                    project_summary=None,
+                    architecture_summary=None,
+                    relevant_files=[],
+                    suspected_areas=[],
+                    improvement_opportunities=[],
+                    test_gaps=[],
+                    key_dependencies=[],
+                    code_notes_summary=None,
+                    limitations=[f"generate-tests timed out after {_timeout_ms}ms"],
+                    truncated=True,
+                    truncated_reason=f"timeout_{_timeout_ms}ms",
+                    confidence="low",
+                )
+            else:
+                output = _fut.result()
+        else:
+            output = builder.build(task, since=since, symptom=symptom, fast=fast, include_config=include_config, all_gaps=all_gaps)
     finally:
         _progress.finish()
     _t_total = (_time.perf_counter() - _t0) * 1000
@@ -2531,6 +2610,19 @@ def prepare_context_cmd(
         out["warnings"] = output.warnings
     if llm_prompt:
         out["llm_prompt"] = builder.render_prompt(output)
+
+    # H-01: fast-mode analysis transparency — consumer must not confuse "not analyzed"
+    # with "analyzed and found nothing". Fields that were never computed are absent or null,
+    # not zero. analysis_mode and skipped_analyzers make the omission explicit.
+    if fast:
+        out["analysis_mode"] = "fast"
+        _skipped: list[str] = ["deep_content_scan"]
+        _spec = TASKS.get(task)
+        if _spec and _spec.enable_code_notes:
+            _skipped.append("code_notes")
+        if task == "generate-tests":
+            _skipped.append("test_gap_discovery")
+        out["skipped_analyzers"] = _skipped
 
     # P0-1: Apply output budget per task — safety net for large repos.
     from sourcecode.output_budget import (
@@ -2864,6 +2956,9 @@ def impact_cmd(
       sourcecode impact org.keycloak.services.DefaultKeycloakSession /path/to/keycloak
       sourcecode impact UserService --depth 6 --output impact.json
     """
+    from sourcecode.license import require_pro as _require_pro
+    _require_pro("impact")
+
     import json as _json
     import sys as _sys
 
@@ -2924,9 +3019,11 @@ def impact_cmd(
             if _copy_to_clipboard(output):
                 typer.echo("✓ copied to clipboard", err=True)
 
-    # Non-zero exit when target not found
+    # H-03: resolution=not_found is a valid structured answer, not an infra failure.
+    # Exit 0 so pipelines can parse the JSON without treating it as an error.
+    # Exit 1 is reserved for path-not-found, I/O failures, and real infra errors.
     if result.get("resolution") == "not_found":
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=0)
 
     from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
     _nudge()
@@ -3246,6 +3343,9 @@ def modernize_cmd(
       sourcecode onboard .         — Architecture overview first
       sourcecode impact <target>   — Verify impact before touching a hotspot
     """
+    from sourcecode.license import require_pro as _require_pro
+    _require_pro("modernize")
+
     import json as _json
     import sys as _sys
     from sourcecode.repository_ir import build_repo_ir, find_java_files, apply_ir_size_limits
@@ -3418,6 +3518,24 @@ def modernize_cmd(
 
 # ── version ───────────────────────────────────────────────────────────────────
 
+@app.command("activate")
+def activate_cmd(
+    license_key: str = typer.Argument(..., help="Your Pro license key"),
+) -> None:
+    """Activate a Pro license key.
+
+    \b
+    Validates the key against the license server and writes
+    ~/.sourcecode/license.json.
+
+    \b
+    Examples:
+      sourcecode activate SC-XXXX-XXXX-XXXX
+    """
+    from sourcecode.license import activate_license as _activate
+    _activate(license_key)
+
+
 @app.command("version")
 def version_cmd() -> None:
     """Show version and exit."""
@@ -3471,6 +3589,9 @@ def mcp_serve() -> None:
         }
       }
     """
+    from sourcecode.license import require_pro as _require_pro
+    _require_pro("mcp serve")
+
     import logging
     import sys as _sys
 
