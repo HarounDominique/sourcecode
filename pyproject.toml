@@ -8,7 +8,8 @@ version = "1.32.3"
 description = "Deterministic codebase context for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { file = "LICENSE" }
+license-expression = "Apache-2.0"
+license-files = ["LICENSE"]
 keywords = ["ai", "llm", "agents", "context", "codebase", "developer-tools"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -54,6 +55,17 @@ mcp = [
 [[tool.mypy.overrides]]
 module = ["tree_sitter", "tree_sitter_typescript", "tree_sitter_javascript"]
 ignore_missing_imports = true
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "tests/",
+    "docs/",
+    "/AUDIT*.md",
+    "/.agents",
+    "/.continue-here.md",
+    "/.sourcecode-cache",
+    "/run_cli.py",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sourcecode"]
