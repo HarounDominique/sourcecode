@@ -110,6 +110,42 @@ def _check_repo_path(path: str) -> "CallToolResult | None":
 
 
 @mcp.tool()
+def get_cold_start_context(repo_path: str = ".") -> dict:
+    """Instant session bootstrap from persisted Repository Intelligence Snapshot (RIS).
+
+    CALL THIS FIRST at the start of every MCP session.  Returns cached structural
+    context built from prior analysis runs — zero re-analysis cost.
+
+    status values:
+      "cold_start_ready"  — RIS exists and matches the current git HEAD.
+      "cold_start_stale"  — RIS exists but HEAD has changed since last analysis.
+                            Data is still useful; run get_compact_context to refresh.
+      "no_ris"            — No RIS yet for this repo; run get_compact_context first.
+
+    Returns: status, repo_id, git_head, stale (bool), last_updated_at,
+             summary (compact snapshot), entrypoints, endpoints, hotspots.
+
+    repo_path: absolute path to the repository (default: current working directory).
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
+        from pathlib import Path as _Path
+        from sourcecode.ris import get_cold_start_context as _gcs
+        return _ok(_gcs(_Path(repo_path)))
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
+@mcp.tool()
 def get_compact_context(repo_path: str = ".", git_context: bool = False) -> dict:
     """Compact human/LLM summary of a repository (~1000-3000 tokens). USE THIS FIRST.
 

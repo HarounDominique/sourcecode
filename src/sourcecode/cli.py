@@ -2049,6 +2049,15 @@ def main(
         except Exception:
             pass  # non-fatal: cache write failure
 
+    # Update RIS with aggregated snapshot data (non-fatal side-effect).
+    if not no_cache and not _pipeline_error and _core_key:
+        try:
+            from sourcecode.serializer import core_view as _ris_core_view
+            from sourcecode.ris import maybe_update_ris as _ris_update
+            _ris_update(target, _ris_core_view(sm), _git_sha)
+        except Exception:
+            pass
+
     if _pipeline_error:
         raise typer.Exit(code=2)
 
@@ -3185,6 +3194,14 @@ def endpoints_cmd(
         raise typer.Exit(code=1)
 
     data = _extract_java_endpoints(target)
+
+    # Update RIS api_surface section (non-fatal side-effect).
+    try:
+        from sourcecode.ris import update_ris_api_surface as _ris_ep
+        _ris_ep(target, data)
+    except Exception:
+        pass
+
     output = _serialize_dict(data, format)
 
     if output_path is not None:
