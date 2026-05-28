@@ -781,6 +781,11 @@ def main(
             err=True,
         )
 
+    # Pro gate for --full: removing truncation limits is enterprise-scale functionality.
+    if full:
+        from sourcecode.license import require_feature as _req_full
+        _req_full("--full")
+
     # P0-2 FIX: --compact and --full are mutually exclusive.
     # compact is designed to be a bounded summary; --full removes truncation limits,
     # which contradicts compact's purpose. Use --agent --full for expanded output.
@@ -2672,6 +2677,32 @@ def prepare_context_cmd(
     _pc_budget = _pc_budgets.get(task, BUDGET_EXPLAIN)
     out = _pc_trim(out, _pc_budget, label=task)
 
+    # Free-tier limits: fix-bug (top-5 files) and review-pr (lightweight).
+    # Pro users get the full analysis; free users get enough to see the value.
+    if task in ("fix-bug", "review-pr"):
+        from sourcecode.license import can_use as _tier_can_use
+        if not _tier_can_use(task):
+            _FREE_FILE_LIMIT = 5
+            if task == "fix-bug":
+                _rf = out.get("relevant_files")
+                if isinstance(_rf, list) and len(_rf) > _FREE_FILE_LIMIT:
+                    out["relevant_files"] = _rf[:_FREE_FILE_LIMIT]
+                    out["tier"] = "free"
+                    out["tier_note"] = (
+                        f"Showing top {_FREE_FILE_LIMIT} files. "
+                        "Upgrade to Pro for complete risk-ranked analysis across all files."
+                    )
+            else:  # review-pr
+                for _cap_field in ("runtime_changes", "execution_paths", "review_hotspots", "suggested_review_order"):
+                    _fval = out.get(_cap_field)
+                    if isinstance(_fval, list) and len(_fval) > _FREE_FILE_LIMIT:
+                        out[_cap_field] = _fval[:_FREE_FILE_LIMIT]
+                out["tier"] = "free"
+                out["tier_note"] = (
+                    "Lightweight review. Upgrade to Pro for full blast-radius analysis, "
+                    "complete execution paths, and CI-grade risk scoring."
+                )
+
     if format == "github-comment" and task == "review-pr":
         from sourcecode.pr_comment_renderer import render_github_comment
         _pc_content = render_github_comment(out)
@@ -3373,13 +3404,11 @@ def modernize_cmd(
       sourcecode onboard .         — Architecture overview first
       sourcecode impact <target>   — Verify impact before touching a hotspot
     """
-    from sourcecode.license import require_pro as _require_pro
-    _require_pro("modernize")
-
     import json as _json
     import sys as _sys
     from sourcecode.repository_ir import build_repo_ir, find_java_files, apply_ir_size_limits
     from sourcecode.output_budget import trim_to_budget, BUDGET_ONBOARD
+    from sourcecode.license import can_use as _mod_can_use
 
     root = path.resolve()
     if not root.is_dir():
@@ -3481,52 +3510,73 @@ def modernize_cmd(
         key=lambda s: -len(s.get("members") or []),
     )[:10]
 
-    result = {
-        "workflow": "modernize",
-        "path": str(root),
-        "summary": {
-            "total_classes": len([n for n in graph_nodes if n.get("type") in ("class", "interface")]),
-            "total_subsystems": len(subsystems),
-            "high_coupling_nodes": len(coupling_nodes),
-            "dead_zone_candidates": len(dead_zones),
-        },
-        "hotspot_candidates": hotspots,
-        "high_coupling_nodes": [
-            {"fqn": n["fqn"], "in_degree": n.get("in_degree", 0), "role": n.get("role", "other")}
-            for n in coupling_nodes
-        ],
-        "dead_zone_candidates": [
-            {"fqn": n["fqn"], "type": n.get("type", ""), "role": n.get("role", "other")}
-            for n in dead_zones
-        ],
-        "subsystem_summary": [
-            {
-                "label": s.get("label") or s.get("name") or "",
-                "package_prefix": s.get("package_prefix") or s.get("pkg") or "",
-                "member_count": len(s.get("members") or []),
-            }
-            for s in subsystems[:15]
-        ],
-        "cross_module_tangles": [
-            {
-                "label": s.get("label") or s.get("name") or "",
-                "member_count": len(s.get("members") or []),
-            }
-            for s in tangle_modules
-        ],
-        # BUG-05 fix: don't recommend "Start with hotspot_candidates" when the list is empty.
-        # hotspots filters by role=service/repository/controller; annotation types and
-        # value objects end up in high_coupling_nodes instead.
-        "recommendation": (
-            (
-                "Start with hotspot_candidates (high fan-in = highest blast radius). "
-                if hotspots else
-                "high_coupling_nodes shows the most-referenced classes — start there. "
-            )
-            + "Dead zones are safe to remove or refactor. "
-            + "Cross-module tangles indicate coupling worth decomposing."
-        ),
+    _summary = {
+        "total_classes": len([n for n in graph_nodes if n.get("type") in ("class", "interface")]),
+        "total_subsystems": len(subsystems),
+        "high_coupling_nodes": len(coupling_nodes),
+        "dead_zone_candidates": len(dead_zones),
     }
+    _subsystem_summary = [
+        {
+            "label": s.get("label") or s.get("name") or "",
+            "package_prefix": s.get("package_prefix") or s.get("pkg") or "",
+            "member_count": len(s.get("members") or []),
+        }
+        for s in subsystems[:15]
+    ]
+
+    if not _mod_can_use("modernize"):
+        # Free tier: structural discovery only — no dead zones, tangles, or full refactor list.
+        result = {
+            "workflow": "modernize",
+            "path": str(root),
+            "tier": "free",
+            "tier_note": (
+                "Upgrade to Pro for full analysis: dead zones, dependency tangles, "
+                "refactor candidates ranked by git churn, and complete coupling graphs."
+            ),
+            "summary": _summary,
+            "subsystem_summary": _subsystem_summary,
+            "hotspot_candidates": hotspots[:3],
+            "high_coupling_nodes": [
+                {"fqn": n["fqn"], "in_degree": n.get("in_degree", 0), "role": n.get("role", "other")}
+                for n in coupling_nodes[:3]
+            ],
+        }
+    else:
+        # Pro tier: full analysis.
+        result = {
+            "workflow": "modernize",
+            "path": str(root),
+            "summary": _summary,
+            "hotspot_candidates": hotspots,
+            "high_coupling_nodes": [
+                {"fqn": n["fqn"], "in_degree": n.get("in_degree", 0), "role": n.get("role", "other")}
+                for n in coupling_nodes
+            ],
+            "dead_zone_candidates": [
+                {"fqn": n["fqn"], "type": n.get("type", ""), "role": n.get("role", "other")}
+                for n in dead_zones
+            ],
+            "subsystem_summary": _subsystem_summary,
+            "cross_module_tangles": [
+                {
+                    "label": s.get("label") or s.get("name") or "",
+                    "member_count": len(s.get("members") or []),
+                }
+                for s in tangle_modules
+            ],
+            # BUG-05 fix: don't recommend "Start with hotspot_candidates" when the list is empty.
+            "recommendation": (
+                (
+                    "Start with hotspot_candidates (high fan-in = highest blast radius). "
+                    if hotspots else
+                    "high_coupling_nodes shows the most-referenced classes — start there. "
+                )
+                + "Dead zones are safe to remove or refactor. "
+                + "Cross-module tangles indicate coupling worth decomposing."
+            ),
+        }
 
     result = trim_to_budget(result, BUDGET_ONBOARD, label="modernize")
     output = _json.dumps(result, indent=2, ensure_ascii=False)
@@ -3619,9 +3669,6 @@ def mcp_serve() -> None:
         }
       }
     """
-    from sourcecode.license import require_pro as _require_pro
-    _require_pro("mcp serve")
-
     import logging
     import sys as _sys
 

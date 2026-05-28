@@ -3,7 +3,7 @@
 Flow:
   1. Module imported → _init() loads ~/.sourcecode/license.json (if present)
   2. is_pro set globally (True when plan == "pro")
-  3. Pro commands call require_pro(feature_name) at entry — exits 1 if not Pro
+  3. Pro commands call require_feature(feature_name) at entry — exits 1 if not Pro
   4. `sourcecode activate <key>` calls activate_license(key) — validates via
      Edge Function, writes ~/.sourcecode/license.json, exits 0 on success
   5. Cached license is re-validated every 24 h (online); network errors keep
@@ -37,6 +37,53 @@ _SUPABASE_ANON_KEY: str = os.environ.get(
 _LICENSE_DIR: Path = Path.home() / ".sourcecode"
 _LICENSE_FILE: Path = _LICENSE_DIR / "license.json"
 _CACHE_TTL_SECONDS: int = 86400  # 24 hours
+
+# ---------------------------------------------------------------------------
+# Per-feature descriptions for upgrade UX
+# ---------------------------------------------------------------------------
+_FEATURE_INFO: dict[str, dict[str, str]] = {
+    "impact": {
+        "display": "impact",
+        "description": (
+            "Shows blast radius, callers, affected endpoints, and persistence paths in one call."
+        ),
+        "value": "Answers: what breaks if I touch this? The core risk signal before any change.",
+    },
+    "modernize": {
+        "display": "modernize (full)",
+        "description": (
+            "Full analysis: dead zones, refactor candidates, dependency tangles, and coupling ranked by git churn."
+        ),
+        "value": "Prioritizes where to refactor and what is safe to touch.",
+    },
+    "fix-bug": {
+        "display": "fix-bug (full)",
+        "description": "Complete risk-ranked file list with all annotation and structural signals.",
+        "value": "More results means less time scanning the codebase manually.",
+    },
+    "review-pr": {
+        "display": "review-pr (expanded)",
+        "description": "Full PR review: blast radius, all execution paths, security and transaction impact.",
+        "value": "CI-grade review — the complete picture before merging.",
+    },
+    "delta": {
+        "display": "prepare-context delta",
+        "description": "Incremental context: git-changed files with impact propagation.",
+        "value": "Designed for CI/CD pipelines — runs on every PR, flags risk automatically.",
+    },
+    "generate-tests": {
+        "display": "prepare-context generate-tests",
+        "description": "Test gap analysis: finds untested files with coverage recommendations.",
+        "value": "Reduces test debt systematically across the entire codebase.",
+    },
+    "--full": {
+        "display": "--full flag",
+        "description": (
+            "Removes truncation limits on transactional boundaries, DTO mappers, and large result sets."
+        ),
+        "value": "Essential for complete analysis of enterprise-scale codebases.",
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Global license state — loaded once at import time
@@ -147,30 +194,74 @@ _init()
 
 
 # ---------------------------------------------------------------------------
-# Enforcement
+# Entitlement helpers
 # ---------------------------------------------------------------------------
 
-def require_pro(feature_name: str) -> None:
-    """Exit with structured JSON error when not Pro.
+def can_use(feature_name: str) -> bool:
+    """Return True if the current plan has access to feature_name.
+
+    Does not trigger revalidation — use require_feature() at command entry
+    points where you want revalidation + gating in one call.
+    """
+    return is_pro
+
+
+def require_feature(feature_name: str) -> None:
+    """Exit with a clean upgrade prompt when feature_name requires Pro.
 
     Re-validates stale cached license before gating (once per 24 h, online).
+
+    Writes human-readable context to stderr (terminal UX) and a JSON error
+    to stdout (backward-compatible machine-readable format).
+
+    Example:
+        from sourcecode.license import require_feature
+        require_feature("impact")
+    """
+    _maybe_revalidate()
+
+    if is_pro:
+        return
+
+    info = _FEATURE_INFO.get(feature_name, {})
+    display = info.get("display", feature_name)
+    description = info.get("description", "")
+    value = info.get("value", "")
+
+    # Human-readable upgrade prompt on stderr
+    lines = [f"\n  '{display}' is a Pro feature."]
+    if description:
+        lines.append(f"  {description}")
+    if value:
+        lines.append(f"  {value}")
+    lines.append("")
+    lines.append("  Upgrade:  sourcecode activate <license_key>")
+    lines.append("")
+    sys.stderr.write("\n".join(lines) + "\n")
+    sys.stderr.flush()
+
+    # JSON on stdout — backward-compatible for CI / MCP consumers
+    payload = {
+        "error": "pro_required",
+        "feature": feature_name,
+        "message": (
+            f"'{display}' requires a Pro license. "
+            "Run: sourcecode activate <license_key>"
+        ),
+    }
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+    sys.exit(1)
+
+
+def require_pro(feature_name: str) -> None:
+    """Backward-compatible alias for require_feature.
 
     Example:
         from sourcecode.license import require_pro
         require_pro("impact")
     """
-    if is_pro:
-        _maybe_revalidate()
-
-    if not is_pro:
-        payload = {
-            "error": "pro_required",
-            "feature": feature_name,
-            "message": "Run: sourcecode activate <license_key>",
-        }
-        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
-        sys.exit(1)
+    require_feature(feature_name)
 
 
 # ---------------------------------------------------------------------------
