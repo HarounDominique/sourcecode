@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional, cast
@@ -140,7 +141,7 @@ def _check_pipeline_coherence(sm: "SourceMap") -> list[str]:  # type: ignore[nam
     return issues
 
 _HELP = """\
-Compressed AI-ready context for Java/Spring enterprise codebases.
+Deterministic codebase context for AI coding agents.
 
 [bold]Primary usage:[/bold]
   sourcecode --compact                  high-signal summary (~600-800 tokens)
@@ -176,9 +177,20 @@ _SUBCOMMANDS: frozenset[str] = frozenset(
     }
 )
 
-# Mutable container holding the path extracted by _preprocess_argv().
-# Default "." means "current directory" when no path is given.
-_detected_path: list[str] = ["."]
+# Thread-local storage for the path extracted by _preprocess_argv().
+# Using threading.local() prevents concurrent MCP tool calls from clobbering
+# each other's target path (the old module-level list was a shared mutable global).
+_tls = threading.local()
+
+
+def _get_detected_path() -> str:
+    """Return the thread-local detected path, defaulting to '.'."""
+    return _tls.__dict__.get("detected_path", ".")
+
+
+def _set_detected_path(value: str) -> None:
+    """Set the thread-local detected path."""
+    _tls.detected_path = value
 
 
 # Options that take a value token — their next arg must not be treated as a path.
@@ -214,6 +226,7 @@ def _preprocess_args(args: list[str]) -> list[str]:
     """
     result = list(args)
     skip_next = False
+    _path_index: int = -1
     for i, arg in enumerate(result):
         if skip_next:
             skip_next = False
@@ -227,9 +240,11 @@ def _preprocess_args(args: list[str]) -> list[str]:
         if arg in _SUBCOMMANDS:
             return result  # known subcommand — leave for Click to dispatch
         # First genuine positional: treat as repository path
-        _detected_path[0] = arg
-        result.pop(i)
-        return result
+        _set_detected_path(arg)
+        _path_index = i
+        break
+    if _path_index >= 0:
+        result.pop(_path_index)
     return result
 
 
@@ -334,7 +349,7 @@ def _get_command_with_preprocessing(typer_instance: Any) -> Any:
     def _cmd_main(args: Optional[list[str]] = None, **kwargs: Any) -> Any:
         if args is not None:
             # CliRunner / programmatic call: preprocess the explicit args list.
-            _detected_path[0] = "."
+            _set_detected_path(".")
             args = _preprocess_args(list(args))
         # args=None → Click reads sys.argv; _preprocess_argv() in main_entry handled it.
         return _orig_cmd_main(args=args, **kwargs)
@@ -363,7 +378,7 @@ app.add_typer(mcp_app, name="mcp")
 def _maybe_ask_consent() -> None:
     """Show first-run consent prompt once, on interactive TTYs only."""
     try:
-        from sourcecode.telemetry.config import has_been_asked, mark_asked, set_enabled
+        from sourcecode.telemetry.config import has_been_asked, set_enabled
         from sourcecode.telemetry.consent import ask_for_consent
         if not has_been_asked():
             enabled = ask_for_consent()
@@ -833,7 +848,7 @@ def main(
     # Path was extracted from argv by _preprocess_argv() before Click ran.
     # FIX-P2-8: preserve original user input in error messages (Windows Git Bash
     # rewrites "/nonexistent" → "C:\Program Files\Git\nonexistent" via Path.resolve()).
-    _raw_path_input = _detected_path[0]
+    _raw_path_input = _get_detected_path()
     target = Path(_raw_path_input).resolve()
     if not target.exists():
         _emit_error_json(
@@ -852,6 +867,7 @@ def main(
 
     # Normalize mode aliases
     _CONTRACT_MODES = frozenset({"contract", "minimal", "standard"})
+    _user_mode_explicit = mode not in ("contract",)  # track if user passed a non-default value
     if mode == "minimal":
         mode = "contract"   # minimal is a documented alias for contract
     elif mode not in _CONTRACT_MODES and mode != "raw":
@@ -872,6 +888,20 @@ def main(
         or docs or semantics or full_metrics or architecture
     )
     if mode in ("contract", "standard") and _legacy_flags_active:
+        if _user_mode_explicit:
+            _overriding_flags = [
+                f for f, v in [
+                    ("--compact", compact), ("--tree", tree),
+                    ("--trace-pipeline", trace_pipeline), ("--docs", docs),
+                    ("--semantics", semantics), ("--full-metrics", full_metrics),
+                    ("--architecture", architecture),
+                ] if v
+            ]
+            typer.echo(
+                f"[warning] --mode {mode} was overridden to raw because legacy flags "
+                f"({', '.join(_overriding_flags)}) require raw output mode.",
+                err=True,
+            )
         mode = "raw"
 
     # Map mode to contract_view depth
@@ -995,7 +1025,7 @@ def main(
                     f"cn={code_notes},mode={mode},"
                     f"ex={_excl_key},depth={effective_depth}"
                 )
-                _core_h = _hashlib.md5(_core_flags_str.encode()).hexdigest()[:8]
+                _core_h = _hashlib.sha256(_core_flags_str.encode()).hexdigest()[:8]
                 _core_key = f"{_git_sha}-{_core_h}"
 
                 # ── View flags: output presentation only (no re-analysis needed) ──
@@ -1007,7 +1037,7 @@ def main(
                     f"mn={max_nodes},ge={graph_edges},mi={max_importers},"
                     f"eg={emit_graph}"
                 )
-                _view_h = _hashlib.md5(_view_flags_str.encode()).hexdigest()[:8]
+                _view_h = _hashlib.sha256(_view_flags_str.encode()).hexdigest()[:8]
 
                 # ── Lookup ──────────────────────────────────────────────────────
                 # Step 1: try L1 to obtain the core_hash needed for L2 key
@@ -1961,7 +1991,7 @@ def main(
             if _written_core_hash:
                 if not _view_key:
                     # _view_key not set (L1 was also a miss); compute it now
-                    _wvh = _hashlib.md5(_view_flags_str.encode()).hexdigest()[:8]
+                    _wvh = _hashlib.sha256(_view_flags_str.encode()).hexdigest()[:8]
                     _view_key = f"{_written_core_hash}-{_wvh}"
                 _cache_mod.write_view(
                     target,

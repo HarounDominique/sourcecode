@@ -3,7 +3,12 @@
 Fires when:
   1. At least one known MCP client (Claude Desktop, Cursor) is installed
   2. sourcecode is NOT yet registered in that client's config
-  3. The nudge hasn't been shown this session (~/.sourcecode/nudge_shown flag)
+  3. The nudge hasn't been shown yet (~/.sourcecode/nudge_shown flag absent)
+
+The sentinel flag (~/.sourcecode/nudge_shown) persists globally on the
+filesystem — it is NOT session-scoped. Once written it suppresses all future
+nudges across all terminal sessions and process invocations until it is
+deleted (which `sourcecode mcp init` does on successful installation).
 
 Cleared by: a successful `sourcecode mcp init` (deletes the flag so the
 post-init detection finds is_installed=True and never nudges again).

@@ -190,7 +190,7 @@ def _dependency_import_index(root: Path, file_paths: list[str]) -> set[str]:
         r"require\(['\"]([^'\"]+)['\"]\)|from\s+['\"]([^'\"]+)['\"])",
         re.MULTILINE,
     )
-    for path in file_paths[:2000]:
+    for path in file_paths[:500]:
         if Path(path).suffix.lower() not in {".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs"}:
             continue
         try:

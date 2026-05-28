@@ -20,9 +20,9 @@ def run_command(args: list[str]) -> Any:
     Returns parsed JSON dict when output is valid JSON, else the raw string.
     Raises RuntimeError on non-zero exit or empty output.
     """
-    from sourcecode.cli import _detected_path, _preprocess_args, app
+    from sourcecode.cli import _set_detected_path, _preprocess_args, app
 
-    _detected_path[0] = "."
+    _set_detected_path(".")
     processed = _preprocess_args(list(args))
     result = _runner.invoke(app, processed)
 

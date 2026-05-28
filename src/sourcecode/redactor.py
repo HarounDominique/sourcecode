@@ -23,6 +23,10 @@ _SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"sk-[A-Za-z0-9]{48}"),                        # OpenAI legacy key
     re.compile(r"AKIA[0-9A-Z]{16}"),                          # AWS Access Key ID
     re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*"),           # Bearer tokens
+    re.compile(r"sk-ant-[A-Za-z0-9\-_]{32,}"),               # Anthropic API key
+    re.compile(r"hf_[A-Za-z0-9]{32,}"),                       # Hugging Face token
+    re.compile(r"sk_live_[A-Za-z0-9]{24,}"),                  # Stripe live secret key
+    re.compile(r"pk_live_[A-Za-z0-9]{24,}"),                  # Stripe live publishable key
 ]
 
 # Patrones de nombres de fichero que deben excluirse (SEC-02)

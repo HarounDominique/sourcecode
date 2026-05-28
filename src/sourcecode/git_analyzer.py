@@ -326,6 +326,9 @@ def _parse_uncommitted(output: str) -> "UncommittedChanges":
             continue
         x, y = line[0], line[1]
         filepath = line[3:].strip()
+        # Renamed files: git porcelain v1 produces "old -> new"; keep only the new path.
+        if x == "R" and " -> " in filepath:
+            filepath = filepath.split(" -> ", 1)[1]
         if x == "?" and y == "?":
             untracked.append(filepath)
         else:

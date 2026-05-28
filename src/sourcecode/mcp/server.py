@@ -454,18 +454,21 @@ def generate_tests_context(repo_path: str = ".", include_all: bool = False) -> d
         timeout_s = timeout_ms / 1000.0
 
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(_execute, args)
-        done, _not_done = concurrent.futures.wait([future], timeout=timeout_s)
-        if _not_done:
-            executor.shutdown(wait=False)
-            return _ok({
-                "truncated": True,
-                "truncated_reason": f"timeout_{timeout_ms // 1000}s" if timeout_ms >= 1000 else f"timeout_{timeout_ms}ms",
-                "files_analyzed": 0,
-                "results": [],
-            })
-        executor.shutdown(wait=False)
-        return future.result()
+        try:
+            future = executor.submit(_execute, args)
+            done, _not_done = concurrent.futures.wait([future], timeout=timeout_s)
+            if _not_done:
+                executor.shutdown(wait=False)
+                return _ok({
+                    "truncated": True,
+                    "truncated_reason": f"timeout_{timeout_ms // 1000}s" if timeout_ms >= 1000 else f"timeout_{timeout_ms}ms",
+                    "files_analyzed": 0,
+                    "results": [],
+                })
+            result = future.result()
+        finally:
+            executor.shutdown(wait=True)
+        return result
 
     except Exception as exc:
         return _err(
@@ -532,8 +535,8 @@ def modernize_context(repo_path: str = ".", format: str = "json") -> dict:
     try:
         if not isinstance(repo_path, str):
             return _err("repo_path must be a string", "INVALID_ARGUMENT")
-        if not isinstance(format, str) or format not in ("json", "yaml"):
-            return _err("format must be 'json' or 'yaml'", "INVALID_ARGUMENT")
+        if not isinstance(format, str) or format != "json":
+            return _err("format must be 'json' — yaml is not supported for modernize output", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
         _path_err = _check_repo_path(repo_path)
         if _path_err is not None:

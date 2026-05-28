@@ -478,8 +478,13 @@ class EnvAnalyzer:
         example_files_found: list,
         limitations: list,
         profiles_scanned: list,
+        depth: int = 0,
+        max_depth: int = 12,
     ) -> int:
         """Walk the directory tree accumulating env var findings. Returns spring_candidates count."""
+        if depth >= max_depth:
+            return 0
+
         try:
             entries = sorted(current.iterdir())
         except PermissionError:
@@ -496,7 +501,7 @@ class EnvAnalyzer:
                     continue
                 total_spring_candidates += self._walk(
                     root, entry, findings, example_entries, example_files_found,
-                    limitations, profiles_scanned,
+                    limitations, profiles_scanned, depth + 1, max_depth,
                 )
             elif entry.is_file():
                 rel = entry.relative_to(root).as_posix()

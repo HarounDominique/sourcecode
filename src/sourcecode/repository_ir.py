@@ -3246,7 +3246,7 @@ def compute_blast_radius(
     if _hub_class_guard and direct_callers:
         _n_direct = len(direct_callers)
         _k = min(_HUB_SAMPLE_SIZE, _n_direct)
-        _sample_seeds = random.sample(direct_callers, _k)
+        _sample_seeds = sorted(direct_callers, key=lambda x: str(x))[:_k]
         _sample_visited: set[str] = set(matched_fqns) | set(direct_callers)
         _sample_queue: list[tuple[str, int]] = [(c, 1) for c in _sample_seeds]
         _sample_indirect: list[str] = []

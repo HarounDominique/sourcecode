@@ -469,6 +469,7 @@ def _cas_load_blob(cache_d: Path, blob_hash: str) -> Optional[str]:
     try:
         return gzip.decompress(path.read_bytes()).decode("utf-8")
     except Exception:
+        _safe_unlink(path)  # evict corrupted blob so it doesn't block future reads
         return None
 
 
