@@ -140,7 +140,21 @@ def _check_pipeline_coherence(sm: "SourceMap") -> list[str]:  # type: ignore[nam
 
     return issues
 
-_HELP = """\
+def _build_help_text() -> str:
+    """Build --help text dynamically based on current license state."""
+    try:
+        from sourcecode.license import is_pro as _is_pro
+    except Exception:
+        _is_pro = False
+
+    if _is_pro:
+        plan_badge = "[bold green]● Pro[/bold green]"
+    else:
+        plan_badge = "[yellow]Free[/yellow]  ·  [dim]sourcecode activate <key>[/dim] to unlock Pro"
+
+    text = f"""\
+[bold]sourcecode[/bold]  {plan_badge}
+
 Deterministic codebase context for AI coding agents.
 
 [bold]Primary usage:[/bold]
@@ -163,6 +177,26 @@ Deterministic codebase context for AI coding agents.
   telemetry status|enable|disable
   version
 """
+
+    if not _is_pro:
+        text += """\
+
+[dim bold]Locked (Pro):[/dim bold]
+  [dim]impact                              blast radius before any change[/dim]
+  [dim]modernize (full)                    dead zones, tangles, full coupling[/dim]
+  [dim]fix-bug (full)                      complete risk-ranked file list[/dim]
+  [dim]review-pr (expanded)               CI-grade PR review[/dim]
+  [dim]prepare-context delta               incremental context for CI/CD[/dim]
+  [dim]prepare-context generate-tests      test gap analysis[/dim]
+  [dim]--full                              removes all truncation limits[/dim]
+
+  [dim cyan]→ sourcecode activate <key>[/dim cyan]
+"""
+
+    return text
+
+
+_HELP = _build_help_text()
 
 # Known subcommand names — tokens matching these are routed as subcommands,
 # not consumed as a repository path.
@@ -344,6 +378,10 @@ def _get_command_with_preprocessing(typer_instance: Any) -> Any:
     cmd = _orig_get_command(typer_instance)
     if typer_instance is not app:
         return cmd  # only wrap the root app, not telemetry_app etc.
+
+    # Refresh help text at invocation time so it reflects current license state.
+    cmd.help = _build_help_text()
+
     _orig_cmd_main = cmd.main
 
     def _cmd_main(args: Optional[list[str]] = None, **kwargs: Any) -> Any:
