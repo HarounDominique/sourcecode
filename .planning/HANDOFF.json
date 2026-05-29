@@ -2,91 +2,130 @@
   "version": "1.0",
   "timestamp": "2026-05-29T00:00:00Z",
   "phase": null,
-  "phase_name": "session 34 — 3 contract bugs + 1.33.1",
+  "phase_name": "session 35 — cache observability + contract audit (1.33.2 + 1.33.3)",
   "phase_dir": null,
   "plan": null,
   "task": null,
   "total_tasks": null,
   "status": "paused",
-  "session_type": "bugfix",
+  "session_type": "bugfix+improvements",
   "completed_tasks": [
     {
       "id": 1,
-      "name": "Landing page cache-first update",
+      "name": "cache.status() — add RIS fields",
       "status": "done",
-      "files": ["~/Documents/workspace/sourcecode-landing/index.html"],
-      "details": "Updated sourcecode-landing/index.html to match v1.33.0 cache-first identity: new h1, hero subtitle, cache section (L1/L2 + commands + agent loop), benchmark numbers (17x/9x), nav link, use cases, pricing. Done in session 33 tail / session 34 start.",
-      "commit": "session-33 (not in atlas-cli repo)"
+      "files": ["src/sourcecode/cache.py"],
+      "details": "status() now returns ris_exists, ris_git_head, ris_last_updated_at, ris_is_stale, current_git_head. Added _get_git_head() private helper. Lazy import of load_ris avoids circular dependency.",
+      "commit": "7949303"
     },
     {
       "id": 2,
-      "name": "fix: cold-start routing — add to _SUBCOMMANDS",
+      "name": "cache.clear() — add --include-ris flag",
       "status": "done",
-      "files": ["src/sourcecode/cli.py"],
-      "details": "cold-start was missing from _SUBCOMMANDS frozenset. _preprocess_args treated 'cold-start' as a path argument → directory_not_found JSON error. Fixed by adding 'cold-start' to _SUBCOMMANDS so Typer routes correctly.",
-      "commit": "4a64435"
+      "files": ["src/sourcecode/cache.py", "src/sourcecode/cli.py"],
+      "details": "clear(repo_root, *, clear_ris=False). CLI: --include-ris flag. Confirmation prompt now says '(RIS preserved — use --include-ris to also clear it)'.",
+      "commit": "7949303"
     },
     {
       "id": 3,
-      "name": "fix: --changed-only returns no_changes JSON when working tree is clean",
+      "name": "get_cold_start_context() — add provenance fields",
       "status": "done",
-      "files": ["src/sourcecode/cli.py"],
-      "details": "When git confirmed no uncommitted changes, code fell back to full scan with a stderr-only warning. Output was identical to --compact — agent couldn't distinguish 'no changes' from 'changes found'. Now returns {status: working_tree_clean, no_changes: true, changed_files: [], message: ...} and exits 0. Git-unavailable/error still falls back to full scan.",
-      "commit": "4a64435"
+      "files": ["src/sourcecode/ris.py"],
+      "details": "Added _has_uncommitted_changes() helper. cold-start now emits: current_git_head, has_uncommitted_changes, cache_source='RIS', data_scope='RIS_BOOTSTRAP', api_surface_complete (false for Java repos with empty endpoint index).",
+      "commit": "7949303 + 34ec782"
     },
     {
       "id": 4,
-      "name": "fix: generate-tests relevant_files filters out test-role files",
+      "name": "_cache provenance block in all JSON outputs",
       "status": "done",
       "files": ["src/sourcecode/cli.py"],
-      "details": "Test files were included in generate-tests scoring and received +2.0 'existing test' content_boost. High-churn test files (score 0.94-0.96) outranked untested source files, inverting the stated goal. Fixed: filter role=='test' from relevant_files at serialization in cli.py. Test files are already in test_gaps.",
-      "commit": "4a64435"
+      "details": "_inject_cache_meta() helper added. Both cache-hit path (L2/L1) and fresh analysis path inject _cache block: cache_source, git_head_at_generation, current_git_head, is_stale, has_uncommitted_changes, generated_at, data_scope.",
+      "commit": "7949303"
     },
     {
       "id": 5,
-      "name": "feat: RIS fast-path for onboard/explain (session 32 pre-existing)",
+      "name": "Bug 7 — controller_methods label lie fixed",
       "status": "done",
-      "files": ["src/sourcecode/prepare_context.py"],
-      "details": "TaskContextBuilder._try_ris_fast_path(): serves onboard/explain from warm RIS snapshot (<50ms) when git HEAD matches stored RIS. Falls through on any cache miss or error.",
-      "commit": "4a64435"
+      "files": ["src/sourcecode/serializer.py"],
+      "details": "controller_methods was always == controller_classes (deduplicated by path). Removed methods field from controllers dict. Note now says 'X controller classes detected (use sourcecode endpoints for per-method HTTP surface)'.",
+      "commit": "34ec782"
     },
     {
       "id": 6,
-      "name": "feat: cold-start endpoints_hint for Java repos (session 32 pre-existing)",
+      "name": "Bug 6 — api_surface_complete field in cold-start",
       "status": "done",
       "files": ["src/sourcecode/ris.py"],
-      "details": "cold-start response now includes endpoints_hint field when repo is Java (pom.xml/build.gradle present) but endpoint index is empty. Guides agents to call get_endpoints.",
-      "commit": "4a64435"
+      "details": "For Java repos with empty endpoints: api_surface_complete=false. Non-Java or Java-with-endpoints: api_surface_complete=true. Agents no longer treat [] as 'no endpoints exist'.",
+      "commit": "34ec782"
     },
     {
       "id": 7,
-      "name": "version bump 1.33.0 → 1.33.1",
+      "name": "Improvement D — cache freshness CLI + check_freshness MCP",
+      "status": "done",
+      "files": ["src/sourcecode/cli.py", "src/sourcecode/mcp/server.py"],
+      "details": "'sourcecode cache freshness <path> [--json]' reports fresh, current_git_head, ris_git_head, delta_commits, has_uncommitted_changes, ris_last_updated_at. MCP tool check_freshness delegates to it.",
+      "commit": "34ec782"
+    },
+    {
+      "id": 8,
+      "name": "Improvement F — get_delta auto-since",
+      "status": "done",
+      "files": ["src/sourcecode/mcp/server.py"],
+      "details": "Empty/omitted since triggers _auto_since(): tries git merge-base HEAD origin/main, then origin/master, falls back to HEAD~1. Removes INVALID_ARGUMENT for empty since.",
+      "commit": "34ec782"
+    },
+    {
+      "id": 9,
+      "name": "Improvement H — Java-only markers in MCP",
+      "status": "done",
+      "files": ["src/sourcecode/mcp/server.py"],
+      "details": "get_endpoints docstring now says JAVA ONLY prominently. get_ir_summary and get_impact_context already had Java only in docstring.",
+      "commit": "34ec782"
+    },
+    {
+      "id": 10,
+      "name": "Improvement B — cache warm documents RIS rebuild",
+      "status": "done",
+      "files": ["src/sourcecode/cli.py"],
+      "details": "Docstring updated. Success message now says 'Cache warmed (L1/L2 + RIS rebuilt).'",
+      "commit": "34ec782"
+    },
+    {
+      "id": 11,
+      "name": "version bump 1.33.1 → 1.33.2 → 1.33.3",
       "status": "done",
       "files": ["src/sourcecode/__init__.py", "pyproject.toml", "README.md"],
-      "commit": "4a64435"
+      "commit": "7949303 + 34ec782"
     }
   ],
   "remaining_tasks": [
     {
-      "id": 8,
-      "name": "Live E2E test: sync workspace → pipx + verify cache commands",
+      "id": 12,
+      "name": "Live E2E test: sync workspace → pipx + verify all fixes",
       "priority": "P1",
       "status": "pending",
-      "details": "Run bash /private/tmp/sync_to_pipx.sh from normal Terminal (EPERM in Claude Code shell), then: sourcecode cache status /private/tmp/spring-petclinic; sourcecode cache clear /private/tmp/keycloak --yes; sourcecode /private/tmp/keycloak --compact (cold); sourcecode /private/tmp/keycloak --compact (warm — should be < 0.6s). Also verify fixed bugs: sourcecode cold-start from /private/tmp/keycloak, sourcecode . --changed-only on clean repo."
+      "details": "Run bash /private/tmp/sync_to_pipx.sh from normal Terminal (EPERM in Claude Code shell). Then: sourcecode cache freshness /private/tmp/spring-petclinic; sourcecode cache status --json; sourcecode cold-start /private/tmp/spring-petclinic (check api_surface_complete field); sourcecode cache clear /private/tmp/keycloak --yes (no --include-ris, confirm RIS preserved); sourcecode cache freshness /private/tmp/keycloak --json. Also verify 1.33.1 fixes still hold."
     },
     {
-      "id": 9,
-      "name": "BUG-C1 — validate async write actually reduces cold latency",
+      "id": 13,
+      "name": "Publish 1.33.3 to PyPI / Homebrew tap",
       "priority": "P2",
       "status": "pending",
-      "details": "E2E benchmarks: cold run time with keycloak/broadleaf. Async background write (daemon thread + atexit join 5s) added in 1.32.4. Verify no corruption and latency improvement on cold path."
+      "details": "Version bumped to 1.33.3 and committed. Needs PyPI publish and Homebrew tap update."
     },
     {
-      "id": 10,
-      "name": "Publish 1.33.1 to PyPI / Homebrew tap",
-      "priority": "P2",
+      "id": 14,
+      "name": "LQN-02 test failure (pre-existing)",
+      "priority": "P3",
       "status": "pending",
-      "details": "Version bumped to 1.33.1 and committed. Needs PyPI publish and Homebrew tap update. Was 1.33.0 in previous handoff."
+      "details": "test_lqn02_project_summary fails because project description changed in session 33 (new README). Test checks for 'codebase context' or 'contexto' but new description says 'Persistent structural context'. Fix: update test to match current description. Pre-existing, not caused by session 35."
+    },
+    {
+      "id": 15,
+      "name": "Improvements G/I/J/K/L/M — deferred",
+      "priority": "P4",
+      "status": "deferred",
+      "details": "G: get_compact_context --full in MCP. I: get_module_context Maven multi-module improvements. J: MCP for Claude Code instructions. K: suggest_next_tool. L: suggest_entrypoint. M: watch mode for RIS invalidation. All require larger scope."
     }
   ],
   "blockers": [],
@@ -109,24 +148,24 @@
   ],
   "decisions": [
     {
-      "decision": "Cache is the product moat — README, CLI help, and landing page now lead with this",
-      "rationale": "Benchmarks (10.5s → 0.6s Keycloak, 2.7s → 0.3s Broadleaf) change sourcecode from an occasional tool to constant agent infrastructure.",
-      "session": 33
+      "decision": "cache.clear() default preserves RIS — --include-ris needed to also clear it",
+      "rationale": "RIS is the persistent cold-start index, not a hot cache. Clearing it accidentally would break cold-start for agents. Default-preserve is correct; prompt and flag make it explicit.",
+      "session": 35
     },
     {
-      "decision": "README benchmark numbers: 17x/9x (not 33x/13x from older README)",
-      "rationale": "Conservative rounded figures: 10.5s/0.6s = ~17x for Keycloak, 2.7s/0.3s = ~9x for Broadleaf.",
-      "session": 33
+      "decision": "controller_methods field removed entirely (not renamed)",
+      "rationale": "Was always equal to controller_classes — adding noise. Real per-method count requires endpoints command which scans @GetMapping etc. per method.",
+      "session": 35
     },
     {
-      "decision": "--changed-only on clean repo: return no_changes JSON (not fall back to full scan)",
-      "rationale": "Silent fallback is a contract violation — agent cannot distinguish 'no changes' from 'changes found'. Only git-unavailable/error should fall back.",
-      "session": 34
+      "decision": "get_delta auto-since uses merge-base, not HEAD~1",
+      "rationale": "HEAD~1 is almost always wrong for PRs with multiple commits. merge-base with origin/main gives the correct diff scope for PR review workflows.",
+      "session": 35
     },
     {
-      "decision": "generate-tests relevant_files filter: output layer (cli.py), not scoring layer (prepare_context.py)",
-      "rationale": "Minimal scope. Internal scoring still sees test files for test_set membership checks. Filter at serialization is least invasive.",
-      "session": 34
+      "decision": "api_surface_complete=false only for Java repos with empty endpoints",
+      "rationale": "Non-Java repos correctly have no endpoints — empty is correct for them. Only Java/Spring repos need this signal to distinguish 'not indexed yet' from 'genuinely no endpoints'.",
+      "session": 35
     }
   ],
   "uncommitted_files": [],
@@ -134,6 +173,6 @@
     "docs/PRODUCT_AUDIT.md",
     "src/sourcecode/cache.tmp_new"
   ],
-  "next_action": "Human: run bash /private/tmp/sync_to_pipx.sh from normal Terminal, then verify: sourcecode cold-start (from /private/tmp/keycloak), sourcecode . --changed-only on clean repo, sourcecode cache status. Then publish 1.33.1.",
-  "context_notes": "Session 34: 3 bugs fixed + 2 session-32 improvements included + version bumped to 1.33.1. All committed in 4a64435. Landing page (~/Documents/workspace/sourcecode-landing/index.html) updated in session 33/34 — not in this repo. Untracked files (cache.tmp_new, PRODUCT_AUDIT.md) are not blocking."
+  "next_action": "Human: run bash /private/tmp/sync_to_pipx.sh from normal Terminal, then run E2E verification of all 1.33.x fixes (cache freshness, cold-start api_surface_complete, cache clear RIS behavior). Then publish 1.33.3.",
+  "context_notes": "Session 35: two commits. 7949303 = 1.33.2 (cache observability: status+clear+_cache block+cold-start provenance). 34ec782 = 1.33.3 (Bug 6 api_surface_complete, Bug 7 controller label, cache freshness cmd, check_freshness MCP, get_delta auto-since, Java-only markers). 1644 tests pass, 3 skipped. LQN-02 pre-existing failure excluded. Untracked files unchanged from session 34."
 }
