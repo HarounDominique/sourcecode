@@ -92,6 +92,8 @@ _CAS_FIELDS: frozenset[str] = frozenset([
 _CAS_THRESHOLD: int = 4096
 
 _DEFAULT_KEEP_COMMITS: int = 5
+_DEFAULT_MAX_CORES: int = 20
+_DEFAULT_MAX_SIZE_MB: int = 50
 
 # Matches "snapshot-<hex_commit>-<hex_flags>.json.gz"
 _SNAPSHOT_RE = re.compile(r"^snapshot-([0-9a-f]+)-[0-9a-f]+\.json\.gz$")
@@ -122,6 +124,58 @@ def cache_dir(repo_root: Path) -> Path:
     env_base = os.environ.get("SOURCECODE_CACHE_DIR", "")
     base: Path = Path(env_base) if env_base else Path.home() / ".sourcecode" / "cache"
     return base / repo_id(repo_root)
+
+
+# ---------------------------------------------------------------------------
+# Public API — observability
+# ---------------------------------------------------------------------------
+
+def status(repo_root: Path) -> dict[str, Any]:
+    """Return a stats dict describing the current cache state for *repo_root*.
+
+    Keys: ``cache_dir``, ``cores``, ``snapshots``, ``views``, ``cas_blobs``,
+    ``total_size_bytes``, ``total_size_mb``.
+    """
+    cache_d = cache_dir(repo_root)
+    if not cache_d.exists():
+        return {
+            "cache_dir": str(cache_d),
+            "cores": 0, "snapshots": 0, "views": 0, "cas_blobs": 0,
+            "total_size_bytes": 0, "total_size_mb": 0.0,
+        }
+    cores = list(cache_d.glob("core-*.json.gz"))
+    snapshots = list(cache_d.glob("snapshot-*.json.gz"))
+    views = list(cache_d.glob("view-*.json.gz"))
+    cas_blobs = list((_cas_dir(cache_d)).glob("*.gz")) if _cas_dir(cache_d).exists() else []
+    all_files = cores + snapshots + views + cas_blobs
+    total_bytes = sum(f.stat().st_size for f in all_files if f.exists())
+    return {
+        "cache_dir": str(cache_d),
+        "cores": len(cores),
+        "snapshots": len(snapshots),
+        "views": len(views),
+        "cas_blobs": len(cas_blobs),
+        "total_size_bytes": total_bytes,
+        "total_size_mb": round(total_bytes / (1024 * 1024), 2),
+    }
+
+
+def clear(repo_root: Path) -> int:
+    """Delete all cache files for *repo_root*.  Returns the number of files removed."""
+    cache_d = cache_dir(repo_root)
+    if not cache_d.exists():
+        return 0
+    removed = 0
+    for pattern in ("core-*.json.gz", "snapshot-*.json.gz", "view-*.json.gz"):
+        for f in cache_d.glob(pattern):
+            _safe_unlink(f)
+            removed += 1
+    cas_d = _cas_dir(cache_d)
+    if cas_d.exists():
+        for f in cas_d.glob("*.gz"):
+            _safe_unlink(f)
+            removed += 1
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +247,7 @@ def write(
     try:
         cache_d.mkdir(parents=True, exist_ok=True)
         payload = _build_envelope(cache_key, content, fmt, layers or {}, cache_d)
-        dest.write_bytes(payload)
+        _atomic_write(dest, payload)
     except Exception:
         return  # non-fatal
 
@@ -275,7 +329,7 @@ def write_core(repo_root: Path, core_key: str, core_data: dict[str, Any]) -> str
             json.dumps(envelope, ensure_ascii=False).encode("utf-8"),
             compresslevel=6,
         )
-        dest.write_bytes(payload)
+        _atomic_write(dest, payload)
     except Exception:
         pass
 
@@ -327,7 +381,7 @@ def write_view(
     try:
         cache_d.mkdir(parents=True, exist_ok=True)
         payload = _build_envelope(view_key, content, fmt, layers or {}, cache_d)
-        dest.write_bytes(payload)
+        _atomic_write(dest, payload)
     except Exception:
         pass
 
@@ -529,12 +583,16 @@ def _cas_restore(
 def _gc(cache_d: Path) -> None:
     """Evict old snapshots/cores/views and sweep orphaned CAS blobs.
 
-    Keeps snapshots and cores from the last ``SOURCECODE_CACHE_KEEP_COMMITS``
-    distinct git commits (determined by newest mtime within each commit group).
-    Views are then pruned: a view survives only when its core-hash prefix
-    matches a core file in the surviving set.
+    Three eviction passes (all non-fatal):
+    1. Commit-based: keep only last SOURCECODE_CACHE_KEEP_COMMITS distinct SHAs.
+    2. Core-count: keep at most SOURCECODE_CACHE_MAX_CORES core files (LRU).
+    3. Size-based: if total cache exceeds SOURCECODE_CACHE_MAX_SIZE_MB, evict
+       oldest core+snapshot files until under budget.
+    Views and CAS blobs are swept after each pass.
     """
     keep = int(os.environ.get("SOURCECODE_CACHE_KEEP_COMMITS", _DEFAULT_KEEP_COMMITS))
+    max_cores = int(os.environ.get("SOURCECODE_CACHE_MAX_CORES", _DEFAULT_MAX_CORES))
+    max_size_bytes = int(os.environ.get("SOURCECODE_CACHE_MAX_SIZE_MB", _DEFAULT_MAX_SIZE_MB)) * 1024 * 1024
 
     try:
         all_snapshots = list(cache_d.glob("snapshot-*.json.gz"))
@@ -544,7 +602,7 @@ def _gc(cache_d: Path) -> None:
         if not all_snapshots and not all_cores and not all_views:
             return
 
-        # Group snapshot + core files by commit SHA
+        # ── Pass 1: commit-based eviction ──────────────────────────────────
         groups: dict[str, list[Path]] = {}
         for f in all_snapshots:
             m = _SNAPSHOT_RE.match(f.name)
@@ -558,7 +616,6 @@ def _gc(cache_d: Path) -> None:
         surviving: list[Path]
 
         if keep <= 0 or len(groups) <= keep:
-            # No eviction needed — but still sweep views + CAS
             surviving = all_snapshots + all_cores
         else:
             def _newest_mtime(commit: str) -> float:
@@ -573,7 +630,33 @@ def _gc(cache_d: Path) -> None:
                     for f in groups[commit]:
                         _safe_unlink(f)
 
+        # ── Pass 2: per-repo core count cap ────────────────────────────────
+        if max_cores > 0:
+            surviving_cores = [p for p in surviving if p.name.startswith("core-") and p.exists()]
+            if len(surviving_cores) > max_cores:
+                surviving_cores.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                for evict in surviving_cores[max_cores:]:
+                    _safe_unlink(evict)
+                    surviving = [p for p in surviving if p != evict]
+
+        # ── Pass 3: total size cap ──────────────────────────────────────────
+        if max_size_bytes > 0:
+            size_candidates = [p for p in surviving if p.exists()]
+            total = sum(p.stat().st_size for p in size_candidates if not p.name.startswith("view-"))
+            if total > max_size_bytes:
+                # Sort oldest-first; evict core+snapshot files until under budget
+                size_candidates.sort(key=lambda p: p.stat().st_mtime)
+                for evict in size_candidates:
+                    if evict.name.startswith("view-"):
+                        continue
+                    total -= evict.stat().st_size if evict.exists() else 0
+                    _safe_unlink(evict)
+                    surviving = [p for p in surviving if p != evict]
+                    if total <= max_size_bytes:
+                        break
+
         # Prune view files whose core hash is no longer in the surviving set
+        all_views = list(cache_d.glob("view-*.json.gz"))
         _gc_views(cache_d, surviving, all_views)
 
         # Sweep orphaned CAS blobs (surviving snapshots + view files may ref them)
@@ -647,6 +730,23 @@ def _gc_cas(cache_d: Path, surviving_snapshots: list[Path]) -> None:
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
+
+def _atomic_write(dest: Path, data: bytes) -> None:
+    """Write *data* to *dest* atomically via a sibling .tmp file + rename.
+
+    On POSIX, ``Path.replace()`` is a single ``rename(2)`` syscall — the
+    destination either has the old content or the new content, never a partial
+    write.  The .tmp suffix keeps the partial file out of glob patterns used
+    by the cache reader and GC.
+    """
+    tmp = dest.with_suffix(".tmp")
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(dest)
+    except Exception:
+        _safe_unlink(tmp)
+        raise
+
 
 def _safe_unlink(path: Path) -> None:
     try:

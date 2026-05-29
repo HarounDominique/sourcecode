@@ -1018,6 +1018,18 @@ def main(
         architecture = True  # agents need full architectural signal (M4)
         graph_modules = True  # IC-003: import graph needed for architecture confidence
 
+    # --compact implicitly enables lightweight analysis passes so that
+    # dependency_summary, env_summary and code_notes_summary are never null.
+    # architecture=True is also enabled so that architecture.confidence is
+    # consistent with --agent (which auto-enables architecture).  The
+    # ArchitectureAnalyzer is path-based and adds negligible latency.
+    # NOTE: must happen BEFORE cache key computation so key reflects effective flags.
+    if compact:
+        dependencies = True
+        env_map = True
+        code_notes = True
+        architecture = True
+
     # ── Two-layer cache ────────────────────────────────────────────────────────
     # L1 (core): (repo, commit, analysis_flags) → pre-computed view data dict
     #            key  = core-<git_sha>-<analysis_hash>.json.gz
@@ -1065,7 +1077,7 @@ def main(
                     f"dep={dependencies},gm={graph_modules},"
                     f"docs={docs},fm={full_metrics},sem={semantics},"
                     f"arch={architecture},gc={git_context},em={env_map},"
-                    f"cn={code_notes},mode={mode},"
+                    f"cn={code_notes},"
                     f"ex={_excl_key},depth={effective_depth}"
                 )
                 _core_h = _hashlib.sha256(_core_flags_str.encode()).hexdigest()[:8]
@@ -1073,7 +1085,7 @@ def main(
 
                 # ── View flags: output presentation only (no re-analysis needed) ──
                 _view_flags_str = (
-                    f"c={compact},ag={agent},fmt={format},full={full},"
+                    f"c={compact},ag={agent},mode={mode},fmt={format},full={full},"
                     f"co={changed_only},tree={tree},nt={no_tree},"
                     f"rb={rank_by},sym={symbol},ep={entrypoints_only},"
                     f"nr={no_redact},gd={graph_detail},dd={docs_depth},"
@@ -1234,17 +1246,6 @@ def main(
                 f"({_topology.confidence:.0%}). Use --depth 8 or higher if files are missing.",
                 err=True,
             )
-
-    # --compact implicitly enables lightweight analysis passes so that
-    # dependency_summary, env_summary and code_notes_summary are never null.
-    # architecture=True is also enabled so that architecture.confidence is
-    # consistent with --agent (which auto-enables architecture).  The
-    # ArchitectureAnalyzer is path-based and adds negligible latency.
-    if compact:
-        dependencies = True
-        env_map = True
-        code_notes = True
-        architecture = True
 
     dependency_analyzer = DependencyAnalyzer() if dependencies else None
     graph_analyzer = GraphAnalyzer() if graph_modules else None
@@ -2024,30 +2025,51 @@ def main(
     # L2 (view): stores the exact rendered string for this flag combination.
     #
     # GC runs after L2 write to evict old commits and orphaned blobs/views.
+    # Writes happen in a background daemon thread so cold-run latency is not
+    # penalised by gzip encoding + disk I/O.  atexit join ensures writes
+    # complete on clean exit without blocking the user-visible response.
     if not no_cache and _core_key and not _pipeline_error:
-        try:
-            from sourcecode.serializer import core_view as _core_view_fn
-            _core_dict_write = _core_view_fn(sm)
-            _written_core_hash = _cache_mod.write_core(target, _core_key, _core_dict_write)
+        import atexit as _atexit
+        import threading as _threading
 
-            # Compute view key using the just-written core hash
-            if _written_core_hash:
-                if not _view_key:
-                    # _view_key not set (L1 was also a miss); compute it now
-                    _wvh = _hashlib.sha256(_view_flags_str.encode()).hexdigest()[:8]
-                    _view_key = f"{_written_core_hash}-{_wvh}"
-                _cache_mod.write_view(
-                    target,
-                    _view_key,
-                    content,
-                    fmt=format,
-                    layers=_compute_analyzer_fingerprints(),
+        # Capture all closure state before handing off to thread
+        _bg_sm = sm
+        _bg_target = target
+        _bg_core_key = _core_key
+        _bg_view_key = _view_key
+        _bg_view_flags_str = _view_flags_str
+        _bg_content = content
+        _bg_format = format
+        _bg_hashlib = _hashlib
+        _bg_cache_mod = _cache_mod
+
+        def _write_cache_async() -> None:
+            try:
+                from sourcecode.serializer import core_view as _core_view_fn
+                _core_dict_write = _core_view_fn(_bg_sm)
+                _written_core_hash = _bg_cache_mod.write_core(
+                    _bg_target, _bg_core_key, _core_dict_write
                 )
-                # Trigger GC (evict old commits + orphaned views + CAS blobs)
-                from sourcecode.cache import cache_dir as _cdir, _gc as _run_gc
-                _run_gc(_cdir(target))
-        except Exception:
-            pass  # non-fatal: cache write failure
+                if _written_core_hash:
+                    _vk = _bg_view_key
+                    if not _vk:
+                        _wvh = _bg_hashlib.sha256(_bg_view_flags_str.encode()).hexdigest()[:8]
+                        _vk = f"{_written_core_hash}-{_wvh}"
+                    _bg_cache_mod.write_view(
+                        _bg_target,
+                        _vk,
+                        _bg_content,
+                        fmt=_bg_format,
+                        layers=_compute_analyzer_fingerprints(),
+                    )
+                    from sourcecode.cache import cache_dir as _cdir, _gc as _run_gc
+                    _run_gc(_cdir(_bg_target))
+            except Exception:
+                pass
+
+        _cache_write_thread = _threading.Thread(target=_write_cache_async, daemon=True)
+        _cache_write_thread.start()
+        _atexit.register(_cache_write_thread.join, 5.0)
 
     # Update RIS with aggregated snapshot data (non-fatal side-effect).
     if not no_cache and not _pipeline_error and _core_key:
