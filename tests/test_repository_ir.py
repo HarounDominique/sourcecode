@@ -1678,8 +1678,11 @@ public class OpenResource {
 """
         routes = self._routes_from_src(src)
         assert len(routes) == 1
-        assert "security_annotations" not in routes[0], (
-            "security_annotations key must be absent when no security found"
+        assert "security_annotations" in routes[0], (
+            "security_annotations key must always be present"
+        )
+        assert routes[0]["security_annotations"] is None, (
+            "security_annotations must be None when no security signal"
         )
 
     def test_spring_secured_annotation(self):

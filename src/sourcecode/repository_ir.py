@@ -201,6 +201,20 @@ _FILTER_SECURITY_ANNOTATIONS: frozenset[str] = frozenset({
     "@EnableGlobalMethodSecurity",
 })
 
+# Programmatic security: method-call patterns that indicate runtime auth enforcement.
+_PROGRAMMATIC_SECURITY_RE = re.compile(
+    r"\b(?:hasRole|hasAuthority|isAuthenticated|requirePermission|checkPermission"
+    r"|assertAuthorized|authenticate)\s*\("
+    r"|(?:Authentication|SecurityContext|Principal|AuthorizationManager|AccessDecisionManager)\b"
+    r"|throw\s+new\s+(?:AccessDeniedException|UnauthorizedException|ForbiddenException|AuthenticationException)\b",
+    re.MULTILINE,
+)
+
+
+def _has_programmatic_security(source: str) -> bool:
+    return bool(_PROGRAMMATIC_SECURITY_RE.search(source))
+
+
 _MODIFIER_WORDS: frozenset[str] = frozenset({
     "public", "private", "protected", "static", "final", "abstract",
     "synchronized", "native", "strictfp", "transient", "volatile", "default",
@@ -2365,6 +2379,7 @@ def _build_route_surface(
 
     routes: list[dict] = []
     seen: set[tuple] = set()
+    _prog_sec_cache: dict[str, Optional[bool]] = {}  # declaring_file → has_programmatic
 
     # Phase 2: emit own endpoint symbols and record them per class.
     # Each method emits one route per resolved effective prefix.
@@ -2414,6 +2429,19 @@ def _build_route_surface(
         _cls_sym_for_sec = class_sym_by_simple.get(cls_simple)
         _sec = _route_security_from_sym(sym, _cls_sym_for_sec)
 
+        # Programmatic security fallback: scan controller file when no annotation found.
+        if _sec is None:
+            _decl_file = sym.declaring_file or ""
+            if _decl_file and _decl_file not in _prog_sec_cache:
+                try:
+                    _prog_sec_cache[_decl_file] = _has_programmatic_security(
+                        Path(_decl_file).read_text(encoding="utf-8", errors="ignore")
+                    )
+                except Exception:
+                    _prog_sec_cache[_decl_file] = False
+            if _prog_sec_cache.get(_decl_file):
+                _sec = {"policy": "programmatic"}
+
         for prefix in effective_prefixes:
             # P1 fix: re.sub collapses any number of consecutive slashes (///, //, etc.)
             # Single .replace("//", "/") fails for triple-slash from prefix="/" + suffix="/{id}".
@@ -2434,8 +2462,7 @@ def _build_route_surface(
                     "stable_id": sym.stable_id,
                     "inheritance_depth": 0,
                 }
-                if _sec is not None:
-                    _route_entry["security_annotations"] = _sec
+                _route_entry["security_annotations"] = _sec
                 routes.append(_route_entry)
 
     # Phase 3: inheritance projection — subclasses with zero own endpoints
@@ -2966,10 +2993,10 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
         # Use security_annotations already extracted by _build_route_surface
         # via the canonical _route_security_from_sym extractor.
         security_info = route.get("security_annotations")
+        entry["security"] = security_info  # always present; None = no security signal
         if security_info:
-            entry["security"] = security_info
             # Backward compat: keep required_permission for custom annotation
-            if security_info.get("policy") == "custom_permission":
+            if isinstance(security_info, dict) and security_info.get("policy") == "custom_permission":
                 entry["required_permission"] = security_info["required_permission"]
         endpoints.append(entry)
 
@@ -2988,7 +3015,7 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
     # "no_security_signal" = no recognized security annotation at method OR class level.
     # Note: repos may use framework-level security (e.g. Keycloak itself) with no
     # per-endpoint annotations — this count reflects annotation-based coverage only.
-    no_security_signal = sum(1 for e in endpoints if "security" not in e)
+    no_security_signal = sum(1 for e in endpoints if not e.get("security"))
 
     # Detect filter-based security: centralized Spring Security config class.
     # When present, high no_security_signal is expected — security is enforced by
@@ -3007,7 +3034,7 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             for sym in _class_syms
         )
     )
-    _has_annotation_security = any("security" in e for e in endpoints)
+    _has_annotation_security = any(e.get("security") for e in endpoints)
     if _filter_based and _has_annotation_security:
         security_model = "mixed"
     elif _filter_based:
@@ -3090,7 +3117,33 @@ def compute_blast_radius(
     subsystems: list[dict] = ir.get("subsystems") or []
 
     # ── 1. Resolve target → one or more FQNs ─────────────────────────────────
+    _path_like = "/" in target or "\\" in target or target.endswith(".java")
     resolution, matched_fqns = _resolve_target(target, reverse_graph, graph_nodes)
+
+    # File-path input with ambiguous resolution: require the user to be specific.
+    if _path_like and len(matched_fqns) > 1:
+        _candidates = sorted(matched_fqns)
+        return {
+            "target": target,
+            "resolution": "ambiguous_path",
+            "message": (
+                f"Path '{target}' matches {len(matched_fqns)} classes in the IR. "
+                "Pass the full FQN to select one."
+            ),
+            "candidates": _candidates,
+            "direct_callers": [],
+            "indirect_callers": [],
+            "endpoints_affected": [],
+            "mappers_affected": [],
+            "security_surface_affected": [],
+            "cross_module_impact": [],
+            "transactional_boundaries_touched": [],
+            "risk_score": 0.0,
+            "risk_level": "unknown",
+            "confidence_score": 0.0,
+            "confidence_level": "low",
+            "explanation": f"Ambiguous path — {len(matched_fqns)} candidates found.",
+        }
 
     if not matched_fqns:
         # Build a short candidate list to help the user

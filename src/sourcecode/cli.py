@@ -1225,13 +1225,24 @@ def main(
                 _uncommitted = False
             _hit_source = "L2_view" if (_view_key and _core_hash) else "L1_core"
             _data_scope = "COMPACT" if compact else ("AGENT" if agent else "FULL")
+            # Recover generated_at from cached content before overwriting _cache block.
+            _cached_generated_at = None
+            try:
+                import json as _json_ga
+                _cached_generated_at = (
+                    _json_ga.loads(_cache_hit_content)
+                    .get("_cache", {})
+                    .get("generated_at")
+                )
+            except Exception:
+                pass
             _cache_hit_content = _inject_cache_meta(_cache_hit_content, {
                 "cache_source": _hit_source,
                 "git_head_at_generation": _git_sha,
                 "current_git_head": _git_sha,
                 "is_stale": False,
                 "has_uncommitted_changes": _uncommitted,
-                "generated_at": None,
+                "generated_at": _cached_generated_at,
                 "data_scope": _data_scope,
             })
         write_output(_cache_hit_content, output=output)
