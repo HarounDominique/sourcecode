@@ -1,106 +1,75 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-29T12:00:00Z",
+  "timestamp": "2026-05-29T13:41:50Z",
   "phase": null,
-  "phase_name": "bugfix session 31 — 1.32.5",
+  "phase_name": "session 33 — product repositioning + 1.33.0",
   "phase_dir": null,
   "plan": null,
   "task": null,
   "total_tasks": null,
   "status": "paused",
-  "session_type": "bugfix",
+  "session_type": "product",
   "completed_tasks": [
     {
       "id": 1,
-      "name": "BUG-R1 — RIS always cold_start_stale",
+      "name": "README rewrite — reposition around persistent cache + agent workflows",
       "status": "done",
-      "files": ["src/sourcecode/ris.py"],
-      "details": "ris._current_git_head changed from rev-parse HEAD (full 40-char SHA) to rev-parse --short HEAD (7-char). cli.py stored short SHA; ris.py compared full SHA → always stale. Now both sides use short SHA → cold_start_ready works.",
-      "commit": "2255711"
+      "files": ["README.md"],
+      "details": "Hero rewritten: 'Persistent structural context and ultra-fast repeated analysis for AI coding agents.' Benchmarks (17x/9x Keycloak/Broadleaf) promoted above quickstart. New 'Cache system' section: L1/L2 layers, invalidation model, cache status/warm/clear commands. New 'Agent workflow patterns' section: continuous loop, delta context, PR review, CI. 'Java/Spring analyzer' framing moved down to command reference. 'What changes at 0.3s vs 2.7s' section added to explain agent infrastructure angle.",
+      "commit": "24df36a"
     },
     {
       "id": 2,
-      "name": "BUG-D1 — cache_app not registered in CLI",
+      "name": "CLI --help rewrite — cache central, cold/warm latency, cache commands block",
       "status": "done",
       "files": ["src/sourcecode/cli.py"],
-      "details": "Added cache_app Typer sub-group + status/clear/warm commands. Registered with app.add_typer(cache_app, name='cache'). Added 'cache' to _SUBCOMMANDS frozenset (was being consumed as repo path by _preprocess_args, routing to main app instead of cache sub-app).",
-      "commit": "2255711"
+      "details": "New tagline: 'Persistent structural context and ultra-fast repeated analysis for AI coding agents.' Cold/warm latency numbers added. Cache commands block (cache status/warm/clear) added prominently before Examples.",
+      "commit": "24df36a"
     },
     {
       "id": 3,
-      "name": "BUG-D2 — version bump invalidates ALL cache",
+      "name": "pyproject.toml description + version bump 1.32.7 → 1.33.0",
       "status": "done",
-      "files": ["src/sourcecode/cache.py", "src/sourcecode/cli.py"],
-      "details": "Added ANALYZER_CACHE_VERSION='1' to cache.py. Replaced f'v={_sc_version},' in core_flags_str with f'acv={_cache_mod.ANALYZER_CACHE_VERSION},'. Patch releases no longer wipe L1 cores. ANALYZER_CACHE_VERSION only bumped when analysis logic/schema changes. One-time migration wipe occurs when upgrading from 1.32.4 → 1.32.5 (unavoidable).",
-      "commit": "2255711"
+      "files": ["pyproject.toml"],
+      "details": "description updated to match new positioning. version bumped to 1.33.0.",
+      "commit": "24df36a"
     },
     {
       "id": 4,
-      "name": "BUG-C5 — CAS blobs non-atomic writes",
+      "name": "__init__.py version bump → 1.33.0",
       "status": "done",
-      "files": ["src/sourcecode/cache.py"],
-      "details": "_cas_store_blob now uses _atomic_write(path, gzip.compress(raw)) instead of path.write_bytes(). Prevents partial blobs visible to concurrent readers on interrupted write.",
-      "commit": "2255711"
+      "files": ["src/sourcecode/__init__.py"],
+      "commit": "24df36a"
     },
     {
       "id": 5,
-      "name": "BUG-C4 — GC size budget excludes CAS blobs",
+      "name": "CHANGELOG.md — 1.33.0 entry",
       "status": "done",
-      "files": ["src/sourcecode/cache.py"],
-      "details": "GC pass-3 (total size cap) now counts CAS blob sizes in the total. Previously only counted core+snapshot files, so CAS accumulation could push cache well over budget without triggering eviction.",
-      "commit": "2255711"
-    },
-    {
-      "id": 6,
-      "name": "Version bump 1.32.4 → 1.32.5",
-      "status": "done",
-      "files": ["src/sourcecode/__init__.py", "pyproject.toml"],
-      "commit": "2255711"
-    },
-    {
-      "id": 7,
-      "name": "Regression tests — 68 tests across 3 files",
-      "status": "done",
-      "files": ["tests/test_ris.py", "tests/test_cache_cli.py", "tests/test_cache.py"],
-      "details": "test_ris.py: SHA format tests, cold_start_ready/stale coverage, maybe_update_ris. test_cache_cli.py: CLI registration, status/clear commands via CliRunner. test_cache.py: ANALYZER_CACHE_VERSION tests, atomic CAS write, status/clear API. 1457 existing tests pass.",
-      "commit": "2255711"
+      "files": ["CHANGELOG.md"],
+      "commit": "24df36a"
     }
   ],
   "remaining_tasks": [
     {
-      "id": 8,
-      "name": "BUG-C1 — validate async write actually reduces latency",
-      "priority": "P2",
-      "status": "pending",
-      "details": "Need live E2E benchmarks: cold run time with keycloak/broadleaf before and after 1.32.5. Async background write (daemon thread + atexit join 5s) was added in 1.32.4. Verify no corruption and latency improvement. Requires running bash /private/tmp/sync_to_pipx.sh from normal Terminal first."
-    },
-    {
-      "id": 9,
+      "id": 6,
       "name": "Live E2E test: sync workspace → pipx + verify all cache commands",
       "priority": "P1",
       "status": "pending",
-      "details": "Run bash /private/tmp/sync_to_pipx.sh, then: sourcecode cache status /private/tmp/spring-petclinic; sourcecode cache clear /private/tmp/keycloak --yes; sourcecode /private/tmp/keycloak --compact (cold); sourcecode /private/tmp/keycloak --compact (warm — should be < 0.5s); get_cold_start_context should return cold_start_ready after first run."
+      "details": "Run bash /private/tmp/sync_to_pipx.sh, then: sourcecode cache status /private/tmp/spring-petclinic; sourcecode cache clear /private/tmp/keycloak --yes; sourcecode /private/tmp/keycloak --compact (cold); sourcecode /private/tmp/keycloak --compact (warm — should be < 0.6s). Requires normal Terminal (EPERM in Claude Code shell)."
     },
     {
-      "id": 10,
-      "name": "GAP 1 (easy): add upgrade_hint to require_feature() payload",
-      "priority": "P1",
-      "status": "pending",
-      "details": "license.py:244 — add 'upgrade_hint': 'sourcecode activate <license_key>' to payload dict in require_feature()."
-    },
-    {
-      "id": 11,
-      "name": "GAP 2 (medium): tiered --help output",
-      "priority": "P1",
-      "status": "pending",
-      "details": "Custom --help callback. Free shows lock labels, Pro shows full. is_pro unavailable at module init — must be lazy."
-    },
-    {
-      "id": 12,
-      "name": "GAP 3 (medium): free-tier node cap for --graph-modules and --semantics",
+      "id": 7,
+      "name": "BUG-C1 — validate async write actually reduces latency",
       "priority": "P2",
       "status": "pending",
-      "details": "Max 10 nodes for free tier in --graph-modules and --semantics output."
+      "details": "E2E benchmarks: cold run time with keycloak/broadleaf before/after 1.33.0. Async background write (daemon thread + atexit join 5s) added in 1.32.4. Verify no corruption and latency improvement."
+    },
+    {
+      "id": 8,
+      "name": "Publish 1.33.0 to PyPI / Homebrew tap",
+      "priority": "P2",
+      "status": "pending",
+      "details": "Version bumped and committed. Needs PyPI publish and Homebrew tap update."
     }
   ],
   "blockers": [],
@@ -123,19 +92,29 @@
   ],
   "decisions": [
     {
-      "decision": "ANALYZER_CACHE_VERSION decoupled from package __version__",
-      "rationale": "Package version changes on every release; analysis schema/logic changes rarely. Coupling them caused every patch bump to wipe all L1 cores (BUG-D2). ANALYZER_CACHE_VERSION starts at '1' and is bumped manually only when cache format or analysis output changes.",
-      "session": 31
+      "decision": "Cache is the product moat — README and CLI help now lead with this",
+      "rationale": "Benchmarks (10.5s → 0.6s Keycloak, 2.7s → 0.3s Broadleaf) change sourcecode from an occasional tool to constant agent infrastructure. All positioning now reflects this.",
+      "session": 33
     },
     {
-      "decision": "short SHA used everywhere for RIS git_head comparison",
-      "rationale": "cli.py already used rev-parse --short for cache key. RIS was using full SHA in _current_git_head, causing the comparison to always fail. Standardized on short SHA as the canonical format.",
-      "session": 31
+      "decision": "No separate landing page — README doubles as landing on PyPI/GitHub",
+      "rationale": "No HTML landing page exists in the repo. README rewrite covers both.",
+      "session": 33
     },
     {
-      "decision": "cache subcommand added to _SUBCOMMANDS frozenset",
-      "rationale": "_preprocess_args extracts the first positional token as a repo path unless it's in _SUBCOMMANDS. 'cache' was not in the set, so sourcecode cache status would treat 'cache' as the target directory and fail. Added 'cache' to the frozenset.",
-      "session": 31
+      "decision": "README benchmark numbers: 17x/9x (not 33x/13x from older README)",
+      "rationale": "Used more conservative rounded figures: 10.5s/0.6s = ~17x for Keycloak, 2.7s/0.3s = ~9x for Broadleaf. Previous README had different raw numbers.",
+      "session": 33
+    },
+    {
+      "decision": "upgrade_hint added as a separate JSON key (not embedded in message) — from session 32",
+      "rationale": "CI/MCP consumers should extract the activation command programmatically.",
+      "session": 32
+    },
+    {
+      "decision": "Free-tier node cap enforced after merge_graphs in cli.py (not in GraphAnalyzer)",
+      "rationale": "Policy layer separation — GraphAnalyzer stays license-unaware.",
+      "session": 32
     }
   ],
   "uncommitted_files": [],
@@ -143,6 +122,6 @@
     "docs/PRODUCT_AUDIT.md",
     "src/sourcecode/cache.tmp_new"
   ],
-  "next_action": "Run bash /private/tmp/sync_to_pipx.sh then verify: sourcecode cache status, get_cold_start_context returns cold_start_ready, keycloak warm run < 0.5s.",
-  "context_notes": "Session 31 fixed 6 bugs (BUG-R1, BUG-D1, BUG-D2, BUG-C4, BUG-C5) and bumped to 1.32.5. All changes committed in 2255711. 1457 tests pass. The one-time cache wipe on upgrade from 1.32.4 is expected — after that, ANALYZER_CACHE_VERSION='1' is stable. Workspace is 3 commits ahead of origin/master."
+  "next_action": "Run bash /private/tmp/sync_to_pipx.sh then verify: sourcecode cache status, warm run < 0.6s on keycloak. Then consider publishing 1.33.0.",
+  "context_notes": "Session 33 was purely product/positioning work. Cache is now the central identity. All changes committed in 24df36a. No test changes needed — no logic changed. Pre-existing uncommitted files (prepare_context.py, ris.py, HANDOFF.json from session 32) still need attention but are not blocking."
 }
