@@ -1237,6 +1237,10 @@ class TaskContextBuilder:
                         limitations=[], confidence="low",
                         error_code="no_diff_source",
                         error_message=_no_diff_msg,
+                        error_hints=[
+                            "Add --since <ref> to specify a base commit.",
+                            "Examples: --since origin/main  |  --since HEAD~3  |  --since main",
+                        ],
                         gaps=[_no_diff_msg],
                         ci_decision="no_diff_source",
                         scope_source=_pr_scope_source,

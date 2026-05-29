@@ -598,6 +598,11 @@ def get_ir_summary(repo_path: str = ".") -> dict:
     on large repos), use the CLI: sourcecode repo-ir <path> --output ir.json
     Use get_compact_context or get_agent_context for non-Java repos.
 
+    IR access paths (for full IR via CLI):
+      nodes  →  result["graph"]["nodes"]   (list of {fqn, type, ...})
+      edges  →  result["graph"]["edges"]   (list of {source, target, type})
+    Summary mode omits nodes/edges entirely (graph._omitted explains why).
+
     repo_path: absolute path to the Java repository (default: current working directory).
     """
     _raw = repo_path
@@ -608,7 +613,14 @@ def get_ir_summary(repo_path: str = ".") -> dict:
         _path_err = _check_repo_path(repo_path)
         if _path_err is not None:
             return _path_err
-        return _execute(["repo-ir", repo_path, "--summary-only"])
+        result = _execute(["repo-ir", repo_path, "--summary-only"])
+        if isinstance(result, dict) and "error" not in result:
+            result["_ir_access"] = {
+                "nodes_path": "result['graph']['nodes']",
+                "edges_path": "result['graph']['edges']",
+                "note": "nodes/edges omitted in summary mode — use CLI repo-ir --output ir.json for full graph",
+            }
+        return result
     except Exception as exc:
         return _err(
             f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",

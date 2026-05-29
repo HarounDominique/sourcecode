@@ -2,7 +2,7 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.33.4-blue)
+![Version](https://img.shields.io/badge/version-1.33.7-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---

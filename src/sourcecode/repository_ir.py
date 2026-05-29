@@ -2993,7 +2993,7 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
         # Use security_annotations already extracted by _build_route_surface
         # via the canonical _route_security_from_sym extractor.
         security_info = route.get("security_annotations")
-        entry["security"] = security_info  # always present; None = no security signal
+        entry["security"] = security_info if security_info is not None else {"policy": "none_detected"}
         if security_info:
             # Backward compat: keep required_permission for custom annotation
             if isinstance(security_info, dict) and security_info.get("policy") == "custom_permission":
@@ -3708,9 +3708,15 @@ def _resolve_target(
     """
     # Normalize: strip .java suffix if given a path
     t = target.strip()
+    _is_path_like = "/" in t or "\\" in t or t.endswith(".java")
     if t.endswith(".java"):
         t = t[:-5]
-    # Convert file path separators to class name
+    # When given a file path (e.g. src/main/java/org/foo/Bar), extract the class
+    # name (basename) so suffix matching resolves it to the correct FQN.
+    # Path-to-dot conversion (src.main.java.org.foo.Bar) never matches an IR FQN.
+    if _is_path_like and ("/" in t or "\\" in t):
+        import os.path as _osp
+        t = _osp.basename(t.replace("\\", "/"))
     t_class = t.replace("/", ".").replace("\\", ".")
 
     # 1. Exact match
