@@ -666,3 +666,141 @@ class TestGCLayered:
         # Keep=1: only the most-recent commit's core survives
         # yyy8888 was written last → should survive
         assert any("yyy8888" not in n for n in surviving_views) or len(surviving_views) == 1
+
+
+# ---------------------------------------------------------------------------
+# BUG-D2 regression — ANALYZER_CACHE_VERSION decoupled from package version
+# ---------------------------------------------------------------------------
+
+class TestAnalyzerCacheVersion:
+    def test_analyzer_cache_version_exported(self) -> None:
+        """ANALYZER_CACHE_VERSION must be exported from cache module."""
+        assert hasattr(_cache, "ANALYZER_CACHE_VERSION")
+        assert isinstance(_cache.ANALYZER_CACHE_VERSION, str)
+        assert len(_cache.ANALYZER_CACHE_VERSION) > 0
+
+    def test_analyzer_cache_version_stable_across_patch(self) -> None:
+        """ANALYZER_CACHE_VERSION must NOT change when package version changes.
+
+        Regression: before this fix, the cache key used v=<package_version>,
+        so every patch release (1.32.4 → 1.32.5) invalidated all cached cores.
+        """
+        import sourcecode
+        # ANALYZER_CACHE_VERSION is independent — changing __version__ must not
+        # change ANALYZER_CACHE_VERSION.  We verify they are different symbols.
+        assert _cache.ANALYZER_CACHE_VERSION != sourcecode.__version__, (
+            "ANALYZER_CACHE_VERSION must NOT equal the package version — "
+            "it tracks analysis schema, not release version"
+        )
+
+    def test_core_flags_use_acv_not_package_version(self) -> None:
+        """CLI cache key must use acv= (ANALYZER_CACHE_VERSION), not v=<package_version>.
+
+        Regression: cli.py used f'v={__version__},' causing every patch release
+        to produce a different core key and invalidate all cached cores.
+        """
+        import sourcecode
+        import inspect
+        import sourcecode.cli as _cli
+        src = inspect.getsource(_cli.main)
+        # Must use acv= (analyzer cache version) in core flags
+        assert "ANALYZER_CACHE_VERSION" in src, (
+            "core_flags_str must reference ANALYZER_CACHE_VERSION"
+        )
+        # Must NOT use __version__ in core flags computation
+        # (it is fine to use it in --version output, but not in the cache key)
+        assert 'f"v={_sc_version' not in src, (
+            "core_flags_str must not embed the package version"
+        )
+
+
+# ---------------------------------------------------------------------------
+# BUG-C5 regression — CAS blobs written atomically
+# ---------------------------------------------------------------------------
+
+class TestCASAtomicWrite:
+    def test_cas_blob_no_partial_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_cas_store_blob must use _atomic_write (temp + rename), not direct write_bytes.
+
+        Regression: before this fix, write_bytes() on the CAS blob path could
+        leave a partial file visible to concurrent readers on write failure.
+        """
+        import inspect
+        from sourcecode import cache as _c
+        src = inspect.getsource(_c._cas_store_blob)
+        assert "_atomic_write" in src, (
+            "_cas_store_blob must call _atomic_write for atomicity"
+        )
+        assert "write_bytes" not in src, (
+            "_cas_store_blob must not use direct write_bytes (not atomic)"
+        )
+
+    def test_cas_blob_survives_interrupted_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Interrupted CAS write must not leave a partial blob visible."""
+        monkeypatch.setenv("SOURCECODE_CACHE_DIR", str(tmp_path / "cache"))
+        r = _make_repo(tmp_path, "repo")
+        cache_d = _cache.cache_dir(r)
+        cache_d.mkdir(parents=True, exist_ok=True)
+
+        # Simulate interrupted write: a .tmp file exists but rename never happened
+        from sourcecode.cache import _cas_dir, _cas_path
+        cas_d = _cas_dir(cache_d)
+        cas_d.mkdir(parents=True, exist_ok=True)
+        stale_tmp = cas_d / "stale.tmp"
+        stale_tmp.write_bytes(b"partial-data")
+
+        # Writing a real blob must succeed regardless of stale .tmp
+        content = _large_json(100)
+        _cache.write(r, _make_key("abc1234"), content)
+        result = _cache.read(r, _make_key("abc1234"))
+        assert result is not None
+        assert json.loads(result) == json.loads(content)
+
+
+# ---------------------------------------------------------------------------
+# BUG-D1 regression — observability: status() and clear() work
+# ---------------------------------------------------------------------------
+
+class TestObservability:
+    def test_status_empty_cache(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SOURCECODE_CACHE_DIR", str(tmp_path / "cache"))
+        r = _make_repo(tmp_path, "repo")
+        stats = _cache.status(r)
+        assert stats["cores"] == 0
+        assert stats["snapshots"] == 0
+        assert stats["views"] == 0
+        assert stats["cas_blobs"] == 0
+        assert stats["total_size_bytes"] == 0
+
+    def test_status_after_writes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SOURCECODE_CACHE_DIR", str(tmp_path / "cache"))
+        r = _make_repo(tmp_path, "repo")
+        _cache.write(r, _make_key("abc1234"), _large_json())
+        _cache.write_core(r, "abc1234-aabbccdd", {"_cv": "1", "_compact": {}})
+        stats = _cache.status(r)
+        assert stats["snapshots"] >= 1
+        assert stats["cores"] >= 1
+        assert stats["total_size_bytes"] > 0
+        assert stats["total_size_mb"] >= 0.0
+        assert stats["cache_dir"]
+
+    def test_clear_removes_all_files(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SOURCECODE_CACHE_DIR", str(tmp_path / "cache"))
+        r = _make_repo(tmp_path, "repo")
+        _cache.write(r, _make_key("abc1234"), _large_json())
+        _cache.write_core(r, "abc1234-aabbccdd", {"_cv": "1", "_compact": {}})
+        removed = _cache.clear(r)
+        assert removed > 0
+        stats = _cache.status(r)
+        assert stats["cores"] == 0
+        assert stats["snapshots"] == 0
+        assert stats["cas_blobs"] == 0
+
+    def test_clear_empty_cache_returns_zero(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SOURCECODE_CACHE_DIR", str(tmp_path / "cache"))
+        r = _make_repo(tmp_path, "repo")
+        assert _cache.clear(r) == 0

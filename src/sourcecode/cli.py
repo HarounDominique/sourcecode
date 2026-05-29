@@ -208,6 +208,8 @@ _SUBCOMMANDS: frozenset[str] = frozenset(
         "onboard", "modernize", "fix-bug", "review-pr",
         # License
         "activate",
+        # Cache observability
+        "cache",
     }
 )
 
@@ -411,6 +413,9 @@ app.add_typer(telemetry_app, name="telemetry")
 
 mcp_app = typer.Typer(help="MCP integration: setup, status, serve, remove.", rich_markup_mode="rich")
 app.add_typer(mcp_app, name="mcp")
+
+cache_app = typer.Typer(help="Cache inspection and management.", rich_markup_mode="rich")
+app.add_typer(cache_app, name="cache")
 
 
 def _maybe_ask_consent() -> None:
@@ -1064,7 +1069,6 @@ def main(
             # Only cache when target IS the git repo root (not a subdir of one),
             # to avoid polluting sub-project directories used in tests.
             if _git_sha and (target / ".git").exists():
-                from sourcecode import __version__ as _sc_version
                 _excl_key = (
                     ",".join(sorted(e.strip() for e in exclude.split(",") if e.strip()))
                     if exclude else ""
@@ -1072,8 +1076,10 @@ def main(
 
                 # ── Core (analysis) flags: affect which analyzers run + scan config ──
                 # Use effective_depth (not raw depth) so Java auto-adjustment is captured.
+                # acv = ANALYZER_CACHE_VERSION — bumped only when analysis logic/schema
+                # changes, NOT on every package release.  Prevents patch-bump cache wipes.
                 _core_flags_str = (
-                    f"v={_sc_version},"
+                    f"acv={_cache_mod.ANALYZER_CACHE_VERSION},"
                     f"dep={dependencies},gm={graph_modules},"
                     f"docs={docs},fm={full_metrics},sem={semantics},"
                     f"arch={architecture},gc={git_context},em={env_map},"
@@ -4122,6 +4128,70 @@ def mcp_remove(
 
     typer.echo("MCP integration removed.")
     typer.echo("  Re-add:  sourcecode mcp init")
+
+
+# ── Cache subcommands ─────────────────────────────────────────────────────────
+
+
+@cache_app.command("status")
+def cache_status_cmd(
+    path: Path = typer.Argument(Path("."), help="Repository path (default: current directory)"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """Show cache statistics for a repository."""
+    from sourcecode import cache as _cm
+    target = Path(path).resolve()
+    stats = _cm.status(target)
+    if json_output:
+        import json as _j
+        typer.echo(_j.dumps(stats, indent=2, ensure_ascii=False))
+    else:
+        typer.echo(f"Cache dir:   {stats['cache_dir']}")
+        typer.echo(f"Cores:       {stats['cores']}")
+        typer.echo(f"Snapshots:   {stats['snapshots']}")
+        typer.echo(f"Views:       {stats['views']}")
+        typer.echo(f"CAS blobs:   {stats['cas_blobs']}")
+        typer.echo(f"Total size:  {stats['total_size_mb']} MB")
+
+
+@cache_app.command("clear")
+def cache_clear_cmd(
+    path: Path = typer.Argument(Path("."), help="Repository path (default: current directory)"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+) -> None:
+    """Delete all cached snapshots for a repository."""
+    from sourcecode import cache as _cm
+    target = Path(path).resolve()
+    if not yes:
+        typer.confirm(f"Delete all cache files for {target}?", abort=True)
+    removed = _cm.clear(target)
+    typer.echo(f"Removed {removed} file(s).")
+
+
+@cache_app.command("warm")
+def cache_warm_cmd(
+    path: Path = typer.Argument(Path("."), help="Repository path to warm (default: current directory)"),
+    compact: bool = typer.Option(True, "--compact/--no-compact", help="Warm compact view (default: on)."),
+    agent: bool = typer.Option(False, "--agent", help="Also warm agent view."),
+) -> None:
+    """Pre-populate the cache by running a fresh analysis."""
+    import subprocess as _sub
+    import sys as _sys
+    target = Path(path).resolve()
+    typer.echo(f"Warming cache for {target} …", err=True)
+    cmd = [_sys.executable, "-m", "sourcecode", str(target)]
+    if compact:
+        cmd.append("--compact")
+    if agent:
+        cmd.append("--agent")
+    result = _sub.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        typer.echo("Cache warmed.", err=True)
+    else:
+        typer.echo(f"Warm failed (exit {result.returncode}).", err=True)
+        if result.stderr:
+            typer.echo(result.stderr.strip(), err=True)
+        raise typer.Exit(code=result.returncode)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

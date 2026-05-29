@@ -329,10 +329,15 @@ def update_ris_api_surface(repo_root: Path, endpoints_data: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _current_git_head(repo_root: Path) -> str:
-    """Return current HEAD SHA.  Returns '' on any error or non-git directory."""
+    """Return current HEAD short SHA.  Returns '' on any error or non-git directory.
+
+    Uses --short to match the format stored in the RIS and used by cli.py
+    cache key computation — both sides must use the same format or staleness
+    checks will always return True.
+    """
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            ["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
             capture_output=True,
             text=True,
             timeout=2,

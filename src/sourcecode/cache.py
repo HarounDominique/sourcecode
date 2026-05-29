@@ -72,6 +72,11 @@ SCHEMA_VERSION: str = "2"
 #: Bump to invalidate all L1 core caches (independent of snapshot version).
 CORE_SCHEMA_VERSION: str = "1"
 
+#: Bump when analysis logic or output schema changes — NOT on every package release.
+#: This is the stable part of the L1 core cache key.  Package version bumps (patch,
+#: minor) must NOT bump this value unless the cached data format actually changed.
+ANALYZER_CACHE_VERSION: str = "1"
+
 #: Fields eligible for CAS deduplication (applied to top-level JSON dict keys).
 _CAS_FIELDS: frozenset[str] = frozenset([
     "file_paths",
@@ -511,7 +516,7 @@ def _cas_store_blob(cache_d: Path, serialised: str) -> str:
     path = _cas_path(cache_d, blob_hash)
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(gzip.compress(raw, compresslevel=6))
+        _atomic_write(path, gzip.compress(raw, compresslevel=6))
     return blob_hash
 
 
@@ -642,7 +647,11 @@ def _gc(cache_d: Path) -> None:
         # ── Pass 3: total size cap ──────────────────────────────────────────
         if max_size_bytes > 0:
             size_candidates = [p for p in surviving if p.exists()]
+            # Include CAS blobs in the size budget calculation
+            cas_d_sz = _cas_dir(cache_d)
+            cas_files = list(cas_d_sz.glob("*.gz")) if cas_d_sz.exists() else []
             total = sum(p.stat().st_size for p in size_candidates if not p.name.startswith("view-"))
+            total += sum(p.stat().st_size for p in cas_files if p.exists())
             if total > max_size_bytes:
                 # Sort oldest-first; evict core+snapshot files until under budget
                 size_candidates.sort(key=lambda p: p.stat().st_mtime)
