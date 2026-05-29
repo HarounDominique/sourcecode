@@ -349,6 +349,26 @@ def _current_git_head(repo_root: Path) -> str:
     return ""
 
 
+def _has_uncommitted_changes(repo_root: Path) -> bool:
+    """Return True if working tree has staged or unstaged changes.
+
+    Uses ``git status --porcelain`` — any non-empty output means the working
+    tree diverges from HEAD.  Returns False on any error (non-git dirs, etc.).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            return bool(result.stdout.strip())
+    except Exception:
+        pass
+    return False
+
+
 def get_cold_start_context(repo_root: Path) -> dict:
     """Return a lightweight bootstrap object from the persisted RIS.
 
@@ -361,14 +381,19 @@ def get_cold_start_context(repo_root: Path) -> dict:
 
         current_head = _current_git_head(repo_root)
         stale = bool(current_head and ris.git_head and current_head != ris.git_head)
+        uncommitted = _has_uncommitted_changes(repo_root)
 
         endpoints = ris.api_surface.get("endpoints", [])
         result: dict = {
             "status": "cold_start_stale" if stale else "cold_start_ready",
             "repo_id": ris.repo_id,
             "git_head": ris.git_head,
+            "current_git_head": current_head,
             "stale": stale,
+            "has_uncommitted_changes": uncommitted,
             "last_updated_at": ris.last_updated_at,
+            "cache_source": "RIS",
+            "data_scope": "RIS_BOOTSTRAP",
             "summary": ris.compact_summary,
             "entrypoints": ris.structural_map.get("entrypoints", []),
             "endpoints": endpoints,

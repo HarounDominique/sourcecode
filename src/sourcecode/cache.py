@@ -57,6 +57,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -111,6 +112,24 @@ _VIEW_RE = re.compile(r"^view-([0-9a-f]{16})-[0-9a-f]+\.json\.gz$")
 
 
 # ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _get_git_head(repo_root: Path) -> str:
+    """Return short git HEAD SHA, or '' on any error."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode == 0:
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Public API — location helpers
 # ---------------------------------------------------------------------------
 
@@ -138,15 +157,51 @@ def cache_dir(repo_root: Path) -> Path:
 def status(repo_root: Path) -> dict[str, Any]:
     """Return a stats dict describing the current cache state for *repo_root*.
 
-    Keys: ``cache_dir``, ``cores``, ``snapshots``, ``views``, ``cas_blobs``,
-    ``total_size_bytes``, ``total_size_mb``.
+    Keys: ``cache_dir``, ``cores``, ``views``, ``cas_blobs``,
+    ``total_size_bytes``, ``total_size_mb``, ``ris_exists``, ``ris_git_head``,
+    ``ris_last_updated_at``, ``ris_is_stale``, ``current_git_head``.
+
+    Note: ``snapshots`` is a legacy v1 field — always 0 in v2 (kept for
+    backward compatibility; v2 writes ``core-*`` and ``view-*`` files only).
     """
     cache_d = cache_dir(repo_root)
+    current_head = _get_git_head(repo_root)
+
+    # RIS metadata (lazy import to avoid circular dependency)
+    ris_fields: dict[str, Any]
+    try:
+        from sourcecode.ris import load_ris as _load_ris  # noqa: PLC0415
+        _ris = _load_ris(repo_root)
+        if _ris is not None:
+            _ris_stale = bool(current_head and _ris.git_head and current_head != _ris.git_head)
+            ris_fields = {
+                "ris_exists": True,
+                "ris_git_head": _ris.git_head,
+                "ris_last_updated_at": _ris.last_updated_at,
+                "ris_is_stale": _ris_stale,
+            }
+        else:
+            ris_fields = {
+                "ris_exists": False,
+                "ris_git_head": None,
+                "ris_last_updated_at": None,
+                "ris_is_stale": False,
+            }
+    except Exception:
+        ris_fields = {
+            "ris_exists": False,
+            "ris_git_head": None,
+            "ris_last_updated_at": None,
+            "ris_is_stale": False,
+        }
+
     if not cache_d.exists():
         return {
             "cache_dir": str(cache_d),
             "cores": 0, "snapshots": 0, "views": 0, "cas_blobs": 0,
             "total_size_bytes": 0, "total_size_mb": 0.0,
+            "current_git_head": current_head,
+            **ris_fields,
         }
     cores = list(cache_d.glob("core-*.json.gz"))
     snapshots = list(cache_d.glob("snapshot-*.json.gz"))
@@ -162,11 +217,18 @@ def status(repo_root: Path) -> dict[str, Any]:
         "cas_blobs": len(cas_blobs),
         "total_size_bytes": total_bytes,
         "total_size_mb": round(total_bytes / (1024 * 1024), 2),
+        "current_git_head": current_head,
+        **ris_fields,
     }
 
 
-def clear(repo_root: Path) -> int:
-    """Delete all cache files for *repo_root*.  Returns the number of files removed."""
+def clear(repo_root: Path, *, clear_ris: bool = False) -> int:
+    """Delete cache files for *repo_root*.  Returns the number of files removed.
+
+    By default, RIS (``ris.json.gz``) is preserved across clears — it is the
+    persistent structural index used by cold-start bootstrapping.  Pass
+    ``clear_ris=True`` (CLI: ``--include-ris``) to also delete the RIS.
+    """
     cache_d = cache_dir(repo_root)
     if not cache_d.exists():
         return 0
@@ -179,6 +241,11 @@ def clear(repo_root: Path) -> int:
     if cas_d.exists():
         for f in cas_d.glob("*.gz"):
             _safe_unlink(f)
+            removed += 1
+    if clear_ris:
+        ris_file = cache_d / "ris.json.gz"
+        if ris_file.exists():
+            _safe_unlink(ris_file)
             removed += 1
     return removed
 

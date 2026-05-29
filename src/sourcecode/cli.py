@@ -1058,6 +1058,22 @@ def main(
         code_notes = True
         architecture = True
 
+    def _inject_cache_meta(raw: str, meta: dict) -> str:
+        """Inject ``_cache`` provenance block into a JSON dict string.
+
+        Parses *raw* as JSON, adds ``_cache`` key, re-serialises.  Returns *raw*
+        unchanged on any parse failure or non-dict JSON (YAML pass-through, etc.).
+        """
+        try:
+            import json as _jm
+            obj = _jm.loads(raw)
+            if isinstance(obj, dict):
+                obj["_cache"] = meta
+                return _jm.dumps(obj, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+        return raw
+
     # ── Two-layer cache ────────────────────────────────────────────────────────
     # L1 (core): (repo, commit, analysis_flags) → pre-computed view data dict
     #            key  = core-<git_sha>-<analysis_hash>.json.gz
@@ -1202,6 +1218,23 @@ def main(
 
     if _cache_hit_content is not None:
         from sourcecode.serializer import write_output
+        if format == "json":
+            try:
+                from sourcecode.ris import _has_uncommitted_changes as _huc
+                _uncommitted = _huc(target)
+            except Exception:
+                _uncommitted = False
+            _hit_source = "L2_view" if (_view_key and _core_hash) else "L1_core"
+            _data_scope = "COMPACT" if compact else ("AGENT" if agent else "FULL")
+            _cache_hit_content = _inject_cache_meta(_cache_hit_content, {
+                "cache_source": _hit_source,
+                "git_head_at_generation": _git_sha,
+                "current_git_head": _git_sha,
+                "is_stale": False,
+                "has_uncommitted_changes": _uncommitted,
+                "generated_at": None,
+                "data_scope": _data_scope,
+            })
         write_output(_cache_hit_content, output=output)
         if copy and not output:
             _copy_to_clipboard(_cache_hit_content)
@@ -2082,6 +2115,23 @@ def main(
 
     # 6. Write output (CLI-04)
     _progress.finish()
+    if format == "json":
+        try:
+            from sourcecode.ris import _has_uncommitted_changes as _huc_fresh
+            _uncommitted_fresh = _huc_fresh(target)
+        except Exception:
+            _uncommitted_fresh = False
+        import datetime as _dt
+        _data_scope_fresh = "COMPACT" if compact else ("AGENT" if agent else "FULL")
+        content = _inject_cache_meta(content, {
+            "cache_source": "fresh",
+            "git_head_at_generation": _git_sha,
+            "current_git_head": _git_sha,
+            "is_stale": False,
+            "has_uncommitted_changes": _uncommitted_fresh,
+            "generated_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "data_scope": _data_scope_fresh,
+        })
     write_output(content, output=output)
 
     # Persist to two-layer cache (git SHA unchanged → re-use on next run).
@@ -4231,23 +4281,36 @@ def cache_status_cmd(
     else:
         typer.echo(f"Cache dir:   {stats['cache_dir']}")
         typer.echo(f"Cores:       {stats['cores']}")
-        typer.echo(f"Snapshots:   {stats['snapshots']}")
         typer.echo(f"Views:       {stats['views']}")
         typer.echo(f"CAS blobs:   {stats['cas_blobs']}")
         typer.echo(f"Total size:  {stats['total_size_mb']} MB")
+        # RIS section
+        if stats.get("ris_exists"):
+            _stale_tag = " [STALE]" if stats.get("ris_is_stale") else ""
+            typer.echo(f"RIS:         exists  HEAD={stats.get('ris_git_head', '?')}{_stale_tag}  updated={stats.get('ris_last_updated_at', '?')}")
+        else:
+            typer.echo("RIS:         none  (run analysis to build)")
+        if stats.get("current_git_head"):
+            typer.echo(f"Current HEAD:{stats['current_git_head']}")
 
 
 @cache_app.command("clear")
 def cache_clear_cmd(
     path: Path = typer.Argument(Path("."), help="Repository path (default: current directory)"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+    include_ris: bool = typer.Option(False, "--include-ris", help="Also delete the RIS snapshot (ris.json.gz). By default, RIS is preserved across clears."),
 ) -> None:
-    """Delete all cached snapshots for a repository."""
+    """Delete cached snapshots for a repository.
+
+    By default, RIS (ris.json.gz) is preserved — it is the persistent structural
+    index used for cold-start bootstrapping.  Use --include-ris to also clear it.
+    """
     from sourcecode import cache as _cm
     target = Path(path).resolve()
     if not yes:
-        typer.confirm(f"Delete all cache files for {target}?", abort=True)
-    removed = _cm.clear(target)
+        _ris_note = " (including RIS)" if include_ris else " (RIS preserved — use --include-ris to also clear it)"
+        typer.confirm(f"Delete all cache files for {target}{_ris_note}?", abort=True)
+    removed = _cm.clear(target, clear_ris=include_ris)
     typer.echo(f"Removed {removed} file(s).")
 
 
