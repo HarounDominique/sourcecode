@@ -1,75 +1,92 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-29T13:41:50Z",
+  "timestamp": "2026-05-29T00:00:00Z",
   "phase": null,
-  "phase_name": "session 33 — product repositioning + 1.33.0",
+  "phase_name": "session 34 — 3 contract bugs + 1.33.1",
   "phase_dir": null,
   "plan": null,
   "task": null,
   "total_tasks": null,
   "status": "paused",
-  "session_type": "product",
+  "session_type": "bugfix",
   "completed_tasks": [
     {
       "id": 1,
-      "name": "README rewrite — reposition around persistent cache + agent workflows",
+      "name": "Landing page cache-first update",
       "status": "done",
-      "files": ["README.md"],
-      "details": "Hero rewritten: 'Persistent structural context and ultra-fast repeated analysis for AI coding agents.' Benchmarks (17x/9x Keycloak/Broadleaf) promoted above quickstart. New 'Cache system' section: L1/L2 layers, invalidation model, cache status/warm/clear commands. New 'Agent workflow patterns' section: continuous loop, delta context, PR review, CI. 'Java/Spring analyzer' framing moved down to command reference. 'What changes at 0.3s vs 2.7s' section added to explain agent infrastructure angle.",
-      "commit": "24df36a"
+      "files": ["~/Documents/workspace/sourcecode-landing/index.html"],
+      "details": "Updated sourcecode-landing/index.html to match v1.33.0 cache-first identity: new h1, hero subtitle, cache section (L1/L2 + commands + agent loop), benchmark numbers (17x/9x), nav link, use cases, pricing. Done in session 33 tail / session 34 start.",
+      "commit": "session-33 (not in atlas-cli repo)"
     },
     {
       "id": 2,
-      "name": "CLI --help rewrite — cache central, cold/warm latency, cache commands block",
+      "name": "fix: cold-start routing — add to _SUBCOMMANDS",
       "status": "done",
       "files": ["src/sourcecode/cli.py"],
-      "details": "New tagline: 'Persistent structural context and ultra-fast repeated analysis for AI coding agents.' Cold/warm latency numbers added. Cache commands block (cache status/warm/clear) added prominently before Examples.",
-      "commit": "24df36a"
+      "details": "cold-start was missing from _SUBCOMMANDS frozenset. _preprocess_args treated 'cold-start' as a path argument → directory_not_found JSON error. Fixed by adding 'cold-start' to _SUBCOMMANDS so Typer routes correctly.",
+      "commit": "4a64435"
     },
     {
       "id": 3,
-      "name": "pyproject.toml description + version bump 1.32.7 → 1.33.0",
+      "name": "fix: --changed-only returns no_changes JSON when working tree is clean",
       "status": "done",
-      "files": ["pyproject.toml"],
-      "details": "description updated to match new positioning. version bumped to 1.33.0.",
-      "commit": "24df36a"
+      "files": ["src/sourcecode/cli.py"],
+      "details": "When git confirmed no uncommitted changes, code fell back to full scan with a stderr-only warning. Output was identical to --compact — agent couldn't distinguish 'no changes' from 'changes found'. Now returns {status: working_tree_clean, no_changes: true, changed_files: [], message: ...} and exits 0. Git-unavailable/error still falls back to full scan.",
+      "commit": "4a64435"
     },
     {
       "id": 4,
-      "name": "__init__.py version bump → 1.33.0",
+      "name": "fix: generate-tests relevant_files filters out test-role files",
       "status": "done",
-      "files": ["src/sourcecode/__init__.py"],
-      "commit": "24df36a"
+      "files": ["src/sourcecode/cli.py"],
+      "details": "Test files were included in generate-tests scoring and received +2.0 'existing test' content_boost. High-churn test files (score 0.94-0.96) outranked untested source files, inverting the stated goal. Fixed: filter role=='test' from relevant_files at serialization in cli.py. Test files are already in test_gaps.",
+      "commit": "4a64435"
     },
     {
       "id": 5,
-      "name": "CHANGELOG.md — 1.33.0 entry",
+      "name": "feat: RIS fast-path for onboard/explain (session 32 pre-existing)",
       "status": "done",
-      "files": ["CHANGELOG.md"],
-      "commit": "24df36a"
+      "files": ["src/sourcecode/prepare_context.py"],
+      "details": "TaskContextBuilder._try_ris_fast_path(): serves onboard/explain from warm RIS snapshot (<50ms) when git HEAD matches stored RIS. Falls through on any cache miss or error.",
+      "commit": "4a64435"
+    },
+    {
+      "id": 6,
+      "name": "feat: cold-start endpoints_hint for Java repos (session 32 pre-existing)",
+      "status": "done",
+      "files": ["src/sourcecode/ris.py"],
+      "details": "cold-start response now includes endpoints_hint field when repo is Java (pom.xml/build.gradle present) but endpoint index is empty. Guides agents to call get_endpoints.",
+      "commit": "4a64435"
+    },
+    {
+      "id": 7,
+      "name": "version bump 1.33.0 → 1.33.1",
+      "status": "done",
+      "files": ["src/sourcecode/__init__.py", "pyproject.toml", "README.md"],
+      "commit": "4a64435"
     }
   ],
   "remaining_tasks": [
     {
-      "id": 6,
-      "name": "Live E2E test: sync workspace → pipx + verify all cache commands",
+      "id": 8,
+      "name": "Live E2E test: sync workspace → pipx + verify cache commands",
       "priority": "P1",
       "status": "pending",
-      "details": "Run bash /private/tmp/sync_to_pipx.sh, then: sourcecode cache status /private/tmp/spring-petclinic; sourcecode cache clear /private/tmp/keycloak --yes; sourcecode /private/tmp/keycloak --compact (cold); sourcecode /private/tmp/keycloak --compact (warm — should be < 0.6s). Requires normal Terminal (EPERM in Claude Code shell)."
+      "details": "Run bash /private/tmp/sync_to_pipx.sh from normal Terminal (EPERM in Claude Code shell), then: sourcecode cache status /private/tmp/spring-petclinic; sourcecode cache clear /private/tmp/keycloak --yes; sourcecode /private/tmp/keycloak --compact (cold); sourcecode /private/tmp/keycloak --compact (warm — should be < 0.6s). Also verify fixed bugs: sourcecode cold-start from /private/tmp/keycloak, sourcecode . --changed-only on clean repo."
     },
     {
-      "id": 7,
-      "name": "BUG-C1 — validate async write actually reduces latency",
+      "id": 9,
+      "name": "BUG-C1 — validate async write actually reduces cold latency",
       "priority": "P2",
       "status": "pending",
-      "details": "E2E benchmarks: cold run time with keycloak/broadleaf before/after 1.33.0. Async background write (daemon thread + atexit join 5s) added in 1.32.4. Verify no corruption and latency improvement."
+      "details": "E2E benchmarks: cold run time with keycloak/broadleaf. Async background write (daemon thread + atexit join 5s) added in 1.32.4. Verify no corruption and latency improvement on cold path."
     },
     {
-      "id": 8,
-      "name": "Publish 1.33.0 to PyPI / Homebrew tap",
+      "id": 10,
+      "name": "Publish 1.33.1 to PyPI / Homebrew tap",
       "priority": "P2",
       "status": "pending",
-      "details": "Version bumped and committed. Needs PyPI publish and Homebrew tap update."
+      "details": "Version bumped to 1.33.1 and committed. Needs PyPI publish and Homebrew tap update. Was 1.33.0 in previous handoff."
     }
   ],
   "blockers": [],
@@ -92,29 +109,24 @@
   ],
   "decisions": [
     {
-      "decision": "Cache is the product moat — README and CLI help now lead with this",
-      "rationale": "Benchmarks (10.5s → 0.6s Keycloak, 2.7s → 0.3s Broadleaf) change sourcecode from an occasional tool to constant agent infrastructure. All positioning now reflects this.",
-      "session": 33
-    },
-    {
-      "decision": "No separate landing page — README doubles as landing on PyPI/GitHub",
-      "rationale": "No HTML landing page exists in the repo. README rewrite covers both.",
+      "decision": "Cache is the product moat — README, CLI help, and landing page now lead with this",
+      "rationale": "Benchmarks (10.5s → 0.6s Keycloak, 2.7s → 0.3s Broadleaf) change sourcecode from an occasional tool to constant agent infrastructure.",
       "session": 33
     },
     {
       "decision": "README benchmark numbers: 17x/9x (not 33x/13x from older README)",
-      "rationale": "Used more conservative rounded figures: 10.5s/0.6s = ~17x for Keycloak, 2.7s/0.3s = ~9x for Broadleaf. Previous README had different raw numbers.",
+      "rationale": "Conservative rounded figures: 10.5s/0.6s = ~17x for Keycloak, 2.7s/0.3s = ~9x for Broadleaf.",
       "session": 33
     },
     {
-      "decision": "upgrade_hint added as a separate JSON key (not embedded in message) — from session 32",
-      "rationale": "CI/MCP consumers should extract the activation command programmatically.",
-      "session": 32
+      "decision": "--changed-only on clean repo: return no_changes JSON (not fall back to full scan)",
+      "rationale": "Silent fallback is a contract violation — agent cannot distinguish 'no changes' from 'changes found'. Only git-unavailable/error should fall back.",
+      "session": 34
     },
     {
-      "decision": "Free-tier node cap enforced after merge_graphs in cli.py (not in GraphAnalyzer)",
-      "rationale": "Policy layer separation — GraphAnalyzer stays license-unaware.",
-      "session": 32
+      "decision": "generate-tests relevant_files filter: output layer (cli.py), not scoring layer (prepare_context.py)",
+      "rationale": "Minimal scope. Internal scoring still sees test files for test_set membership checks. Filter at serialization is least invasive.",
+      "session": 34
     }
   ],
   "uncommitted_files": [],
@@ -122,6 +134,6 @@
     "docs/PRODUCT_AUDIT.md",
     "src/sourcecode/cache.tmp_new"
   ],
-  "next_action": "Run bash /private/tmp/sync_to_pipx.sh then verify: sourcecode cache status, warm run < 0.6s on keycloak. Then consider publishing 1.33.0.",
-  "context_notes": "Session 33 was purely product/positioning work. Cache is now the central identity. All changes committed in 24df36a. No test changes needed — no logic changed. Pre-existing uncommitted files (prepare_context.py, ris.py, HANDOFF.json from session 32) still need attention but are not blocking."
+  "next_action": "Human: run bash /private/tmp/sync_to_pipx.sh from normal Terminal, then verify: sourcecode cold-start (from /private/tmp/keycloak), sourcecode . --changed-only on clean repo, sourcecode cache status. Then publish 1.33.1.",
+  "context_notes": "Session 34: 3 bugs fixed + 2 session-32 improvements included + version bumped to 1.33.1. All committed in 4a64435. Landing page (~/Documents/workspace/sourcecode-landing/index.html) updated in session 33/34 — not in this repo. Untracked files (cache.tmp_new, PRODUCT_AUDIT.md) are not blocking."
 }
