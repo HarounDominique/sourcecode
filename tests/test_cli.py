@@ -4,7 +4,7 @@ from pathlib import Path
 import tomllib
 from typer.testing import CliRunner
 
-from sourcecode.cli import _detected_path, _preprocess_args, app
+from sourcecode.cli import _set_detected_path, _preprocess_args, app
 
 _runner = CliRunner()
 PROJECT_VERSION = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
@@ -12,7 +12,7 @@ PROJECT_VERSION = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8
 
 def invoke(args: list[str]):
     """Invoke the CLI with argv preprocessing (mirrors main_entry behaviour)."""
-    _detected_path[0] = "."
+    _set_detected_path(".")
     processed = _preprocess_args(list(args))
     return _runner.invoke(app, processed)
 

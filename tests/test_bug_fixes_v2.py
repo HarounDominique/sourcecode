@@ -92,16 +92,16 @@ class TestExcludeOptionRegistration:
 
     def test_exclude_value_not_consumed_as_path(self):
         """_preprocess_args must skip the exclude value, not treat it as repo path."""
-        from sourcecode.cli import _preprocess_args, _detected_path
+        from sourcecode.cli import _preprocess_args, _set_detected_path, _get_detected_path
 
-        _detected_path[0] = "."  # reset
+        _set_detected_path(".")  # reset
         result = _preprocess_args(["--exclude", "saint-client,saint-portal"])
         # The exclude value must remain in the args list (not consumed as path)
         assert "saint-client,saint-portal" in result, (
             "exclude value was consumed as a repo path"
         )
         # detected_path must stay at default (not set to the exclude value)
-        assert _detected_path[0] == ".", f"Repo path set to exclude value: {_detected_path[0]}"
+        assert _get_detected_path() == ".", f"Repo path set to exclude value: {_get_detected_path()}"
 
 
 # ── BUG-3: onboard --fast shallow scan ────────────────────────────────────────

@@ -4,13 +4,13 @@ from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
-from sourcecode.cli import _detected_path, _preprocess_args, app
+from sourcecode.cli import _set_detected_path, _preprocess_args, app
 
 _runner = CliRunner()
 
 
 def invoke(args: list[str]):
-    _detected_path[0] = "."
+    _set_detected_path(".")
     processed = _preprocess_args(list(args))
     return _runner.invoke(app, processed)
 

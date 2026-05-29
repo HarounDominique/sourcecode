@@ -384,6 +384,18 @@ def _get_command_with_preprocessing(typer_instance: Any) -> Any:
     # Refresh help text at invocation time so it reflects current license state.
     cmd.help = _build_help_text()
 
+    # Add [Pro] badge to Pro-gated option help strings for free-tier users.
+    try:
+        from sourcecode.license import is_pro as _lp_is_pro
+    except Exception:
+        _lp_is_pro = False
+    if not _lp_is_pro:
+        _PRO_OPTS = {"full"}
+        for _param in cmd.params:
+            if getattr(_param, "name", None) in _PRO_OPTS and getattr(_param, "help", None):
+                if "[Pro]" not in _param.help:
+                    _param.help = _param.help + "  [dim][Pro][/dim]"
+
     _orig_cmd_main = cmd.main
 
     def _cmd_main(args: Optional[list[str]] = None, **kwargs: Any) -> Any:
@@ -1442,12 +1454,23 @@ def main(
         if dependency_analyzer is not None
         else None
     )
+    # Free-tier node cap: limit graph size to 10 nodes unless Pro.
+    _effective_max_nodes = max_nodes
+    try:
+        from sourcecode.license import is_pro as _lp_is_pro_gm
+    except Exception:
+        _lp_is_pro_gm = False
+    _FREE_NODE_CAP = 10
+    if not _lp_is_pro_gm and graph_analyzer is not None:
+        if _effective_max_nodes is None or _effective_max_nodes > _FREE_NODE_CAP:
+            _effective_max_nodes = _FREE_NODE_CAP
+
     module_graph = (
         graph_analyzer.merge_graphs(
             module_graphs,
             detail=graph_detail_typed,
             edge_kinds=parsed_graph_edges,
-            max_nodes=max_nodes,
+            max_nodes=_effective_max_nodes,
             entry_points=entry_points,
         )
         if graph_analyzer is not None
@@ -1566,6 +1589,15 @@ def main(
                 semantic_links=sem_links,
                 semantic_summary=sem_sum,
             )
+
+    # Free-tier node cap for --semantics: limit semantic_symbols to 10 unless Pro.
+    if semantic_analyzer is not None and sm.semantic_symbols:
+        try:
+            from sourcecode.license import is_pro as _lp_is_pro_sem
+        except Exception:
+            _lp_is_pro_sem = False
+        if not _lp_is_pro_sem and len(sm.semantic_symbols) > _FREE_NODE_CAP:
+            sm = replace(sm, semantic_symbols=sm.semantic_symbols[:_FREE_NODE_CAP])
 
     # Runtime architecture — classify workspace packages for structural summaries
     if workspace_analysis.workspaces:

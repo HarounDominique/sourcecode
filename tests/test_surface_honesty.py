@@ -25,14 +25,14 @@ _runner = CliRunner()
 
 def _invoke_direct(*args: str) -> Any:
     """Invoke CLI without external pre-processing so the monkey-patch handles path extraction."""
-    from sourcecode.cli import app, _detected_path
-    _detected_path[0] = "."
+    from sourcecode.cli import app, _set_detected_path
+    _set_detected_path(".")
     return _runner.invoke(app, list(args))
 
 
 def _invoke_help() -> Any:
-    from sourcecode.cli import app, _detected_path
-    _detected_path[0] = "."
+    from sourcecode.cli import app, _set_detected_path
+    _set_detected_path(".")
     return _runner.invoke(app, ["--help"])
 
 

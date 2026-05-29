@@ -26,8 +26,8 @@ _runner = CliRunner()
 
 
 def _invoke(*args: str) -> Any:
-    from sourcecode.cli import app, _detected_path, _preprocess_args
-    _detected_path[0] = "."
+    from sourcecode.cli import app, _set_detected_path, _preprocess_args
+    _set_detected_path(".")
     processed = _preprocess_args(list(args))
     return _runner.invoke(app, processed)
 

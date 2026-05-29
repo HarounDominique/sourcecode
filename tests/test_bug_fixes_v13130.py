@@ -183,10 +183,10 @@ class TestFastModeTransparency:
     """H-01: fast mode output must declare analysis_mode and skipped_analyzers."""
 
     def _invoke_fast(self, tmp_path: Path, task: str) -> dict:
-        from sourcecode.cli import _detected_path, _preprocess_args, app
+        from sourcecode.cli import _set_detected_path, _preprocess_args, app
         from typer.testing import CliRunner
         runner = CliRunner()
-        _detected_path[0] = "."
+        _set_detected_path(".")
         args = _preprocess_args(["prepare-context", task, str(tmp_path), "--fast"])
         result = runner.invoke(app, args)
         assert result.exit_code == 0, f"exit {result.exit_code}: {result.output[:200]}"
@@ -225,10 +225,10 @@ class TestFastModeTransparency:
 
     def test_non_fast_has_no_analysis_mode(self, tmp_path):
         """Non-fast invocations must NOT inject analysis_mode."""
-        from sourcecode.cli import _detected_path, _preprocess_args, app
+        from sourcecode.cli import _set_detected_path, _preprocess_args, app
         from typer.testing import CliRunner
         runner = CliRunner()
-        _detected_path[0] = "."
+        _set_detected_path(".")
         args = _preprocess_args(["prepare-context", "explain", str(tmp_path)])
         result = runner.invoke(app, args)
         if result.exit_code == 0:
@@ -254,11 +254,11 @@ class TestGenerateTestsTimeout:
             threading.Event().wait(timeout=5)
             raise RuntimeError("should not reach here")
 
-        from sourcecode.cli import _detected_path, _preprocess_args, app
+        from sourcecode.cli import _set_detected_path, _preprocess_args, app
         from typer.testing import CliRunner
 
         runner = CliRunner()
-        _detected_path[0] = "."
+        _set_detected_path(".")
         args = _preprocess_args(["prepare-context", "generate-tests", str(tmp_path)])
 
         with patch("sourcecode.prepare_context.TaskContextBuilder.build", side_effect=_blocking_build):
@@ -276,11 +276,11 @@ class TestGenerateTestsTimeout:
         """Fast completions must not be affected by timeout logic."""
         monkeypatch.setenv("SOURCECODE_TESTS_TIMEOUT_MS", "30000")
 
-        from sourcecode.cli import _detected_path, _preprocess_args, app
+        from sourcecode.cli import _set_detected_path, _preprocess_args, app
         from typer.testing import CliRunner
 
         runner = CliRunner()
-        _detected_path[0] = "."
+        _set_detected_path(".")
         args = _preprocess_args(["prepare-context", "generate-tests", str(tmp_path)])
 
         with patch("sourcecode.license.require_pro", return_value=None):
@@ -300,10 +300,10 @@ class TestImpactExitCode:
     """H-03: impact with target not found must exit 0 and write valid JSON."""
 
     def _invoke_impact(self, tmp_path: Path, target: str) -> tuple[int, dict]:
-        from sourcecode.cli import _detected_path, _preprocess_args, app
+        from sourcecode.cli import _set_detected_path, _preprocess_args, app
         from typer.testing import CliRunner
         runner = CliRunner()
-        _detected_path[0] = "."
+        _set_detected_path(".")
         args = _preprocess_args(["impact", target, str(tmp_path)])
         with patch("sourcecode.license.require_pro", return_value=None):
             result = runner.invoke(app, args)
@@ -327,10 +327,10 @@ class TestImpactExitCode:
 
     def test_invalid_path_exits_nonzero(self):
         """Real infra error (bad path) must still exit non-zero."""
-        from sourcecode.cli import _detected_path, _preprocess_args, app
+        from sourcecode.cli import _set_detected_path, _preprocess_args, app
         from typer.testing import CliRunner
         runner = CliRunner()
-        _detected_path[0] = "."
+        _set_detected_path(".")
         args = _preprocess_args(["impact", "SomeClass", "/path/that/does/not/exist/xyz"])
         with patch("sourcecode.license.require_pro", return_value=None):
             result = runner.invoke(app, args)

@@ -679,9 +679,9 @@ class TestExitCodes:
 
     def _invoke(self, args: list[str]) -> int:
         from typer.testing import CliRunner
-        from sourcecode.cli import _detected_path, app
+        from sourcecode.cli import _set_detected_path, app
 
-        _detected_path[0] = "."
+        _set_detected_path(".")
         runner = CliRunner()
         result = runner.invoke(app, args)
         return result.exit_code

@@ -248,6 +248,7 @@ def require_feature(feature_name: str) -> None:
             f"'{display}' requires a Pro license. "
             "Run: sourcecode activate <license_key>"
         ),
+        "upgrade_hint": "sourcecode activate <license_key>",
     }
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     sys.stdout.flush()
