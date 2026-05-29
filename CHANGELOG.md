@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.33.0] — 2026-05-29
+
+### Changed
+- **Repositioned product identity** around persistent structural cache and ultra-fast repeated analysis for AI coding agents. Cache is now the central product story, not a performance feature.
+- README rewritten: new intro emphasizing persistent context engine, cache performance benchmarks promoted above quickstart, agent workflow patterns section added, "Java/Spring analysis CLI" framing moved down.
+- `pyproject.toml` description updated: "Persistent structural context and ultra-fast repeated analysis for AI coding agents".
+- CLI `--help` updated: tagline, cold/warm latency numbers, cache commands section added prominently.
+
 ## [Unreleased]
 
 ### Added

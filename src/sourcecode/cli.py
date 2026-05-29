@@ -155,11 +155,20 @@ def _build_help_text() -> str:
     text = f"""\
 [bold]sourcecode[/bold]  {plan_badge}
 
-Deterministic codebase context for AI coding agents.
+Persistent structural context and ultra-fast repeated analysis for AI coding agents.
+
+Cache warms on first scan; every subsequent call returns pre-built context in milliseconds.
+Cold scan: 2–10s depending on repo size. Warm cache: 0.3–0.6s.
 
 [bold]Primary usage:[/bold]
-  sourcecode --compact                  high-signal summary (~600-800 tokens)
+  sourcecode --compact                  high-signal summary (~2,500–4,000 tokens)
   sourcecode --compact --git-context    include git hotspots and uncommitted files
+  sourcecode --agent                    full structured JSON for AI agents
+
+[bold]Cache commands:[/bold]
+  cache status                 [dim]# cache size, hit keys, last-warmed timestamp[/dim]
+  cache warm                   [dim]# pre-build cache ahead of an agent session[/dim]
+  cache clear                  [dim]# clear all cached results for this repo[/dim]
 
 [bold]Examples:[/bold]
   sourcecode saint-server --compact
@@ -3753,6 +3762,24 @@ def config_cmd() -> None:
     typer.echo("  sourcecode telemetry status")
 
 
+# ── cold-start (RIS bootstrap for external MCP and agents) ───────────────────
+
+@app.command("cold-start")
+def cold_start_cmd(
+    path: Path = typer.Argument(Path("."), help="Repository path (default: current directory)"),
+) -> None:
+    """Output Repository Intelligence Snapshot bootstrap context as JSON.
+
+    Returns instantly from persisted RIS — zero re-analysis cost.
+    status: cold_start_ready | cold_start_stale | no_ris
+    """
+    import json as _json
+    from sourcecode.ris import get_cold_start_context as _gcs
+    target = Path(path).resolve()
+    result = _gcs(target)
+    typer.echo(_json.dumps(result, indent=2, ensure_ascii=False))
+
+
 # ── analyze (legacy alias) ────────────────────────────────────────────────────
 
 @app.command("analyze", hidden=True)
@@ -4207,11 +4234,13 @@ def cache_warm_cmd(
     agent: bool = typer.Option(False, "--agent", help="Also warm agent view."),
 ) -> None:
     """Pre-populate the cache by running a fresh analysis."""
+    import shutil as _shutil
     import subprocess as _sub
     import sys as _sys
     target = Path(path).resolve()
     typer.echo(f"Warming cache for {target} …", err=True)
-    cmd = [_sys.executable, "-m", "sourcecode", str(target)]
+    _sc_bin = _shutil.which("sourcecode") or _sys.argv[0]
+    cmd = [_sc_bin, str(target)]
     if compact:
         cmd.append("--compact")
     if agent:

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sourcecode"
-version = "1.32.6"
-description = "Deterministic codebase context for AI coding agents"
+version = "1.33.0"
+description = "Persistent structural context and ultra-fast repeated analysis for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.9"
 license-expression = "Apache-2.0"
