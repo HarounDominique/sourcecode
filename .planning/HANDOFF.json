@@ -1,131 +1,100 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-29T00:00:00Z",
+  "timestamp": "2026-05-29T21:00:00Z",
   "phase": null,
-  "phase_name": "session 35 — cache observability + contract audit (1.33.2 + 1.33.3)",
+  "phase_name": "session 36 — 1.33.4 bug fixes (7 contract/observability issues)",
   "phase_dir": null,
   "plan": null,
   "task": null,
   "total_tasks": null,
   "status": "paused",
-  "session_type": "bugfix+improvements",
+  "session_type": "bugfix",
   "completed_tasks": [
     {
       "id": 1,
-      "name": "cache.status() — add RIS fields",
+      "name": "--changed-only untracked files bug",
       "status": "done",
-      "files": ["src/sourcecode/cache.py"],
-      "details": "status() now returns ris_exists, ris_git_head, ris_last_updated_at, ris_is_stale, current_git_head. Added _get_git_head() private helper. Lazy import of load_ris avoids circular dependency.",
-      "commit": "7949303"
+      "files": ["src/sourcecode/cli.py"],
+      "details": "Include untracked (new) files in _allowed_changed_files. Clean-repo early-exit JSON now emits {changed_files:[], message, analysis_scope:'empty', _meta:{changed_only:true}} instead of status/no_changes fields.",
+      "commit": "6480eae"
     },
     {
       "id": 2,
-      "name": "cache.clear() — add --include-ris flag",
+      "name": "cache clear --all flag",
       "status": "done",
-      "files": ["src/sourcecode/cache.py", "src/sourcecode/cli.py"],
-      "details": "clear(repo_root, *, clear_ris=False). CLI: --include-ris flag. Confirmation prompt now says '(RIS preserved — use --include-ris to also clear it)'.",
-      "commit": "7949303"
+      "files": ["src/sourcecode/cli.py"],
+      "details": "Added --all as canonical flag name. --include-ris kept as hidden backward-compat alias. Prompt and help updated.",
+      "commit": "6480eae"
     },
     {
       "id": 3,
-      "name": "get_cold_start_context() — add provenance fields",
+      "name": "RIS cold-start validation block",
       "status": "done",
       "files": ["src/sourcecode/ris.py"],
-      "details": "Added _has_uncommitted_changes() helper. cold-start now emits: current_git_head, has_uncommitted_changes, cache_source='RIS', data_scope='RIS_BOOTSTRAP', api_surface_complete (false for Java repos with empty endpoint index).",
-      "commit": "7949303 + 34ec782"
+      "details": "Added validation dict to cold-start output: spring_detected, controllers_found, endpoints_found, status (valid|incomplete_snapshot). When Spring detected but endpoints missing: status downgraded to cold_start_incomplete, stale=true.",
+      "commit": "6480eae"
     },
     {
       "id": 4,
-      "name": "_cache provenance block in all JSON outputs",
+      "name": "--env-map unhide",
       "status": "done",
       "files": ["src/sourcecode/cli.py"],
-      "details": "_inject_cache_meta() helper added. Both cache-hit path (L2/L1) and fresh analysis path inject _cache block: cache_source, git_head_at_generation, current_git_head, is_stale, has_uncommitted_changes, generated_at, data_scope.",
-      "commit": "7949303"
+      "details": "Removed hidden=True from --env-map option. Now visible in CLI help.",
+      "commit": "6480eae"
     },
     {
       "id": 5,
-      "name": "Bug 7 — controller_methods label lie fixed",
+      "name": "fix-bug no-symptom warning",
       "status": "done",
-      "files": ["src/sourcecode/serializer.py"],
-      "details": "controller_methods was always == controller_classes (deduplicated by path). Removed methods field from controllers dict. Note now says 'X controller classes detected (use sourcecode endpoints for per-method HTTP surface)'.",
-      "commit": "34ec782"
+      "files": ["src/sourcecode/cli.py"],
+      "details": "When fix-bug runs without --symptom, emits warning to stderr: 'Results are significantly better with --symptom.'",
+      "commit": "6480eae"
     },
     {
       "id": 6,
-      "name": "Bug 6 — api_surface_complete field in cold-start",
+      "name": "generate-tests output split",
       "status": "done",
-      "files": ["src/sourcecode/ris.py"],
-      "details": "For Java repos with empty endpoints: api_surface_complete=false. Non-Java or Java-with-endpoints: api_surface_complete=true. Agents no longer treat [] as 'no endpoints exist'.",
-      "commit": "34ec782"
+      "files": ["src/sourcecode/cli.py", "src/sourcecode/prepare_context.py"],
+      "details": "test_gaps now emitted as both untested_sources (canonical) + test_gaps (compat alias). Added existing_test_count field (count of test files found). TaskOutput gains existing_test_count: Optional[int] field.",
+      "commit": "6480eae"
     },
     {
       "id": 7,
-      "name": "Improvement D — cache freshness CLI + check_freshness MCP",
+      "name": "LQN-02 test fix",
       "status": "done",
-      "files": ["src/sourcecode/cli.py", "src/sourcecode/mcp/server.py"],
-      "details": "'sourcecode cache freshness <path> [--json]' reports fresh, current_git_head, ris_git_head, delta_commits, has_uncommitted_changes, ris_last_updated_at. MCP tool check_freshness delegates to it.",
-      "commit": "34ec782"
+      "files": ["tests/test_integration_lqn.py"],
+      "details": "Pre-existing failure. Updated assertion to accept 'persistent structural context' alongside old 'codebase context' strings.",
+      "commit": "6480eae"
     },
     {
       "id": 8,
-      "name": "Improvement F — get_delta auto-since",
-      "status": "done",
-      "files": ["src/sourcecode/mcp/server.py"],
-      "details": "Empty/omitted since triggers _auto_since(): tries git merge-base HEAD origin/main, then origin/master, falls back to HEAD~1. Removes INVALID_ARGUMENT for empty since.",
-      "commit": "34ec782"
-    },
-    {
-      "id": 9,
-      "name": "Improvement H — Java-only markers in MCP",
-      "status": "done",
-      "files": ["src/sourcecode/mcp/server.py"],
-      "details": "get_endpoints docstring now says JAVA ONLY prominently. get_ir_summary and get_impact_context already had Java only in docstring.",
-      "commit": "34ec782"
-    },
-    {
-      "id": 10,
-      "name": "Improvement B — cache warm documents RIS rebuild",
-      "status": "done",
-      "files": ["src/sourcecode/cli.py"],
-      "details": "Docstring updated. Success message now says 'Cache warmed (L1/L2 + RIS rebuilt).'",
-      "commit": "34ec782"
-    },
-    {
-      "id": 11,
-      "name": "version bump 1.33.1 → 1.33.2 → 1.33.3",
+      "name": "version bump 1.33.3 → 1.33.4",
       "status": "done",
       "files": ["src/sourcecode/__init__.py", "pyproject.toml", "README.md"],
-      "commit": "7949303 + 34ec782"
+      "commit": "6480eae"
     }
   ],
   "remaining_tasks": [
     {
-      "id": 12,
+      "id": 9,
       "name": "Live E2E test: sync workspace → pipx + verify all fixes",
       "priority": "P1",
       "status": "pending",
-      "details": "Run bash /private/tmp/sync_to_pipx.sh from normal Terminal (EPERM in Claude Code shell). Then: sourcecode cache freshness /private/tmp/spring-petclinic; sourcecode cache status --json; sourcecode cold-start /private/tmp/spring-petclinic (check api_surface_complete field); sourcecode cache clear /private/tmp/keycloak --yes (no --include-ris, confirm RIS preserved); sourcecode cache freshness /private/tmp/keycloak --json. Also verify 1.33.1 fixes still hold."
+      "details": "Run bash /private/tmp/sync_to_pipx.sh from normal Terminal (EPERM in Claude Code shell). Then: sourcecode cache freshness /private/tmp/spring-petclinic; sourcecode cache status --json; sourcecode cold-start /private/tmp/spring-petclinic (check validation block, api_surface_complete); sourcecode cache clear /private/tmp/keycloak --yes (confirm --all flag works); sourcecode fix-bug /private/tmp/keycloak (confirm no-symptom warning on stderr); sourcecode prepare-context generate-tests . (check untested_sources + existing_test_count fields). Also verify 1.33.1-1.33.3 fixes still hold."
     },
     {
-      "id": 13,
-      "name": "Publish 1.33.3 to PyPI / Homebrew tap",
+      "id": 10,
+      "name": "Publish 1.33.4 to PyPI / Homebrew tap",
       "priority": "P2",
       "status": "pending",
-      "details": "Version bumped to 1.33.3 and committed. Needs PyPI publish and Homebrew tap update."
+      "details": "Version bumped to 1.33.4 and committed. Needs PyPI publish and Homebrew tap update."
     },
     {
-      "id": 14,
-      "name": "LQN-02 test failure (pre-existing)",
-      "priority": "P3",
-      "status": "pending",
-      "details": "test_lqn02_project_summary fails because project description changed in session 33 (new README). Test checks for 'codebase context' or 'contexto' but new description says 'Persistent structural context'. Fix: update test to match current description. Pre-existing, not caused by session 35."
-    },
-    {
-      "id": 15,
-      "name": "Improvements G/I/J/K/L/M — deferred",
+      "id": 11,
+      "name": "Deferred improvements G/I/J/K/L/M",
       "priority": "P4",
       "status": "deferred",
-      "details": "G: get_compact_context --full in MCP. I: get_module_context Maven multi-module improvements. J: MCP for Claude Code instructions. K: suggest_next_tool. L: suggest_entrypoint. M: watch mode for RIS invalidation. All require larger scope."
+      "details": "G: get_compact_context --full in MCP. I: get_module_context Maven multi-module improvements. J: MCP for Claude Code instructions. K: suggest_next_tool. L: suggest_entrypoint (high value — task+candidate entrypoints). M: watch mode for RIS invalidation."
     }
   ],
   "blockers": [],
@@ -148,24 +117,19 @@
   ],
   "decisions": [
     {
-      "decision": "cache.clear() default preserves RIS — --include-ris needed to also clear it",
-      "rationale": "RIS is the persistent cold-start index, not a hot cache. Clearing it accidentally would break cold-start for agents. Default-preserve is correct; prompt and flag make it explicit.",
-      "session": 35
+      "decision": "cold_start_incomplete status when Spring detected but endpoints absent",
+      "rationale": "cold_start_ready is misleading when a Spring repo has controllers but no endpoint index. Agents relying on this to skip warm will get incomplete context. incomplete downgrade forces them to call get_endpoints or rebuild.",
+      "session": 36
     },
     {
-      "decision": "controller_methods field removed entirely (not renamed)",
-      "rationale": "Was always equal to controller_classes — adding noise. Real per-method count requires endpoints command which scans @GetMapping etc. per method.",
-      "session": 35
+      "decision": "untested_sources emitted alongside test_gaps (not replacing it)",
+      "rationale": "Breaking rename of test_gaps would break existing agent prompts. Emit both: agents can use untested_sources, old clients still see test_gaps.",
+      "session": 36
     },
     {
-      "decision": "get_delta auto-since uses merge-base, not HEAD~1",
-      "rationale": "HEAD~1 is almost always wrong for PRs with multiple commits. merge-base with origin/main gives the correct diff scope for PR review workflows.",
-      "session": 35
-    },
-    {
-      "decision": "api_surface_complete=false only for Java repos with empty endpoints",
-      "rationale": "Non-Java repos correctly have no endpoints — empty is correct for them. Only Java/Spring repos need this signal to distinguish 'not indexed yet' from 'genuinely no endpoints'.",
-      "session": 35
+      "decision": "--all is the canonical flag for cache clear + RIS; --include-ris hidden compat",
+      "rationale": "--all is more discoverable and consistent with other CLI tools. --include-ris kept to not break scripts.",
+      "session": 36
     }
   ],
   "uncommitted_files": [],
@@ -173,6 +137,6 @@
     "docs/PRODUCT_AUDIT.md",
     "src/sourcecode/cache.tmp_new"
   ],
-  "next_action": "Human: run bash /private/tmp/sync_to_pipx.sh from normal Terminal, then run E2E verification of all 1.33.x fixes (cache freshness, cold-start api_surface_complete, cache clear RIS behavior). Then publish 1.33.3.",
-  "context_notes": "Session 35: two commits. 7949303 = 1.33.2 (cache observability: status+clear+_cache block+cold-start provenance). 34ec782 = 1.33.3 (Bug 6 api_surface_complete, Bug 7 controller label, cache freshness cmd, check_freshness MCP, get_delta auto-since, Java-only markers). 1644 tests pass, 3 skipped. LQN-02 pre-existing failure excluded. Untracked files unchanged from session 34."
+  "next_action": "Human: run bash /private/tmp/sync_to_pipx.sh from normal Terminal, then run E2E verification of all 1.33.x fixes. Then publish 1.33.4.",
+  "context_notes": "Session 36: commit 6480eae = 1.33.4 (7 bugs fixed). 1655 tests pass, 3 skipped. LQN-02 pre-existing failure now fixed. Bugs fixed: --changed-only untracked gap, cache clear --all, RIS validation block, --env-map unhide, fix-bug no-symptom warning, generate-tests output split, LQN-02 test assertion."
 }
