@@ -734,12 +734,89 @@ class TaskContextBuilder:
     def __init__(self, root: Path) -> None:
         self.root = root
 
+    # ------------------------------------------------------------------
+    # RIS fast-path: serve onboard/explain from warm snapshot (<50ms)
+    # ------------------------------------------------------------------
+
+    def _try_ris_fast_path(self, task_name: str, spec: "TaskSpec") -> Optional[TaskOutput]:
+        """Return TaskOutput from a warm RIS without running the full scan.
+
+        Only activated for onboard/explain when git HEAD matches stored RIS.
+        Falls through (returns None) on any error or cache miss.
+        """
+        try:
+            import subprocess as _sp
+            from sourcecode.ris import load_ris as _lris
+            _ris = _lris(self.root)
+            if _ris is None or not _ris.compact_summary:
+                return None
+            _r = _sp.run(
+                ["git", "-C", str(self.root), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=2,
+            )
+            if _r.returncode != 0 or _r.stdout.strip() != _ris.git_head:
+                return None
+
+            compact = _ris.compact_summary
+            struct = _ris.structural_map
+
+            entry_points = struct.get("entrypoints") or compact.get("entry_points") or []
+            controllers = struct.get("controllers") or []
+            services = struct.get("services") or []
+
+            _seen: set = set()
+            relevant: list[RelevantFile] = []
+            for fp in entry_points[:10]:
+                if isinstance(fp, str) and fp not in _seen:
+                    _seen.add(fp)
+                    relevant.append(RelevantFile(path=fp, role="entrypoint", score=1.0, reason="entry_point", why="Primary entry point"))
+            for fp in controllers[:8]:
+                if isinstance(fp, str) and fp not in _seen:
+                    _seen.add(fp)
+                    relevant.append(RelevantFile(path=fp, role="source", score=0.9, reason="controller", why="Controller"))
+            for fp in services[:8]:
+                if isinstance(fp, str) and fp not in _seen:
+                    _seen.add(fp)
+                    relevant.append(RelevantFile(path=fp, role="source", score=0.8, reason="service", why="Service layer"))
+
+            # compact_summary uses "analysis_gaps" (list[dict]) not "gaps" (list[str])
+            _raw_gaps = compact.get("gaps") or compact.get("analysis_gaps") or []
+            _gap_strs: list[str] = [
+                g.get("reason", str(g)) if isinstance(g, dict) else str(g)
+                for g in _raw_gaps
+                if g
+            ]
+
+            return TaskOutput(
+                task=task_name,
+                goal=spec.goal,
+                project_summary=compact.get("project_summary") or compact.get("summary"),
+                architecture_summary=compact.get("architecture_summary"),
+                relevant_files=relevant,
+                suspected_areas=[],
+                improvement_opportunities=[],
+                test_gaps=[],
+                key_dependencies=compact.get("key_dependencies") or [],
+                code_notes_summary=None,
+                limitations=[],
+                confidence=compact.get("confidence") or compact.get("confidence_summary") or "high",
+                gaps=_gap_strs,
+            )
+        except Exception:
+            return None
+
     def build(self, task_name: str, *, since: Optional[str] = None, symptom: Optional[str] = None, fast: bool = False, include_config: bool = False, all_gaps: bool = False) -> TaskOutput:
         if task_name not in TASKS:
             raise ValueError(
                 f"Unknown task '{task_name}'. Available: {', '.join(TASKS)}"
             )
         spec = TASKS[task_name]
+
+        # ── RIS fast-path (onboard / explain only) ────────────────────────────
+        if task_name in ("onboard", "explain") and not fast:
+            _warm = self._try_ris_fast_path(task_name, spec)
+            if _warm is not None:
+                return _warm
 
         # ── 0. review-pr: git-first scope resolution (before any filesystem scan) ─
         _pr_git_root: Optional[Path] = None

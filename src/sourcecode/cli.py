@@ -219,6 +219,8 @@ _SUBCOMMANDS: frozenset[str] = frozenset(
         "activate",
         # Cache observability
         "cache",
+        # RIS bootstrap
+        "cold-start",
     }
 )
 
@@ -1838,6 +1840,7 @@ def main(
     _allowed_changed_files: Optional[set[str]] = None
     if changed_only:
         from sourcecode.git_analyzer import GitAnalyzer as _GitAnalyzerEarly
+        _git_confirmed_clean = False
         try:
             _gc_early = _GitAnalyzerEarly().analyze(target, depth=1, days=1)
             _bad_gc = {"no_git_repo", "git_not_found", "git_timeout"}
@@ -1846,15 +1849,31 @@ def main(
                 if _uc:
                     # WORKTREE_UNSTAGED + WORKTREE_STAGED only; untracked excluded
                     _allowed_changed_files = set(_uc.staged) | set(_uc.unstaged)
-            if not _allowed_changed_files:
+                if not _allowed_changed_files:
+                    # Git is available and confirms no uncommitted changes.
+                    # Do NOT fall back to a full scan — that would silently produce
+                    # output identical to --compact, making it impossible for the
+                    # caller to distinguish "no changes" from "changes found".
+                    _git_confirmed_clean = True
+            else:
+                # Git unavailable — fall back gracefully.
                 typer.echo(
-                    "[changed-only] git unavailable or no uncommitted changes — falling back to full scan.",
+                    "[changed-only] git unavailable — falling back to full scan.",
                     err=True,
                 )
                 changed_only = False
         except Exception:
             typer.echo("[changed-only] git error — falling back to full scan.", err=True)
             changed_only = False
+        if _git_confirmed_clean:
+            _nc_payload = json.dumps({
+                "status": "working_tree_clean",
+                "no_changes": True,
+                "changed_files": [],
+                "message": "No uncommitted changes detected — working tree is clean.",
+            }, ensure_ascii=False)
+            write_output(_nc_payload, output=output)
+            raise typer.Exit()
 
     # Contract pipeline — runs for mode=contract|standard|deep|hybrid (skip for raw)
     _progress.update("extracting contracts")
@@ -2539,9 +2558,14 @@ def prepare_context_cmd(
     if _task_include("confidence"):
         out["confidence"] = output.confidence
     if task != "review-pr" and _task_include("relevant_files"):
+        _rfs = output.relevant_files
+        if task == "generate-tests":
+            # relevant_files goal: untested SOURCE files. Test files belong in test_gaps.
+            # Without this filter, high-churn test files rank above untested source files.
+            _rfs = [f for f in _rfs if getattr(f, "role", None) != "test"]
         out["relevant_files"] = [
             _serialize_relevant_file(f)
-            for f in output.relevant_files
+            for f in _rfs
         ]
     if _task_include("key_dependencies") and output.key_dependencies:
         out["key_dependencies"] = output.key_dependencies

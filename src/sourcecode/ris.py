@@ -362,7 +362,8 @@ def get_cold_start_context(repo_root: Path) -> dict:
         current_head = _current_git_head(repo_root)
         stale = bool(current_head and ris.git_head and current_head != ris.git_head)
 
-        return {
+        endpoints = ris.api_surface.get("endpoints", [])
+        result: dict = {
             "status": "cold_start_stale" if stale else "cold_start_ready",
             "repo_id": ris.repo_id,
             "git_head": ris.git_head,
@@ -370,8 +371,18 @@ def get_cold_start_context(repo_root: Path) -> dict:
             "last_updated_at": ris.last_updated_at,
             "summary": ris.compact_summary,
             "entrypoints": ris.structural_map.get("entrypoints", []),
-            "endpoints": ris.api_surface.get("endpoints", []),
+            "endpoints": endpoints,
             "hotspots": ris.git_context_snapshot.get("hotspots", []),
         }
+        if not endpoints:
+            _is_java = (repo_root / "pom.xml").exists() or \
+                       (repo_root / "build.gradle").exists() or \
+                       (repo_root / "build.gradle.kts").exists()
+            if _is_java:
+                result["endpoints_hint"] = (
+                    "Java repo detected but no endpoint index found. "
+                    "Call get_endpoints (or: sourcecode endpoints <path>) to populate."
+                )
+        return result
     except Exception:
         return {"status": "no_ris"}
