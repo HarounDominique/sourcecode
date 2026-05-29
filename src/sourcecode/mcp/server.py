@@ -110,11 +110,241 @@ def _check_repo_path(path: str) -> "CallToolResult | None":
 
 
 @mcp.tool()
+def start_session(repo_path: str = ".", task_description: str = "") -> dict:
+    """PRIMARY ENTRY POINT — call this first on every new MCP session.
+
+    Single entry point that replaces manual tool selection. Determines session state,
+    checks RIS freshness, detects repo type, and returns a ready-to-execute tool
+    sequence. Agent never has to guess which tool to call next.
+
+    With task_description: detects intent (pr_review, bug_investigation,
+    feature_implementation, refactor, test_generation) and returns the exact
+    flow runner to call with pre-filled args. Zero sequencing decisions for agent.
+
+    Without task_description: returns session state + recommended_next_action
+    based on RIS freshness and repo type (java_spring, java, etc.).
+
+    Returns:
+      session_state        — INIT | CONTEXT_LOADED | STALE_CONTEXT |
+                             INCOMPLETE_CONTEXT | TASK_INTENT_DETECTED
+      repo_type            — java_spring | java | nodejs | python | unknown
+      cache_freshness      — fresh | stale | missing
+      recommended_next_action — {tool, reason, args} — call this next, no guessing
+      required_tools_sequence — ordered list of tools the agent should call
+      risk_level           — low | medium | high | unknown
+      entrypoint_candidates — top entry points from RIS
+      endpoints_count      — Java endpoint count from RIS api_surface
+      session_meta         — {ttfca_ms, tools_suggested, agent_decision_reduction,
+                              orchestration_rules_applied}
+      intent               — detected intent when task_description provided
+      intent_confidence    — detection confidence (1.0 = explicit match)
+      ris_summary          — lightweight RIS snapshot when context loaded
+      missing_data_hint    — what to build next when critical data absent
+      bootstrap_hint       — how to build RIS when missing
+
+    Orchestration rules applied automatically:
+      R1: stale cache → prepend get_delta to any tool sequence
+      R2: Java + no endpoint index → prepend get_endpoints
+      R3: repo > 1000 classes → RIS path flagged as preferred
+
+    KPIs tracked in session_meta:
+      ttfca_ms                — time_to_first_correct_action in milliseconds
+      tools_suggested         — agent decision reduction (1-3 vs 18 free tools)
+      orchestration_rules_applied — which rules fired
+
+    repo_path: absolute path to the repository (default: current working directory).
+    task_description: optional natural language task description for intent detection.
+      Examples: "review the PR on the auth module",
+                "NullPointerException in UserService.findById",
+                "implement a new endpoint for password reset"
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
+        from sourcecode.mcp.orchestrator import start_session_impl
+        return _ok(start_session_impl(repo_path, task_description or ""))
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
+@mcp.tool()
+def analyze_task(repo_path: str = ".", task_description: str = "") -> dict:
+    """Detect task intent and return targeted tool sequence. No tool guessing needed.
+
+    Given a natural language description of what you need to do, returns:
+      - Detected intent (pr_review, bug_investigation, feature_implementation, etc.)
+      - Ordered tool sequence to execute
+      - Recommended flow runner to call with pre-filled args
+      - Extracted parameters (symptom for bugs, etc.)
+      - Orchestration rules that were applied
+
+    Prefer start_session(task_description=...) for combined bootstrap + intent detection.
+    Use analyze_task standalone when session is already loaded and you have a new task.
+
+    Quality warnings included when:
+      - Bug intent detected but no error class/message found in description
+        (ranking will be generic, not focused)
+
+    repo_path: absolute path to the repository (default: current working directory).
+    task_description: natural language task description (required for meaningful output).
+      Examples: "fix the NPE in PaymentService",
+                "review PR changes in the billing module",
+                "add new REST endpoint for user preferences"
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        if not isinstance(task_description, str) or not task_description.strip():
+            return _err("task_description must be a non-empty string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
+        from sourcecode.mcp.orchestrator import analyze_task_impl
+        return _ok(analyze_task_impl(repo_path, task_description))
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
+@mcp.tool()
+def run_pr_review_flow(repo_path: str = ".", since: str = "") -> dict:
+    """PR Review Flow — auto-chains 3 tools: delta → execution paths → blast radius.
+
+    Auto-executes the complete PR review pipeline in one call:
+      1. get_delta(since) — changed files and context since merge base
+      2. review_pr_context — execution paths and hotspots for changed files
+      3. get_impact_context — blast radius for up to 3 changed Java classes
+
+    Auto-detects merge base with origin/main or origin/master when since is omitted.
+    Falls back to HEAD~1 when no remote branch found.
+
+    Returns consolidated_output with all three results merged.
+    session_meta.ttfca_ms shows total wall-clock time.
+    quality_warnings list any partial failures (steps still return partial output).
+
+    Use this instead of calling get_delta + review_pr_context + get_impact_context
+    separately — agent makes zero sequencing decisions.
+
+    JAVA ONLY for blast-radius step. Delta and execution paths work on all repos.
+
+    repo_path: absolute path to the repository (default: current working directory).
+    since: git ref to diff against. Auto-detected from origin/main if omitted.
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
+        from sourcecode.mcp.orchestrator import run_pr_review_flow_impl
+        return _ok(run_pr_review_flow_impl(repo_path, since or ""))
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
+@mcp.tool()
+def run_bug_investigation_flow(repo_path: str = ".", symptom: str = "") -> dict:
+    """Bug Investigation Flow — auto-chains 3 tools: risk-rank → impact → IR context.
+
+    Auto-executes the complete bug investigation pipeline in one call:
+      1. fix_bug_context(symptom) — files ranked by risk, focused on symptom
+      2. get_impact_context — blast radius of the top suspect class
+      3. get_ir_summary — Java IR dependency context (Java repos only)
+
+    symptom should be: error message, exception class name, or affected class.
+    Without symptom: ranking is generic (not focused). quality_warnings will note this.
+
+    Returns consolidated_output with all results plus suspect_class (auto-extracted
+    from symptom or top ranked file). session_meta.ttfca_ms shows total wall time.
+
+    Use this instead of calling fix_bug_context + get_impact_context + get_ir_summary
+    separately — agent makes zero sequencing decisions.
+
+    repo_path: absolute path to the repository (default: current working directory).
+    symptom: error message, exception class, or class name.
+      Examples: "NullPointerException in UserService.findById",
+                "PaymentController", "AuthenticationException"
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
+        from sourcecode.mcp.orchestrator import run_bug_investigation_flow_impl
+        return _ok(run_bug_investigation_flow_impl(repo_path, symptom or ""))
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
+@mcp.tool()
+def run_feature_flow(repo_path: str = ".", feature_description: str = "") -> dict:
+    """Feature Implementation Flow — auto-chains 4 tools: context → API → delta → structure.
+
+    Auto-executes the complete feature planning pipeline in one call:
+      1. get_compact_context (or RIS fast-path if fresh) — project orientation
+      2. get_endpoints — existing API surface (Java repos only)
+      3. get_delta(HEAD~3) — what changed recently (active development areas)
+      4. refactor_context — structural coupling and hotspot awareness
+
+    Returns consolidated_output with all four results. Use feature_description to
+    help the agent understand what you are building (stored in output for traceability).
+
+    Use this instead of calling the four tools separately — agent makes zero
+    sequencing decisions. Typical wall time: 2-10s depending on repo size and cache.
+
+    repo_path: absolute path to the repository (default: current working directory).
+    feature_description: optional description of the feature to implement.
+      Example: "add password reset flow with email verification"
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
+        from sourcecode.mcp.orchestrator import run_feature_flow_impl
+        return _ok(run_feature_flow_impl(repo_path, feature_description or ""))
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
+@mcp.tool()
 def get_cold_start_context(repo_path: str = ".") -> dict:
     """Instant session bootstrap from persisted Repository Intelligence Snapshot (RIS).
 
-    CALL THIS FIRST at the start of every MCP session.  Returns cached structural
-    context built from prior analysis runs — zero re-analysis cost.
+    PREFER start_session over this tool — it provides orchestration guidance on top
+    of the same RIS data. Use get_cold_start_context when you only need the raw
+    RIS bootstrap object without tool sequencing recommendations.
+
+    Returns cached structural context built from prior analysis runs — zero re-analysis cost.
 
     status values:
       "cold_start_ready"  — RIS exists and matches the current git HEAD.
