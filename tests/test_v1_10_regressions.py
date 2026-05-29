@@ -170,7 +170,10 @@ class TestSymbolEmptyValidation:
 
     def test_empty_symbol_stderr_message(self):
         result = _invoke(str(FIXTURE), "--symbol", "")
-        assert "symbol query cannot be empty" in (result.output + (result.stderr or ""))
+        stderr = (result.stderr or result.output or "").strip()
+        payload = json.loads(stderr)
+        assert payload["error"]["code"] == "INVALID_INPUT"
+        assert "symbol query cannot be empty" in payload["error"]["message"]
 
     def test_whitespace_symbol_exits_with_code_2(self):
         result = _invoke(str(FIXTURE), "--symbol", "   ")

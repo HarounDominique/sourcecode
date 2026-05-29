@@ -20,7 +20,13 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 
 from sourcecode import __version__ as _sourcecode_version
-from sourcecode.mcp.runner import run_command
+from sourcecode.error_schema import (
+    EXECUTION_FAILED_CODE,
+    INTERNAL_ERROR_CODE,
+    INVALID_INPUT_CODE,
+    build_error_object,
+)
+from sourcecode.mcp.runner import CommandError, run_command
 
 # FIX-P0-5: MCP server version must match CLI version exactly.
 # FastMCP does not accept version= in __init__; inject it on the underlying
@@ -34,29 +40,89 @@ def _ok(data: Any) -> dict:
     return {"success": True, "data": data, "error": None}
 
 
-def _err(message: str, code: str = "EXECUTION_FAILED") -> CallToolResult:
+def _err(
+    message: str,
+    code: str = EXECUTION_FAILED_CODE,
+    *,
+    hint: str | None = None,
+    expected: str | None = None,
+    **context: Any,
+) -> CallToolResult:
     """Return an MCP tool-error result with isError=True per MCP spec §tool-result."""
-    payload = {"success": False, "data": None, "error": {"code": code, "message": message}}
+    payload = {
+        "success": False,
+        "data": None,
+        "error": build_error_object(code, message, hint=hint, expected=expected),
+    }
+    payload.update(context)
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(payload))],
         isError=True,
     )
 
 
+def _coerce_cli_error(exc: Exception, default_message: str) -> CallToolResult:
+    payload = getattr(exc, "payload", None)
+    if isinstance(payload, dict):
+        if "error" in payload and isinstance(payload["error"], dict):
+            error = payload["error"]
+            normalized = {
+                "success": False,
+                "data": None,
+                "error": build_error_object(
+                    str(error.get("code") or EXECUTION_FAILED_CODE),
+                    str(error.get("message") or default_message),
+                    hint=str(error.get("hint") or ""),
+                    expected=str(error.get("expected") or ""),
+                ),
+            }
+            for key, value in payload.items():
+                if key != "error":
+                    normalized[key] = value
+            return CallToolResult(
+                content=[TextContent(type="text", text=json.dumps(normalized))],
+                isError=True,
+            )
+    message = str(exc) or default_message
+    return _err(
+        message,
+        EXECUTION_FAILED_CODE,
+        hint="Inspect the CLI stderr for the structured error payload.",
+        expected="Successful CLI execution.",
+    )
+
+
 def _execute(args: list[str]) -> dict | CallToolResult:
     try:
         result = run_command(args)
+    except CommandError as exc:
+        return _coerce_cli_error(exc, f"Command failed: {' '.join(args)}")
     except RuntimeError as exc:
-        return _err(str(exc))
+        return _err(
+            str(exc),
+            EXECUTION_FAILED_CODE,
+            hint="Inspect the CLI stderr for the structured error payload.",
+            expected="Successful CLI execution.",
+        )
     # If CLI output itself signals failure via success:false, propagate as isError=True
     if isinstance(result, dict) and result.get("success") is False:
+        cli_error = result.get("error")
+        if isinstance(cli_error, dict):
+            normalized_error = build_error_object(
+                str(cli_error.get("code") or EXECUTION_FAILED_CODE),
+                str(cli_error.get("message") or "Command returned success=false"),
+                hint=str(cli_error.get("hint") or ""),
+                expected=str(cli_error.get("expected") or ""),
+            )
+        else:
+            normalized_error = build_error_object(
+                EXECUTION_FAILED_CODE,
+                "Command returned success=false",
+            )
         payload = {
             "success": False,
             "data": None,
-            "error": result.get("error") or {
-                "code": "EXECUTION_FAILED",
-                "message": "Command returned success=false",
-            },
+            "error": normalized_error,
         }
         return CallToolResult(
             content=[TextContent(type="text", text=json.dumps(payload))],
@@ -98,13 +164,19 @@ def _check_repo_path(path: str) -> "CallToolResult | None":
     """
     if not os.path.exists(path):
         return _err(
-            f"directory_not_found: '{path}' does not exist.",
-            "DIRECTORY_NOT_FOUND",
+            f"'{path}' does not exist.",
+            INVALID_INPUT_CODE,
+            hint="Pass an existing repository directory.",
+            expected="An existing directory path.",
+            path=path,
         )
     if not os.path.isdir(path):
         return _err(
-            f"not_a_directory: '{path}' is not a directory.",
-            "NOT_A_DIRECTORY",
+            f"'{path}' is not a directory.",
+            INVALID_INPUT_CODE,
+            hint="Pass a repository directory, not a file.",
+            expected="A directory path.",
+            path=path,
         )
     return None
 
@@ -918,3 +990,32 @@ def telemetry(action: str) -> dict:
             "INVALID_ARGUMENT",
         )
     return _execute(["telemetry", action])
+
+
+def _finalize_mcp_registry() -> None:
+    """Replace manual tool registration with the runtime-generated registry."""
+    from sourcecode.mcp.registry import build_public_tool_specs, make_tool_callable, validate_registry
+
+    try:
+        for tool in list(mcp._tool_manager.list_tools()):  # type: ignore[attr-defined]
+            mcp.remove_tool(tool.name)
+    except Exception:
+        pass
+
+    for spec in build_public_tool_specs():
+        tool_fn = make_tool_callable(spec)
+        tool_fn.__doc__ = spec.docstring
+        globals()[spec.name] = tool_fn
+        mcp.add_tool(
+            tool_fn,
+            name=spec.name,
+            description=spec.description,
+            structured_output=False,
+        )
+
+    drift = validate_registry()
+    if drift:
+        raise RuntimeError(f"MCP registry drift detected: {drift}")
+
+
+_finalize_mcp_registry()

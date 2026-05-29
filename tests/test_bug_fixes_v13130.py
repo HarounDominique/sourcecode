@@ -34,6 +34,8 @@ def _assert_mcp_error(result: Any, code: str) -> None:
     payload = json.loads(result.content[0].text)
     assert payload["success"] is False
     assert payload["error"]["code"] == code
+    assert "hint" in payload["error"]
+    assert "expected" in payload["error"]
 
 
 class TestMcpPathValidation:
@@ -43,21 +45,21 @@ class TestMcpPathValidation:
         nonexistent = str(tmp_path / "does_not_exist_xyz")
         with patch("sourcecode.mcp.server.run_command") as mock_rc:
             result = mcp_server.get_compact_context(nonexistent)
-        _assert_mcp_error(result, "DIRECTORY_NOT_FOUND")
+        _assert_mcp_error(result, "INVALID_INPUT")
         mock_rc.assert_not_called()
 
     def test_get_agent_context_nonexistent_path_returns_error(self, tmp_path):
         nonexistent = str(tmp_path / "no_such_dir")
         with patch("sourcecode.mcp.server.run_command") as mock_rc:
             result = mcp_server.get_agent_context(nonexistent)
-        _assert_mcp_error(result, "DIRECTORY_NOT_FOUND")
+        _assert_mcp_error(result, "INVALID_INPUT")
         mock_rc.assert_not_called()
 
     def test_get_endpoints_nonexistent_path_returns_error(self, tmp_path):
         nonexistent = str(tmp_path / "no_such_dir")
         with patch("sourcecode.mcp.server.run_command") as mock_rc:
             result = mcp_server.get_endpoints(nonexistent)
-        _assert_mcp_error(result, "DIRECTORY_NOT_FOUND")
+        _assert_mcp_error(result, "INVALID_INPUT")
         mock_rc.assert_not_called()
 
     def test_get_compact_context_file_path_not_dir_returns_error(self, tmp_path):
@@ -65,28 +67,28 @@ class TestMcpPathValidation:
         f.write_text("hello")
         with patch("sourcecode.mcp.server.run_command") as mock_rc:
             result = mcp_server.get_compact_context(str(f))
-        _assert_mcp_error(result, "NOT_A_DIRECTORY")
+        _assert_mcp_error(result, "INVALID_INPUT")
         mock_rc.assert_not_called()
 
     def test_get_impact_context_nonexistent_path_returns_error(self, tmp_path):
         nonexistent = str(tmp_path / "no_such_dir")
         with patch("sourcecode.mcp.server.run_command") as mock_rc:
             result = mcp_server.get_impact_context(nonexistent, target="UserService")
-        _assert_mcp_error(result, "DIRECTORY_NOT_FOUND")
+        _assert_mcp_error(result, "INVALID_INPUT")
         mock_rc.assert_not_called()
 
     def test_get_ir_summary_nonexistent_path_returns_error(self, tmp_path):
         nonexistent = str(tmp_path / "no_such_dir")
         with patch("sourcecode.mcp.server.run_command") as mock_rc:
             result = mcp_server.get_ir_summary(nonexistent)
-        _assert_mcp_error(result, "DIRECTORY_NOT_FOUND")
+        _assert_mcp_error(result, "INVALID_INPUT")
         mock_rc.assert_not_called()
 
     def test_generate_tests_nonexistent_path_returns_error(self, tmp_path):
         nonexistent = str(tmp_path / "no_such_dir")
         with patch("sourcecode.mcp.server.run_command") as mock_rc:
             result = mcp_server.generate_tests_context(nonexistent)
-        _assert_mcp_error(result, "DIRECTORY_NOT_FOUND")
+        _assert_mcp_error(result, "INVALID_INPUT")
         mock_rc.assert_not_called()
 
     def test_valid_path_does_call_runner(self, tmp_path):
@@ -135,32 +137,49 @@ class TestCliJsonErrorForInvalidOptions:
         if out:
             try:
                 payload = json.loads(out)
-                assert "error" in payload
-                assert "message" in payload
+                assert payload["error"]["code"] == "INVALID_INPUT"
+                assert "message" in payload["error"]
             except json.JSONDecodeError:
                 pytest.fail(f"UsageError.show() must emit JSON, got: {out!r}")
 
     def test_emit_error_json_covers_directory_not_found(self, capsys):
         from sourcecode.cli import _emit_error_json
-        _emit_error_json("directory_not_found", "Dir '/x' does not exist.", path="/x")
+        _emit_error_json(
+            "INVALID_INPUT",
+            "Dir '/x' does not exist.",
+            path="/x",
+            hint="Pass an existing repository directory.",
+            expected="An existing directory path.",
+        )
         out = capsys.readouterr().err.strip()
         payload = json.loads(out)
-        assert payload["error"] == "directory_not_found"
+        assert payload["error"]["code"] == "INVALID_INPUT"
         assert payload["path"] == "/x"
 
     def test_emit_error_json_covers_incompatible_flags(self, capsys):
         from sourcecode.cli import _emit_error_json
-        _emit_error_json("incompatible_flags", "--compact and --full are mutually exclusive.")
+        _emit_error_json(
+            "INVALID_INPUT",
+            "--compact and --full are mutually exclusive.",
+            hint="Remove one of the conflicting flags.",
+            expected="Exactly one of --compact or --full.",
+        )
         out = capsys.readouterr().err.strip()
         payload = json.loads(out)
-        assert payload["error"] == "incompatible_flags"
+        assert payload["error"]["code"] == "INVALID_INPUT"
 
     def test_emit_error_json_covers_invalid_option(self, capsys):
         from sourcecode.cli import _emit_error_json
-        _emit_error_json("invalid_option", "No such option: --foo", flag="--foo")
+        _emit_error_json(
+            "INVALID_INPUT",
+            "No such option: --foo",
+            flag="--foo",
+            hint="Check the command syntax and supported options.",
+            expected="A valid CLI argument or option.",
+        )
         out = capsys.readouterr().err.strip()
         payload = json.loads(out)
-        assert payload["error"] == "invalid_option"
+        assert payload["error"]["code"] == "INVALID_INPUT"
         assert payload["flag"] == "--foo"
 
     def test_click_usage_error_show_patched_to_json(self, capsys):
@@ -172,7 +191,7 @@ class TestCliJsonErrorForInvalidOptions:
         if out:
             payload = json.loads(out)
             assert "error" in payload
-            assert "message" in payload
+            assert "message" in payload["error"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

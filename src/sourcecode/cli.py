@@ -10,6 +10,7 @@ from typing import Any, Optional, cast
 import typer
 
 from sourcecode import __version__
+from sourcecode.error_schema import INVALID_INPUT_CODE, build_error_envelope
 from sourcecode.entrypoint_classifier import is_production_entry_point, normalize_entry_point
 from sourcecode.progress import Progress
 from sourcecode.repository_ir import extract_java_endpoints as _extract_java_endpoints
@@ -305,14 +306,13 @@ def _preprocess_argv() -> None:
 def _emit_error_json(error: str, message: str, **context: object) -> None:
     """Write a structured JSON error envelope to stderr.
 
-    Format: {"error": "<code>", "message": "<human text>", ...<context>}
+    Format: {"error": {"code": "<code>", "message": "<human text>", ...}, ...<context>}
     All CLI validation and runtime errors must go through this helper so that
     agents and tools can parse stderr reliably regardless of error type.
     """
     import json as _json
     import sys as _sys
-    payload: dict[str, object] = {"error": error, "message": message}
-    payload.update(context)
+    payload = build_error_envelope(error, message, **context)
     _sys.stderr.write(_json.dumps(payload, ensure_ascii=False) + "\n")
     _sys.stderr.flush()
 
@@ -326,18 +326,15 @@ try:
     def _json_click_usage_error_show(self: Any, file: Any = None) -> None:  # type: ignore[override]
         import json as _je
         import sys as _jse
-        _code_map = {
-            "NoSuchOption": "invalid_option",
-            "BadOptionUsage": "invalid_option",
-            "BadParameter": "bad_parameter",
-            "MissingParameter": "missing_required",
-            "BadArgumentUsage": "bad_argument",
-        }
-        code = _code_map.get(type(self).__name__, "invalid_option")
-        payload: dict[str, object] = {"error": code, "message": self.format_message()}
-        _opt = getattr(self, "option_name", None) or getattr(self, "param_hint", None)
-        if _opt:
-            payload["flag"] = str(_opt).strip("'\"")
+        _flag = str((getattr(self, "option_name", None) or getattr(self, "param_hint", None)) or "").strip("'\"")
+        _context: dict[str, object] = {}
+        if _flag:
+            _context["flag"] = _flag
+        payload = build_error_envelope(
+            INVALID_INPUT_CODE,
+            self.format_message(),
+            **_context,
+        )
         _jse.stderr.write(_je.dumps(payload, ensure_ascii=False) + "\n")
         _jse.stderr.flush()
 
@@ -798,35 +795,59 @@ def main(
         )
         mode = fallback
     elif mode not in _MODE_CHOICES:
-        typer.echo(
-            f"Error: invalid value '{mode}' for --mode. Valid options: {', '.join(_MODE_CHOICES)}",
-            err=True,
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid value '{mode}' for --mode. Valid options: {', '.join(_MODE_CHOICES)}",
+            flag="--mode",
+            value=mode,
+            valid_values=list(_MODE_CHOICES),
+            hint="Choose one of the supported --mode values.",
+            expected=f"One of: {', '.join(_MODE_CHOICES)}",
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
     _RANK_CHOICES = ("relevance", "centrality", "git-churn")
     if rank_by not in _RANK_CHOICES:
-        typer.echo(
-            f"Error: invalid value '{rank_by}' for --rank-by. Valid options: {', '.join(_RANK_CHOICES)}",
-            err=True,
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid value '{rank_by}' for --rank-by. Valid options: {', '.join(_RANK_CHOICES)}",
+            flag="--rank-by",
+            value=rank_by,
+            valid_values=list(_RANK_CHOICES),
+            hint="Choose one of the supported --rank-by values.",
+            expected=f"One of: {', '.join(_RANK_CHOICES)}",
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
     if symbol is not None and not symbol.strip():
-        typer.echo("symbol query cannot be empty", err=True)
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            "symbol query cannot be empty",
+            flag="--symbol",
+            hint="Pass a non-empty symbol or omit --symbol.",
+            expected="A non-empty symbol query.",
+        )
         raise typer.Exit(code=2)
 
     if symbol and mode not in ("contract", "standard"):
-        typer.echo(
-            f"Error: --symbol requires --mode contract or standard (got '{mode}'). "
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"--symbol requires --mode contract or standard (got '{mode}'). "
             "Symbol search uses the contract pipeline which does not run in raw mode.",
-            err=True,
+            flag="--symbol",
+            mode=mode,
+            hint="Switch to --mode contract or --mode standard.",
+            expected="A contract or standard analysis mode.",
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
     if entrypoints_only and mode not in ("contract", "standard"):
-        typer.echo(
-            f"Error: --entrypoints-only requires --mode contract or standard (got '{mode}').",
-            err=True,
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"--entrypoints-only requires --mode contract or standard (got '{mode}').",
+            flag="--entrypoints-only",
+            mode=mode,
+            hint="Switch to --mode contract or --mode standard.",
+            expected="A contract or standard analysis mode.",
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
@@ -855,15 +876,15 @@ def main(
     # compact is designed to be a bounded summary; --full removes truncation limits,
     # which contradicts compact's purpose. Use --agent --full for expanded output.
     if compact and full:
-        import json as _json_flags, sys as _sys_flags
-        _sys_flags.stdout.write(_json_flags.dumps({
-            "error": "incompatible_flags",
-            "message": "--compact and --full are mutually exclusive. "
-                       "--compact produces a bounded summary; --full removes truncation limits "
-                       "and is meant for --agent mode. Use --agent --full for expanded output.",
-            "exit_code": 1,
-        }, ensure_ascii=False) + "\n")
-        _sys_flags.stdout.flush()
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            "--compact and --full are mutually exclusive. "
+            "--compact produces a bounded summary; --full removes truncation limits "
+            "and is meant for --agent mode. Use --agent --full for expanded output.",
+            hint="Remove one of the conflicting flags.",
+            expected="Exactly one of --compact or --full.",
+            flag_conflict=["--compact", "--full"],
+        )
         raise typer.Exit(code=1)
 
     # P0-2 FIX: --full without --compact or --agent has no effect in contract/raw mode.
@@ -889,29 +910,35 @@ def main(
     # Validate format choices
     if format not in FORMAT_CHOICES:
         _emit_error_json(
-            "invalid_flag_value",
+            INVALID_INPUT_CODE,
             f"Invalid value '{format}' for --format. Valid values: {', '.join(FORMAT_CHOICES)}.",
             flag="--format",
             value=format,
             valid_values=list(FORMAT_CHOICES),
+            hint="Choose one of the supported --format values.",
+            expected=f"One of: {', '.join(FORMAT_CHOICES)}",
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
     if graph_detail not in GRAPH_DETAIL_CHOICES:
         _emit_error_json(
-            "invalid_flag_value",
+            INVALID_INPUT_CODE,
             f"Invalid value '{graph_detail}' for --graph-detail. Valid values: {', '.join(GRAPH_DETAIL_CHOICES)}.",
             flag="--graph-detail",
             value=graph_detail,
             valid_values=list(GRAPH_DETAIL_CHOICES),
+            hint="Choose one of the supported --graph-detail values.",
+            expected=f"One of: {', '.join(GRAPH_DETAIL_CHOICES)}",
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
     if docs_depth not in DOCS_DEPTH_CHOICES:
         _emit_error_json(
-            "invalid_flag_value",
+            INVALID_INPUT_CODE,
             f"Invalid value '{docs_depth}' for --docs-depth. Valid values: {', '.join(DOCS_DEPTH_CHOICES)}.",
             flag="--docs-depth",
             value=docs_depth,
             valid_values=list(DOCS_DEPTH_CHOICES),
+            hint="Choose one of the supported --docs-depth values.",
+            expected=f"One of: {', '.join(DOCS_DEPTH_CHOICES)}",
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
@@ -922,16 +949,20 @@ def main(
     target = Path(_raw_path_input).resolve()
     if not target.exists():
         _emit_error_json(
-            "directory_not_found",
+            INVALID_INPUT_CODE,
             f"Directory '{_raw_path_input}' does not exist.",
             path=_raw_path_input,
+            hint="Pass an existing repository directory.",
+            expected="An existing directory path.",
         )
         raise typer.Exit(code=1)
     if not target.is_dir():
         _emit_error_json(
-            "not_a_directory",
+            INVALID_INPUT_CODE,
             f"Path '{_raw_path_input}' is not a directory.",
             path=_raw_path_input,
+            hint="Pass a repository directory, not a file.",
+            expected="A directory path.",
         )
         raise typer.Exit(code=1)
 
@@ -1027,12 +1058,15 @@ def main(
     effective_depth = max(depth, _java_min_depth) if _is_java and depth < _java_min_depth else depth
 
     if symbol is not None and _is_java:
-        typer.echo(
-            f"Error: --symbol is not supported for Java/JVM repositories. "
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            "--symbol is not supported for Java/JVM repositories. "
             "Per-file AST extraction is unavailable for JVM — symbol search only works with Python, TypeScript, and JavaScript. "
             "Alternatives: use --agent --compact to get file relevance scores, "
             "or use --git-context to find recently changed files.",
-            err=True,
+            flag="--symbol",
+            hint="Use a non-Java repository or omit --symbol.",
+            expected="A repository where symbol extraction is supported.",
         )
         raise typer.Exit(code=1)
 
@@ -1329,10 +1363,15 @@ def main(
     if parsed_graph_edges is not None:
         invalid_edges = sorted(parsed_graph_edges - GRAPH_EDGE_CHOICES)
         if invalid_edges:
-            typer.echo(
-                f"Error: invalid values for --graph-edges: "
+            _emit_error_json(
+                INVALID_INPUT_CODE,
+                f"invalid values for --graph-edges: "
                 f"{', '.join(invalid_edges)}. Valid options: {', '.join(sorted(GRAPH_EDGE_CHOICES))}",
-                err=True,
+                flag="--graph-edges",
+                value=invalid_edges,
+                valid_values=sorted(GRAPH_EDGE_CHOICES),
+                hint="Choose one or more supported graph edge types.",
+                expected=f"One or more of: {', '.join(sorted(GRAPH_EDGE_CHOICES))}",
             )
             raise typer.Exit(code=1)
     graph_detail_typed = cast(GraphDetail, graph_detail)
@@ -2413,17 +2452,24 @@ def prepare_context_cmd(
         raise typer.Exit()
 
     if task is None:
-        typer.echo(
-            f"Error: task is required. Available: {', '.join(TASKS)}\n"
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"task is required. Available: {', '.join(TASKS)}\n"
             "Use --task-help for descriptions.",
-            err=True,
+            flag="task",
+            hint="Pass one of the documented prepare-context tasks.",
+            expected=f"One of: {', '.join(TASKS)}",
         )
         raise typer.Exit(code=1)
 
     if task not in TASKS:
-        typer.echo(
-            f"Error: unknown task '{task}'. Available: {', '.join(TASKS)}",
-            err=True,
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"unknown task '{task}'. Available: {', '.join(TASKS)}",
+            flag="task",
+            value=task,
+            hint="Choose one of the supported prepare-context tasks.",
+            expected=f"One of: {', '.join(TASKS)}",
         )
         raise typer.Exit(code=1)
 
@@ -2438,10 +2484,15 @@ def prepare_context_cmd(
     # Invalid values must error loudly — silently falling through to JSON is a lie.
     _PC_FORMAT_CHOICES = ("json", "github-comment")
     if format is not None and format not in _PC_FORMAT_CHOICES:
-        typer.echo(
-            f"Error: invalid value '{format}' for --format. "
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"invalid value '{format}' for --format. "
             f"Valid options: {', '.join(_PC_FORMAT_CHOICES)}.",
-            err=True,
+            flag="--format",
+            value=format,
+            valid_values=list(_PC_FORMAT_CHOICES),
+            hint="Choose one of the supported prepare-context output formats.",
+            expected=f"One of: {', '.join(_PC_FORMAT_CHOICES)}",
         )
         raise typer.Exit(code=2)
     # github-comment only renders for review-pr; warn and normalize for other tasks.
@@ -2456,9 +2507,11 @@ def prepare_context_cmd(
     target = path.resolve()
     if not target.exists() or not target.is_dir():
         _emit_error_json(
-            "invalid_path",
+            INVALID_INPUT_CODE,
             f"'{target}' is not a valid directory.",
             path=str(target),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
         )
         raise typer.Exit(code=1)
 
@@ -3080,9 +3133,11 @@ def repo_ir_cmd(
     root = path.resolve()
     if not root.is_dir():
         _emit_error_json(
-            "invalid_path",
+            INVALID_INPUT_CODE,
             f"'{root}' is not a valid directory.",
             path=str(root),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
         )
         raise typer.Exit(1)
 
@@ -3239,9 +3294,11 @@ def impact_cmd(
     root = path.resolve()
     if not root.is_dir():
         _emit_error_json(
-            "invalid_path",
+            INVALID_INPUT_CODE,
             f"'{root}' is not a valid directory.",
             path=str(root),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
         )
         raise typer.Exit(1)
 
@@ -3348,9 +3405,11 @@ def endpoints_cmd(
     target = path.resolve()
     if not target.exists() or not target.is_dir():
         _emit_error_json(
-            "invalid_path",
+            INVALID_INPUT_CODE,
             f"'{target}' is not a valid directory.",
             path=str(target),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
         )
         raise typer.Exit(code=1)
 
@@ -3635,19 +3694,24 @@ def modernize_cmd(
     root = path.resolve()
     if not root.is_dir():
         _emit_error_json(
-            "invalid_path",
+            INVALID_INPUT_CODE,
             f"'{root}' is not a valid directory.",
             path=str(root),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
         )
         raise typer.Exit(1)
 
     file_list = find_java_files(root)
     if not file_list:
-        typer.echo(_json.dumps({
-            "error": "No Java files found in repository.",
-            "path": str(root),
-        }, indent=2))
-        return
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            "No Java files found in repository.",
+            path=str(root),
+            hint="Pass a repository containing Java source files.",
+            expected="At least one Java file.",
+        )
+        raise typer.Exit(1)
 
     _prog = Progress()
     _prog.start(f"building IR ({len(file_list)} files) for modernization analysis")

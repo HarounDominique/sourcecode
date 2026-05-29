@@ -296,25 +296,33 @@ class TestCliErrorJsonEnvelope:
 
     def test_emit_error_json_format(self, capsys):
         from sourcecode.cli import _emit_error_json
-        _emit_error_json("directory_not_found", "Directory '/x' does not exist.", path="/x")
+        _emit_error_json(
+            "INVALID_INPUT",
+            "Directory '/x' does not exist.",
+            path="/x",
+            hint="Pass an existing repository directory.",
+            expected="An existing directory path.",
+        )
         captured = capsys.readouterr()
         payload = json.loads(captured.err.strip())
-        assert payload["error"] == "directory_not_found"
-        assert "/x" in payload["message"]
+        assert payload["error"]["code"] == "INVALID_INPUT"
+        assert "/x" in payload["error"]["message"]
         assert payload["path"] == "/x"
 
     def test_emit_error_json_invalid_flag(self, capsys):
         from sourcecode.cli import _emit_error_json
         _emit_error_json(
-            "invalid_flag_value",
+            "INVALID_INPUT",
             "Invalid value 'bad' for --format. Valid values: json, yaml, github-comment.",
             flag="--format",
             value="bad",
             valid_values=["json", "yaml", "github-comment"],
+            hint="Choose one of the supported --format values.",
+            expected="One of: json, yaml, github-comment",
         )
         captured = capsys.readouterr()
         payload = json.loads(captured.err.strip())
-        assert payload["error"] == "invalid_flag_value"
+        assert payload["error"]["code"] == "INVALID_INPUT"
         assert payload["flag"] == "--format"
         assert payload["value"] == "bad"
         assert "json" in payload["valid_values"]
@@ -327,7 +335,7 @@ class TestCliErrorJsonEnvelope:
         # Must not raise
         payload = json.loads(captured.err.strip())
         assert "error" in payload
-        assert "message" in payload
+        assert "message" in payload["error"]
 
     def test_nonexistent_path_stderr_is_json(self, tmp_path: Path):
         """sourcecode --compact /nonexistent must write JSON to stderr (exit 1)."""
@@ -345,8 +353,8 @@ class TestCliErrorJsonEnvelope:
             pytest.fail(
                 f"stderr on path-not-found must be valid JSON, got:\n{stderr!r}"
             )
-        assert payload.get("error") == "directory_not_found", (
-            f"expected error=directory_not_found, got: {payload}"
+        assert payload.get("error", {}).get("code") == "INVALID_INPUT", (
+            f"expected error.code=INVALID_INPUT, got: {payload}"
         )
 
     def test_invalid_format_flag_stderr_is_json(self, tmp_path: Path):
@@ -364,6 +372,6 @@ class TestCliErrorJsonEnvelope:
             pytest.fail(
                 f"stderr on invalid --format must be valid JSON, got:\n{stderr!r}"
             )
-        assert payload.get("error") == "invalid_flag_value"
+        assert payload.get("error", {}).get("code") == "INVALID_INPUT"
         assert payload.get("flag") == "--format"
         assert payload.get("value") == "bad_format_xyz"

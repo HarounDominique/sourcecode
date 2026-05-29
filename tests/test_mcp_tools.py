@@ -59,6 +59,8 @@ def _assert_failure(result: Any, expected_code: str | None = None) -> None:
     assert isinstance(payload["error"], dict)
     assert "code" in payload["error"]
     assert "message" in payload["error"]
+    assert "hint" in payload["error"]
+    assert "expected" in payload["error"]
     if expected_code:
         assert payload["error"]["code"] == expected_code
 
@@ -180,12 +182,12 @@ def test_get_module_context_success():
 
 def test_get_module_context_empty_module_rejected():
     result = server.get_module_context("/some/repo", "")
-    _assert_failure(result, "INVALID_ARGUMENT")
+    _assert_failure(result, "INVALID_INPUT")
 
 
 def test_get_module_context_whitespace_module_rejected():
     result = server.get_module_context("/some/repo", "   ")
-    _assert_failure(result, "INVALID_ARGUMENT")
+    _assert_failure(result, "INVALID_INPUT")
 
 
 def test_get_module_context_failure():
@@ -273,6 +275,7 @@ def test_version_success():
     with patch(_RUNNER_PATH, return_value="sourcecode 1.2.3") as mock_rc:
         result = server.version()
     _assert_success(result)
+    assert result["data"] == "sourcecode 1.2.3"
     assert mock_rc.call_args[0][0] == ["version"]
 
 
@@ -309,12 +312,12 @@ def test_telemetry_success_all_actions():
 
 def test_telemetry_invalid_action_rejected():
     result = server.telemetry("--enable")
-    _assert_failure(result, "INVALID_ARGUMENT")
+    _assert_failure(result, "INVALID_INPUT")
 
 
 def test_telemetry_unknown_action_rejected():
     result = server.telemetry("reset")
-    _assert_failure(result, "INVALID_ARGUMENT")
+    _assert_failure(result, "INVALID_INPUT")
 
 
 def test_telemetry_failure():
