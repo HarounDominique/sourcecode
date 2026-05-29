@@ -4320,7 +4320,11 @@ def cache_warm_cmd(
     compact: bool = typer.Option(True, "--compact/--no-compact", help="Warm compact view (default: on)."),
     agent: bool = typer.Option(False, "--agent", help="Also warm agent view."),
 ) -> None:
-    """Pre-populate the cache by running a fresh analysis."""
+    """Pre-populate the cache by running a fresh analysis.
+
+    Runs a full analysis to populate L1/L2 caches and rebuild the RIS
+    (Repository Intelligence Snapshot). Useful after a merge/pull in CI.
+    """
     import shutil as _shutil
     import subprocess as _sub
     import sys as _sys
@@ -4334,12 +4338,94 @@ def cache_warm_cmd(
         cmd.append("--agent")
     result = _sub.run(cmd, capture_output=True, text=True)
     if result.returncode == 0:
-        typer.echo("Cache warmed.", err=True)
+        typer.echo("Cache warmed (L1/L2 + RIS rebuilt).", err=True)
     else:
         typer.echo(f"Warm failed (exit {result.returncode}).", err=True)
         if result.stderr:
             typer.echo(result.stderr.strip(), err=True)
         raise typer.Exit(code=result.returncode)
+
+
+@cache_app.command("freshness")
+def cache_freshness_cmd(
+    path: Path = typer.Argument(Path("."), help="Repository path (default: current directory)"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """Report RIS freshness relative to the current git HEAD.
+
+    Answers: is the cached snapshot current? How many commits behind is it?
+
+    \b
+    Output fields:
+      fresh              — True when RIS HEAD matches current HEAD and no uncommitted changes
+      current_git_head   — Current repo HEAD (short SHA)
+      ris_git_head       — HEAD stored in RIS when it was last built
+      delta_commits      — Number of commits between ris_git_head and HEAD (0 = in sync)
+      has_uncommitted_changes — Working tree has staged/unstaged changes
+      ris_exists         — False when no RIS has been built yet
+      ris_last_updated_at — ISO-8601 timestamp of last RIS write
+    """
+    import json as _json
+    import subprocess as _sub
+    from sourcecode import cache as _cm
+    from sourcecode.ris import _has_uncommitted_changes as _huc
+    from sourcecode.ris import load_ris as _lris
+
+    target = Path(path).resolve()
+    current_head = _cm._get_git_head(target)
+    ris = _lris(target)
+
+    if ris is None:
+        result: dict = {
+            "fresh": False,
+            "ris_exists": False,
+            "current_git_head": current_head,
+            "ris_git_head": None,
+            "delta_commits": None,
+            "has_uncommitted_changes": _huc(target),
+            "ris_last_updated_at": None,
+        }
+    else:
+        ris_head = ris.git_head
+        head_matches = bool(current_head and ris_head and current_head == ris_head)
+        uncommitted = _huc(target)
+
+        # Count commits between ris_head and current HEAD
+        delta = None
+        if ris_head and current_head and ris_head != current_head:
+            try:
+                _r = _sub.run(
+                    ["git", "-C", str(target), "rev-list", "--count", f"{ris_head}..HEAD"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if _r.returncode == 0:
+                    delta = int(_r.stdout.strip())
+            except Exception:
+                pass
+        elif head_matches:
+            delta = 0
+
+        result = {
+            "fresh": head_matches and not uncommitted,
+            "ris_exists": True,
+            "current_git_head": current_head,
+            "ris_git_head": ris_head,
+            "delta_commits": delta,
+            "has_uncommitted_changes": uncommitted,
+            "ris_last_updated_at": ris.last_updated_at,
+        }
+
+    if json_output:
+        typer.echo(_json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        _fresh_tag = "FRESH" if result["fresh"] else "STALE"
+        typer.echo(f"Status:       {_fresh_tag}")
+        typer.echo(f"Current HEAD: {result['current_git_head'] or '(unknown)'}")
+        typer.echo(f"RIS HEAD:     {result.get('ris_git_head') or '(none)'}")
+        if result.get("delta_commits") is not None:
+            typer.echo(f"Delta:        {result['delta_commits']} commit(s) behind")
+        typer.echo(f"Uncommitted:  {result['has_uncommitted_changes']}")
+        typer.echo(f"RIS updated:  {result.get('ris_last_updated_at') or 'never'}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

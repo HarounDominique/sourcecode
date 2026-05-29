@@ -212,9 +212,12 @@ def test_get_delta_default_since():
     assert args[args.index("--since") + 1] == "HEAD~1"
 
 
-def test_get_delta_empty_since_rejected():
-    result = server.get_delta("/some/repo", "")
-    _assert_failure(result, "INVALID_ARGUMENT")
+def test_get_delta_empty_since_uses_auto_detect():
+    # Empty since triggers auto-detection (merge-base or HEAD~1 fallback).
+    # It is no longer rejected — the tool resolves a ref and proceeds.
+    with patch(_RUNNER_PATH, return_value=_PARSED_OUTPUT):
+        result = server.get_delta("/some/repo", "")
+    assert result["success"] is True
 
 
 def test_get_delta_failure():

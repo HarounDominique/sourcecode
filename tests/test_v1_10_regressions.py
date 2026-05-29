@@ -301,9 +301,8 @@ class TestBootstrapEntryPoints:
         eps = self._make_eps()
         result = _bootstrap_structured(eps)
         assert "controllers" in result
-        # GAP-6 fix: count renamed to classes/methods
+        # classes only — methods field removed (was always equal to classes)
         assert result["controllers"]["classes"] == 1
-        assert result["controllers"]["methods"] >= 1
         assert "note" in result["controllers"]
 
     def test_bootstrap_takes_priority_over_alphabetical_in_compact(self):

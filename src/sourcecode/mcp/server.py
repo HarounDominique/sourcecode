@@ -215,7 +215,10 @@ def get_agent_context(repo_path: str = ".", git_context: bool = False) -> dict:
 
 @mcp.tool()
 def get_endpoints(repo_path: str = ".") -> dict:
-    """REST API endpoint surface extraction from Java source files.
+    """REST API endpoint surface extraction from Java source files. JAVA ONLY.
+
+    Do NOT call this on non-Java repositories — it will return empty results.
+    Use get_compact_context or get_agent_context for non-Java repos.
 
     Maps to: sourcecode endpoints <repo_path>
     Returns: endpoints list with method, path, controller, handler fields;
@@ -230,7 +233,7 @@ def get_endpoints(repo_path: str = ".") -> dict:
     Supports Spring MVC (@GetMapping etc.) and JAX-RS (@GET/@POST etc.).
     Security annotations detected: @RolesAllowed, @PermitAll, @DenyAll,
     @Authenticated, @PreAuthorize, @Secured, @SecurityRequirement, @M3FiltroSeguridad.
-    repo_path: absolute path to the repository (default: current working directory).
+    repo_path: absolute path to the Java repository (default: current working directory).
     """
     _raw = repo_path
     try:
@@ -275,28 +278,80 @@ def get_module_context(repo_path: str = ".", module: str = "") -> dict:
         )
 
 
+def _auto_since(repo_path: str) -> str:
+    """Detect best merge-base for delta: origin/main > origin/master > HEAD~1."""
+    import subprocess as _sp
+    for base in ("origin/main", "origin/master"):
+        try:
+            r = _sp.run(
+                ["git", "-C", repo_path, "merge-base", "HEAD", base],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except Exception:
+            pass
+    return "HEAD~1"
+
+
 @mcp.tool()
-def get_delta(repo_path: str = ".", since: str = "HEAD~1") -> dict:
+def get_delta(repo_path: str = ".", since: str = "") -> dict:
     """Incremental context: git-changed files since a reference commit.
 
     Maps to: sourcecode prepare-context delta <repo_path> --since <since>
     repo_path: absolute path to the repository (default: current working directory).
     since: git ref to diff against (e.g. HEAD~3, main, origin/main).
+           If empty or omitted, auto-detects merge-base with origin/main (or
+           origin/master). Falls back to HEAD~1 if no remote branch found.
+           Pass "HEAD~1" explicitly to force single-commit diff.
     """
     _raw = repo_path
     try:
         if not isinstance(repo_path, str):
             return _err("repo_path must be a string", "INVALID_ARGUMENT")
-        if not isinstance(since, str) or not since.strip():
-            return _err("since must be a non-empty git ref", "INVALID_ARGUMENT")
         repo_path = _normalize_repo_path(repo_path)
         _path_err = _check_repo_path(repo_path)
         if _path_err is not None:
             return _path_err
-        return _execute(["prepare-context", "delta", repo_path, "--since", since])
+        _since = since.strip() if isinstance(since, str) and since.strip() else _auto_since(repo_path)
+        return _execute(["prepare-context", "delta", repo_path, "--since", _since])
     except Exception as exc:
         return _err(
             f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
+@mcp.tool()
+def check_freshness(repo_path: str = ".") -> dict:
+    """Report RIS freshness relative to the current git HEAD.
+
+    Answers instantly: is the cached snapshot current? How many commits behind?
+    Use before deciding whether to call get_compact_context for a refresh.
+
+    Returns:
+      fresh (bool)               — True when RIS HEAD == current HEAD and no uncommitted changes
+      current_git_head (str)     — Current repo HEAD (short SHA)
+      ris_git_head (str|null)    — HEAD stored in RIS at last build
+      delta_commits (int|null)   — Commits between ris_git_head and HEAD (0 = in sync)
+      has_uncommitted_changes    — Working tree has staged or unstaged changes
+      ris_exists (bool)          — False when no RIS built yet
+      ris_last_updated_at (str)  — ISO-8601 timestamp of last RIS write
+
+    repo_path: absolute path to the repository (default: current working directory).
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
+        return _execute(["cache", "freshness", repo_path, "--json"])
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path: {_raw}",
             "INTERNAL_ERROR",
         )
 

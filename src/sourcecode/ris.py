@@ -384,6 +384,15 @@ def get_cold_start_context(repo_root: Path) -> dict:
         uncommitted = _has_uncommitted_changes(repo_root)
 
         endpoints = ris.api_surface.get("endpoints", [])
+        _is_java = (
+            (repo_root / "pom.xml").exists()
+            or (repo_root / "build.gradle").exists()
+            or (repo_root / "build.gradle.kts").exists()
+        )
+        # api_surface_complete: False when this is a Java repo but endpoints are absent.
+        # An empty list does NOT mean "no endpoints exist" — it means the endpoint
+        # index has not been built yet.  Agents must call get_endpoints to populate.
+        _api_complete = not _is_java or bool(endpoints)
         result: dict = {
             "status": "cold_start_stale" if stale else "cold_start_ready",
             "repo_id": ris.repo_id,
@@ -394,20 +403,17 @@ def get_cold_start_context(repo_root: Path) -> dict:
             "last_updated_at": ris.last_updated_at,
             "cache_source": "RIS",
             "data_scope": "RIS_BOOTSTRAP",
+            "api_surface_complete": _api_complete,
             "summary": ris.compact_summary,
             "entrypoints": ris.structural_map.get("entrypoints", []),
             "endpoints": endpoints,
             "hotspots": ris.git_context_snapshot.get("hotspots", []),
         }
-        if not endpoints:
-            _is_java = (repo_root / "pom.xml").exists() or \
-                       (repo_root / "build.gradle").exists() or \
-                       (repo_root / "build.gradle.kts").exists()
-            if _is_java:
-                result["endpoints_hint"] = (
-                    "Java repo detected but no endpoint index found. "
-                    "Call get_endpoints (or: sourcecode endpoints <path>) to populate."
-                )
+        if not endpoints and _is_java:
+            result["endpoints_hint"] = (
+                "Java repo detected but no endpoint index found. "
+                "Call get_endpoints (or: sourcecode endpoints <path>) to populate."
+            )
         return result
     except Exception:
         return {"status": "no_ris"}

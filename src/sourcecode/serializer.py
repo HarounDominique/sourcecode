@@ -631,9 +631,12 @@ def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
     if security:
         result["security"] = security
     if controllers:
-        # Count unique files (classes) vs total entries (methods/endpoints)
+        # Each controller file generates one EntryPoint regardless of how many
+        # handler methods it contains.  controller_classes == len(controllers)
+        # always (deduplicated by path in _scan_java_file_for_entry_points).
+        # "methods" is therefore removed from the note — use `sourcecode endpoints`
+        # for per-method HTTP surface.
         controller_classes = len({c["path"] for c in controllers})
-        controller_methods = len(controllers)
 
         # Extract all DDD module names from controller paths and group by domain area.
         # Path pattern: .../ddd/{module}/infrastructure/rest/*Controller.java
@@ -655,9 +658,8 @@ def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
                 module_names.append(module)
 
         _ctrl_note = (
-            f"{controller_methods} detected entry-point methods across "
-            f"{controller_classes} controller classes"
-            f" (use 'sourcecode endpoints' for full surface)"
+            f"{controller_classes} controller classes detected"
+            f" (use 'sourcecode endpoints' for per-method HTTP surface)"
         )
         if len(module_names) > 30:
             # Group by first path segment under ddd/ (inferred domain area)
@@ -678,14 +680,12 @@ def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
                         domain_groups[domain_prefix or "other"].append(module)
             result["controllers"] = {
                 "classes": controller_classes,
-                "methods": controller_methods,
                 "note": _ctrl_note,
                 "modules": {k: sorted(v) for k, v in sorted(domain_groups.items())},
             }
         else:
             result["controllers"] = {
                 "classes": controller_classes,
-                "methods": controller_methods,
                 "note": _ctrl_note,
                 "modules": sorted(module_names),
             }
