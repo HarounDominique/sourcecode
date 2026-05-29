@@ -658,7 +658,6 @@ def main(
     env_map: bool = typer.Option(
         False,
         "--env-map",
-        hidden=True,
         help="Map environment variables referenced across the codebase.",
     ),
     code_notes: bool = typer.Option(
@@ -1880,8 +1879,9 @@ def main(
             if _gc_early and not (_bad_gc & set(_gc_early.limitations)):
                 _uc = _gc_early.uncommitted_changes
                 if _uc:
-                    # WORKTREE_UNSTAGED + WORKTREE_STAGED only; untracked excluded
-                    _allowed_changed_files = set(_uc.staged) | set(_uc.unstaged)
+                    # Include untracked (new files not yet staged) so new source files
+                    # are analyzed under --changed-only, not silently treated as "clean".
+                    _allowed_changed_files = set(_uc.staged) | set(_uc.unstaged) | set(_uc.untracked)
                 if not _allowed_changed_files:
                     # Git is available and confirms no uncommitted changes.
                     # Do NOT fall back to a full scan — that would silently produce
@@ -1900,10 +1900,10 @@ def main(
             changed_only = False
         if _git_confirmed_clean:
             _nc_payload = json.dumps({
-                "status": "working_tree_clean",
-                "no_changes": True,
                 "changed_files": [],
-                "message": "No uncommitted changes detected — working tree is clean.",
+                "message": "no uncommitted changes detected",
+                "analysis_scope": "empty",
+                "_meta": {"changed_only": True},
             }, ensure_ascii=False)
             write_output(_nc_payload, output=output)
             raise typer.Exit()
@@ -2626,7 +2626,14 @@ def prepare_context_cmd(
     if _task_include("improvement_opportunities") and output.improvement_opportunities:
         out["improvement_opportunities"] = output.improvement_opportunities
     if _task_include("test_gaps") and output.test_gaps:
-        out["test_gaps"] = output.test_gaps
+        # Emit both the canonical name (untested_sources) and the compat alias (test_gaps)
+        # so agents can use either. untested_sources is the correct semantic name.
+        out["untested_sources"] = output.test_gaps
+        out["test_gaps"] = output.test_gaps  # backward compat alias
+        if task == "generate-tests":
+            _et_count = getattr(output, "existing_test_count", None)
+            if _et_count is not None:
+                out["existing_test_count"] = _et_count
     # P0-2: fast-mode truncation transparency — always emit when truncated, even if test_gaps is []
     # Use `is True` (strict) so MagicMock objects in tests don't trigger this branch.
     if getattr(output, "truncated", False) is True:
@@ -3543,6 +3550,12 @@ def fix_bug_cmd(
       sourcecode impact <target>   — Propagate impact from a specific class
       sourcecode onboard .         — Full architecture context first
     """
+    if not symptom:
+        typer.echo(
+            "[fix-bug] Results are significantly better with --symptom. "
+            "Example: --symptom 'NullPointerException in PaymentService'",
+            err=True,
+        )
     ctx.invoke(
         prepare_context_cmd,
         task="fix-bug",
@@ -4298,19 +4311,21 @@ def cache_status_cmd(
 def cache_clear_cmd(
     path: Path = typer.Argument(Path("."), help="Repository path (default: current directory)"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
-    include_ris: bool = typer.Option(False, "--include-ris", help="Also delete the RIS snapshot (ris.json.gz). By default, RIS is preserved across clears."),
+    include_ris: bool = typer.Option(False, "--include-ris", hidden=True, help="Alias for --all. Preserved for backward compatibility."),
+    all_: bool = typer.Option(False, "--all", help="Also delete the RIS snapshot (ris.json.gz). By default, RIS is preserved across clears."),
 ) -> None:
     """Delete cached snapshots for a repository.
 
     By default, RIS (ris.json.gz) is preserved — it is the persistent structural
-    index used for cold-start bootstrapping.  Use --include-ris to also clear it.
+    index used for cold-start bootstrapping.  Use --all to also clear it.
     """
     from sourcecode import cache as _cm
     target = Path(path).resolve()
+    _clear_ris = include_ris or all_
     if not yes:
-        _ris_note = " (including RIS)" if include_ris else " (RIS preserved — use --include-ris to also clear it)"
+        _ris_note = " (including RIS)" if _clear_ris else " (RIS preserved — use --all to also clear it)"
         typer.confirm(f"Delete all cache files for {target}{_ris_note}?", abort=True)
-    removed = _cm.clear(target, clear_ris=include_ris)
+    removed = _cm.clear(target, clear_ris=_clear_ris)
     typer.echo(f"Removed {removed} file(s).")
 
 

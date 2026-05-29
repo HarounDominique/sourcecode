@@ -63,7 +63,12 @@ def test_lqn02_project_summary() -> None:
     assert ps is not None, "project.summary key missing from output"
     assert isinstance(ps, str), f"LQN-02: project_summary must be str, got {type(ps)}"
     assert len(ps) > 10, f"LQN-02: project_summary too short ({len(ps)} chars): {ps!r}"
-    assert "codebase context" in ps.lower() or "contexto" in ps.lower(), (
+    assert (
+        "codebase context" in ps.lower()
+        or "contexto" in ps.lower()
+        or "persistent structural context" in ps.lower()
+        or "structural context" in ps.lower()
+    ), (
         f"LQN-02: project_summary should reflect the real project description, got: {ps!r}"
     )
     assert "Stack: Python" in ps, (

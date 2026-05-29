@@ -391,6 +391,8 @@ class TaskOutput:
     # P0-2: fast-mode truncation transparency
     truncated: bool = False
     truncated_reason: Optional[str] = None
+    # generate-tests: count of existing test files found (complements untested_sources)
+    existing_test_count: Optional[int] = None
 
 
 @dataclass
@@ -2237,6 +2239,8 @@ class TaskContextBuilder:
             # P0-2: fast-mode truncation transparency
             truncated=_fast_truncated,
             truncated_reason=_fast_truncated_reason,
+            # generate-tests: count of test files found alongside untested_sources
+            existing_test_count=len(test_set) if task_name == "generate-tests" else None,
         )
 
     def render_prompt(self, output: TaskOutput) -> str:

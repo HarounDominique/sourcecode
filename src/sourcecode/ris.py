@@ -393,12 +393,40 @@ def get_cold_start_context(repo_root: Path) -> dict:
         # An empty list does NOT mean "no endpoints exist" — it means the endpoint
         # index has not been built yet.  Agents must call get_endpoints to populate.
         _api_complete = not _is_java or bool(endpoints)
+
+        # Build structural validation for Java/Spring repos.
+        # Detects when the RIS snapshot is structurally incomplete (controllers found
+        # but endpoint index was never built), so agents can decide whether to rebuild.
+        _controllers_in_map = ris.structural_map.get("controllers", [])
+        _controllers_in_api = ris.api_surface.get("controllers_index", [])
+        _controllers_found = len(_controllers_in_map) or len(_controllers_in_api)
+        _endpoints_found = len(endpoints)
+        # Spring is detected when controllers exist in structural map or api surface.
+        _spring_detected = bool(_controllers_found) or bool(_controllers_in_api)
+        _validation_status = (
+            "incomplete_snapshot"
+            if _is_java and _spring_detected and _endpoints_found == 0
+            else "valid"
+        )
+        _validation: dict = {
+            "spring_detected": _spring_detected,
+            "controllers_found": _controllers_found,
+            "endpoints_found": _endpoints_found,
+            "status": _validation_status,
+        }
+
+        # When the snapshot is structurally incomplete, downgrade status so agents
+        # don't assume cold_start_ready when critical sections are missing.
+        _status_base = "cold_start_stale" if stale else "cold_start_ready"
+        if _validation_status == "incomplete_snapshot" and not stale:
+            _status_base = "cold_start_incomplete"
+
         result: dict = {
-            "status": "cold_start_stale" if stale else "cold_start_ready",
+            "status": _status_base,
             "repo_id": ris.repo_id,
             "git_head": ris.git_head,
             "current_git_head": current_head,
-            "stale": stale,
+            "stale": stale or (_validation_status == "incomplete_snapshot"),
             "has_uncommitted_changes": uncommitted,
             "last_updated_at": ris.last_updated_at,
             "cache_source": "RIS",
@@ -408,6 +436,7 @@ def get_cold_start_context(repo_root: Path) -> dict:
             "entrypoints": ris.structural_map.get("entrypoints", []),
             "endpoints": endpoints,
             "hotspots": ris.git_context_snapshot.get("hotspots", []),
+            "validation": _validation,
         }
         if not endpoints and _is_java:
             result["endpoints_hint"] = (
