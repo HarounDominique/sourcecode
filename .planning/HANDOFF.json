@@ -1,0 +1,148 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-05-29T12:00:00Z",
+  "phase": null,
+  "phase_name": "bugfix session 31 — 1.32.5",
+  "phase_dir": null,
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
+  "status": "paused",
+  "session_type": "bugfix",
+  "completed_tasks": [
+    {
+      "id": 1,
+      "name": "BUG-R1 — RIS always cold_start_stale",
+      "status": "done",
+      "files": ["src/sourcecode/ris.py"],
+      "details": "ris._current_git_head changed from rev-parse HEAD (full 40-char SHA) to rev-parse --short HEAD (7-char). cli.py stored short SHA; ris.py compared full SHA → always stale. Now both sides use short SHA → cold_start_ready works.",
+      "commit": "2255711"
+    },
+    {
+      "id": 2,
+      "name": "BUG-D1 — cache_app not registered in CLI",
+      "status": "done",
+      "files": ["src/sourcecode/cli.py"],
+      "details": "Added cache_app Typer sub-group + status/clear/warm commands. Registered with app.add_typer(cache_app, name='cache'). Added 'cache' to _SUBCOMMANDS frozenset (was being consumed as repo path by _preprocess_args, routing to main app instead of cache sub-app).",
+      "commit": "2255711"
+    },
+    {
+      "id": 3,
+      "name": "BUG-D2 — version bump invalidates ALL cache",
+      "status": "done",
+      "files": ["src/sourcecode/cache.py", "src/sourcecode/cli.py"],
+      "details": "Added ANALYZER_CACHE_VERSION='1' to cache.py. Replaced f'v={_sc_version},' in core_flags_str with f'acv={_cache_mod.ANALYZER_CACHE_VERSION},'. Patch releases no longer wipe L1 cores. ANALYZER_CACHE_VERSION only bumped when analysis logic/schema changes. One-time migration wipe occurs when upgrading from 1.32.4 → 1.32.5 (unavoidable).",
+      "commit": "2255711"
+    },
+    {
+      "id": 4,
+      "name": "BUG-C5 — CAS blobs non-atomic writes",
+      "status": "done",
+      "files": ["src/sourcecode/cache.py"],
+      "details": "_cas_store_blob now uses _atomic_write(path, gzip.compress(raw)) instead of path.write_bytes(). Prevents partial blobs visible to concurrent readers on interrupted write.",
+      "commit": "2255711"
+    },
+    {
+      "id": 5,
+      "name": "BUG-C4 — GC size budget excludes CAS blobs",
+      "status": "done",
+      "files": ["src/sourcecode/cache.py"],
+      "details": "GC pass-3 (total size cap) now counts CAS blob sizes in the total. Previously only counted core+snapshot files, so CAS accumulation could push cache well over budget without triggering eviction.",
+      "commit": "2255711"
+    },
+    {
+      "id": 6,
+      "name": "Version bump 1.32.4 → 1.32.5",
+      "status": "done",
+      "files": ["src/sourcecode/__init__.py", "pyproject.toml"],
+      "commit": "2255711"
+    },
+    {
+      "id": 7,
+      "name": "Regression tests — 68 tests across 3 files",
+      "status": "done",
+      "files": ["tests/test_ris.py", "tests/test_cache_cli.py", "tests/test_cache.py"],
+      "details": "test_ris.py: SHA format tests, cold_start_ready/stale coverage, maybe_update_ris. test_cache_cli.py: CLI registration, status/clear commands via CliRunner. test_cache.py: ANALYZER_CACHE_VERSION tests, atomic CAS write, status/clear API. 1457 existing tests pass.",
+      "commit": "2255711"
+    }
+  ],
+  "remaining_tasks": [
+    {
+      "id": 8,
+      "name": "BUG-C1 — validate async write actually reduces latency",
+      "priority": "P2",
+      "status": "pending",
+      "details": "Need live E2E benchmarks: cold run time with keycloak/broadleaf before and after 1.32.5. Async background write (daemon thread + atexit join 5s) was added in 1.32.4. Verify no corruption and latency improvement. Requires running bash /private/tmp/sync_to_pipx.sh from normal Terminal first."
+    },
+    {
+      "id": 9,
+      "name": "Live E2E test: sync workspace → pipx + verify all cache commands",
+      "priority": "P1",
+      "status": "pending",
+      "details": "Run bash /private/tmp/sync_to_pipx.sh, then: sourcecode cache status /private/tmp/spring-petclinic; sourcecode cache clear /private/tmp/keycloak --yes; sourcecode /private/tmp/keycloak --compact (cold); sourcecode /private/tmp/keycloak --compact (warm — should be < 0.5s); get_cold_start_context should return cold_start_ready after first run."
+    },
+    {
+      "id": 10,
+      "name": "GAP 1 (easy): add upgrade_hint to require_feature() payload",
+      "priority": "P1",
+      "status": "pending",
+      "details": "license.py:244 — add 'upgrade_hint': 'sourcecode activate <license_key>' to payload dict in require_feature()."
+    },
+    {
+      "id": 11,
+      "name": "GAP 2 (medium): tiered --help output",
+      "priority": "P1",
+      "status": "pending",
+      "details": "Custom --help callback. Free shows lock labels, Pro shows full. is_pro unavailable at module init — must be lazy."
+    },
+    {
+      "id": 12,
+      "name": "GAP 3 (medium): free-tier node cap for --graph-modules and --semantics",
+      "priority": "P2",
+      "status": "pending",
+      "details": "Max 10 nodes for free tier in --graph-modules and --semantics output."
+    }
+  ],
+  "blockers": [],
+  "human_actions_pending": [
+    {
+      "action": "Run bash /private/tmp/sync_to_pipx.sh from a normal Terminal (not Claude Code shell)",
+      "context": "Claude Code shell has EPERM on workspace file renames. sync_to_pipx.sh uses cp to push workspace source to active pipx install.",
+      "blocking": true
+    },
+    {
+      "action": "Delete src/sourcecode/cache.tmp_new (leftover temp file from session 30)",
+      "context": "Not committed. Safe to rm.",
+      "blocking": false
+    },
+    {
+      "action": "Decide fate of docs/PRODUCT_AUDIT.md (untracked)",
+      "context": "Untracked since session 29. No action needed to unblock.",
+      "blocking": false
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "ANALYZER_CACHE_VERSION decoupled from package __version__",
+      "rationale": "Package version changes on every release; analysis schema/logic changes rarely. Coupling them caused every patch bump to wipe all L1 cores (BUG-D2). ANALYZER_CACHE_VERSION starts at '1' and is bumped manually only when cache format or analysis output changes.",
+      "session": 31
+    },
+    {
+      "decision": "short SHA used everywhere for RIS git_head comparison",
+      "rationale": "cli.py already used rev-parse --short for cache key. RIS was using full SHA in _current_git_head, causing the comparison to always fail. Standardized on short SHA as the canonical format.",
+      "session": 31
+    },
+    {
+      "decision": "cache subcommand added to _SUBCOMMANDS frozenset",
+      "rationale": "_preprocess_args extracts the first positional token as a repo path unless it's in _SUBCOMMANDS. 'cache' was not in the set, so sourcecode cache status would treat 'cache' as the target directory and fail. Added 'cache' to the frozenset.",
+      "session": 31
+    }
+  ],
+  "uncommitted_files": [],
+  "untracked_files": [
+    "docs/PRODUCT_AUDIT.md",
+    "src/sourcecode/cache.tmp_new"
+  ],
+  "next_action": "Run bash /private/tmp/sync_to_pipx.sh then verify: sourcecode cache status, get_cold_start_context returns cold_start_ready, keycloak warm run < 0.5s.",
+  "context_notes": "Session 31 fixed 6 bugs (BUG-R1, BUG-D1, BUG-D2, BUG-C4, BUG-C5) and bumped to 1.32.5. All changes committed in 2255711. 1457 tests pass. The one-time cache wipe on upgrade from 1.32.4 is expected — after that, ANALYZER_CACHE_VERSION='1' is stable. Workspace is 3 commits ahead of origin/master."
+}
