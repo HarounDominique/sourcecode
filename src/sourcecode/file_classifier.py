@@ -187,16 +187,19 @@ class FileClassifier:
             if java_class is not None:
                 return java_class
 
-        if self._has_any_import(imports, _API_IMPORTS):
-            evidence = self._matched_imports(imports, _API_IMPORTS)
+        # Fix 4: call _matched_imports once per category instead of twice
+        # (_has_any_import was calling _matched_imports and discarding the result,
+        # then the caller invoked it again to get the evidence — halving throughput).
+        evidence = self._matched_imports(imports, _API_IMPORTS)
+        if evidence:
             return FileClassification(norm, "api_layer", "high", 0.82, "imports API/server framework", evidence)
 
-        if self._has_any_import(imports, _DB_IMPORTS):
-            evidence = self._matched_imports(imports, _DB_IMPORTS)
+        evidence = self._matched_imports(imports, _DB_IMPORTS)
+        if evidence:
             return FileClassification(norm, "database_layer", "high", 0.78, "imports database/persistence dependency", evidence)
 
-        if self._has_any_import(imports, _INFRA_IMPORTS):
-            evidence = self._matched_imports(imports, _INFRA_IMPORTS)
+        evidence = self._matched_imports(imports, _INFRA_IMPORTS)
+        if evidence:
             return FileClassification(norm, "infrastructure", "high", 0.72, "imports infrastructure dependency", evidence)
 
         role = self._package_role(norm)

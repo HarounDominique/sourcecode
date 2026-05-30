@@ -437,6 +437,18 @@ def get_cold_start_context(repo_root: Path) -> dict:
             "endpoints": endpoints,
             "hotspots": ris.git_context_snapshot.get("hotspots", []),
             "validation": _validation,
+            # Fix 3: _cache wrapper for backward compat with CLI schema consumers.
+            # CLI outputs inject _cache via _inject_cache_meta; MCP cold-start path
+            # skips that step, leaving agents that read _cache.cache_source with None.
+            "_cache": {
+                "cache_source": "RIS",
+                "git_head_at_generation": ris.git_head or "",
+                "current_git_head": current_head or "",
+                "is_stale": stale,
+                "has_uncommitted_changes": uncommitted,
+                "generated_at": ris.last_updated_at,
+                "data_scope": "RIS_BOOTSTRAP",
+            },
         }
         if not endpoints and _is_java:
             result["endpoints_hint"] = (

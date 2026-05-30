@@ -1836,6 +1836,15 @@ class TaskContextBuilder:
                 # the candidate pool (e.g. AkitaBaseService containing setLoading).
                 _src_exts = frozenset({".java", ".py", ".ts", ".js", ".kt", ".go"})
                 _frontend_kws = [kw for kw in symptom_keywords if kw in _FRONTEND_SYMPTOM_MAP]
+                # Fix 5: In large repos, skip frontend→backend synonym grep for keywords
+                # that already have direct path matches — those are backend terms (e.g.
+                # "login" in an IAM repo) that don't need UI→service-layer translation.
+                # Prevents "authentication" grep flooding keycloak with SAML adapter files.
+                if _is_large_repo and _frontend_kws:
+                    _frontend_kws = [
+                        kw for kw in _frontend_kws
+                        if not any(kw in p.lower() for p in _sx_direct_path)
+                    ]
                 _backend_terms_set: list[str] = []
                 if _frontend_kws:
                     _bt: list[str] = []
@@ -1923,6 +1932,7 @@ class TaskContextBuilder:
                 _no_scan_candidates = relevant_files[_CONTENT_SCAN_LIMIT:]
 
                 _boosted: list[RelevantFile] = []
+                _raw_signals: dict[str, float] = {}  # uncapped accumulated signal per file
                 _scanned_body: dict[str, str] = {}  # cache for graph expansion (Pass 5)
                 for _rf in _scan_candidates:
                     _extra = 0.0
@@ -1996,7 +2006,9 @@ class TaskContextBuilder:
                     elif _extra_syn > 0:
                         _new_reason = _rf.reason + f", synonym-match backend (+{_extra_syn:.2f})"
 
-                    _final_score = round(min(_rf.score + _total_extra, 1.0), 2)
+                    _raw_signal = _rf.score + _total_extra  # uncapped for ranking
+                    _raw_signals[_rf.path] = _raw_signal
+                    _final_score = round(min(_raw_signal, 1.0), 2)
                     _boosted.append(RelevantFile(
                         path=_rf.path,
                         role=_rf.role,
@@ -2005,21 +2017,14 @@ class TaskContextBuilder:
                         why=_rf.why,
                     ))
 
-                # Use total boost as a secondary sort key so symptom-matched files
-                # that were boosted from a lower base score rank above structural
-                # files that coincidentally reach the same capped score of 1.0.
-                # This prevents budget-trimming from discarding the most relevant files.
-                _boost_totals: dict[str, float] = {}
-                for _rf in _scan_candidates:
-                    pass  # populated below
-                _boost_totals = {}
-                for _idx, _rf in enumerate(_scan_candidates):
-                    _b_rf = _boosted[_idx]
-                    _boost_totals[_b_rf.path] = round(_b_rf.score - _rf.score, 4)
-
+                # Sort by uncapped raw signal so files with more accumulated evidence
+                # (path matches + content hits + commit matches) rank above files that
+                # merely cap at the same display score of 1.0.
+                # _raw_signals holds each file's full sum before the display cap.
+                # Files not content-scanned (_no_scan_candidates) use their base score.
                 relevant_files = sorted(
                     _boosted + _no_scan_candidates,
-                    key=lambda rf: (-rf.score, -_boost_totals.get(rf.path, 0)),
+                    key=lambda rf: -_raw_signals.get(rf.path, rf.score),
                 )
 
                 # Pass 5: reverse graph expansion from high-score seed nodes.
@@ -2118,8 +2123,13 @@ class TaskContextBuilder:
                         if _gx_new:
                             relevant_files = sorted(
                                 relevant_files + _gx_new,
-                                key=lambda rf: (-rf.score, -_boost_totals.get(rf.path, 0)),
+                                key=lambda rf: -_raw_signals.get(rf.path, rf.score),
                             )
+
+                # Fix 2: Cap output for large repos to stay within agent context budgets.
+                # Raw signal sort above ensures highest-signal files survive the cut.
+                if _is_large_repo and len(relevant_files) > 40:
+                    relevant_files = relevant_files[:40]
 
                 # Synonym note (only when synonyms actually fired)
                 if _frontend_kws and _sx_synonyms:
