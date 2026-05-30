@@ -959,9 +959,11 @@ _TELEMETRY_ACTIONS = frozenset({"status", "enable", "disable"})
 
 @mcp.tool()
 def version() -> dict:
-    """Print sourcecode CLI version.
+    """Return sourcecode version and MCP compatibility metadata.
 
     Maps to: sourcecode version
+    Returns structured JSON: cli_version, mcp_schema_version, compatibility_schema_version.
+    cli_version and mcp_schema_version are always identical (released together).
     """
     return _execute(["version"])
 

@@ -2677,10 +2677,11 @@ def prepare_context_cmd(
             # relevant_files goal: untested SOURCE files. Test files belong in test_gaps.
             # Without this filter, high-churn test files rank above untested source files.
             _rfs = [f for f in _rfs if getattr(f, "role", None) != "test"]
-        out["relevant_files"] = [
-            _serialize_relevant_file(f)
-            for f in _rfs
-        ]
+        _serialized_rfs = [_serialize_relevant_file(f) for f in _rfs]
+        out["relevant_files"] = _serialized_rfs
+        if task == "fix-bug":
+            # ranked_files was the v1 name for this field — emit as backward-compat alias.
+            out["ranked_files"] = _serialized_rfs
     if _task_include("key_dependencies") and output.key_dependencies:
         out["key_dependencies"] = output.key_dependencies
     if _task_include("gaps") and output.gaps:
@@ -3291,13 +3292,33 @@ def impact_cmd(
     )
     from sourcecode.output_budget import trim_to_budget as _trim, BUDGET_IMPACT
 
+    import sys as _sys_ic
+    # Legacy-compat: old syntax was `impact <path> <target>`.
+    # Detect: target resolves to an existing directory (not a class name), and
+    # the path arg is not a valid directory (looks like a class name).
+    _target_as_path = Path(target)
+    if _target_as_path.is_dir() and not path.resolve().is_dir():
+        # Gate on isatty() — non-TTY (MCP, pipes) must not receive text mixed into JSON stdout.
+        if getattr(_sys_ic.stderr, "isatty", lambda: False)():
+            _sys_ic.stderr.write(
+                f"[impact] Legacy argument order detected: '{target}' is a directory, not a class name.\n"
+                f"[impact] Swapping: target='{path}', path='{target}'. "
+                f"New syntax: sourcecode impact <target> [path]\n"
+            )
+            _sys_ic.stderr.flush()
+        target, path = str(path), _target_as_path
+
     root = path.resolve()
     if not root.is_dir():
         _emit_error_json(
             INVALID_INPUT_CODE,
             f"'{root}' is not a valid directory.",
             path=str(root),
-            hint="Pass an existing repository directory.",
+            hint=(
+                "Pass an existing repository directory as the second argument. "
+                "New syntax: sourcecode impact <target> [path] — "
+                "target is the class name, path is the repo root."
+            ),
             expected="A directory path.",
         )
         raise typer.Exit(1)
@@ -3621,11 +3642,15 @@ def fix_bug_cmd(
       sourcecode onboard .         — Full architecture context first
     """
     if not symptom:
-        typer.echo(
-            "[fix-bug] Results are significantly better with --symptom. "
-            "Example: --symptom 'NullPointerException in PaymentService'",
-            err=True,
-        )
+        import sys as _sys_fb
+        # Only emit advisory to interactive terminals — non-TTY (MCP, pipes, scripts)
+        # must never receive informational text mixed into JSON stdout.
+        if getattr(_sys_fb.stderr, "isatty", lambda: False)():
+            typer.echo(
+                "[fix-bug] Results are significantly better with --symptom. "
+                "Example: --symptom 'NullPointerException in PaymentService'",
+                err=True,
+            )
     ctx.invoke(
         prepare_context_cmd,
         task="fix-bug",
@@ -3904,8 +3929,23 @@ def activate_cmd(
 
 @app.command("version")
 def version_cmd() -> None:
-    """Show version and exit."""
-    typer.echo(f"sourcecode {__version__}")
+    """Show version and exit.
+
+    Outputs human-readable text on interactive terminals.
+    Outputs structured JSON on non-TTY (MCP, pipes, scripts):
+      {"cli_version": "1.33.11", "mcp_schema_version": "1.33.11",
+       "compatibility_schema_version": "1.0"}
+    """
+    import sys as _sys_ver
+    if getattr(_sys_ver.stdout, "isatty", lambda: False)():
+        typer.echo(f"sourcecode {__version__}")
+    else:
+        import json as _json_ver
+        typer.echo(_json_ver.dumps({
+            "cli_version": __version__,
+            "mcp_schema_version": __version__,
+            "compatibility_schema_version": "1.0",
+        }, ensure_ascii=False))
 
 
 # ── config ────────────────────────────────────────────────────────────────────
@@ -4349,6 +4389,46 @@ def mcp_remove(
 
     typer.echo("MCP integration removed.")
     typer.echo("  Re-add:  sourcecode mcp init")
+
+
+@mcp_app.command("list-tools")
+def mcp_list_tools(
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """List all MCP tools exposed by the sourcecode server.
+
+    \b
+    Shows each tool name, its description, and the CLI command it maps to.
+    Useful for discovering capabilities when using sourcecode as an MCP server.
+
+    \b
+    Examples:
+      sourcecode mcp list-tools
+      sourcecode mcp list-tools --json
+    """
+    import asyncio
+    import json as _json
+
+    from sourcecode.mcp.server import mcp as _mcp
+
+    tools = asyncio.run(_mcp.list_tools())
+    tools_sorted = sorted(tools, key=lambda t: t.name)
+
+    if json_output:
+        payload = [
+            {"name": t.name, "description": (t.description or "").strip()}
+            for t in tools_sorted
+        ]
+        typer.echo(_json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
+    typer.echo(f"sourcecode MCP tools ({len(tools_sorted)} available)\n")
+    for t in tools_sorted:
+        desc_first_line = (t.description or "").strip().splitlines()[0] if t.description else ""
+        typer.echo(f"  {t.name:<35} {desc_first_line}")
+    typer.echo("")
+    typer.echo("Use:  sourcecode mcp serve   — start MCP server on stdio")
+    typer.echo("Use:  sourcecode mcp init    — configure MCP client")
 
 
 # ── Cache subcommands ─────────────────────────────────────────────────────────

@@ -1225,8 +1225,8 @@ class TaskContextBuilder:
                 # Distinguish: no_staged_changes (CI, no --since) vs no_diff (empty range)
                 if _pr_scope_source == "no_staged_changes":
                     _no_diff_msg = (
-                        "No --since ref provided and no staged changes found. "
-                        "Use --since <ref>"
+                        "No --since ref provided and no staged/uncommitted changes found. "
+                        "Provide --since <ref> to specify the base commit for the diff."
                     )
                     return TaskOutput(
                         task="review-pr", goal=spec.goal,
@@ -1239,7 +1239,8 @@ class TaskContextBuilder:
                         error_message=_no_diff_msg,
                         error_hints=[
                             "Add --since <ref> to specify a base commit.",
-                            "Examples: --since origin/main  |  --since HEAD~3  |  --since main",
+                            "Common values: --since HEAD~1 (last commit)  |  --since origin/main  |  --since main",
+                            "If reviewing uncommitted changes: stage them first (git add), then run without --since.",
                         ],
                         gaps=[_no_diff_msg],
                         ci_decision="no_diff_source",
