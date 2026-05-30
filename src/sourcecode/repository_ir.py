@@ -232,6 +232,12 @@ _INJECT_ANNOTATIONS: frozenset[str] = frozenset({
     "@Autowired", "@Inject", "@Value", "@Qualifier", "@Resource",
 })
 
+# Lombok annotations that generate constructors injecting fields
+_LOMBOK_CTOR_ANNOTATIONS: frozenset[str] = frozenset({
+    "@RequiredArgsConstructor",  # injects private final fields
+    "@AllArgsConstructor",       # injects all non-static fields
+})
+
 _JAVA_ROLE_MAP: dict[str, str] = {
     # Spring MVC / Spring Boot
     "@RestController": "controller",
@@ -932,6 +938,58 @@ def _build_relations(
                     evidence={"type": "annotation", "value": next(
                         (a for a in sym.annotations if a in _INJECT_ANNOTATIONS), "@Autowired"
                     )},
+                ))
+
+    # ── Constructor injection ─────────────────────────────────────────────────
+    # Spring 4.3+ omits @Autowired when there is a single constructor.
+    # Both annotated and bare constructors get injects edges from ClassName#<init>
+    # to each resolvable parameter type so the reverse graph can propagate impact.
+    for sym in symbols:
+        if sym.symbol_kind != "constructor" or not sym.param_types:
+            continue
+        for simple_type in sym.param_types:
+            base = re.sub(r'<.*', '', simple_type).strip()
+            fqn = import_map.get(base)
+            if fqn:
+                edges.append(RelationEdge(
+                    from_symbol=sym.symbol,
+                    to_symbol=fqn,
+                    type="injects",
+                    confidence="high",
+                    evidence={"type": "constructor_param", "value": simple_type},
+                ))
+
+    # ── Lombok constructor injection ──────────────────────────────────────────
+    # @RequiredArgsConstructor: injects all private final fields.
+    # @AllArgsConstructor: injects all non-static fields.
+    # No explicit constructor symbol exists; edges are emitted from the class FQN.
+    for sym in symbols:
+        if sym.type not in ("class", "interface"):
+            continue
+        _has_req = "@RequiredArgsConstructor" in sym.annotations
+        _has_all = "@AllArgsConstructor" in sym.annotations
+        if not (_has_req or _has_all):
+            continue
+        _lombok_ann = "@RequiredArgsConstructor" if _has_req else "@AllArgsConstructor"
+        for _line in source.splitlines():
+            fld = _FIELD_DECL_RE.match(_line.strip())
+            if not fld:
+                continue
+            _mods = _parse_modifier_str(fld.group("modifiers") or "")
+            if "static" in _mods:
+                continue
+            if _has_req and "final" not in _mods:
+                continue
+            _ftype = fld.group("type").strip()
+            _base = re.sub(r'<.*', '', _ftype).strip()
+            _fqn = import_map.get(_base)
+            if _fqn:
+                edges.append(RelationEdge(
+                    from_symbol=sym.symbol,
+                    to_symbol=_fqn,
+                    type="injects",
+                    confidence="medium",
+                    evidence={"type": "lombok_constructor", "value": _lombok_ann},
                 ))
 
     for m in re.finditer(

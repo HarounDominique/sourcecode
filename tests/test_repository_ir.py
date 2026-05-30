@@ -2229,3 +2229,343 @@ public class SubCaller{i}_{j} {{
         result = compute_blast_radius(ir, "HubClass", max_depth=4)
 
         assert result["stats"]["indirect_caller_count"] == len(result["indirect_callers"])
+
+
+# ---------------------------------------------------------------------------
+# Spring DI injection — constructor, Lombok, service chains
+# ---------------------------------------------------------------------------
+
+def _build_di_ir(*sources_and_paths):
+    """Build a minimal IR from (source, rel_path) pairs."""
+    from sourcecode.repository_ir import (
+        _extract_symbols, _build_relations, _build_spring_summary, _assemble,
+    )
+    all_syms, all_rels = [], []
+    for src, rel in sources_and_paths:
+        pkg, syms, raw_imports = _extract_symbols(src, rel)
+        rels = _build_relations(syms, raw_imports, src, pkg, rel)
+        all_syms.extend(syms)
+        all_rels.extend(rels)
+    ss = _build_spring_summary(all_syms)
+    return _assemble(all_syms, all_rels, [], ss, None)
+
+
+class TestSpringDIInjection:
+    """Spring DI edge construction and impact propagation through constructor injection."""
+
+    # ── fixture sources ──────────────────────────────────────────────────────
+
+    _OWNER_REPOSITORY = """\
+package org.springframework.samples.petclinic.owner;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface OwnerRepository extends JpaRepository<Owner, Integer> {
+    Owner findByLastName(String lastName);
+}
+"""
+
+    _OWNER_CONTROLLER = """\
+package org.springframework.samples.petclinic.owner;
+import org.springframework.samples.petclinic.owner.OwnerRepository;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+
+@Controller
+@RequestMapping("/owners")
+public class OwnerController {
+
+    private final OwnerRepository owners;
+
+    public OwnerController(OwnerRepository owners) {
+        this.owners = owners;
+    }
+
+    @GetMapping("/find")
+    public String initFindForm() {
+        return "owners/findOwners";
+    }
+
+    @GetMapping
+    public String processFindForm(Owner owner) {
+        return "owners/ownersList";
+    }
+}
+"""
+
+    _ORDER_REPOSITORY = """\
+package com.example;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface OrderRepository {
+    Object findAll();
+}
+"""
+
+    _ORDER_SERVICE = """\
+package com.example;
+import com.example.OrderRepository;
+import org.springframework.stereotype.Service;
+
+@Service
+public class OrderService {
+
+    private final OrderRepository repo;
+
+    public OrderService(OrderRepository repo) {
+        this.repo = repo;
+    }
+
+    public Object list() {
+        return repo.findAll();
+    }
+}
+"""
+
+    _ORDER_CONTROLLER = """\
+package com.example;
+import com.example.OrderService;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/orders")
+public class OrderController {
+
+    private final OrderService svc;
+
+    public OrderController(OrderService svc) {
+        this.svc = svc;
+    }
+
+    @GetMapping
+    public Object list() {
+        return svc.list();
+    }
+}
+"""
+
+    _LOMBOK_SERVICE = """\
+package com.example;
+import com.example.OrderRepository;
+import org.springframework.stereotype.Service;
+import lombok.RequiredArgsConstructor;
+
+@Service
+@RequiredArgsConstructor
+public class LombokService {
+    private final OrderRepository repo;
+    private static final String CONSTANT = "x";
+}
+"""
+
+    _LOMBOK_ALL_SERVICE = """\
+package com.example;
+import com.example.OrderRepository;
+import org.springframework.stereotype.Service;
+import lombok.AllArgsConstructor;
+
+@Service
+@AllArgsConstructor
+public class LombokAllService {
+    private OrderRepository repo;
+}
+"""
+
+    _AUTOWIRED_CTOR_CONTROLLER = """\
+package com.example;
+import com.example.OrderService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class ExplicitAutowiredController {
+
+    private final OrderService svc;
+
+    @Autowired
+    public ExplicitAutowiredController(OrderService svc) {
+        this.svc = svc;
+    }
+
+    @GetMapping("/items")
+    public Object items() {
+        return svc.list();
+    }
+}
+"""
+
+    # ── tests: constructor injection ─────────────────────────────────────────
+
+    def test_constructor_injection_direct_caller_found(self):
+        """Impact on OwnerRepository must find OwnerController as direct caller."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = _build_di_ir(
+            (self._OWNER_REPOSITORY, "OwnerRepository.java"),
+            (self._OWNER_CONTROLLER, "OwnerController.java"),
+        )
+        result = compute_blast_radius(ir, "OwnerRepository", max_depth=4)
+        assert result["resolution"] != "not_found", "OwnerRepository not found in IR"
+
+        all_affected = set(result["direct_callers"]) | set(result["indirect_callers"])
+        assert any(
+            "OwnerController" in c for c in all_affected
+        ), (
+            f"OwnerController not in blast cone. "
+            f"direct={result['direct_callers']}, indirect={result['indirect_callers']}"
+        )
+
+    def test_constructor_injection_endpoints_affected(self):
+        """Impact on OwnerRepository must surface OwnerController endpoints."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = _build_di_ir(
+            (self._OWNER_REPOSITORY, "OwnerRepository.java"),
+            (self._OWNER_CONTROLLER, "OwnerController.java"),
+        )
+        result = compute_blast_radius(ir, "OwnerRepository", max_depth=4)
+        eps = result.get("endpoints_affected", [])
+        assert len(eps) > 0, (
+            f"endpoints_affected empty for OwnerRepository. "
+            f"route_surface={ir.get('route_surface')}, "
+            f"direct_callers={result['direct_callers']}"
+        )
+
+    def test_explicit_autowired_constructor_injection(self):
+        """@Autowired on constructor: same injects edge semantics as implicit."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = _build_di_ir(
+            (self._ORDER_REPOSITORY, "OrderRepository.java"),
+            (self._ORDER_SERVICE, "OrderService.java"),
+            (self._AUTOWIRED_CTOR_CONTROLLER, "ExplicitAutowiredController.java"),
+        )
+        result = compute_blast_radius(ir, "OrderService", max_depth=4)
+        all_affected = set(result["direct_callers"]) | set(result["indirect_callers"])
+        assert any("ExplicitAutowiredController" in c for c in all_affected), (
+            f"ExplicitAutowiredController not found. affected={all_affected}"
+        )
+
+    # ── tests: service chains ─────────────────────────────────────────────────
+
+    def test_service_chain_repository_reaches_controller(self):
+        """Repository → Service → Controller: impact on repo must reach controller."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = _build_di_ir(
+            (self._ORDER_REPOSITORY, "OrderRepository.java"),
+            (self._ORDER_SERVICE, "OrderService.java"),
+            (self._ORDER_CONTROLLER, "OrderController.java"),
+        )
+        result = compute_blast_radius(ir, "OrderRepository", max_depth=4)
+        all_affected = set(result["direct_callers"]) | set(result["indirect_callers"])
+        assert any("OrderService" in c for c in all_affected), (
+            f"OrderService not in blast cone. affected={all_affected}"
+        )
+        assert any("OrderController" in c for c in all_affected), (
+            f"OrderController not in blast cone. affected={all_affected}"
+        )
+
+    def test_service_chain_endpoints_affected(self):
+        """Repository impact must surface endpoints exposed by the controller chain."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = _build_di_ir(
+            (self._ORDER_REPOSITORY, "OrderRepository.java"),
+            (self._ORDER_SERVICE, "OrderService.java"),
+            (self._ORDER_CONTROLLER, "OrderController.java"),
+        )
+        result = compute_blast_radius(ir, "OrderRepository", max_depth=4)
+        eps = result.get("endpoints_affected", [])
+        assert len(eps) > 0, (
+            f"endpoints_affected empty. route_surface={ir.get('route_surface')}, "
+            f"direct={result['direct_callers']}, indirect={result['indirect_callers']}"
+        )
+
+    # ── tests: Lombok ─────────────────────────────────────────────────────────
+
+    def test_lombok_required_args_constructor_injection(self):
+        """@RequiredArgsConstructor: private final fields become injected dependencies."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = _build_di_ir(
+            (self._ORDER_REPOSITORY, "OrderRepository.java"),
+            (self._LOMBOK_SERVICE, "LombokService.java"),
+        )
+        result = compute_blast_radius(ir, "OrderRepository", max_depth=4)
+        all_affected = set(result["direct_callers"]) | set(result["indirect_callers"])
+        assert any("LombokService" in c for c in all_affected), (
+            f"LombokService not in blast cone for @RequiredArgsConstructor. "
+            f"affected={all_affected}"
+        )
+
+    def test_lombok_required_args_skips_static_fields(self):
+        """@RequiredArgsConstructor: static fields must not create injects edges."""
+        from sourcecode.repository_ir import _extract_symbols, _build_relations
+        pkg, syms, raw_imports = _extract_symbols(self._LOMBOK_SERVICE, "LombokService.java")
+        rels = _build_relations(syms, raw_imports, self._LOMBOK_SERVICE, pkg, "LombokService.java")
+        injects = [r for r in rels if r.type == "injects"]
+        assert all("String" not in r.to_symbol and "CONSTANT" not in r.to_symbol
+                   for r in injects), (
+            f"Static/primitive field leaked into injects edges: {injects}"
+        )
+
+    def test_lombok_all_args_constructor_injection(self):
+        """@AllArgsConstructor: non-static fields become injected dependencies."""
+        from sourcecode.repository_ir import compute_blast_radius
+        ir = _build_di_ir(
+            (self._ORDER_REPOSITORY, "OrderRepository.java"),
+            (self._LOMBOK_ALL_SERVICE, "LombokAllService.java"),
+        )
+        result = compute_blast_radius(ir, "OrderRepository", max_depth=4)
+        all_affected = set(result["direct_callers"]) | set(result["indirect_callers"])
+        assert any("LombokAllService" in c for c in all_affected), (
+            f"LombokAllService not in blast cone for @AllArgsConstructor. "
+            f"affected={all_affected}"
+        )
+
+    # ── tests: non-regression ────────────────────────────────────────────────
+
+    def test_field_injection_still_works(self):
+        """@Autowired field injection must continue to work after constructor fix."""
+        from sourcecode.repository_ir import compute_blast_radius
+        field_ctrl = """\
+package com.example;
+import com.example.OrderService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class FieldController {
+    @Autowired
+    private OrderService svc;
+
+    @GetMapping("/field")
+    public Object get() { return svc.list(); }
+}
+"""
+        ir = _build_di_ir(
+            (self._ORDER_SERVICE, "OrderService.java"),
+            (field_ctrl, "FieldController.java"),
+        )
+        result = compute_blast_radius(ir, "OrderService", max_depth=4)
+        all_affected = set(result["direct_callers"]) | set(result["indirect_callers"])
+        assert any("FieldController" in c for c in all_affected), (
+            f"@Autowired field injection broken. affected={all_affected}"
+        )
+
+    def test_no_injects_edges_for_plain_class(self):
+        """Non-Spring class with no DI annotations must not get phantom injects edges."""
+        from sourcecode.repository_ir import _extract_symbols, _build_relations
+        plain = """\
+package com.example;
+import com.example.OrderRepository;
+
+public class PlainClass {
+    private OrderRepository repo;
+    public void setRepo(OrderRepository r) { this.repo = r; }
+}
+"""
+        pkg, syms, raw_imports = _extract_symbols(plain, "PlainClass.java")
+        rels = _build_relations(syms, raw_imports, plain, pkg, "PlainClass.java")
+        injects = [r for r in rels if r.type == "injects"]
+        assert injects == [], f"Phantom injects edges on plain class: {injects}"
