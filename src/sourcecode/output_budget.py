@@ -67,7 +67,7 @@ _TRIM_SCHEDULE: list[tuple[str, str | None, int]] = [
     ("execution_paths",          None,                    0),
     ("dependency_graph_summary", None,                    0),
     # Step 6 — last resort
-    ("relevant_files",           None,                    3),
+    ("relevant_files",           None,                   10),
     ("suspected_areas",          None,                    0),
     ("key_dependencies",         None,                    0),
 ]
@@ -148,7 +148,7 @@ def trim_to_budget(data: dict, budget_bytes: int, *, label: str = "") -> dict:
 # Budget constants (bytes) — used by CLI callers
 BUDGET_COMPACT    = 30_000   # compact/agent main cmd
 BUDGET_AGENT      = 40_000   # agent main cmd (slightly more headroom)
-BUDGET_FIX_BUG   = 100_000  # fix-bug (with or without --symptom)
+BUDGET_FIX_BUG   = 200_000  # fix-bug (with or without --symptom)
 BUDGET_REVIEW_PR  = 100_000  # review-pr
 BUDGET_ONBOARD    = 30_000   # onboard
 BUDGET_EXPLAIN    = 30_000   # explain

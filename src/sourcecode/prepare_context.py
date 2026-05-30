@@ -1725,6 +1725,7 @@ class TaskContextBuilder:
                 _sx_commits: list[dict] = []
                 _sx_synonyms: list[str] = []
                 _sx_boosts: list[dict] = []
+                _sx_graph_expanded: list[str] = []
 
                 # Pass 1: surface code notes whose text contains any keyword
                 _note_matched_paths: dict[str, int] = {}  # path → count of matching notes
@@ -1897,6 +1898,7 @@ class TaskContextBuilder:
                 _no_scan_candidates = relevant_files[_CONTENT_SCAN_LIMIT:]
 
                 _boosted: list[RelevantFile] = []
+                _scanned_body: dict[str, str] = {}  # cache for graph expansion (Pass 5)
                 for _rf in _scan_candidates:
                     _extra = 0.0
                     _extra_syn = 0.0
@@ -1931,9 +1933,11 @@ class TaskContextBuilder:
                     _body_lower = ""
                     if Path(_rf.path).suffix.lower() in _src_exts:
                         try:
-                            _body_lower = (self.root / _rf.path).read_text(
+                            _raw_body = (self.root / _rf.path).read_text(
                                 encoding="utf-8", errors="replace"
-                            )[:12000].lower()  # ~300 lines avg
+                            )[:12000]  # ~300 lines avg
+                            _scanned_body[_rf.path] = _raw_body  # cache for Pass 5
+                            _body_lower = _raw_body.lower()
                         except OSError:
                             pass
 
@@ -1993,6 +1997,105 @@ class TaskContextBuilder:
                     key=lambda rf: (-rf.score, -_boost_totals.get(rf.path, 0)),
                 )
 
+                # Pass 5: reverse graph expansion from high-score seed nodes.
+                # Identifies which source files in the repo REFERENCE the seed
+                # classes (imports, implements, extends, field declarations).
+                # This is a reverse-import lookup: for seed class "UserProvider",
+                # it finds JpaUserProvider / DefaultUserSessionProvider which import
+                # UserProvider — even though those files don't contain symptom
+                # keywords in their own path.
+                # Seeds include any high-score file (not just symptom_match role)
+                # so that files found by _rank_files class-name matching also expand.
+                if not fast:
+                    import re as _re_gx
+                    _GX_SEED_THRESH = 0.5
+                    _GX_EXPAND_CAP = 30
+                    _GX_HOP_DECAY = 0.6
+
+                    # Collect seed class names from high-score results
+                    _gx_seed_stems: dict[str, float] = {}  # stem → score
+                    for _gx_rf in relevant_files:
+                        if _gx_rf.score < _GX_SEED_THRESH:
+                            continue
+                        if Path(_gx_rf.path).suffix.lower() not in _src_exts:
+                            continue
+                        _gx_stem = Path(_gx_rf.path).stem
+                        _gx_seed_stems[_gx_stem] = max(
+                            _gx_seed_stems.get(_gx_stem, 0.0), _gx_rf.score
+                        )
+
+                    if _gx_seed_stems:
+                        # Compile per-stem word-boundary patterns for fast matching
+                        import re as _re_gx2
+                        _gx_patterns: dict[str, Any] = {
+                            stem: _re_gx2.compile(rf'\b{_re_gx2.escape(stem)}\b')
+                            for stem in _gx_seed_stems
+                        }
+
+                        _gx_existing = {rf.path for rf in relevant_files}
+                        _gx_new: list[RelevantFile] = []
+                        _gx_added: set[str] = set()
+
+                        # Candidates: non-test source files not yet in results.
+                        # Small repos: scan all; large repos: use pre-scanned content only.
+                        # Test files are excluded (fix-bug focuses on production code).
+                        if _is_large_repo:
+                            _gx_candidates = [
+                                p for p in _scanned_body
+                                if p not in _gx_existing and not self._is_test(p)
+                            ]
+                        else:
+                            _gx_candidates = [
+                                p for p in all_paths
+                                if p not in _gx_existing
+                                and Path(p).suffix.lower() in _src_exts
+                                and not self._is_test(p)
+                            ]
+
+                        for _gx_cand in _gx_candidates:
+                            if len(_gx_new) >= _GX_EXPAND_CAP:
+                                break
+                            if _gx_cand in _gx_added:
+                                continue
+
+                            # Use cached content or read fresh (small repos only)
+                            _gx_body = _scanned_body.get(_gx_cand)
+                            if _gx_body is None:
+                                if _is_large_repo:
+                                    continue  # never do fresh reads on large repos in Pass 5
+                                try:
+                                    _gx_body = (self.root / _gx_cand).read_text(
+                                        encoding="utf-8", errors="replace"
+                                    )[:8000]
+                                except OSError:
+                                    continue
+
+                            # Reverse lookup: does this file reference any seed class?
+                            for _gx_stem, _gx_seed_score in _gx_seed_stems.items():
+                                if _gx_patterns[_gx_stem].search(_gx_body):
+                                    _hop1_score = round(
+                                        min(_gx_seed_score * _GX_HOP_DECAY, 0.85), 2
+                                    )
+                                    _gx_new.append(RelevantFile(
+                                        path=_gx_cand,
+                                        role="symptom_match",
+                                        score=_hop1_score,
+                                        reason=(
+                                            f"graph_expansion: references {_gx_stem} "
+                                            f"(1-hop reverse import)"
+                                        ),
+                                        why=f"graph_expansion: 1 hop from {_gx_stem}",
+                                    ))
+                                    _gx_added.add(_gx_cand)
+                                    _sx_graph_expanded.append(_gx_cand)
+                                    break  # one match per candidate is enough
+
+                        if _gx_new:
+                            relevant_files = sorted(
+                                relevant_files + _gx_new,
+                                key=lambda rf: (-rf.score, -_boost_totals.get(rf.path, 0)),
+                            )
+
                 # Synonym note (only when synonyms actually fired)
                 if _frontend_kws and _sx_synonyms:
                     symptom_note = (
@@ -2016,6 +2119,7 @@ class TaskContextBuilder:
                     "content_matches": _sx_content[:10],
                     "commit_matches": _sx_commits[:10],
                     "synonym_matches": _sx_synonyms[:10],
+                    "graph_expansion": _sx_graph_expanded[:10],
                     "boosts": _sx_boosts[:30],
                     "final_boost": round(
                         sum(b["value"] for b in _sx_boosts), 3

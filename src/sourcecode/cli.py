@@ -1102,6 +1102,9 @@ def main(
             obj = _jm.loads(raw)
             if isinstance(obj, dict):
                 obj["_cache"] = meta
+                # Top-level cache_source for one release — backward compat alias
+                if "cache_source" in meta:
+                    obj["cache_source"] = meta["cache_source"]
                 return _jm.dumps(obj, indent=2, ensure_ascii=False)
         except Exception:
             pass
@@ -2273,6 +2276,9 @@ def _make_explanation(reason: str, why: str) -> str:
 def _serialize_relevant_file(f: Any) -> dict:
     from dataclasses import asdict as _asdict
     d = {k: v for k, v in _asdict(f).items() if v != "" and v is not None}
+    # Emit 'file' as backward-compat alias for 'path' for one release
+    if "path" in d:
+        d["file"] = d["path"]
     reason = d.pop("reason", "") or ""
     why = d.pop("why", "") or ""
     # Expose score as a rounded float so agents can rank/filter files deterministically.
