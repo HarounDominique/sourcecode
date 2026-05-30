@@ -3015,7 +3015,10 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
     # "no_security_signal" = no recognized security annotation at method OR class level.
     # Note: repos may use framework-level security (e.g. Keycloak itself) with no
     # per-endpoint annotations — this count reflects annotation-based coverage only.
-    no_security_signal = sum(1 for e in endpoints if not e.get("security"))
+    no_security_signal = sum(
+        1 for e in endpoints
+        if e.get("security", {}).get("policy") == "none_detected"
+    )
 
     # Detect filter-based security: centralized Spring Security config class.
     # When present, high no_security_signal is expected — security is enforced by
@@ -3034,7 +3037,10 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             for sym in _class_syms
         )
     )
-    _has_annotation_security = any(e.get("security") for e in endpoints)
+    _has_annotation_security = any(
+        e.get("security", {}).get("policy") != "none_detected"
+        for e in endpoints
+    )
     if _filter_based and _has_annotation_security:
         security_model = "mixed"
     elif _filter_based:

@@ -640,7 +640,7 @@ class TestEndpointExtraction:
         assert result.exit_code == 0
         data = json.loads(result.output)
         eps = data.get("endpoints", [])
-        secured = [ep for ep in eps if ep.get("security")]
+        secured = [ep for ep in eps if ep.get("security", {}).get("policy") != "none_detected"]
         assert len(secured) >= 1, "Expected at least one secured endpoint"
 
     def test_permit_all_annotation_detected(self, keycloak_like_repo: Path) -> None:
@@ -671,7 +671,7 @@ class TestEndpointExtraction:
         assert result.exit_code == 0
         data = json.loads(result.output)
         eps = data.get("endpoints", [])
-        manually_unsecured = sum(1 for ep in eps if not ep.get("security"))
+        manually_unsecured = sum(1 for ep in eps if ep.get("security", {}).get("policy") == "none_detected")
         reported_nss = data.get("no_security_signal", -1)
         assert reported_nss == manually_unsecured, (
             f"no_security_signal={reported_nss} != manually counted {manually_unsecured}"

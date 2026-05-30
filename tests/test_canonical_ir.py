@@ -540,7 +540,9 @@ class TestProjectionParity:
         projected = project_endpoint_surface(cir)
 
         eps = projected["endpoints"]
-        manually_unsecured = sum(1 for e in eps if not e.get("security"))
+        manually_unsecured = sum(
+            1 for e in eps if e.get("security", {}).get("policy") == "none_detected"
+        )
         assert projected["no_security_signal"] == manually_unsecured
 
     def test_project_blast_radius_structure_present(self, jaxrs_repo: Path) -> None:
@@ -566,8 +568,14 @@ class TestProjectionParity:
         projected = project_endpoint_surface(cir)
         legacy = extract_java_endpoints(spring_repo)
 
-        proj_secured = sum(1 for e in projected["endpoints"] if e.get("security"))
-        legacy_secured = sum(1 for e in legacy["endpoints"] if e.get("security"))
+        proj_secured = sum(
+            1 for e in projected["endpoints"]
+            if e.get("security", {}).get("policy") != "none_detected"
+        )
+        legacy_secured = sum(
+            1 for e in legacy["endpoints"]
+            if e.get("security", {}).get("policy") != "none_detected"
+        )
 
         assert proj_secured == legacy_secured, (
             f"Secured endpoint count mismatch: projected={proj_secured} legacy={legacy_secured}"
@@ -839,8 +847,10 @@ class TestSecurityAnnotationCoverage:
                 continue
             cir_ep = matching[0]
 
-            # Security must agree
+            # Security must agree ("none_detected" sentinel in projection ≡ None in CIR)
             proj_policy = (ep_dict.get("security") or {}).get("policy")
+            if proj_policy == "none_detected":
+                proj_policy = None
             cir_policy = cir_ep.security.policy if cir_ep.security else None
             assert proj_policy == cir_policy, (
                 f"Security divergence at {ep_dict['method']} {ep_dict['path']}: "

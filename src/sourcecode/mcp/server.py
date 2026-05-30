@@ -524,10 +524,10 @@ def get_endpoints(repo_path: str = ".") -> dict:
 
     Maps to: sourcecode endpoints <repo_path>
     Returns: endpoints list with method, path, controller, handler fields;
-             security dict when authorization annotations are present
-             (policy: roles_allowed|permit_all|deny_all|authenticated|...);
+             security dict always present (policy: roles_allowed|permit_all|deny_all|
+             authenticated|...|none_detected); none_detected = no auth annotation found.
              total (int), no_security_signal (int), and security_model (str) fields.
-             no_security_signal counts endpoints with no recognized auth annotation.
+             no_security_signal counts endpoints where security.policy == "none_detected".
              security_model values: "filter_based" (centralized Spring Security config —
              high no_security_signal is expected and does NOT mean endpoints are unprotected),
              "annotation_based" (per-endpoint annotations only), "mixed" (both),

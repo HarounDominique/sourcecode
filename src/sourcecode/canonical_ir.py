@@ -445,10 +445,15 @@ def project_endpoint_surface(cir: CanonicalRepositoryIR) -> dict:
             # Backward compat: top-level required_permission for custom annotation
             if ep.security.policy == "custom_permission":
                 entry["required_permission"] = ep.security.required_permission
+        else:
+            entry["security"] = {"policy": "none_detected"}
 
         endpoints.append(entry)
 
-    no_security_signal = sum(1 for e in endpoints if "security" not in e)
+    no_security_signal = sum(
+        1 for e in endpoints
+        if e.get("security", {}).get("policy") == "none_detected"
+    )
     return {
         "endpoints": endpoints,
         "total": len(endpoints),
