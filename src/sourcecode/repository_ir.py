@@ -888,15 +888,40 @@ def _extract_mapped_paths(source: str, class_fqn: str) -> dict[str, str]:
 # Phase 3 — Symbol relation graph
 # ---------------------------------------------------------------------------
 
+def _build_same_package_map(symbols: list[SymbolRecord]) -> dict[str, dict[str, str]]:
+    """Build {package: {simple_name: FQN}} map from all class/interface symbols.
+
+    Used by build_repo_ir to resolve same-package types that need no explicit import.
+    In Java, classes in the same package reference each other without import statements,
+    so import_map is empty for them — this map provides the fallback resolution.
+    """
+    result: dict[str, dict[str, str]] = {}
+    for sym in symbols:
+        if sym.type not in ("class", "interface") or "#" in sym.symbol:
+            continue
+        pkg = sym.symbol.rsplit(".", 1)[0] if "." in sym.symbol else ""
+        simple = sym.symbol.split(".")[-1]
+        result.setdefault(pkg, {})[simple] = sym.symbol
+    return result
+
+
 def _build_relations(
     symbols: list[SymbolRecord],
     raw_imports: list[str],
     source: str,
     package: str,
     rel_path: str,
+    same_pkg_types: dict[str, str] | None = None,
 ) -> list[RelationEdge]:
-    """Phase 3: Build directed relation graph for symbols in one file."""
+    """Phase 3: Build directed relation graph for symbols in one file.
+
+    same_pkg_types: {simple_name → FQN} for classes in the same package.
+    Passed by build_repo_ir after a first pass that collects all symbols.
+    Enables resolving injection targets that share a package with the caller
+    and therefore need no explicit Java import statement.
+    """
     edges: list[RelationEdge] = []
+    _same_pkg: dict[str, str] = same_pkg_types or {}
 
     import_map: dict[str, str] = {}
     for fqn in raw_imports:
@@ -929,15 +954,27 @@ def _build_relations(
                 ))
 
         if sym.type == "field":
-            for imp_fqn in sym.imports_used:
+            _inject_ann = next(
+                (a for a in sym.annotations if a in _INJECT_ANNOTATIONS), "@Autowired"
+            )
+            _field_targets: set[str] = set(sym.imports_used)
+            # Same-package field injection: imports_used is empty when the field type
+            # shares a package with the declaring class (no import needed in Java).
+            # Extract type from signature ("Type name") and resolve via same_pkg_types.
+            if not _field_targets and _same_pkg:
+                _sig_type = (sym.signature or "").split()[0] if sym.signature else ""
+                _sig_base = re.sub(r'<.*', '', _sig_type).strip()
+                if _sig_base and _sig_base[0].isupper():
+                    _same_fqn = _same_pkg.get(_sig_base)
+                    if _same_fqn and _same_fqn != _enclosing_class(sym_fqn):
+                        _field_targets.add(_same_fqn)
+            for imp_fqn in _field_targets:
                 edges.append(RelationEdge(
                     from_symbol=sym_fqn,
                     to_symbol=imp_fqn,
                     type="injects",
                     confidence="high",
-                    evidence={"type": "annotation", "value": next(
-                        (a for a in sym.annotations if a in _INJECT_ANNOTATIONS), "@Autowired"
-                    )},
+                    evidence={"type": "annotation", "value": _inject_ann},
                 ))
 
     # ── Constructor injection ─────────────────────────────────────────────────
@@ -949,7 +986,7 @@ def _build_relations(
             continue
         for simple_type in sym.param_types:
             base = re.sub(r'<.*', '', simple_type).strip()
-            fqn = import_map.get(base)
+            fqn = import_map.get(base) or _same_pkg.get(base)
             if fqn:
                 edges.append(RelationEdge(
                     from_symbol=sym.symbol,
@@ -982,7 +1019,7 @@ def _build_relations(
                 continue
             _ftype = fld.group("type").strip()
             _base = re.sub(r'<.*', '', _ftype).strip()
-            _fqn = import_map.get(_base)
+            _fqn = import_map.get(_base) or _same_pkg.get(_base)
             if _fqn:
                 edges.append(RelationEdge(
                     from_symbol=sym.symbol,
@@ -2632,23 +2669,37 @@ def build_repo_ir(
     if since:
         _since_changed = _get_git_changed_files(root, since)
 
+    # Pass 1: extract symbols from all files so we can build the same-package
+    # type map before building relations.  Java classes in the same package
+    # reference each other without import statements, so import_map alone cannot
+    # resolve them — _build_same_package_map provides the cross-file fallback.
+    _per_file: list[tuple[str, str, str, list[str], list[SymbolRecord]]] = []
     for rel_path in sorted(file_paths):
         abs_path = root / rel_path
         try:
             source = abs_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        package, symbols, raw_imports = _extract_symbols(source, rel_path)
+        all_symbols.extend(symbols)
+        _per_file.append((rel_path, source, package, raw_imports, symbols))
+
+    # Build {package: {simple_name: FQN}} from every class/interface found.
+    _same_pkg_map: dict[str, dict[str, str]] = _build_same_package_map(all_symbols)
+
+    # Pass 2: build relations with same-package type resolution available.
+    for rel_path, source, package, raw_imports, symbols in _per_file:
+        same_pkg_types = _same_pkg_map.get(package, {})
+        relations = _build_relations(
+            symbols, raw_imports, source, package, rel_path,
+            same_pkg_types=same_pkg_types,
+        )
 
         old_source: Optional[str] = None
         if since:
-            # Only fetch old content for files known to have changed.
-            # Unchanged files have no diff entries — skip git show entirely.
             _file_changed = _since_changed is None or rel_path in _since_changed
             if _file_changed:
                 old_source = _get_git_old_content(root, rel_path, since)
-
-        package, symbols, raw_imports = _extract_symbols(source, rel_path)
-        relations = _build_relations(symbols, raw_imports, source, package, rel_path)
 
         if old_source is not None:
             _, old_symbols, _ = _extract_symbols(old_source, rel_path)
@@ -2664,7 +2715,6 @@ def build_repo_ir(
                     confidence="high",
                 ))
 
-        all_symbols.extend(symbols)
         all_relations.extend(relations)
 
     spring_summary = _build_spring_summary(all_symbols)

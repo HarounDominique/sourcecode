@@ -627,6 +627,21 @@ _FRONTEND_SYMPTOM_MAP: dict[str, list[str]] = {
     "trabajador": ["trabajador", "empleado", "worker", "asignacion", "trabajadordao", "trabajadorservice"],
 }
 
+# Generic words that add noise when used as symptom keywords in large repos.
+# "token" and "user" are too ubiquitous in auth systems to be useful alone.
+_SYMPTOM_STOP_WORDS: frozenset[str] = frozenset({
+    "fails", "fail", "failed", "failure",
+    "not", "for", "with", "when", "that", "the", "and", "but",
+    "are", "has", "had", "have", "was", "were",
+    "get", "set", "can", "does", "did", "should", "would", "could",
+    "null", "none", "empty", "invalid", "incorrect", "wrong", "missing",
+    "error", "issue", "problem", "bug",
+    "from", "into", "via", "due", "also", "after", "before",
+    "slow", "fast", "new", "old",
+})
+
+# Repo-scale threshold: above this file count, use stricter injection logic.
+_LARGE_REPO_THRESHOLD = 500
 
 MAX_FILES_FAST = 2000  # above this threshold --fast uses git-index-only mode
 
@@ -1695,7 +1710,7 @@ class TaskContextBuilder:
             _camel_expanded = _re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', _camel_expanded)
             symptom_keywords = [
                 w.lower() for w in _re.split(r"[\s\W]+", _camel_expanded)
-                if len(w) > 2
+                if len(w) > 2 and w.lower() not in _SYMPTOM_STOP_WORDS
             ]
             if symptom_keywords:
                 # Pre-compile combined keyword pattern for fast content scanning
@@ -1759,14 +1774,27 @@ class TaskContextBuilder:
                     ))
                     _existing_paths.add(_cp)
 
-                # Pass 4: inject files whose path matches symptom keywords
+                # Scale-awareness: large repos need wider scan and stricter injection.
+                _is_large_repo = len(all_paths) > _LARGE_REPO_THRESHOLD
+
+                # Pass 4: inject files whose path matches symptom keywords.
+                # CamelCase-expand the filename stem so "OfflineSessionLoader" matches
+                # the keyword "offline" even without an explicit directory separator.
+                _p4_dirs_of_injected: set[str] = set()  # directories of high-score injects
                 for _p in all_paths:
                     if _p in _existing_paths:
                         continue
                     if Path(_p).suffix.lower() not in _ALL_EXTENSIONS:
                         continue
                     _p_lower = _p.lower()
-                    _matching_kws = [kw for kw in symptom_keywords if kw in _p_lower]
+                    # CamelCase-expand the stem and append to the search string so
+                    # "OfflineSessionLoader" → "offline session loader" can match
+                    # individual keyword tokens beyond what substring search finds.
+                    _stem_raw = Path(_p).stem
+                    _stem_exp = _re.sub(r'([a-z])([A-Z])', r'\1 \2', _stem_raw)
+                    _stem_exp = _re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', _stem_exp).lower()
+                    _p_search = _p_lower + " " + _stem_exp
+                    _matching_kws = [kw for kw in symptom_keywords if kw in _p_search]
                     if not _matching_kws:
                         continue
                     _boost = 0.2 * len(_matching_kws)
@@ -1781,6 +1809,8 @@ class TaskContextBuilder:
                     ))
                     _existing_paths.add(_p)
                     _sx_direct_path.append(_p)
+                    if _injected_score >= 0.7:
+                        _p4_dirs_of_injected.add(str(Path(_p).parent))
 
                 # Pass 4b: grep-based injection for frontend→backend synonym terms.
                 # Runs parallel grep for each backend term to find files not yet in
@@ -1828,9 +1858,41 @@ class TaskContextBuilder:
                         ))
                         _existing_paths_now.add(_gf)
 
-                # Sort before content scan so top candidates get read first
-                relevant_files = sorted(relevant_files, key=lambda rf: -rf.score)
-                _CONTENT_SCAN_LIMIT = 80
+                # Pass 4c: subsystem co-location — inject sibling files from the same
+                # directories as high-score (≥0.7) path-matched files. This catches
+                # architecturally adjacent classes that don't mention symptom keywords
+                # in their own name (e.g. InfinispanOfflineSessionCacheEntryLifespan…
+                # siblings in the same infinispan/ package).
+                if _is_large_repo and _p4_dirs_of_injected:
+                    _coloc_existing = {rf.path for rf in relevant_files}
+                    for _cp in all_paths:
+                        if _cp in _coloc_existing:
+                            continue
+                        if Path(_cp).suffix.lower() not in _src_exts:
+                            continue
+                        if str(Path(_cp).parent) in _p4_dirs_of_injected:
+                            relevant_files.append(RelevantFile(
+                                path=_cp,
+                                role="symptom_match",
+                                score=0.55,
+                                reason="subsystem co-location: same directory as symptom-matched file",
+                                why="directory proximity injection",
+                            ))
+                            _coloc_existing.add(_cp)
+
+                # Sort before content scan so top candidates get read first.
+                # In large repos: prioritise symptom_match files within each score band
+                # so that subsystem-relevant files are content-scanned before generic
+                # structural files at the same score.
+                if _is_large_repo:
+                    relevant_files = sorted(
+                        relevant_files,
+                        key=lambda rf: (-rf.score, 0 if rf.role == "symptom_match" else 1),
+                    )
+                    _CONTENT_SCAN_LIMIT = 150
+                else:
+                    relevant_files = sorted(relevant_files, key=lambda rf: -rf.score)
+                    _CONTENT_SCAN_LIMIT = 80
                 _scan_candidates = relevant_files[:_CONTENT_SCAN_LIMIT]
                 _no_scan_candidates = relevant_files[_CONTENT_SCAN_LIMIT:]
 
@@ -1905,15 +1967,31 @@ class TaskContextBuilder:
                     elif _extra_syn > 0:
                         _new_reason = _rf.reason + f", synonym-match backend (+{_extra_syn:.2f})"
 
+                    _final_score = round(min(_rf.score + _total_extra, 1.0), 2)
                     _boosted.append(RelevantFile(
                         path=_rf.path,
                         role=_rf.role,
-                        score=round(min(_rf.score + _total_extra, 1.0), 2),
+                        score=_final_score,
                         reason=_new_reason,
                         why=_rf.why,
                     ))
 
-                relevant_files = sorted(_boosted + _no_scan_candidates, key=lambda rf: -rf.score)
+                # Use total boost as a secondary sort key so symptom-matched files
+                # that were boosted from a lower base score rank above structural
+                # files that coincidentally reach the same capped score of 1.0.
+                # This prevents budget-trimming from discarding the most relevant files.
+                _boost_totals: dict[str, float] = {}
+                for _rf in _scan_candidates:
+                    pass  # populated below
+                _boost_totals = {}
+                for _idx, _rf in enumerate(_scan_candidates):
+                    _b_rf = _boosted[_idx]
+                    _boost_totals[_b_rf.path] = round(_b_rf.score - _rf.score, 4)
+
+                relevant_files = sorted(
+                    _boosted + _no_scan_candidates,
+                    key=lambda rf: (-rf.score, -_boost_totals.get(rf.path, 0)),
+                )
 
                 # Synonym note (only when synonyms actually fired)
                 if _frontend_kws and _sx_synonyms:
@@ -2390,7 +2468,8 @@ class TaskContextBuilder:
                     else:
                         _symptom_class_names.add(_tok)
                 _symptom_tokens = {
-                    w.lower() for w in _re_bug.split(r'[\s\W]+', symptom) if len(w) > 2
+                    w.lower() for w in _re_bug.split(r'[\s\W]+', symptom)
+                    if len(w) > 2 and w.lower() not in _SYMPTOM_STOP_WORDS
                 }
 
         scored: list[tuple[float, str, RelevantFile]] = []
@@ -2487,9 +2566,16 @@ class TaskContextBuilder:
                             content_boost += 0.8
                             _why_parts.append("exception type in path (+0.8)")
 
-                # AND-weighted token intersection — multiple matching tokens >> single
+                # AND-weighted token intersection — multiple matching tokens >> single.
+                # CamelCase-expand the filename stem so "OfflineSessionLoader" contributes
+                # "offline", "session", "loader" as individual tokens beyond what the raw
+                # path splitting yields. This lets multi-word symptoms match class names.
                 if _symptom_tokens:
                     _path_parts = set(path_lower.replace("/", " ").replace(".", " ").replace("_", " ").split())
+                    _stem_cc = Path(path).stem
+                    _stem_cc_exp = _re_bug.sub(r'([a-z])([A-Z])', r'\1 \2', _stem_cc)
+                    _stem_cc_exp = _re_bug.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', _stem_cc_exp).lower()
+                    _path_parts.update(_stem_cc_exp.split())
                     _intersection = _symptom_tokens & _path_parts
                     _n_match = len(_intersection)
                     if _n_match >= 3:

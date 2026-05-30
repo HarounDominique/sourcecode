@@ -366,16 +366,16 @@ class TestSymptomPerformance:
         assert output is not None
 
     def test_content_scan_limit_constant(self) -> None:
-        """_CONTENT_SCAN_LIMIT must be present and ≤ 100."""
+        """_CONTENT_SCAN_LIMIT must be present and ≤ 200 (scale-aware: 80 small, 150 large)."""
         import inspect
         import re
         import sourcecode.prepare_context as pc_mod
         src = inspect.getsource(pc_mod.TaskContextBuilder.build)
         assert "_CONTENT_SCAN_LIMIT" in src, "content scan limit constant missing from build()"
-        # Extract numeric value: "_CONTENT_SCAN_LIMIT = <N>"
-        m = re.search(r"_CONTENT_SCAN_LIMIT\s*=\s*(\d+)", src)
-        if m:
-            assert int(m.group(1)) <= 100, f"_CONTENT_SCAN_LIMIT={m.group(1)} too large"
+        # Extract all numeric values assigned to _CONTENT_SCAN_LIMIT.
+        # Scale-aware mode: small repos use 80, large repos use 150.
+        for m in re.finditer(r"_CONTENT_SCAN_LIMIT\s*=\s*(\d+)", src):
+            assert int(m.group(1)) <= 200, f"_CONTENT_SCAN_LIMIT={m.group(1)} too large"
 
     def test_symptom_no_crash_empty_repo(self, tmp_path: Path) -> None:
         from sourcecode.prepare_context import TaskContextBuilder

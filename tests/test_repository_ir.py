@@ -2236,16 +2236,32 @@ public class SubCaller{i}_{j} {{
 # ---------------------------------------------------------------------------
 
 def _build_di_ir(*sources_and_paths):
-    """Build a minimal IR from (source, rel_path) pairs."""
+    """Build a minimal IR from (source, rel_path) pairs.
+
+    Mirrors the 2-pass approach of build_repo_ir: symbols are collected first
+    so _build_same_package_map can resolve same-package types without imports.
+    """
     from sourcecode.repository_ir import (
         _extract_symbols, _build_relations, _build_spring_summary, _assemble,
+        _build_same_package_map,
     )
-    all_syms, all_rels = [], []
+    # Pass 1: collect all symbols
+    all_syms = []
+    per_file = []
     for src, rel in sources_and_paths:
         pkg, syms, raw_imports = _extract_symbols(src, rel)
-        rels = _build_relations(syms, raw_imports, src, pkg, rel)
         all_syms.extend(syms)
+        per_file.append((src, rel, pkg, raw_imports, syms))
+
+    same_pkg_map = _build_same_package_map(all_syms)
+
+    # Pass 2: build relations with same-package fallback
+    all_rels = []
+    for src, rel, pkg, raw_imports, syms in per_file:
+        same_pkg_types = same_pkg_map.get(pkg, {})
+        rels = _build_relations(syms, raw_imports, src, pkg, rel, same_pkg_types=same_pkg_types)
         all_rels.extend(rels)
+
     ss = _build_spring_summary(all_syms)
     return _assemble(all_syms, all_rels, [], ss, None)
 
@@ -2569,3 +2585,117 @@ public class PlainClass {
         rels = _build_relations(syms, raw_imports, plain, pkg, "PlainClass.java")
         injects = [r for r in rels if r.type == "injects"]
         assert injects == [], f"Phantom injects edges on plain class: {injects}"
+
+    # ── tests: same-package injection (no explicit import) ───────────────────
+
+    def test_same_package_constructor_injection_no_import(self):
+        """Constructor injection where caller and dependency share a package.
+
+        In Java, same-package classes need no import.  The IR must still emit
+        injects edges so impact propagation reaches the controller.
+        """
+        from sourcecode.repository_ir import build_repo_ir, compute_blast_radius
+        repo_src = """\
+package org.petclinic.owner;
+public interface OwnerRepository {
+    Object findAll();
+}
+"""
+        ctrl_src = """\
+package org.petclinic.owner;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+
+@Controller
+@RequestMapping("/owners")
+public class OwnerController {
+    private final OwnerRepository repo;
+
+    public OwnerController(OwnerRepository repo) {
+        this.repo = repo;
+    }
+
+    @GetMapping("/list")
+    public String list() { return "owners/list"; }
+}
+"""
+        ir = _build_di_ir(
+            (repo_src, "OwnerRepository.java"),
+            (ctrl_src, "OwnerController.java"),
+        )
+        result = compute_blast_radius(ir, "OwnerRepository", max_depth=4)
+        all_affected = set(result["direct_callers"]) | set(result["indirect_callers"])
+        assert any("OwnerController" in c for c in all_affected), (
+            f"Same-package constructor injection not resolved. "
+            f"direct={result['direct_callers']}, indirect={result['indirect_callers']}"
+        )
+        eps = result.get("endpoints_affected", [])
+        assert len(eps) > 0, (
+            f"Endpoints not surfaced for same-package injection. "
+            f"route_surface={ir.get('route_surface')}"
+        )
+
+    def test_same_package_field_injection_no_import(self):
+        """@Autowired field injection where the field type is in the same package."""
+        from sourcecode.repository_ir import build_repo_ir, compute_blast_radius
+        svc_src = """\
+package com.example;
+import org.springframework.stereotype.Service;
+public interface MyService { void run(); }
+"""
+        ctrl_src = """\
+package com.example;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class MyController {
+    @Autowired
+    private MyService svc;
+
+    @GetMapping("/run")
+    public void run() { svc.run(); }
+}
+"""
+        ir = _build_di_ir(
+            (svc_src, "MyService.java"),
+            (ctrl_src, "MyController.java"),
+        )
+        result = compute_blast_radius(ir, "MyService", max_depth=4)
+        all_affected = set(result["direct_callers"]) | set(result["indirect_callers"])
+        assert any("MyController" in c for c in all_affected), (
+            f"Same-package @Autowired field injection not resolved. affected={all_affected}"
+        )
+
+    def test_same_package_lombok_injection_no_import(self):
+        """@RequiredArgsConstructor with same-package dependency (no import)."""
+        from sourcecode.repository_ir import build_repo_ir, compute_blast_radius
+        repo_src = """\
+package com.example;
+import org.springframework.stereotype.Repository;
+@Repository
+public interface DataStore { Object find(); }
+"""
+        svc_src = """\
+package com.example;
+import org.springframework.stereotype.Service;
+import lombok.RequiredArgsConstructor;
+
+@Service
+@RequiredArgsConstructor
+public class DataService {
+    private final DataStore store;
+}
+"""
+        ir = _build_di_ir(
+            (repo_src, "DataStore.java"),
+            (svc_src, "DataService.java"),
+        )
+        result = compute_blast_radius(ir, "DataStore", max_depth=4)
+        all_affected = set(result["direct_callers"]) | set(result["indirect_callers"])
+        assert any("DataService" in c for c in all_affected), (
+            f"Same-package Lombok @RequiredArgsConstructor not resolved. "
+            f"affected={all_affected}"
+        )
