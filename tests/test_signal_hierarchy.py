@@ -530,5 +530,5 @@ class TestDeltaTask:
         if result.exit_code == 0:
             assert "relevant_files" in data or "changed_files" in data
         else:
-            assert data.get("error") in {"no_diff", "no_git_repo", "git_ref_not_found"}
+            assert data.get("error") in {"no_diff", "no_diff_source", "no_git_repo", "git_ref_not_found"}
             assert "ci_decision" in data

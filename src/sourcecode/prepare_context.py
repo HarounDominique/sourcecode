@@ -1781,7 +1781,12 @@ class TaskContextBuilder:
                 # Pass 4: inject files whose path matches symptom keywords.
                 # CamelCase-expand the filename stem so "OfflineSessionLoader" matches
                 # the keyword "offline" even without an explicit directory separator.
+                # Large repos: cap per-keyword injections so a common term like
+                # "authentication" (50+ path matches in an IAM repo) cannot flood the
+                # candidate list and push specific terms like "ldap" out of the budget.
                 _p4_dirs_of_injected: set[str] = set()  # directories of high-score injects
+                _P4_KW_CAP = 15  # max path-injections per keyword in large repos
+                _p4_kw_counts: dict[str, int] = {}
                 for _p in all_paths:
                     if _p in _existing_paths:
                         continue
@@ -1798,6 +1803,16 @@ class TaskContextBuilder:
                     _matching_kws = [kw for kw in symptom_keywords if kw in _p_search]
                     if not _matching_kws:
                         continue
+                    # In large repos, skip keywords already at cap; keep file only if at
+                    # least one keyword still has quota (multi-kw matches exhaust each
+                    # keyword's quota independently so specific terms survive longer).
+                    if _is_large_repo:
+                        _matching_kws = [
+                            kw for kw in _matching_kws
+                            if _p4_kw_counts.get(kw, 0) < _P4_KW_CAP
+                        ]
+                        if not _matching_kws:
+                            continue
                     _boost = 0.2 * len(_matching_kws)
                     _injected_score = round(min(0.5 + _boost, 1.0), 2)
                     _first_kw = _matching_kws[0]
@@ -1810,6 +1825,9 @@ class TaskContextBuilder:
                     ))
                     _existing_paths.add(_p)
                     _sx_direct_path.append(_p)
+                    if _is_large_repo:
+                        for _kw in _matching_kws:
+                            _p4_kw_counts[_kw] = _p4_kw_counts.get(_kw, 0) + 1
                     if _injected_score >= 0.7:
                         _p4_dirs_of_injected.add(str(Path(_p).parent))
 
@@ -1864,9 +1882,15 @@ class TaskContextBuilder:
                 # architecturally adjacent classes that don't mention symptom keywords
                 # in their own name (e.g. InfinispanOfflineSessionCacheEntryLifespan…
                 # siblings in the same infinispan/ package).
+                # Large repos: cap total co-location injections so that a keyword
+                # matching many directories doesn't flood the candidate list.
                 if _is_large_repo and _p4_dirs_of_injected:
                     _coloc_existing = {rf.path for rf in relevant_files}
+                    _P4C_CAP = 30
+                    _coloc_count = 0
                     for _cp in all_paths:
+                        if _coloc_count >= _P4C_CAP:
+                            break
                         if _cp in _coloc_existing:
                             continue
                         if Path(_cp).suffix.lower() not in _src_exts:
@@ -1880,6 +1904,7 @@ class TaskContextBuilder:
                                 why="directory proximity injection",
                             ))
                             _coloc_existing.add(_cp)
+                            _coloc_count += 1
 
                 # Sort before content scan so top candidates get read first.
                 # In large repos: prioritise symptom_match files within each score band
