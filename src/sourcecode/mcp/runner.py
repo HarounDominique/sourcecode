@@ -39,11 +39,12 @@ def run_command(args: list[str]) -> Any:
     Returns parsed JSON dict when output is valid JSON, else the raw string.
     Raises CommandError on non-zero exit so MCP can preserve structured payloads.
     """
-    from sourcecode.cli import _preprocess_args, _set_detected_path, app
+    from sourcecode.cli import app
 
-    _set_detected_path(".")
-    processed = _preprocess_args(list(args))
-    result = _runner.invoke(app, processed)
+    # Pass raw args to invoke — the _cmd_main hook inside cli.py handles path
+    # extraction via _preprocess_args. Pre-processing here would strip the path
+    # from args, then _cmd_main would re-process the stripped list and lose it.
+    result = _runner.invoke(app, list(args))
 
     if result.exit_code != 0:
         stdout_raw = getattr(result, "output", "")
