@@ -1750,8 +1750,14 @@ class TaskContextBuilder:
                 for _cr in _commits_scanned:
                     _msg_lower = (_cr.message or "").lower()
                     if _kw_re.search(_msg_lower):
+                        _rn_prefix = self.root.name + "/"
                         for _cf in (_cr.files_changed or []):
                             _cf_norm = _cf.replace("\\", "/")
+                            # Git reports paths relative to the git root, which may be
+                            # a parent of the analyzed directory (e.g. MSAS/saint-server/).
+                            # Strip the analyzed-dir prefix so paths match all_paths.
+                            if _cf_norm.startswith(_rn_prefix):
+                                _cf_norm = _cf_norm[len(_rn_prefix):]
                             _commit_file_hits[_cf_norm] = _commit_file_hits.get(_cf_norm, 0) + 1
                         _sx_commits.append({
                             "message": (_cr.message or "")[:80],

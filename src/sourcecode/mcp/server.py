@@ -650,7 +650,56 @@ def check_freshness(repo_path: str = ".") -> dict:
         _path_err = _check_repo_path(repo_path)
         if _path_err is not None:
             return _path_err
-        return _execute(["cache", "freshness", repo_path, "--json"])
+
+        # Call Python functions directly — avoids CliRunner/subprocess nesting
+        # that caused current_git_head to return "" on Windows parent-git repos.
+        import subprocess as _sp
+        from pathlib import Path as _Path
+        from sourcecode.cache import _get_git_head as _cache_head
+        from sourcecode.ris import load_ris as _load_ris, _has_uncommitted_changes as _huc
+
+        target = _Path(repo_path).resolve()
+        current_head = _cache_head(target)
+        ris = _load_ris(target)
+
+        if ris is None:
+            result: dict = {
+                "fresh": False,
+                "ris_exists": False,
+                "current_git_head": current_head,
+                "ris_git_head": None,
+                "delta_commits": None,
+                "has_uncommitted_changes": _huc(target),
+                "ris_last_updated_at": None,
+            }
+        else:
+            ris_head = ris.git_head
+            head_matches = bool(current_head and ris_head and current_head == ris_head)
+            uncommitted = _huc(target)
+            delta = None
+            if ris_head and current_head and ris_head != current_head:
+                try:
+                    _r = _sp.run(
+                        ["git", "-C", str(target), "rev-list", "--count", f"{ris_head}..HEAD"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if _r.returncode == 0:
+                        delta = int(_r.stdout.strip())
+                except Exception:
+                    pass
+            elif head_matches:
+                delta = 0
+            result = {
+                "fresh": head_matches and not uncommitted,
+                "ris_exists": True,
+                "current_git_head": current_head,
+                "ris_git_head": ris_head,
+                "delta_commits": delta,
+                "has_uncommitted_changes": uncommitted,
+                "ris_last_updated_at": ris.last_updated_at,
+            }
+
+        return _ok(result)
     except Exception as exc:
         return _err(
             f"Internal error: {type(exc).__name__}: {exc} — repo_path: {_raw}",

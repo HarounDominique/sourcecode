@@ -1141,9 +1141,23 @@ def main(
                 capture_output=True, text=True, timeout=3,
             )
             _git_sha = _sha_r.stdout.strip()
-            # Only cache when target IS the git repo root (not a subdir of one),
-            # to avoid polluting sub-project directories used in tests.
-            if _git_sha and (target / ".git").exists():
+
+            # Detect actual git root (may be an ancestor of target for monorepos,
+            # multi-project repos, or SVN-migrated trees where .git is in a parent).
+            # The original "(target / '.git').exists()" check broke these layouts.
+            _git_root_str = ""
+            if _git_sha:
+                try:
+                    _gr_r = _sub.run(
+                        ["git", "-C", str(target), "rev-parse", "--show-toplevel"],
+                        capture_output=True, text=True, timeout=3,
+                    )
+                    if _gr_r.returncode == 0:
+                        _git_root_str = _gr_r.stdout.strip()
+                except Exception:
+                    pass
+
+            if _git_sha and _git_root_str:
                 _excl_key = (
                     ",".join(sorted(e.strip() for e in exclude.split(",") if e.strip()))
                     if exclude else ""
@@ -2241,7 +2255,9 @@ def main(
         _atexit.register(_cache_write_thread.join, 5.0)
 
     # Update RIS with aggregated snapshot data (non-fatal side-effect).
-    if not no_cache and not _pipeline_error and _core_key:
+    # Update RIS whenever git is available, even when L1/L2 cache is skipped
+    # (e.g. target is a subdirectory of the git root — _core_key may be "").
+    if not no_cache and not _pipeline_error and _git_sha:
         try:
             from sourcecode.serializer import core_view as _ris_core_view
             from sourcecode.ris import maybe_update_ris as _ris_update
