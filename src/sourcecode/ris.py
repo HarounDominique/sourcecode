@@ -350,14 +350,15 @@ def _current_git_head(repo_root: Path) -> str:
 
 
 def _has_uncommitted_changes(repo_root: Path) -> bool:
-    """Return True if working tree has staged or unstaged changes.
+    """Return True if working tree has staged or unstaged changes to tracked files.
 
-    Uses ``git status --porcelain`` — any non-empty output means the working
-    tree diverges from HEAD.  Returns False on any error (non-git dirs, etc.).
+    Uses ``git status --porcelain --untracked-files=no`` so that untracked
+    files (e.g. legacy .sourcecode-cache/ directories) do not produce false
+    positives.  Returns False on any error (non-git dirs, etc.).
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo_root), "status", "--porcelain"],
+            ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=no"],
             capture_output=True,
             text=True,
             timeout=2,

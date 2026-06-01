@@ -1266,7 +1266,7 @@ def main(
             _view_key = ""
             _core_hash = ""
 
-    if _cache_hit_content is not None:
+    if _cache_hit_content is not None and not changed_only:
         from sourcecode.serializer import write_output
         if format == "json":
             try:
@@ -1948,7 +1948,10 @@ def main(
                 if _uc:
                     # Include untracked (new files not yet staged) so new source files
                     # are analyzed under --changed-only, not silently treated as "clean".
-                    _allowed_changed_files = set(_uc.staged) | set(_uc.unstaged) | set(_uc.untracked)
+                    # Exclude directory entries (trailing "/") — e.g. untracked tool
+                    # cache dirs like ".sourcecode-cache/" are dirs not source files.
+                    _uc_files = {p for p in _uc.untracked if not p.endswith("/")}
+                    _allowed_changed_files = set(_uc.staged) | set(_uc.unstaged) | _uc_files
                 if not _allowed_changed_files:
                     # Git is available and confirms no uncommitted changes.
                     # Do NOT fall back to a full scan — that would silently produce
