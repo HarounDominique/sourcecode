@@ -615,6 +615,41 @@ def get_endpoints(repo_path: str = ".") -> dict:
 
 
 @mcp.tool()
+def get_spring_audit(repo_path: str = ".", scope: str = "all") -> dict:
+    """Spring semantic audit: TX anomalies + security surface findings. JAVA/SPRING ONLY.
+
+    Do NOT call this on non-Java repositories — it will return spring_detected=false.
+
+    Maps to: sourcecode spring-audit <repo_path> --scope <scope>
+    Returns: SpringAuditResult with schema_version, spring_detected, scope, summary,
+             findings list (id, pattern_id, category, severity, confidence, title,
+             symbol, source_file, evidence, explanation, fix_hint), limitations, metadata.
+    Patterns: TX-001..005 (transaction anomalies), SEC-001..003 (security surface).
+    scope: "all" (default) | "tx" | "security".
+    repo_path: absolute path to the Java repository (default: current working directory).
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        if scope not in ("all", "tx", "security"):
+            return _err(
+                f"Invalid scope '{scope}' — must be one of: all, tx, security",
+                "INVALID_ARGUMENT",
+            )
+        repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
+        return _execute(["spring-audit", repo_path, "--scope", scope])
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
+@mcp.tool()
 def get_module_context(repo_path: str = ".", module: str = "") -> dict:
     """Compact analysis of a specific module or subdirectory within a repository.
 

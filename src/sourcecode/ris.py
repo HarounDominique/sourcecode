@@ -275,6 +275,53 @@ def maybe_update_ris(repo_root: Path, core_dict: dict, git_head: str) -> None:
         pass
 
 
+def update_ris_spring_audit(repo_root: Path, audit_result: dict) -> None:
+    """Persist spring-audit summary into the RIS metadata section.
+
+    Stores summary-only snapshot (no full findings) in metadata["spring_audit"].
+    Called from spring_audit_cmd after a successful run.  Never raises.
+    """
+    try:
+        if not isinstance(audit_result, dict):
+            return
+        summary = audit_result.get("summary") or {}
+        existing = load_ris(repo_root)
+        if existing is None:
+            from sourcecode.cache import repo_id as _repo_id_fn
+            now = _now_iso()
+            existing = RepositoryIntelligenceSnapshot(
+                repo_id=_repo_id_fn(repo_root),
+                created_at=now,
+                last_updated_at=now,
+                git_head="",
+                version=RIS_SCHEMA_VERSION,
+                structural_map={},
+                api_surface={},
+                dependency_graph={},
+                compact_summary={},
+                agent_index={},
+                git_context_snapshot={},
+                metadata={"snapshot_source": "existing_snapshot_system", "confidence": 0.0, "partial": True},
+            )
+
+        spring_audit_cache = {
+            "total_findings": summary.get("total_findings", 0),
+            "by_severity": summary.get("by_severity", {}),
+            "by_category": summary.get("by_category", {}),
+            "confidence_level": summary.get("confidence_level", ""),
+            "scope": audit_result.get("scope", "all"),
+            "spring_detected": audit_result.get("spring_detected", False),
+            "last_run_at": audit_result.get("generated_at", _now_iso()),
+        }
+        updated_meta = {**existing.metadata, "spring_audit": spring_audit_cache}
+        updated = RepositoryIntelligenceSnapshot(
+            **{**existing.__dict__, "metadata": updated_meta, "last_updated_at": _now_iso()}
+        )
+        save_ris(repo_root, updated)
+    except Exception:
+        pass
+
+
 def update_ris_api_surface(repo_root: Path, endpoints_data: dict) -> None:
     """Update the api_surface section from an ``endpoints`` command output.
 

@@ -238,6 +238,14 @@ _LOMBOK_CTOR_ANNOTATIONS: frozenset[str] = frozenset({
     "@AllArgsConstructor",       # injects all non-static fields
 })
 
+# Transaction annotations whose args must be captured for semantic analysis.
+_TX_ANNOTATIONS: frozenset[str] = frozenset({"@Transactional"})
+
+# Combined set used in _extract_symbols annotation-value capture.
+_CAPTURE_ANN_ARGS: frozenset[str] = (
+    _ENDPOINT_ANNOTATIONS | _PERMISSION_ANNOTATIONS | _PATH_ANNOTATIONS | _TX_ANNOTATIONS
+)
+
 _JAVA_ROLE_MAP: dict[str, str] = {
     # Spring MVC / Spring Boot
     "@RestController": "controller",
@@ -563,7 +571,7 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
                 ann_args = ann_m.group(2) or ""
                 if ann not in pending_anns:
                     pending_anns.append(ann)
-                if ann_args and (ann in _ENDPOINT_ANNOTATIONS or ann in _PERMISSION_ANNOTATIONS or ann in _PATH_ANNOTATIONS):
+                if ann_args and ann in _CAPTURE_ANN_ARGS:
                     # P1 fix: attempt to resolve constant expressions before storing.
                     # Transforms '"/" + SECTION_KEY' → '"/category"' when constant
                     # is defined in this file. Falls back to original if unresolvable.
@@ -2234,6 +2242,9 @@ def _assemble(
             "role": spring_role_map.get(s.symbol, "other"),
             "in_degree": in_deg.get(s.symbol, 0),
             "out_degree": out_deg.get(s.symbol, 0),
+            "annotations": list(s.annotations),
+            "annotation_values": dict(s.annotation_values),
+            "modifiers": list(s.modifiers),
         }
         for s in sorted_syms
     ]
