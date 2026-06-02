@@ -85,7 +85,7 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
         r"""System\.getenv\(\s*["']([A-Z][A-Z0-9_]*)["']\s*\)"""
     )),
     ("java_spring_value", re.compile(
-        r"""@Value\(\s*["']\$\{([A-Z][A-Z0-9_]*)(?::[^}]*)?\}["']\s*\)"""
+        r"""@Value\(\s*["']\$\{([A-Za-z][A-Za-z0-9._\-]*)(?::[^}]*)?\}["']\s*\)"""
     )),
     ("php_getenv", re.compile(
         r"""getenv\(\s*["']([A-Z][A-Z0-9_]*)["']\s*\)"""

@@ -1185,6 +1185,16 @@ def main(
 
     _cache_hit_content: Optional[str] = None
     _git_sha = ""
+    # HEAD SHA is diagnostic metadata — compute unconditionally, not tied to cache.
+    try:
+        _sha_r = _sub.run(
+            ["git", "-C", str(target), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=3,
+        )
+        _git_sha = _sha_r.stdout.strip()
+    except Exception:
+        pass
+
     _core_key = ""
     _view_key = ""
     _core_hash = ""
@@ -1193,12 +1203,6 @@ def main(
 
     if not no_cache:
         try:
-            _sha_r = _sub.run(
-                ["git", "-C", str(target), "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True, timeout=3,
-            )
-            _git_sha = _sha_r.stdout.strip()
-
             # Detect actual git root (may be an ancestor of target for monorepos,
             # multi-project repos, or SVN-migrated trees where .git is in a parent).
             # The original "(target / '.git').exists()" check broke these layouts.
@@ -1369,7 +1373,6 @@ def main(
                             _cache_hit_content = None  # rebuild failed → full analysis
 
         except Exception:
-            _git_sha = ""
             _core_key = ""
             _view_key = ""
             _core_hash = ""
@@ -1468,6 +1471,30 @@ def main(
                     "generated_at": _cached_generated_at,
                     "data_scope": _data_scope,
                 })
+                # Patch git_context.uncommitted_files when there are working-tree
+                # changes — the cached body has stale 0 from generation time.
+                if git_context and _uncommitted:
+                    try:
+                        import json as _json_gc
+                        import subprocess as _sub_gc
+                        _patched = _json_gc.loads(_cache_hit_content)
+                        if "git_context" in _patched:
+                            _uc_r = _sub_gc.run(
+                                ["git", "-C", str(target), "status", "--porcelain"],
+                                capture_output=True, text=True, timeout=3,
+                            )
+                            _uc_count = len(
+                                [l for l in _uc_r.stdout.splitlines() if l.strip()]
+                            )
+                            _patched["git_context"]["uncommitted_files"] = _uc_count
+                            _patched["git_context"]["_stale_fields_refreshed"] = [
+                                "uncommitted_files"
+                            ]
+                            _cache_hit_content = _json_gc.dumps(
+                                _patched, indent=2, ensure_ascii=False
+                            )
+                    except Exception:
+                        pass  # stale value better than crash
             write_output(_cache_hit_content, output=output)
             if copy and not output:
                 _copy_to_clipboard(_cache_hit_content)
@@ -3580,6 +3607,18 @@ def endpoints_cmd(
         "-c",
         help="Copy output to system clipboard after a successful run. No-op when --output is used or clipboard is unavailable.",
     ),
+    path_prefix: Optional[str] = typer.Option(
+        None, "--path-prefix", "-p",
+        help="Filter endpoints whose URL path starts with this prefix. Example: /v1/liquidacion",
+    ),
+    controller: Optional[str] = typer.Option(
+        None, "--controller",
+        help="Filter endpoints from this controller class (substring match). Example: LiquidacionJornada",
+    ),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", "-n",
+        help="Maximum number of endpoints to return.",
+    ),
 ) -> None:
     """Extract REST API endpoint surface from Java source files.
 
@@ -3594,6 +3633,9 @@ def endpoints_cmd(
       sourcecode endpoints /path/to/repo
       sourcecode endpoints . --output endpoints.json
       sourcecode endpoints . --format yaml
+      sourcecode endpoints . --path-prefix /v1/liquidacion
+      sourcecode endpoints . --controller LiquidacionJornada
+      sourcecode endpoints . --limit 10
     """
     target = path.resolve()
     if not target.exists() or not target.is_dir():
@@ -3614,6 +3656,26 @@ def endpoints_cmd(
         _ris_ep(target, data)
     except Exception:
         pass
+
+    # Apply filters before serialization.
+    _total_before = data.get("total", len(data.get("endpoints", [])))
+    endpoints_list = data.get("endpoints", [])
+    if path_prefix:
+        endpoints_list = [e for e in endpoints_list if e.get("path", "").startswith(path_prefix)]
+    if controller:
+        _ctrl_lower = controller.lower()
+        endpoints_list = [e for e in endpoints_list if _ctrl_lower in e.get("controller", "").lower()]
+    if limit is not None and limit > 0:
+        endpoints_list = endpoints_list[:limit]
+    if path_prefix or controller or limit is not None:
+        data["endpoints"] = endpoints_list
+        data["total"] = len(endpoints_list)
+        data["_filter"] = {
+            "path_prefix": path_prefix,
+            "controller": controller,
+            "limit": limit,
+            "total_before_filter": _total_before,
+        }
 
     output = _serialize_dict(data, format)
 
