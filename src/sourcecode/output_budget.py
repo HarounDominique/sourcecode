@@ -18,6 +18,7 @@ Always preserved: project_type, project_summary, architecture_summary, task,
 from __future__ import annotations
 
 import json
+import sys
 from typing import Any
 
 
@@ -78,20 +79,36 @@ def _serialized_size(data: Any) -> int:
     return len(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
 
-def trim_to_budget(data: dict, budget_bytes: int, *, label: str = "") -> dict:
+def trim_to_budget(
+    data: dict,
+    budget_bytes: int,
+    *,
+    label: str = "",
+    skip: bool = False,
+    warn_stderr: bool = False,
+) -> dict:
     """Progressively trim *data* to fit within *budget_bytes*.
 
     Preserves the highest-value sections. Adds ``_budget_note`` when trimming
     occurs so callers can surface it to users.
 
-    Returns data unchanged if already within budget.
+    Args:
+        skip: When True (e.g. writing to a file), skip all trimming and return
+              data unchanged with no ``_budget_note``.
+        warn_stderr: When True, emit a WARNING line to stderr before returning
+                     if trimming was applied. Used for stdout output so users
+                     see the warning before the JSON payload.
+
+    Returns data unchanged if already within budget or ``skip=True``.
     """
-    if _serialized_size(data) <= budget_bytes:
+    if skip or _serialized_size(data) <= budget_bytes:
         return data
 
     result: dict = dict(data)
     original_size = _serialized_size(result)
     trimmed_sections: list[str] = []
+    # Track original counts for total_omitted_items calculation.
+    _original_counts: dict[str, int] = {}
 
     for top_key, inner_key, max_items in _TRIM_SCHEDULE:
         if _serialized_size(result) <= budget_bytes:
@@ -107,9 +124,12 @@ def trim_to_budget(data: dict, budget_bytes: int, *, label: str = "") -> dict:
             if max_items == 0:
                 if top_key in _ALWAYS_KEEP:
                     continue
+                if isinstance(section_val, list):
+                    _original_counts[top_key] = _original_counts.get(top_key, len(section_val))
                 del result[top_key]
                 trimmed_sections.append(f"{top_key}:dropped")
             elif isinstance(section_val, list) and len(section_val) > max_items:
+                _original_counts[top_key] = _original_counts.get(top_key, len(section_val))
                 result[top_key] = section_val[:max_items]
                 trimmed_sections.append(f"{top_key}≤{max_items}")
         else:
@@ -119,19 +139,29 @@ def trim_to_budget(data: dict, budget_bytes: int, *, label: str = "") -> dict:
             if inner_key not in section_val:
                 continue
             inner_val = section_val[inner_key]
+            _inner_key = f"{top_key}.{inner_key}"
             if max_items == 0:
+                if isinstance(inner_val, list):
+                    _original_counts[_inner_key] = _original_counts.get(_inner_key, len(inner_val))
                 new_sec = dict(section_val)
                 del new_sec[inner_key]
                 result[top_key] = new_sec
-                trimmed_sections.append(f"{top_key}.{inner_key}:dropped")
+                trimmed_sections.append(f"{_inner_key}:dropped")
             elif isinstance(inner_val, list) and len(inner_val) > max_items:
+                _original_counts[_inner_key] = _original_counts.get(_inner_key, len(inner_val))
                 new_sec = dict(section_val)
                 new_sec[inner_key] = inner_val[:max_items]
                 result[top_key] = new_sec
-                trimmed_sections.append(f"{top_key}.{inner_key}≤{max_items}")
+                trimmed_sections.append(f"{_inner_key}≤{max_items}")
 
     final_size = _serialized_size(result)
     if trimmed_sections:
+        # Build human-readable section summary for note/warning.
+        _section_summary_parts: list[str] = []
+        for _sk, _orig in _original_counts.items():
+            _cur_key = _sk.replace(".", "/")  # normalize for display
+            _section_summary_parts.append(f"{_sk} ({_orig} total)")
+
         note = (
             f"Output trimmed {original_size // 1024}KB → {final_size // 1024}KB "
             f"(budget {budget_bytes // 1024}KB). "
@@ -141,6 +171,51 @@ def trim_to_budget(data: dict, budget_bytes: int, *, label: str = "") -> dict:
         if label:
             note = f"[{label}] {note}"
         result["_budget_note"] = note
+
+        # Compute total omitted items across all truncated lists.
+        total_omitted = 0
+        for _sk, _orig in _original_counts.items():
+            if ":dropped" in "".join(s for s in trimmed_sections if _sk in s):
+                total_omitted += _orig
+            else:
+                # Find the last max_items cap applied to this key.
+                _caps = [
+                    int(s.split("≤")[1])
+                    for s in trimmed_sections
+                    if s.startswith(_sk + "≤")
+                ]
+                _cap = min(_caps) if _caps else 0
+                total_omitted += max(0, _orig - _cap)
+
+        result["_truncation_summary"] = {
+            "total_omitted_items": total_omitted,
+            "original_size_kb": original_size // 1024,
+            "final_size_kb": final_size // 1024,
+            "budget_kb": budget_bytes // 1024,
+        }
+
+        if warn_stderr:
+            # Build per-section counts for the warning line.
+            _warn_sections: list[str] = []
+            for _sk, _orig in _original_counts.items():
+                _caps = [
+                    int(s.split("≤")[1])
+                    for s in trimmed_sections
+                    if s.startswith(_sk + "≤")
+                ]
+                _shown = min(_caps) if _caps else 0
+                _warn_sections.append(f"{_sk} ({_shown}/{_orig})")
+            _warn_line = (
+                f"WARNING: Output will be trimmed "
+                f"({original_size // 1024}KB → {final_size // 1024}KB, "
+                f"budget {budget_bytes // 1024}KB). "
+                f"Affected: {', '.join(_warn_sections)}. "
+                "Use --output <file> to capture full output.\n"
+            )
+            if label:
+                _warn_line = f"[{label}] {_warn_line}"
+            sys.stderr.write(_warn_line)
+            sys.stderr.flush()
 
     return result
 

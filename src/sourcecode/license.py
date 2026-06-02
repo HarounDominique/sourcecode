@@ -206,13 +206,20 @@ def can_use(feature_name: str) -> bool:
     return is_pro
 
 
-def require_feature(feature_name: str) -> None:
+def require_feature(
+    feature_name: str,
+    extra_fields: Optional[dict] = None,
+) -> None:
     """Exit with a clean upgrade prompt when feature_name requires Pro.
 
     Re-validates stale cached license before gating (once per 24 h, online).
 
     Writes human-readable context to stderr (terminal UX) and a JSON error
     to stdout (backward-compatible machine-readable format).
+
+    Args:
+        extra_fields: Optional extra keys merged into the JSON error payload
+                      (e.g. ``{"free_tier_alternative": "..."}``)
 
     Example:
         from sourcecode.license import require_feature
@@ -241,7 +248,7 @@ def require_feature(feature_name: str) -> None:
     sys.stderr.flush()
 
     # JSON on stdout — backward-compatible for CI / MCP consumers
-    payload = {
+    payload: dict = {
         "error": "pro_required",
         "feature": feature_name,
         "message": (
@@ -250,9 +257,11 @@ def require_feature(feature_name: str) -> None:
         ),
         "upgrade_hint": "sourcecode activate <license_key>",
     }
+    if extra_fields:
+        payload.update(extra_fields)
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     sys.stdout.flush()
-    sys.exit(1)
+    sys.exit(2)  # exit 2 = Pro feature required (0=ok, 1=runtime error, 2=license required)
 
 
 def require_pro(feature_name: str) -> None:

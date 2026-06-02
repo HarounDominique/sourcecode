@@ -887,6 +887,14 @@ def main(
         )
         raise typer.Exit(code=1)
 
+    # MEJORA-1: --compact is silently ignored when --agent is used.
+    # Always warn (not TTY-gated): user explicitly set both flags, one is being ignored.
+    if compact and agent:
+        typer.echo(
+            "[warning] --compact ignored when --agent is used. --agent takes precedence.",
+            err=True,
+        )
+
     # P0-2 FIX: --full without --compact or --agent has no effect in contract/raw mode.
     # Warn so the user knows the flag is not doing anything.
     if full and not compact and not agent:
@@ -1970,9 +1978,11 @@ def main(
             changed_only = False
         if _git_confirmed_clean:
             _nc_payload = json.dumps({
+                "changed_files_count": 0,
                 "changed_files": [],
                 "message": "no uncommitted changes detected",
                 "analysis_scope": "empty",
+                "note": "No uncommitted changes detected. No output produced — use without --changed-only for full context.",
                 "_meta": {"changed_only": True},
             }, ensure_ascii=False)
             write_output(_nc_payload, output=output)
@@ -2078,8 +2088,9 @@ def main(
         if not no_redact:
             data = redact_dict(data)
         # P0-1: Apply output budget — safety net for large repos.
+        # Skip budget when writing to a file (no size constraint); warn on stdout.
         from sourcecode.output_budget import trim_to_budget as _trim, BUDGET_AGENT
-        data = _trim(data, BUDGET_AGENT, label="agent")
+        data = _trim(data, BUDGET_AGENT, label="agent", skip=(output is not None), warn_stderr=(output is None))
         # FIX-P0-2: agent mode must honour --format yaml (previously always emitted JSON).
         if format == "yaml":
             from io import StringIO
@@ -2122,8 +2133,9 @@ def main(
         if not no_redact:
             data = redact_dict(data)
         # P0-1: Apply output budget — safety net for large repos.
+        # Skip budget when writing to a file (no size constraint); warn on stdout.
         from sourcecode.output_budget import trim_to_budget as _trim_c, BUDGET_COMPACT
-        data = _trim_c(data, BUDGET_COMPACT, label="compact")
+        data = _trim_c(data, BUDGET_COMPACT, label="compact", skip=(output is not None), warn_stderr=(output is None))
         if format == "yaml":
             from io import StringIO
             from ruamel.yaml import YAML as _YAML
@@ -2501,8 +2513,11 @@ def prepare_context_cmd(
     # Pro gate: generate-tests and delta require an active Pro license.
     _PRO_TASKS: frozenset[str] = frozenset({"generate-tests", "delta"})
     if task in _PRO_TASKS:
-        from sourcecode.license import require_pro as _require_pro
-        _require_pro(task)
+        from sourcecode.license import require_feature as _require_feature
+        _extra: dict = {}
+        if task == "delta":
+            _extra["free_tier_alternative"] = "sourcecode prepare-context review-pr --since <ref>"
+        _require_feature(task, extra_fields=_extra if _extra else None)
 
     # Validate --format: only "json" and "github-comment" are valid for prepare-context.
     # "yaml" is intentionally NOT supported here (use main command for yaml output).
@@ -3299,6 +3314,10 @@ def impact_cmd(
       - endpoints_affected — HTTP endpoints that transitively depend on the target
       - transactional_boundaries_touched — @Transactional classes in the call chain
       - risk_score / risk_level — quantified change risk
+
+    \b
+    NOTE: This feature requires a Pro license. Run 'sourcecode license' for details.
+    Upgrade: sourcecode activate <license_key>
 
     \b
     Examples:
@@ -4326,10 +4345,19 @@ def mcp_status() -> None:
             typer.echo(f"    Fix: sourcecode mcp init --target {client.slug}")
     typer.echo("")
 
+    # Build config state map for cross-check in Stage 3.
+    _configured_clients: set[str] = set()
+    for _c in clients:
+        if _c.app_installed:
+            _cfg = applier.read_config(_c.config_path)
+            if applier.is_installed(_cfg):
+                _configured_clients.add(_c.slug)
+
     # Stage 3: Process liveness — is the client app currently running?
     # This is independent from config: a running app may still need restart to pick up config.
     typer.echo("Runtime (client app process running?)")
     any_installed = any(c.app_installed for c in clients)
+    _action_required: list[str] = []
     if not any_installed:
         typer.echo("  (no client apps found — nothing to check)")
     else:
@@ -4338,11 +4366,18 @@ def mcp_status() -> None:
                 continue
             if is_client_running(client):
                 typer.echo(f"  {client.name:<20} ✓ running")
+                if client.slug not in _configured_clients:
+                    _action_required.append(client.name)
             else:
                 typer.echo(f"  {client.name:<20} ✗ not running")
                 typer.echo(f"    Fix: open {client.name}, then run sourcecode mcp status")
 
     typer.echo(sep)
+    if _action_required:
+        for _name in _action_required:
+            typer.echo(f"  ⚠ ACTION REQUIRED: {_name} is running but sourcecode is not configured.")
+        typer.echo("    Run: sourcecode mcp init")
+        typer.echo("")
     typer.echo("  Note:    'configured' and 'running' are checked independently.")
     typer.echo("           A running app still needs restart after first-time config.")
     typer.echo("  Path:    repo_path must use forward slashes: C:/Users/... or /unix/path")

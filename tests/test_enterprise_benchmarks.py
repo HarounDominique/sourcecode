@@ -1725,3 +1725,190 @@ class TestMultiRepoComparisonMatrix:
             assert data.get("workflow") == "modernize"
             assert "hotspot_candidates" in data
             assert "summary" in data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug-fixes 1.33.19 — CRÍTICO 1/2/3 + MEJORA 1/2
+# ─────────────────────────────────────────────────────────────────────────────
+
+import io
+import sys
+from unittest.mock import patch
+
+
+class TestBudgetSkipAndWarn:
+    """CRÍTICO 1 — trim_to_budget skip/warn_stderr params and _truncation_summary."""
+
+    def _big_data(self) -> dict:
+        return {
+            "project_type": "api",
+            "transactional_boundaries": {"classes": [f"Tx{i}" for i in range(30)]},
+            "mybatis": {"dto_mappers": [f"Mapper{i}" for i in range(100)]},
+        }
+
+    def test_skip_true_no_trimming_no_note(self) -> None:
+        data = self._big_data()
+        result = trim_to_budget(data, 50, label="compact", skip=True)
+        assert "_budget_note" not in result
+        assert "_truncation_summary" not in result
+        assert len(result["mybatis"]["dto_mappers"]) == 100
+
+    def test_skip_false_trims_and_adds_note(self) -> None:
+        data = self._big_data()
+        result = trim_to_budget(data, 50, label="compact", skip=False)
+        assert "_budget_note" in result
+        assert "_truncation_summary" in result
+        summary = result["_truncation_summary"]
+        assert summary["total_omitted_items"] > 0
+        assert "original_size_kb" in summary
+        assert "budget_kb" in summary
+
+    def test_warn_stderr_emits_warning_before_output(self) -> None:
+        data = self._big_data()
+        old_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            trim_to_budget(data, 50, label="compact", warn_stderr=True)
+            warning = sys.stderr.getvalue()
+        finally:
+            sys.stderr = old_stderr
+        assert "WARNING" in warning
+        assert "trimmed" in warning.lower() or "trim" in warning.lower()
+
+    def test_warn_stderr_false_no_stderr_output(self) -> None:
+        data = self._big_data()
+        old_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            trim_to_budget(data, 50, label="compact", warn_stderr=False)
+            warning = sys.stderr.getvalue()
+        finally:
+            sys.stderr = old_stderr
+        assert warning == ""
+
+    def test_output_flag_skips_budget_no_note(self, keycloak_like_repo: Path, tmp_path: Path) -> None:
+        """--output <file> must produce full output with no _budget_note."""
+        out_file = tmp_path / "full.json"
+        result = runner.invoke(app, [str(keycloak_like_repo), "--compact", "--output", str(out_file)])
+        assert result.exit_code == 0
+        assert out_file.exists()
+        data = json.loads(out_file.read_text())
+        assert "_budget_note" not in data
+
+    def test_stdout_compact_may_emit_budget_note_on_large_repo(self, keycloak_like_repo: Path) -> None:
+        """Stdout path keeps _budget_note when trimming occurs."""
+        result = runner.invoke(app, [str(keycloak_like_repo), "--compact"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        # Budget note only present when repo actually exceeds BUDGET_COMPACT
+        if "_budget_note" in data:
+            assert "_truncation_summary" in data
+            assert data["_truncation_summary"]["total_omitted_items"] >= 0
+
+
+class TestProLockExitCode:
+    """CRÍTICO 2/3 — Pro-locked features exit with code 2, not 0 or 1."""
+
+    def test_delta_exits_2_without_pro(self, keycloak_like_repo: Path) -> None:
+        with patch("sourcecode.license.is_pro", False), \
+             patch("sourcecode.license._license_data", None), \
+             patch("sourcecode.license._maybe_revalidate", return_value=None):
+            result = runner.invoke(
+                app,
+                ["prepare-context", "delta", str(keycloak_like_repo), "--since", "HEAD~1"],
+            )
+        assert result.exit_code == 2
+
+    def test_delta_error_json_has_free_tier_alternative(self, keycloak_like_repo: Path) -> None:
+        with patch("sourcecode.license.is_pro", False), \
+             patch("sourcecode.license._license_data", None), \
+             patch("sourcecode.license._maybe_revalidate", return_value=None):
+            result = runner.invoke(
+                app,
+                ["prepare-context", "delta", str(keycloak_like_repo), "--since", "HEAD~1"],
+            )
+        # CliRunner mixes stderr into result.output; extract the JSON line
+        json_line = next(
+            (ln for ln in result.output.splitlines() if ln.strip().startswith("{")), None
+        )
+        assert json_line is not None, f"No JSON line in output: {result.output[:200]}"
+        data = json.loads(json_line)
+        assert data["error"] == "pro_required"
+        assert "free_tier_alternative" in data
+        assert "review-pr" in data["free_tier_alternative"]
+
+    def test_impact_exits_2_without_pro(self, keycloak_like_repo: Path) -> None:
+        with patch("sourcecode.license.is_pro", False), \
+             patch("sourcecode.license._license_data", None), \
+             patch("sourcecode.license._maybe_revalidate", return_value=None):
+            result = runner.invoke(app, ["impact", "SomeService", str(keycloak_like_repo)])
+        assert result.exit_code == 2
+
+    def test_impact_help_mentions_pro(self) -> None:
+        result = runner.invoke(app, ["impact", "--help"])
+        assert result.exit_code == 0
+        combined = result.output + (result.stderr or "")
+        assert "pro" in combined.lower() or "license" in combined.lower()
+
+    def test_delta_and_impact_exit_codes_consistent(self, keycloak_like_repo: Path) -> None:
+        with patch("sourcecode.license.is_pro", False), \
+             patch("sourcecode.license._license_data", None), \
+             patch("sourcecode.license._maybe_revalidate", return_value=None):
+            r_delta = runner.invoke(
+                app,
+                ["prepare-context", "delta", str(keycloak_like_repo), "--since", "HEAD~1"],
+            )
+            r_impact = runner.invoke(app, ["impact", "SomeService", str(keycloak_like_repo)])
+        assert r_delta.exit_code == r_impact.exit_code == 2
+
+
+class TestCompactAgentWarning:
+    """MEJORA 1 — --compact --agent emits precedence warning on stderr."""
+
+    def test_compact_agent_warns_compact_ignored(self, keycloak_like_repo: Path) -> None:
+        result = runner.invoke(app, [str(keycloak_like_repo), "--compact", "--agent"])
+        combined = result.output + (result.stderr or "")
+        assert "compact" in combined.lower()
+        assert "ignored" in combined.lower() or "precedence" in combined.lower()
+
+    def test_compact_agent_output_is_agent_format(self, keycloak_like_repo: Path) -> None:
+        result = runner.invoke(app, [str(keycloak_like_repo), "--compact", "--agent"])
+        assert result.exit_code == 0
+        # CliRunner mixes stderr warning into output; find the JSON block
+        json_start = result.output.find("{")
+        assert json_start >= 0, f"No JSON in output: {result.output[:200]}"
+        data = json.loads(result.output[json_start:])
+        assert "project" in data
+
+
+class TestChangedOnlyCleanRepo:
+    """MEJORA 2 — --changed-only on clean repo emits changed_files_count + note."""
+
+    @pytest.fixture()
+    def clean_git_repo(self, tmp_path: Path) -> Path:
+        import subprocess as _sp
+        repo = tmp_path / "clean-repo"
+        repo.mkdir()
+        (repo / "pom.xml").write_text("<project/>")
+        (repo / "src").mkdir()
+        (repo / "src" / "Main.java").write_text("public class Main {}")
+        _sp.run(["git", "init"], cwd=repo, capture_output=True)
+        _sp.run(["git", "config", "user.email", "test@test.com"], cwd=repo, capture_output=True)
+        _sp.run(["git", "config", "user.name", "Test"], cwd=repo, capture_output=True)
+        _sp.run(["git", "add", "."], cwd=repo, capture_output=True)
+        _sp.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
+        return repo
+
+    def test_changed_only_clean_repo_has_count_field(self, clean_git_repo: Path) -> None:
+        result = runner.invoke(app, [str(clean_git_repo), "--changed-only"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "changed_files_count" in data
+        assert data["changed_files_count"] == 0
+
+    def test_changed_only_clean_repo_has_note(self, clean_git_repo: Path) -> None:
+        result = runner.invoke(app, [str(clean_git_repo), "--changed-only"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "note" in data
+        assert data["note"]  # non-empty
