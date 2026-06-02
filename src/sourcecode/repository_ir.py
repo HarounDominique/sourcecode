@@ -2399,6 +2399,8 @@ def _route_security_from_sym(
             m = _re2.search(r'(?:nombreRecurso\s*=\s*)?["\']([^"\']+)["\']', raw)
             if m:
                 return {"policy": "custom_permission", "required_permission": m.group(1)}
+            # Value is a constant reference or empty — still flag the annotation
+            return {"policy": "custom_annotation", "annotation": "@M3FiltroSeguridad", "resource": raw.strip() or None}
         return None
 
     # Method-level first, then class-level fallback
@@ -2569,6 +2571,11 @@ def _build_route_surface(
             for child_fqn, parent_simple in extends_map.items()
         }
 
+        # Build lookup for security_annotations from phase-2 routes
+        _parent_sec_by_sym: dict[str, object] = {
+            r["symbol"]: r.get("security_annotations") for r in routes
+        }
+
         for cls_simple, data in class_info.items():
             if data["own_endpoints"]:
                 continue
@@ -2602,6 +2609,7 @@ def _build_route_surface(
                                     "method": verb,
                                     "stable_id": stable_id,
                                     "inheritance_depth": depth,
+                                    "security_annotations": _parent_sec_by_sym.get(declaring_sym),
                                 })
                     break
                 chain = simple_extends.get(chain)

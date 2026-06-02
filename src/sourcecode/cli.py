@@ -2566,6 +2566,42 @@ def prepare_context_cmd(
     from dataclasses import asdict
     import time as _time
 
+    # Task-level cache: keyed on (task, git_head, symptom) so warm calls complete in <1s.
+    # Skip for diff-dependent tasks (delta, review-pr), fast mode, and llm_prompt
+    # (those embed per-call content that must not be served from cache).
+    import subprocess as _pctx_sub
+    import hashlib as _pctx_hash
+    from sourcecode import cache as _pctx_cache
+    _pctx_git_sha = ""
+    _pctx_cache_key = ""
+    _pctx_cacheable = task not in ("delta", "review-pr") and not fast and not llm_prompt
+    if _pctx_cacheable:
+        try:
+            _sha_r2 = _pctx_sub.run(
+                ["git", "-C", str(target), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=3,
+            )
+            _pctx_git_sha = _sha_r2.stdout.strip()
+        except Exception:
+            pass
+        if _pctx_git_sha:
+            _sym_h = _pctx_hash.sha256((symptom or "").encode()).hexdigest()[:8]
+            _pctx_cache_key = f"pctx-{task}-{_pctx_git_sha}-{_sym_h}-{format or 'json'}"
+            _cached_pctx = _pctx_cache.read(target, _pctx_cache_key)
+            if _cached_pctx is not None:
+                if output_path is not None:
+                    output_path.write_text(_cached_pctx, encoding="utf-8")
+                else:
+                    sys.stdout.buffer.write(_cached_pctx.encode("utf-8"))
+                    if not _cached_pctx.endswith("\n"):
+                        sys.stdout.buffer.write(b"\n")
+                    sys.stdout.buffer.flush()
+                if copy:
+                    _c = _cached_pctx.strip()
+                    if _c not in ("{}", "[]", "null"):
+                        _copy_to_clipboard(_cached_pctx)
+                return
+
     builder = TaskContextBuilder(target)
     _progress = Progress()
     _phase = f"analyzing ({task})"
@@ -2950,6 +2986,12 @@ def prepare_context_cmd(
     else:
         _pc_content = json.dumps(out, indent=2, ensure_ascii=False)
 
+    if _pctx_cacheable and _pctx_cache_key and format != "github-comment":
+        try:
+            _pctx_cache.write(target, _pctx_cache_key, _pc_content)
+        except Exception:
+            pass
+
     if output_path is not None:
         output_path.write_text(_pc_content, encoding="utf-8")
     else:
@@ -3179,6 +3221,16 @@ def repo_ir_cmd(
                 err=True,
             )
     else:
+        _ir_size = len(output.encode("utf-8"))
+        if _ir_size > 400_000:
+            _ir_tokens = _ir_size // 4
+            sys.stderr.write(
+                f"WARNING: Output is ~{_ir_tokens // 1000}K tokens. This exceeds the context window of "
+                "most LLMs (GPT-4o: 128K, Claude Sonnet: 200K). "
+                "Use --compact or --agent for LLM-consumable context. "
+                "Use --output FILE to save for local search tools.\n"
+            )
+            sys.stderr.flush()
         try:
             sys.stdout.buffer.write(output.encode("utf-8"))
             sys.stdout.buffer.write(b"\n")
@@ -3948,12 +4000,29 @@ def cold_start_cmd(
 
     Returns instantly from persisted RIS — zero re-analysis cost.
     status: cold_start_ready | cold_start_stale | no_ris
+
+    \b
+    Note: Produces large output (~100K–200K tokens for medium repos).
+    Designed for bootstrap snapshots, not direct LLM injection.
+    Use --compact or --agent instead for LLM-consumable context.
+    Use --output FILE to save for local search tools.
     """
     import json as _json
     from sourcecode.ris import get_cold_start_context as _gcs
     target = Path(path).resolve()
     result = _gcs(target)
-    typer.echo(_json.dumps(result, indent=2, ensure_ascii=False))
+    _out = _json.dumps(result, indent=2, ensure_ascii=False)
+    _size = len(_out.encode("utf-8"))
+    if _size > 400_000:
+        _tokens = _size // 4
+        sys.stderr.write(
+            f"WARNING: Output is ~{_tokens // 1000}K tokens. This exceeds the context window of "
+            "most LLMs (GPT-4o: 128K, Claude Sonnet: 200K). "
+            "Use --compact or --agent for LLM-consumable context. "
+            "Use --output FILE to save for local search tools.\n"
+        )
+        sys.stderr.flush()
+    typer.echo(_out)
 
 
 # ── analyze (legacy alias) ────────────────────────────────────────────────────

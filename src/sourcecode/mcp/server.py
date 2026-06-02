@@ -28,6 +28,41 @@ from sourcecode.error_schema import (
 )
 from sourcecode.mcp.runner import CommandError, run_command
 
+# Patch FastMCP's Tool.run to intercept pydantic.ValidationError and return
+# structured JSON instead of the raw "Error executing tool X: 1 validation
+# error..." plain-text string that FastMCP produces by default.
+try:
+    import pydantic as _pydantic
+    from mcp.server.fastmcp.tools.base import Tool as _FastMCPTool
+
+    _orig_tool_run = _FastMCPTool.run
+
+    async def _patched_tool_run(self, arguments, context=None, convert_result=False):  # type: ignore[override]
+        try:
+            return await _orig_tool_run(self, arguments, context=context, convert_result=convert_result)
+        except Exception as _exc:
+            _cause = getattr(_exc, "__cause__", None)
+            if isinstance(_cause, _pydantic.ValidationError):
+                _errors = _cause.errors()
+                _missing = [str(e.get("loc", ("?",))[0]) for e in _errors if e.get("type") == "missing"]
+                _msg = f"Missing required field: {_missing[0]}" if _missing else "Argument validation failed"
+                _payload = {
+                    "success": False,
+                    "data": None,
+                    "error": build_error_object(
+                        INVALID_INPUT_CODE,
+                        _msg,
+                        hint="Pass the supported arguments using the documented tool schema.",
+                        expected=f"{self.name} arguments with required field '{_missing[0]}'" if _missing else f"{self.name} arguments",
+                    ),
+                }
+                return _payload
+            raise
+
+    _FastMCPTool.run = _patched_tool_run  # type: ignore[method-assign]
+except Exception:
+    pass  # never break server startup over a patch failure
+
 # FIX-P0-5: MCP server version must match CLI version exactly.
 # FastMCP does not accept version= in __init__; inject it on the underlying
 # low-level Server so the MCP initialize handshake reports the correct version.
