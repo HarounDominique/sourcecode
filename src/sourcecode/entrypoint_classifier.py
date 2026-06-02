@@ -25,6 +25,31 @@ _DEVELOPMENT_DIRS = frozenset({
 _DEV_MARKERS = ("rspress", "vite", "storybook", "playground", "dev-server")
 _PRODUCTION_SCRIPT_REASONS = {"script:start", "script:serve", "script:server"}
 
+# JVM source trees: directories below these markers are package namespaces,
+# not functional directory roles — "com/example/spaghetti" must not match
+# _AUXILIARY_DIRS just because "example" is a package name component.
+_JVM_SRC_ROOTS = (
+    "src/main/java/", "src/test/java/",
+    "src/main/kotlin/", "src/test/kotlin/",
+    "src/main/scala/", "src/test/scala/",
+    "src/integration-test/java/", "src/integrationTest/java/",
+)
+
+
+def _dir_check_parts(path: str) -> frozenset[str]:
+    """Return path segments used for auxiliary/development dir-name matching.
+
+    For JVM source files the package path (below the source root) is a
+    namespace, not a functional directory hierarchy.  Truncate there so
+    package components like 'example' in com.example.* don't false-match
+    _AUXILIARY_DIRS entries.
+    """
+    for root in _JVM_SRC_ROOTS:
+        idx = path.find(root)
+        if idx >= 0:
+            return frozenset(path[: idx + len(root)].split("/"))
+    return frozenset(path.split("/"))
+
 
 def classify_entry_point(ep: EntryPoint) -> Classification:
     """Return the operational class for an entry point.
@@ -33,7 +58,7 @@ def classify_entry_point(ep: EntryPoint) -> Classification:
     and auxiliary path evidence wins over detector-provided production labels.
     """
     path = ep.path.replace("\\", "/").lower()
-    parts = set(path.split("/"))
+    parts = _dir_check_parts(path)
     reason = (ep.reason or "").lower()
     evidence = (ep.evidence or "").lower()
     marker_text = f"{path} {reason} {evidence}"
