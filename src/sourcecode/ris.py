@@ -422,7 +422,9 @@ def get_cold_start_context(repo_root: Path) -> dict:
         if _validation_status == "incomplete_snapshot" and not stale:
             _status_base = "cold_start_incomplete"
 
+        _compact = ris.compact_summary or {}
         result: dict = {
+            "schema_version": "1.1",
             "status": _status_base,
             "repo_id": ris.repo_id,
             "git_head": ris.git_head,
@@ -433,7 +435,10 @@ def get_cold_start_context(repo_root: Path) -> dict:
             "cache_source": "RIS",
             "data_scope": "RIS_BOOTSTRAP",
             "api_surface_complete": _api_complete,
-            "summary": ris.compact_summary,
+            # Backward-compat alias: old consumers read cold-start.project_type directly.
+            # New consumers should use cold-start.summary.project_type.
+            "project_type": _compact.get("project_type"),
+            "summary": _compact,
             "entrypoints": ris.structural_map.get("entrypoints", []),
             "endpoints": endpoints,
             "hotspots": ris.git_context_snapshot.get("hotspots", []),

@@ -864,6 +864,10 @@ _SYMPTOM_STOP_WORDS: frozenset[str] = frozenset({
     "error", "issue", "problem", "bug",
     "from", "into", "via", "due", "also", "after", "before",
     "slow", "fast", "new", "old",
+    # Diagnostic abbreviations — too ubiquitous in comments/javadoc to be useful
+    # as path/content signals (e.g. "npe" matches "NPE" in thousands of comments).
+    "npe", "oom", "oob", "iae", "ise", "npe", "cce", "aioobe",
+    "exception", "throwable", "stacktrace",
 })
 
 # Repo-scale threshold: above this file count, use stricter injection logic.
@@ -2363,6 +2367,26 @@ class TaskContextBuilder:
                 if _is_large_repo and len(relevant_files) > 40:
                     relevant_files = relevant_files[:40]
 
+                # Score normalization: prevent all-1.0 saturation when many files
+                # accumulate enough boost to hit the cap.  Normalize display scores
+                # relative to max raw signal so the ranked gradient is preserved.
+                _norm_max = max(
+                    (_raw_signals.get(rf.path, rf.score) for rf in relevant_files),
+                    default=1.0,
+                ) or 1.0
+                if _norm_max > 1.0:
+                    relevant_files = [
+                        RelevantFile(
+                            path=rf.path,
+                            role=rf.role,
+                            score=round(min(_raw_signals.get(rf.path, rf.score) / _norm_max, 1.0), 3),
+                            reason=rf.reason,
+                            why=rf.why,
+                            tier=rf.tier,
+                        )
+                        for rf in relevant_files
+                    ]
+
                 # Synonym note (only when synonyms actually fired)
                 if _frontend_kws and _sx_synonyms:
                     symptom_note = (
@@ -2491,12 +2515,27 @@ class TaskContextBuilder:
                     key=lambda x: -(x["public_method_count"] * (1.5 if x["has_framework_annotations"] else 1.0))
                 )
                 _top = _java_candidates if all_gaps else _java_candidates[:20]
+                _max_rank = max(
+                    (c["public_method_count"] * (1.5 if c["has_framework_annotations"] else 1.0)
+                     for c in _java_candidates),
+                    default=1.0,
+                ) or 1.0
                 test_gaps = [
                     {
                         "path": c["path"],
                         "public_method_count": c["public_method_count"],
                         "has_framework_annotations": c["has_framework_annotations"],
                         "rank_score": round(c["public_method_count"] * (1.5 if c["has_framework_annotations"] else 1.0), 1),
+                        "score": round(min(
+                            c["public_method_count"] * (1.5 if c["has_framework_annotations"] else 1.0) / _max_rank,
+                            1.0,
+                        ), 3),
+                        "reason": (
+                            (f"{c['public_method_count']} public method{'s' if c['public_method_count'] != 1 else ''}; "
+                             if c["public_method_count"] else "")
+                            + ("has Spring/Jakarta framework annotations" if c["has_framework_annotations"]
+                               else "no test coverage detected")
+                        ).strip("; ") or "untested source file",
                     }
                     for c in _top
                 ]

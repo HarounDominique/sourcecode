@@ -88,6 +88,31 @@ _AUXILIARY_DIR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?:^|/)stories(?:/|$)"),
 ]
 
+# JVM source roots: path components below these are package namespaces, not
+# functional directories. "com/example/foo" must not match the "example"
+# auxiliary-dir pattern just because "example" is a package name component.
+_JVM_SRC_ROOTS: tuple[str, ...] = (
+    "src/main/java/", "src/test/java/",
+    "src/main/kotlin/", "src/test/kotlin/",
+    "src/main/scala/", "src/test/scala/",
+    "src/integration-test/java/", "src/integrationTest/java/",
+)
+
+
+def _jvm_strip_path(path: str) -> str:
+    """Return the path segment used for auxiliary-dir pattern matching.
+
+    For JVM source trees the package path below the source root is a namespace,
+    not a functional directory hierarchy.  Truncate at the source root so that
+    package components like 'example' in com.example.* don't false-match
+    _AUXILIARY_DIR_PATTERNS entries.
+    """
+    for root in _JVM_SRC_ROOTS:
+        idx = path.find(root)
+        if idx >= 0:
+            return path[: idx + len(root)]
+    return path
+
 # Test file patterns — scored low, excluded from default contract output
 _TEST_FILE_PATTERNS: tuple[str, ...] = (
     "_test.", ".test.", ".spec.", "test_", "conftest", "_spec.",
@@ -221,7 +246,7 @@ class RelevanceScorer:
         return self._is_auxiliary(path.replace("\\", "/"))
 
     def _is_auxiliary(self, norm: str) -> bool:
-        return any(p.search(norm) for p in _AUXILIARY_DIR_PATTERNS)
+        return any(p.search(_jvm_strip_path(norm)) for p in _AUXILIARY_DIR_PATTERNS)
 
     def package_role(self, path: str) -> str:
         """Return the monorepo package role for this path, or empty string."""
