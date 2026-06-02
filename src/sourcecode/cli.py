@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import threading
 import time
 from pathlib import Path
@@ -298,9 +299,73 @@ def _preprocess_args(args: list[str]) -> list[str]:
 
 def _preprocess_argv() -> None:
     """Apply _preprocess_args to sys.argv in-place (used by main_entry)."""
-    import sys as _sys
-    modified = _preprocess_args(_sys.argv[1:])
-    _sys.argv = _sys.argv[:1] + modified
+    modified = _preprocess_args(sys.argv[1:])
+    sys.argv = sys.argv[:1] + modified
+
+
+def _is_always_include_ref(p: str) -> bool:
+    """Return True for security-const files that must survive --changed-only filtering."""
+    name = p.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if name.endswith("Const.java") or name.endswith("Constants.java"):
+        return True
+    parts = p.replace("\\", "/").lower().split("/")
+    return any(seg in ("security", "seguridad", "constantes") for seg in parts)
+
+
+def filter_sensitive_files(tree: dict[str, Any], redactor: Any) -> dict[str, Any]:
+    """Recursively filter .env and *.secret entries from the file tree (SEC-02)."""
+    filtered: dict[str, Any] = {}
+    for name, value in tree.items():
+        if redactor.should_exclude_file(name):
+            continue  # exclude .env, *.secret from tree
+        if isinstance(value, dict):
+            filtered[name] = filter_sensitive_files(value, redactor)
+        else:
+            filtered[name] = value
+    return filtered
+
+
+def prune_workspace_paths(
+    tree: dict[str, Any], workspace_paths: list[str]
+) -> dict[str, Any]:
+    """Remove workspace sub-trees from a file tree by path segments."""
+    pruned = dict(tree)
+    for workspace_path in workspace_paths:
+        parts = [part for part in workspace_path.split("/") if part]
+        if not parts:
+            continue
+        node = pruned
+        for index, part in enumerate(parts):
+            if not isinstance(node, dict) or part not in node:
+                break
+            if index == len(parts) - 1:
+                node.pop(part, None)
+                break
+            child = node.get(part)
+            if not isinstance(child, dict):
+                break
+            node = child
+    return pruned
+
+
+def _inject_cache_meta(raw: str, meta: dict) -> str:
+    """Inject ``_cache`` provenance block into a JSON dict string.
+
+    Parses *raw* as JSON, adds ``_cache`` key, re-serialises.  Returns *raw*
+    unchanged on any parse failure or non-dict JSON (YAML pass-through, etc.).
+    """
+    try:
+        import json as _jm
+        obj = _jm.loads(raw)
+        if isinstance(obj, dict):
+            obj["_cache"] = meta
+            # Top-level cache_source for one release — backward compat alias
+            if "cache_source" in meta:
+                obj["cache_source"] = meta["cache_source"]
+            return _jm.dumps(obj, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+    return raw
 
 
 def _emit_error_json(error: str, message: str, **context: object) -> None:
@@ -311,10 +376,9 @@ def _emit_error_json(error: str, message: str, **context: object) -> None:
     agents and tools can parse stderr reliably regardless of error type.
     """
     import json as _json
-    import sys as _sys
     payload = build_error_envelope(error, message, **context)
-    _sys.stderr.write(_json.dumps(payload, ensure_ascii=False) + "\n")
-    _sys.stderr.flush()
+    sys.stderr.write(_json.dumps(payload, ensure_ascii=False) + "\n")
+    sys.stderr.flush()
 
 
 # H-06: Intercept Click-level UsageError (unknown options, bad args) and emit JSON.
@@ -325,7 +389,6 @@ try:
 
     def _json_click_usage_error_show(self: Any, file: Any = None) -> None:  # type: ignore[override]
         import json as _je
-        import sys as _jse
         _flag = str((getattr(self, "option_name", None) or getattr(self, "param_hint", None)) or "").strip("'\"")
         _context: dict[str, object] = {}
         if _flag:
@@ -335,8 +398,8 @@ try:
             self.format_message(),
             **_context,
         )
-        _jse.stderr.write(_je.dumps(payload, ensure_ascii=False) + "\n")
-        _jse.stderr.flush()
+        sys.stderr.write(_je.dumps(payload, ensure_ascii=False) + "\n")
+        sys.stderr.flush()
 
     _click_exc.UsageError.show = _json_click_usage_error_show  # type: ignore[method-assign]
 except Exception:
@@ -346,12 +409,11 @@ except Exception:
 def _copy_to_clipboard(content: str) -> bool:
     """Copy text to system clipboard. Returns True on success, False otherwise (never raises)."""
     import subprocess
-    import sys as _sys
     try:
-        if _sys.platform == "darwin":
+        if sys.platform == "darwin":
             subprocess.run(["pbcopy"], input=content.encode("utf-8"), check=True, timeout=10)
             return True
-        elif _sys.platform == "win32":
+        elif sys.platform == "win32":
             subprocess.run(["clip"], input=content.encode("utf-16"), check=True, timeout=10)
             return True
         else:
@@ -456,9 +518,8 @@ def _maybe_ask_consent() -> None:
 
 def _maybe_show_mcp_hint() -> None:
     """Show MCP integration hint once after first install, on TTY only."""
-    import sys as _sys
     try:
-        if not _sys.stderr.isatty():
+        if not sys.stderr.isatty():
             return
         from sourcecode.telemetry.config import _CONFIG_FILE, _load, _save
         data = _load()
@@ -501,6 +562,15 @@ FORMAT_CHOICES = ["json", "yaml"]
 GRAPH_DETAIL_CHOICES = ["high", "medium", "full"]
 GRAPH_EDGE_CHOICES = {"imports", "calls", "contains", "extends"}
 DOCS_DEPTH_CHOICES = ["module", "symbols", "full"]
+
+# ── Module-level constants ─────────────────────────────────────────────────────
+_FREE_TIER_NODE_CAP: int = 10  # semantic cap for graph nodes and semantic symbols in free tier
+_JAVA_MIN_SCAN_DEPTH: int = 12  # Maven src/main/java/<pkg>/<module>/File depth floor
+_JVM_STACKS: frozenset[str] = frozenset({"java", "kotlin", "scala", "groovy"})
+_IMPACT_PRIORITY_THRESHOLDS: list[tuple[float, str]] = [
+    (0.60, "high"),
+    (0.40, "medium"),
+]
 
 
 def version_callback(value: bool) -> None:
@@ -908,8 +978,7 @@ def main(
     # P1-2 FIX: --changed-only silently implies --compact; inform only on TTY.
     # PowerShell 5.1 interprets any stderr write (even with exit 0) as NativeCommandError.
     # Gate on isatty() so pipeline consumers never see informational noise on stderr.
-    import sys as _sys_tty
-    if changed_only and not compact and not agent and _sys_tty.stderr.isatty():
+    if changed_only and not compact and not agent and sys.stderr.isatty():
         typer.echo(
             "[info] --changed-only implies --compact (bounding output to changed files).",
             err=True,
@@ -1062,8 +1131,7 @@ def main(
     # Require at least 8: src(1)+main(2)+java(3)+com(4)+co(5)+app(6)+module(7)+file.
     _java_manifest_names = {"pom.xml", "build.gradle", "build.gradle.kts"}
     _is_java = any(Path(m).name in _java_manifest_names for m in manifests)
-    _java_min_depth = 12
-    effective_depth = max(depth, _java_min_depth) if _is_java and depth < _java_min_depth else depth
+    effective_depth = max(depth, _JAVA_MIN_SCAN_DEPTH) if _is_java and depth < _JAVA_MIN_SCAN_DEPTH else depth
 
     if symbol is not None and _is_java:
         _emit_error_json(
@@ -1098,25 +1166,6 @@ def main(
         env_map = True
         code_notes = True
         architecture = True
-
-    def _inject_cache_meta(raw: str, meta: dict) -> str:
-        """Inject ``_cache`` provenance block into a JSON dict string.
-
-        Parses *raw* as JSON, adds ``_cache`` key, re-serialises.  Returns *raw*
-        unchanged on any parse failure or non-dict JSON (YAML pass-through, etc.).
-        """
-        try:
-            import json as _jm
-            obj = _jm.loads(raw)
-            if isinstance(obj, dict):
-                obj["_cache"] = meta
-                # Top-level cache_source for one release — backward compat alias
-                if "cache_source" in meta:
-                    obj["cache_source"] = meta["cache_source"]
-                return _jm.dumps(obj, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
-        return raw
 
     # ── Two-layer cache ────────────────────────────────────────────────────────
     # L1 (core): (repo, commit, analysis_flags) → pre-computed view data dict
@@ -1314,13 +1363,12 @@ def main(
         _extra_excludes = frozenset(e.strip() for e in exclude.split(",") if e.strip())
         # IMP-2: warn if the exclude value looks like it was swallowed as a path
         # (BUG-2 symptom in older versions: --exclude value consumed as repo path).
-        import sys as _sys_warn
         if len(_extra_excludes) == 1 and Path(list(_extra_excludes)[0]).is_dir():
-            _sys_warn.stderr.write(
+            sys.stderr.write(
                 f"[sourcecode] Warning: --exclude value '{list(_extra_excludes)[0]}' is a directory path. "
                 "If this was meant as a pattern, use --exclude=pattern or --exclude pattern (both are supported).\n"
             )
-            _sys_warn.stderr.flush()
+            sys.stderr.flush()
 
     _progress = Progress()
     _progress.start("scanning files")
@@ -1329,49 +1377,16 @@ def main(
                                extra_excludes=_extra_excludes)
     raw_tree = scanner.scan_tree()
 
-    # 2. Filter .env and *.secret entries from file tree (SEC-02, all levels)
-    def filter_sensitive_files(tree: dict[str, Any]) -> dict[str, Any]:
-        filtered: dict[str, Any] = {}
-        for name, value in tree.items():
-            if redactor.should_exclude_file(name):
-                continue  # exclude .env, *.secret from tree
-            if isinstance(value, dict):
-                filtered[name] = filter_sensitive_files(value)
-            else:
-                filtered[name] = value
-        return filtered
-
-    def prune_workspace_paths(
-        tree: dict[str, Any], workspace_paths: list[str]
-    ) -> dict[str, Any]:
-        pruned = dict(tree)
-        for workspace_path in workspace_paths:
-            parts = [part for part in workspace_path.split("/") if part]
-            if not parts:
-                continue
-            node = pruned
-            for index, part in enumerate(parts):
-                if not isinstance(node, dict) or part not in node:
-                    break
-                if index == len(parts) - 1:
-                    node.pop(part, None)
-                    break
-                child = node.get(part)
-                if not isinstance(child, dict):
-                    break
-                node = child
-        return pruned
-
     _progress.update("parsing manifests")
-    file_tree = filter_sensitive_files(raw_tree)
+    # 2. Filter .env and *.secret entries from file tree (SEC-02, all levels)
+    file_tree = filter_sensitive_files(raw_tree, redactor)
     detector = ProjectDetector(build_default_detectors())
     workspace_analysis = WorkspaceAnalyzer().analyze(target, manifests)
 
     # Adaptive traversal handles monorepo source root discovery automatically.
     # Emit a diagnostic when topology confidence is low so users know why.
-    import sys as _sys
     if _topology.workspace_type == "monorepo" and _topology.confidence < 0.5:
-        if _sys.stderr.isatty():
+        if sys.stderr.isatty():
             typer.echo(
                 "[traversal] monorepo detected but source root confidence is low "
                 f"({_topology.confidence:.0%}). Use --depth 8 or higher if files are missing.",
@@ -1495,7 +1510,7 @@ def main(
                 continue
         _ws_topology = RepoClassifier().classify(workspace_root)
         workspace_scanner = AdaptiveScanner(workspace_root, topology=_ws_topology, base_depth=depth)
-        workspace_tree = filter_sensitive_files(workspace_scanner.scan_tree())
+        workspace_tree = filter_sensitive_files(workspace_scanner.scan_tree(), redactor)
         workspace_manifests = workspace_scanner.find_manifests()
         workspace_stacks, workspace_entry_points, _ = detector.detect(
             workspace_root,
@@ -1578,10 +1593,9 @@ def main(
         from sourcecode.license import is_pro as _lp_is_pro_gm
     except Exception:
         _lp_is_pro_gm = False
-    _FREE_NODE_CAP = 10
     if not _lp_is_pro_gm and graph_analyzer is not None:
-        if _effective_max_nodes is None or _effective_max_nodes > _FREE_NODE_CAP:
-            _effective_max_nodes = _FREE_NODE_CAP
+        if _effective_max_nodes is None or _effective_max_nodes > _FREE_TIER_NODE_CAP:
+            _effective_max_nodes = _FREE_TIER_NODE_CAP
 
     module_graph = (
         graph_analyzer.merge_graphs(
@@ -1659,7 +1673,8 @@ def main(
                     target / ws.path,
                     (
                         filter_sensitive_files(
-                            AdaptiveScanner(target / ws.path, base_depth=depth).scan_tree()
+                            AdaptiveScanner(target / ws.path, base_depth=depth).scan_tree(),
+                            redactor,
                         )
                     ),
                     workspace=ws.path,
@@ -1714,8 +1729,8 @@ def main(
             from sourcecode.license import is_pro as _lp_is_pro_sem
         except Exception:
             _lp_is_pro_sem = False
-        if not _lp_is_pro_sem and len(sm.semantic_symbols) > _FREE_NODE_CAP:
-            sm = replace(sm, semantic_symbols=sm.semantic_symbols[:_FREE_NODE_CAP])
+        if not _lp_is_pro_sem and len(sm.semantic_symbols) > _FREE_TIER_NODE_CAP:
+            sm = replace(sm, semantic_symbols=sm.semantic_symbols[:_FREE_TIER_NODE_CAP])
 
     # Runtime architecture — classify workspace packages for structural summaries
     if workspace_analysis.workspaces:
@@ -1996,8 +2011,7 @@ def main(
         from sourcecode.contract_pipeline import ContractPipeline
         from sourcecode.contract_model import ContractSummary as _ContractSummary
         # FIX-1: Java projects need higher caps — many files, comprehensive coverage required
-        _jvm_stacks = {"java", "kotlin", "scala", "groovy"}
-        _is_jvm = any(s.stack in _jvm_stacks for s in sm.stacks)
+        _is_jvm = any(s.stack in _JVM_STACKS for s in sm.stacks)
         # FIX-1: Java projects need higher caps and no relevance threshold
         _max_files_cp = 2500 if _is_jvm else 500
         _cp = ContractPipeline(max_files=_max_files_cp)
@@ -2040,8 +2054,7 @@ def main(
             )
         sm = _replace(sm, file_contracts=_contracts, contract_summary=_contract_summary)
         if symbol is not None and len(_contracts) == 0:
-            _jvm_stacks = {"java", "kotlin", "scala", "groovy"}
-            _is_jvm_repo = any(s.stack in _jvm_stacks for s in sm.stacks)
+            _is_jvm_repo = any(s.stack in _JVM_STACKS for s in sm.stacks)
             if _is_jvm_repo:
                 typer.echo(
                     f"[warning] --symbol '{symbol}' matched 0 files. "
@@ -2067,22 +2080,7 @@ def main(
         data = _contract_view(sm, emit_graph=emit_graph, depth=_depth)
         if not no_redact:
             data = redact_dict(data)
-        if format == "yaml":
-            from io import StringIO
-            from ruamel.yaml import YAML as _YAML
-            _yaml = _YAML()
-            _yaml.default_flow_style = False
-            _yaml.representer.add_representer(
-                type(None),
-                lambda dumper, data_val: dumper.represent_scalar(
-                    "tag:yaml.org,2002:null", "null"
-                ),
-            )
-            _stream = StringIO()
-            _yaml.dump(data, _stream)
-            content = _stream.getvalue()
-        else:
-            content = json.dumps(data, indent=2, ensure_ascii=False)
+        content = _serialize_dict(data, format)
     elif agent:
         data = agent_view(sm, full=full)
         if not no_redact:
@@ -2092,22 +2090,7 @@ def main(
         from sourcecode.output_budget import trim_to_budget as _trim, BUDGET_AGENT
         data = _trim(data, BUDGET_AGENT, label="agent", skip=(output is not None), warn_stderr=(output is None))
         # FIX-P0-2: agent mode must honour --format yaml (previously always emitted JSON).
-        if format == "yaml":
-            from io import StringIO
-            from ruamel.yaml import YAML as _YAML
-            _yaml_ag = _YAML()
-            _yaml_ag.default_flow_style = False
-            _yaml_ag.representer.add_representer(
-                type(None),
-                lambda dumper, data_val: dumper.represent_scalar(
-                    "tag:yaml.org,2002:null", "null"
-                ),
-            )
-            _stream_ag = StringIO()
-            _yaml_ag.dump(data, _stream_ag)
-            content = _stream_ag.getvalue()
-        else:
-            content = json.dumps(data, indent=2, ensure_ascii=False)
+        content = _serialize_dict(data, format)
     elif compact:
         if changed_only and _allowed_changed_files:
             # GAP-5: preserve full entry_points for architecture context even in
@@ -2115,13 +2098,6 @@ def main(
             # ALWAYS-INCLUDE: security-const files must stay in file_paths even when
             # not in the git diff — they resolve Java constant references used in
             # @M3FiltroSeguridad annotations (read-only anchors, not diff output).
-            def _is_always_include_ref(p: str) -> bool:
-                name = p.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-                if name.endswith("Const.java") or name.endswith("Constants.java"):
-                    return True
-                parts = p.replace("\\", "/").lower().split("/")
-                return any(seg in ("security", "seguridad", "constantes") for seg in parts)
-
             sm = _replace(sm,
                 file_paths=[
                     p for p in sm.file_paths
@@ -2136,45 +2112,12 @@ def main(
         # Skip budget when writing to a file (no size constraint); warn on stdout.
         from sourcecode.output_budget import trim_to_budget as _trim_c, BUDGET_COMPACT
         data = _trim_c(data, BUDGET_COMPACT, label="compact", skip=(output is not None), warn_stderr=(output is None))
-        if format == "yaml":
-            from io import StringIO
-            from ruamel.yaml import YAML as _YAML
-            _yaml = _YAML()
-            _yaml.default_flow_style = False
-            _yaml.representer.add_representer(
-                type(None),
-                lambda dumper, data_val: dumper.represent_scalar(
-                    "tag:yaml.org,2002:null", "null"
-                ),
-            )
-            _stream = StringIO()
-            _yaml.dump(data, _stream)
-            content = _stream.getvalue()
-        else:
-            content = json.dumps(data, indent=2, ensure_ascii=False)
+        content = _serialize_dict(data, format)
     else:
         raw_dict = standard_view(sm, include_tree=tree and not no_tree)
         if not no_redact:
             raw_dict = redact_dict(raw_dict)
-
-        if format == "yaml":
-            from io import StringIO
-
-            from ruamel.yaml import YAML
-
-            yaml = YAML()
-            yaml.default_flow_style = False
-            yaml.representer.add_representer(
-                type(None),
-                lambda dumper, data_val: dumper.represent_scalar(
-                    "tag:yaml.org,2002:null", "null"
-                ),
-            )
-            stream = StringIO()
-            yaml.dump(raw_dict, stream)
-            content = stream.getvalue()
-        else:
-            content = json.dumps(raw_dict, indent=2, ensure_ascii=False)
+        content = _serialize_dict(raw_dict, format)
 
     # 5. Telemetry (fire-and-forget, never blocks)
     try:
@@ -2325,7 +2268,6 @@ def _serialize_relevant_file(f: Any) -> dict:
 
 def _transform_impact_scores(scores: dict) -> dict:
     """Convert internal impact_score_per_file to human-readable review signals."""
-    _THRESHOLDS = [(0.60, "high"), (0.40, "medium")]
     _CT_LABELS: dict[str, str] = {
         "security_change":    "security-sensitive change",
         "behavioral_change":  "behavioral change",
@@ -2337,7 +2279,7 @@ def _transform_impact_scores(scores: dict) -> dict:
     result: dict = {}
     for path, entry in scores.items():
         raw = entry.get("_rank_score", 0.0)
-        priority = next((p for thresh, p in _THRESHOLDS if raw >= thresh), "low")
+        priority = next((p for thresh, p in _IMPACT_PRIORITY_THRESHOLDS if raw >= thresh), "low")
         signals: list[str] = [
             _CT_LABELS[ct] for ct in entry.get("change_types", []) if ct in _CT_LABELS
         ]
@@ -2380,6 +2322,60 @@ def _build_human_summary(output: Any) -> dict:
         summary["review_concerns"] = concerns[:6]
     summary["confidence"] = (getattr(output, "confidence", None) or "medium").upper()
     return summary
+
+
+# Task-specific content-filter: each task emphasizes different output fields.
+# Fields marked False are suppressed from this task's output to reduce noise.
+_TASK_CONTENT_MAP: dict[str, dict[str, bool]] = {
+    "onboard": {
+        "project_summary": True, "architecture_summary": True,
+        "relevant_files": True, "key_dependencies": True,
+        "gaps": True, "confidence": True,
+        "suspected_areas": False, "improvement_opportunities": False,
+        "test_gaps": False, "code_notes_summary": False,
+        "changed_files": False, "affected_entry_points": False,
+    },
+    "explain": {
+        "project_summary": True, "architecture_summary": True,
+        "relevant_files": False, "key_dependencies": True,
+        "gaps": False, "confidence": True,
+        "suspected_areas": False, "improvement_opportunities": False,
+        "test_gaps": False, "code_notes_summary": False,
+        "changed_files": False, "affected_entry_points": False,
+    },
+    "fix-bug": {
+        "project_summary": True, "architecture_summary": False,
+        "relevant_files": True, "key_dependencies": False,
+        "gaps": False, "confidence": True,
+        "suspected_areas": True, "improvement_opportunities": False,
+        "test_gaps": False, "code_notes_summary": True,
+        "changed_files": False, "affected_entry_points": False,
+    },
+    "generate-tests": {
+        "project_summary": True, "architecture_summary": False,
+        "relevant_files": True, "key_dependencies": True,
+        "gaps": True, "confidence": True,
+        "suspected_areas": False, "improvement_opportunities": False,
+        "test_gaps": True, "code_notes_summary": False,
+        "changed_files": False, "affected_entry_points": False,
+    },
+    "delta": {
+        "project_summary": False, "architecture_summary": False,
+        "relevant_files": True, "key_dependencies": False,
+        "gaps": True, "confidence": True,
+        "suspected_areas": False, "improvement_opportunities": False,
+        "test_gaps": False, "code_notes_summary": False,
+        "changed_files": True, "affected_entry_points": True,
+    },
+    "review-pr": {
+        "project_summary": False, "architecture_summary": False,
+        "relevant_files": True, "key_dependencies": False,
+        "gaps": True, "confidence": False,
+        "suspected_areas": False, "improvement_opportunities": False,
+        "test_gaps": False, "code_notes_summary": False,
+        "changed_files": True, "affected_entry_points": True,
+    },
+}
 
 
 @app.command("prepare-context")
@@ -2577,10 +2573,9 @@ def prepare_context_cmd(
         _phase += f" since {since}"
     _progress.start(_phase)
     if not fast:
-        import sys as _sys
-        if _sys.stderr.isatty():
-            _sys.stderr.write(f"Analyzing ({task})... (deep scan may take 15–35 s for large codebases)\n")
-            _sys.stderr.flush()
+        if sys.stderr.isatty():
+            sys.stderr.write(f"Analyzing ({task})... (deep scan may take 15–35 s for large codebases)\n")
+            sys.stderr.flush()
     _t0 = _time.perf_counter()
     try:
         # H-02: apply timeout for generate-tests — large repos can stall indefinitely.
@@ -2599,12 +2594,11 @@ def prepare_context_cmd(
             _done_set, _nd_set = _cf.wait([_fut], timeout=_timeout_s)
             _ex.shutdown(wait=False)
             if _nd_set:
-                import sys as _sys_gt
-                if _sys_gt.stderr.isatty():
-                    _sys_gt.stderr.write(
+                if sys.stderr.isatty():
+                    sys.stderr.write(
                         f"[generate-tests] timeout after {_timeout_ms}ms — returning partial result\n"
                     )
-                    _sys_gt.stderr.flush()
+                    sys.stderr.flush()
                 from sourcecode.prepare_context import TaskOutput as _TO
                 output = _TO(
                     task=task,
@@ -2639,58 +2633,6 @@ def prepare_context_cmd(
             err=True,
         )
 
-    # Task-specific content-filter: each task emphasizes different output fields.
-    # Fields marked False are suppressed from this task's output to reduce noise.
-    _TASK_CONTENT_MAP: dict[str, dict[str, bool]] = {
-        "onboard": {
-            "project_summary": True, "architecture_summary": True,
-            "relevant_files": True, "key_dependencies": True,
-            "gaps": True, "confidence": True,
-            "suspected_areas": False, "improvement_opportunities": False,
-            "test_gaps": False, "code_notes_summary": False,
-            "changed_files": False, "affected_entry_points": False,
-        },
-        "explain": {
-            "project_summary": True, "architecture_summary": True,
-            "relevant_files": False, "key_dependencies": True,
-            "gaps": False, "confidence": True,
-            "suspected_areas": False, "improvement_opportunities": False,
-            "test_gaps": False, "code_notes_summary": False,
-            "changed_files": False, "affected_entry_points": False,
-        },
-        "fix-bug": {
-            "project_summary": True, "architecture_summary": False,
-            "relevant_files": True, "key_dependencies": False,
-            "gaps": False, "confidence": True,
-            "suspected_areas": True, "improvement_opportunities": False,
-            "test_gaps": False, "code_notes_summary": True,
-            "changed_files": False, "affected_entry_points": False,
-        },
-        "generate-tests": {
-            "project_summary": True, "architecture_summary": False,
-            "relevant_files": True, "key_dependencies": True,
-            "gaps": True, "confidence": True,
-            "suspected_areas": False, "improvement_opportunities": False,
-            "test_gaps": True, "code_notes_summary": False,
-            "changed_files": False, "affected_entry_points": False,
-        },
-        "delta": {
-            "project_summary": False, "architecture_summary": False,
-            "relevant_files": True, "key_dependencies": False,
-            "gaps": True, "confidence": True,
-            "suspected_areas": False, "improvement_opportunities": False,
-            "test_gaps": False, "code_notes_summary": False,
-            "changed_files": True, "affected_entry_points": True,
-        },
-        "review-pr": {
-            "project_summary": False, "architecture_summary": False,
-            "relevant_files": True, "key_dependencies": False,
-            "gaps": True, "confidence": False,
-            "suspected_areas": False, "improvement_opportunities": False,
-            "test_gaps": False, "code_notes_summary": False,
-            "changed_files": True, "affected_entry_points": True,
-        },
-    }
     _content_filter = _TASK_CONTENT_MAP.get(task, {})
 
     def _task_include(field: str) -> bool:
@@ -2790,10 +2732,9 @@ def prepare_context_cmd(
             if output_path is not None:
                 output_path.write_text(_err_json, encoding="utf-8")
             else:
-                import sys as _sys
-                _sys.stdout.buffer.write(_err_json.encode("utf-8"))
-                _sys.stdout.buffer.write(b"\n")
-                _sys.stdout.buffer.flush()
+                sys.stdout.buffer.write(_err_json.encode("utf-8"))
+                sys.stdout.buffer.write(b"\n")
+                sys.stdout.buffer.flush()
             raise typer.Exit(code=1)
         if output.ci_decision == "no_changes":
             # Early exit: no diff — emit minimal JSON without any analysis fields.
@@ -2811,10 +2752,9 @@ def prepare_context_cmd(
             if output_path is not None:
                 output_path.write_text(_nc_json, encoding="utf-8")
             else:
-                import sys as _sys
-                _sys.stdout.buffer.write(_nc_json.encode("utf-8"))
-                _sys.stdout.buffer.write(b"\n")
-                _sys.stdout.buffer.flush()
+                sys.stdout.buffer.write(_nc_json.encode("utf-8"))
+                sys.stdout.buffer.write(b"\n")
+                sys.stdout.buffer.flush()
             if copy:
                 if _copy_to_clipboard(_nc_json):
                     typer.echo("✓ copied to clipboard", err=True)
@@ -2859,10 +2799,9 @@ def prepare_context_cmd(
             if output_path is not None:
                 output_path.write_text(_err_json, encoding="utf-8")
             else:
-                import sys as _sys
-                _sys.stdout.buffer.write(_err_json.encode("utf-8"))
-                _sys.stdout.buffer.write(b"\n")
-                _sys.stdout.buffer.flush()
+                sys.stdout.buffer.write(_err_json.encode("utf-8"))
+                sys.stdout.buffer.write(b"\n")
+                sys.stdout.buffer.flush()
             # FIX: no_diff (no PR changes) is not an error — exit 0, consistent
             # with delta's no_changes handling. Only true errors exit non-zero.
             _review_pr_exit = 0 if output.error_code == "no_diff" else 1
@@ -3014,12 +2953,11 @@ def prepare_context_cmd(
     if output_path is not None:
         output_path.write_text(_pc_content, encoding="utf-8")
     else:
-        import sys as _sys
         _pc_bytes = _pc_content.encode("utf-8")
-        _sys.stdout.buffer.write(_pc_bytes)
+        sys.stdout.buffer.write(_pc_bytes)
         if not _pc_content.endswith("\n"):
-            _sys.stdout.buffer.write(b"\n")
-        _sys.stdout.buffer.flush()
+            sys.stdout.buffer.write(b"\n")
+        sys.stdout.buffer.flush()
 
     if copy:
         _trimmed = _pc_content.strip()
@@ -3167,7 +3105,6 @@ def repo_ir_cmd(
       sourcecode repo-ir --max-nodes 200 --max-edges 500
     """
     import json as _json
-    import sys as _sys
 
     from sourcecode.repository_ir import apply_ir_size_limits, build_repo_ir, find_java_files
 
@@ -3243,22 +3180,22 @@ def repo_ir_cmd(
             )
     else:
         try:
-            _sys.stdout.buffer.write(output.encode("utf-8"))
-            _sys.stdout.buffer.write(b"\n")
-            _sys.stdout.buffer.flush()
+            sys.stdout.buffer.write(output.encode("utf-8"))
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
         except UnicodeEncodeError as _ue:
             # IMP-2: emit workaround before re-raising so the user knows what to do.
-            _sys.stderr.write(
+            sys.stderr.write(
                 f"[sourcecode] UnicodeEncodeError on stdout ({_ue.encoding}): "
                 "your console codec cannot encode this output.\n"
                 "Workaround: sourcecode repo-ir --output ir.json\n"
             )
-            _sys.stderr.flush()
+            sys.stderr.flush()
             raise
         except AttributeError:
             # Fallback for wrapped stdout without buffer (e.g. some test harnesses)
-            _sys.stdout.write(output)
-            _sys.stdout.write("\n")
+            sys.stdout.write(output)
+            sys.stdout.write("\n")
         if copy:
             if _copy_to_clipboard(output):
                 typer.echo("✓ copied to clipboard", err=True)
@@ -3329,27 +3266,25 @@ def impact_cmd(
     _require_pro("impact")
 
     import json as _json
-    import sys as _sys
 
     from sourcecode.repository_ir import (
         build_repo_ir, find_java_files, compute_blast_radius,
     )
     from sourcecode.output_budget import trim_to_budget as _trim, BUDGET_IMPACT
 
-    import sys as _sys_ic
     # Legacy-compat: old syntax was `impact <path> <target>`.
     # Detect: target resolves to an existing directory (not a class name), and
     # the path arg is not a valid directory (looks like a class name).
     _target_as_path = Path(target)
     if _target_as_path.is_dir() and not path.resolve().is_dir():
         # Gate on isatty() — non-TTY (MCP, pipes) must not receive text mixed into JSON stdout.
-        if getattr(_sys_ic.stderr, "isatty", lambda: False)():
-            _sys_ic.stderr.write(
+        if getattr(sys.stderr, "isatty", lambda: False)():
+            sys.stderr.write(
                 f"[impact] Legacy argument order detected: '{target}' is a directory, not a class name.\n"
                 f"[impact] Swapping: target='{path}', path='{target}'. "
                 f"New syntax: sourcecode impact <target> [path]\n"
             )
-            _sys_ic.stderr.flush()
+            sys.stderr.flush()
         target, path = str(path), _target_as_path
 
     root = path.resolve()
@@ -3401,11 +3336,11 @@ def impact_cmd(
         typer.echo(f"Impact analysis written to {output_path}", err=True)
     else:
         try:
-            _sys.stdout.buffer.write(output.encode("utf-8"))
-            _sys.stdout.buffer.write(b"\n")
-            _sys.stdout.buffer.flush()
+            sys.stdout.buffer.write(output.encode("utf-8"))
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
         except AttributeError:
-            _sys.stdout.write(output + "\n")
+            sys.stdout.write(output + "\n")
         if copy:
             if _copy_to_clipboard(output):
                 typer.echo("✓ copied to clipboard", err=True)
@@ -3465,8 +3400,6 @@ def endpoints_cmd(
       sourcecode endpoints . --output endpoints.json
       sourcecode endpoints . --format yaml
     """
-    import sys as _sys
-
     target = path.resolve()
     if not target.exists() or not target.is_dir():
         _emit_error_json(
@@ -3496,9 +3429,9 @@ def endpoints_cmd(
             err=True,
         )
     else:
-        _sys.stdout.buffer.write(output.encode("utf-8"))
-        _sys.stdout.buffer.write(b"\n")
-        _sys.stdout.buffer.flush()
+        sys.stdout.buffer.write(output.encode("utf-8"))
+        sys.stdout.buffer.write(b"\n")
+        sys.stdout.buffer.flush()
         if copy:
             if _copy_to_clipboard(output):
                 typer.echo("✓ copied to clipboard", err=True)
@@ -3686,10 +3619,9 @@ def fix_bug_cmd(
       sourcecode onboard .         — Full architecture context first
     """
     if not symptom:
-        import sys as _sys_fb
         # Only emit advisory to interactive terminals — non-TTY (MCP, pipes, scripts)
         # must never receive informational text mixed into JSON stdout.
-        if getattr(_sys_fb.stderr, "isatty", lambda: False)():
+        if getattr(sys.stderr, "isatty", lambda: False)():
             typer.echo(
                 "[fix-bug] Results are significantly better with --symptom. "
                 "Example: --symptom 'NullPointerException in PaymentService'",
@@ -3755,7 +3687,6 @@ def modernize_cmd(
       sourcecode impact <target>   — Verify impact before touching a hotspot
     """
     import json as _json
-    import sys as _sys
     from sourcecode.repository_ir import build_repo_ir, find_java_files, apply_ir_size_limits
     from sourcecode.output_budget import trim_to_budget, BUDGET_ONBOARD
     from sourcecode.license import can_use as _mod_can_use
@@ -3941,11 +3872,11 @@ def modernize_cmd(
         typer.echo(f"Modernization analysis written to {output_path}", err=True)
     else:
         try:
-            _sys.stdout.buffer.write(output.encode("utf-8"))
-            _sys.stdout.buffer.write(b"\n")
-            _sys.stdout.buffer.flush()
+            sys.stdout.buffer.write(output.encode("utf-8"))
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
         except AttributeError:
-            _sys.stdout.write(output + "\n")
+            sys.stdout.write(output + "\n")
 
     if copy:
         _copy_to_clipboard(output)
@@ -3980,8 +3911,7 @@ def version_cmd() -> None:
       {"cli_version": "1.33.11", "mcp_schema_version": "1.33.11",
        "compatibility_schema_version": "1.0"}
     """
-    import sys as _sys_ver
-    if getattr(_sys_ver.stdout, "isatty", lambda: False)():
+    if getattr(sys.stdout, "isatty", lambda: False)():
         typer.echo(f"sourcecode {__version__}")
     else:
         import json as _json_ver
@@ -4058,10 +3988,9 @@ def mcp_serve() -> None:
       }
     """
     import logging
-    import sys as _sys
 
     logging.basicConfig(
-        stream=_sys.stderr,
+        stream=sys.stderr,
         level=logging.INFO,
         format="[sourcecode-mcp] %(levelname)s %(message)s",
     )
@@ -4077,7 +4006,7 @@ def mcp_serve() -> None:
     # No-op on Linux/macOS/Git Bash where stdin never starts with a BOM.
     # Guard: CliRunner / test stubs replace sys.stdin with StringIO (no .buffer).
     try:
-        _stdin_buf = getattr(_sys.stdin, "buffer", None)
+        _stdin_buf = getattr(sys.stdin, "buffer", None)
         if _stdin_buf is not None and hasattr(_stdin_buf, "peek"):
             _bom_prefix = _stdin_buf.peek(3)[:3]
             if _bom_prefix == b"\xef\xbb\xbf":
@@ -4239,7 +4168,6 @@ def mcp_init(
 def mcp_status() -> None:
     """Show MCP integration status: dependencies, config files, and connectivity."""
     import subprocess as _sp
-    import sys as _sys
     from sourcecode import __version__ as _cli_version
     from sourcecode.mcp.onboarding.detector import detect_clients, is_client_running
     from sourcecode.mcp.onboarding import applier
@@ -4250,7 +4178,7 @@ def mcp_status() -> None:
     typer.echo(sep)
 
     # FIX-P0-5/P0-6: Show CLI version explicitly so drift is immediately visible.
-    typer.echo(f"CLI version   {_cli_version}   ({_sys.executable})")
+    typer.echo(f"CLI version   {_cli_version}   ({sys.executable})")
     typer.echo("")
 
     # Stage 1: Dependencies
@@ -4557,10 +4485,9 @@ def cache_warm_cmd(
     """
     import shutil as _shutil
     import subprocess as _sub
-    import sys as _sys
     target = Path(path).resolve()
     typer.echo(f"Warming cache for {target} …", err=True)
-    _sc_bin = _shutil.which("sourcecode") or _sys.argv[0]
+    _sc_bin = _shutil.which("sourcecode") or sys.argv[0]
     cmd = [_sc_bin, str(target)]
     if compact:
         cmd.append("--compact")
@@ -4668,12 +4595,11 @@ def main_entry() -> None:
     can consume them as positional arguments (which would prevent subcommand
     routing for tokens like 'version' or 'config').
     """
-    import sys as _sys
     # Force UTF-8 on stdout so Unicode characters (arrows, etc.) survive on
     # Windows where the default console codec is cp1252 (BUG-1).
-    if hasattr(_sys.stdout, "reconfigure"):
+    if hasattr(sys.stdout, "reconfigure"):
         try:
-            _sys.stdout.reconfigure(encoding="utf-8")
+            sys.stdout.reconfigure(encoding="utf-8")
         except Exception:
             pass
     _preprocess_argv()
