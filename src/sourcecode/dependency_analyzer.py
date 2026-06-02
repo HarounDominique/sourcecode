@@ -199,13 +199,11 @@ class DependencyAnalyzer:
             result.transitive_count += summary.transitive_count
             ecosystems.update(summary.ecosystems)
             sources.update(summary.sources)
-            for limitation in summary.limitations:
-                if limitation not in limitations:
-                    limitations.append(limitation)
+            limitations.extend(summary.limitations)
             all_dependencies.extend(summary.dependencies)
         result.ecosystems = sorted(ecosystems)
         result.sources = sorted(sources)
-        result.limitations = limitations
+        result.limitations = list(dict.fromkeys(limitations))
         result.dependencies = all_dependencies
         return result
 
@@ -216,10 +214,7 @@ class DependencyAnalyzer:
         ecosystems = sorted({record.ecosystem for record in records})
         direct_count = sum(1 for record in records if record.scope != "transitive")
         transitive_count = sum(1 for record in records if record.scope == "transitive")
-        unique_limitations: list[str] = []
-        for limitation in limitations:
-            if limitation not in unique_limitations:
-                unique_limitations.append(limitation)
+        unique_limitations = list(dict.fromkeys(limitations))
         return DependencySummary(
             requested=True,
             total_count=len(records),
