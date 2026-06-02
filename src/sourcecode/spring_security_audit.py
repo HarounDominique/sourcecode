@@ -9,12 +9,14 @@ All patterns are deterministic and never raise.
 """
 from __future__ import annotations
 
+import inspect
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 from sourcecode.spring_findings import SpringAuditResult, SpringFinding
+from sourcecode.spring_model import SpringSemanticModel
 from sourcecode.spring_semantic import TransactionBoundaryIndex, build_tx_index
 
 if TYPE_CHECKING:
@@ -38,8 +40,27 @@ class SecurityPattern(Protocol):
         cir: "CanonicalRepositoryIR",
         tx_index: Optional[TransactionBoundaryIndex],
         root: Optional[Path],
+        *,
+        model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         ...
+
+
+def _call_pattern_analyze(
+    pattern: Any,
+    cir: "CanonicalRepositoryIR",
+    tx_index: Optional[TransactionBoundaryIndex],
+    root: Optional[Path],
+    model: Optional[SpringSemanticModel],
+) -> list[SpringFinding]:
+    """Dispatch to pattern.analyze(), injecting model if the pattern accepts it."""
+    try:
+        sig = inspect.signature(pattern.analyze)
+        if "model" in sig.parameters:
+            return pattern.analyze(cir, tx_index, root, model=model)
+    except (ValueError, TypeError):
+        pass
+    return pattern.analyze(cir, tx_index, root)
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +76,8 @@ class _SEC001UnsecuredEndpoint:
         cir: "CanonicalRepositoryIR",
         tx_index: Optional[TransactionBoundaryIndex],
         root: Optional[Path],
+        *,
+        model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         security_model = cir.metadata.get("security_model", "unknown")
         # filter_based model has centralized config — per-endpoint annotation absence is expected
@@ -119,9 +142,16 @@ class _SEC002PreAuthorizeGenericInheritance:
         cir: "CanonicalRepositoryIR",
         tx_index: Optional[TransactionBoundaryIndex],
         root: Optional[Path],
+        *,
+        model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
-        # Build extends map: child_fqn → parent_signature (may contain generics)
-        extends_map = _build_extends_map(cir)
+        # Use shared inheritance graph when available; fall back to local build.
+        if model is not None:
+            _parent_of = model.inheritance.parent_of
+            _generic_parents = model.inheritance.generic_parents
+        else:
+            _parent_of = _build_extends_map(cir)
+            _generic_parents = None  # determined via regex below
 
         findings: list[SpringFinding] = []
         seen: set[str] = set()
@@ -135,8 +165,11 @@ class _SEC002PreAuthorizeGenericInheritance:
                 continue
 
             # Resolve parent class signature for this controller
-            parent_sig = extends_map.get(ep.controller_class, "")
-            has_generics = bool(_GENERIC_PARAM_RE.search(parent_sig))
+            parent_sig = _parent_of.get(ep.controller_class, "")
+            if _generic_parents is not None:
+                has_generics = ep.controller_class in _generic_parents
+            else:
+                has_generics = bool(_GENERIC_PARAM_RE.search(parent_sig))
             confidence = "high" if has_generics else "medium"
 
             key = f"{ep.controller_class}#{ep.handler_symbol}"
@@ -205,6 +238,8 @@ class _SEC003TransactionalOnController:
         cir: "CanonicalRepositoryIR",
         tx_index: Optional[TransactionBoundaryIndex],
         root: Optional[Path],
+        *,
+        model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         if tx_index is None:
             return []
@@ -380,6 +415,8 @@ class SecurityScanner:
     Usage:
         scanner = SecurityScanner()
         findings = scanner.analyze(cir, tx_index=tx_index, root=Path("/repo"))
+        # or with pre-built model (shares inheritance graph, avoids rebuilds):
+        findings = scanner.analyze(cir, tx_index=tx_index, root=Path("/repo"), model=model)
 
     Never raises. Pattern errors are silently swallowed (finding missed, not crash).
     """
@@ -394,11 +431,13 @@ class SecurityScanner:
         cir: "CanonicalRepositoryIR",
         tx_index: Optional[TransactionBoundaryIndex] = None,
         root: Optional[Path] = None,
+        *,
+        model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         all_findings: list[SpringFinding] = []
         for pattern in self.patterns:
             try:
-                found = pattern.analyze(cir, tx_index, root)
+                found = _call_pattern_analyze(pattern, cir, tx_index, root, model)
                 all_findings.extend(found)
             except Exception:
                 pass
@@ -418,6 +457,7 @@ def run_security_audit(
     min_severity: str = "low",
     patterns: Optional[list[SecurityPattern]] = None,
     tx_index: Optional[TransactionBoundaryIndex] = None,
+    model: Optional[SpringSemanticModel] = None,
 ) -> SpringAuditResult:
     """Run security surface audit and return a SpringAuditResult.
 
@@ -428,17 +468,20 @@ def run_security_audit(
         min_severity: Filter findings below this severity.
         patterns:     Override default pattern list (for testing).
         tx_index:     Pre-built TransactionBoundaryIndex (built from cir if None).
+        model:        Pre-built SpringSemanticModel (avoids duplicate build in CLI).
     """
     _sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     min_rank = _sev_rank.get(min_severity, 3)
 
     t0 = time.monotonic()
 
-    if tx_index is None:
+    if model is not None:
+        tx_index = model.tx_index
+    elif tx_index is None:
         tx_index = build_tx_index(cir)
 
     scanner = SecurityScanner(patterns=patterns)
-    findings = scanner.analyze(cir, tx_index=tx_index, root=root)
+    findings = scanner.analyze(cir, tx_index=tx_index, root=root, model=model)
 
     findings = [f for f in findings if _sev_rank.get(f.severity, 9) <= min_rank]
 

@@ -14,13 +14,15 @@ All patterns are deterministic and never raise.
 """
 from __future__ import annotations
 
+import inspect
 import re
 import time
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 from sourcecode.spring_findings import SpringAuditResult, SpringFinding
+from sourcecode.spring_model import SpringSemanticModel
 from sourcecode.spring_semantic import (
     PROPAGATION_DEFAULT,
     TransactionBoundary,
@@ -70,8 +72,31 @@ class TxPattern(Protocol):
         cir: "CanonicalRepositoryIR",
         tx_index: TransactionBoundaryIndex,
         root: Optional[Path],
+        *,
+        model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         ...
+
+
+def _call_pattern_analyze(
+    pattern: Any,
+    cir: "CanonicalRepositoryIR",
+    tx_index: TransactionBoundaryIndex,
+    root: Optional[Path],
+    model: Optional[SpringSemanticModel],
+) -> list[SpringFinding]:
+    """Dispatch to pattern.analyze(), injecting model if the pattern accepts it.
+
+    Patterns that declare `model` in their signature receive the shared model.
+    Patterns without it (e.g. test doubles) are called with the legacy signature.
+    """
+    try:
+        sig = inspect.signature(pattern.analyze)
+        if "model" in sig.parameters:
+            return pattern.analyze(cir, tx_index, root, model=model)
+    except (ValueError, TypeError):
+        pass
+    return pattern.analyze(cir, tx_index, root)
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +112,8 @@ class _TX001ProxyBypass:
         cir: "CanonicalRepositoryIR",
         tx_index: TransactionBoundaryIndex,
         root: Optional[Path],
+        *,
+        model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         findings: list[SpringFinding] = []
 
@@ -210,11 +237,13 @@ class _TX002RequiresNewNested:
         cir: "CanonicalRepositoryIR",
         tx_index: TransactionBoundaryIndex,
         root: Optional[Path],
+        *,
+        model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         findings: list[SpringFinding] = []
         seen_pairs: set[tuple[str, str]] = set()
 
-        adj = _build_forward_adjacency(cir)
+        adj = model.call_adj.adjacency if model is not None else _build_forward_adjacency(cir)
         deadline = time.monotonic_ns() + _BFS_TIMEOUT_MS * 1_000_000
 
         for boundary in tx_index.all_boundaries():
@@ -284,11 +313,13 @@ class _TX003ReadOnlyWritePropagation:
         cir: "CanonicalRepositoryIR",
         tx_index: TransactionBoundaryIndex,
         root: Optional[Path],
+        *,
+        model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         findings: list[SpringFinding] = []
         seen_pairs: set[tuple[str, str]] = set()
 
-        adj = _build_forward_adjacency(cir)
+        adj = model.call_adj.adjacency if model is not None else _build_forward_adjacency(cir)
         deadline = time.monotonic_ns() + _BFS_TIMEOUT_MS * 1_000_000
 
         for boundary in tx_index.all_boundaries():
@@ -364,11 +395,13 @@ class _TX004TxSuspensionRisk:
         cir: "CanonicalRepositoryIR",
         tx_index: TransactionBoundaryIndex,
         root: Optional[Path],
+        *,
+        model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         findings: list[SpringFinding] = []
         seen_pairs: set[tuple[str, str]] = set()
 
-        adj = _build_forward_adjacency(cir)
+        adj = model.call_adj.adjacency if model is not None else _build_forward_adjacency(cir)
         deadline = time.monotonic_ns() + _BFS_TIMEOUT_MS * 1_000_000
 
         for boundary in tx_index.all_boundaries():
@@ -448,6 +481,8 @@ class _TX005ExceptionSwallowing:
         cir: "CanonicalRepositoryIR",
         tx_index: TransactionBoundaryIndex,
         root: Optional[Path],
+        *,
+        model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         if root is None:
             return []
@@ -551,6 +586,8 @@ class TxPatternEngine:
     Usage:
         engine = TxPatternEngine()
         findings = engine.analyze(cir, tx_index, root=Path("/repo"))
+        # or with pre-built model (eliminates duplicate adjacency builds):
+        findings = engine.analyze(cir, tx_index, root=Path("/repo"), model=model)
 
     Never raises. Pattern errors are silently swallowed (finding missed, not crash).
     """
@@ -563,11 +600,13 @@ class TxPatternEngine:
         cir: "CanonicalRepositoryIR",
         tx_index: TransactionBoundaryIndex,
         root: Optional[Path] = None,
+        *,
+        model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         all_findings: list[SpringFinding] = []
         for pattern in self.patterns:
             try:
-                found = pattern.analyze(cir, tx_index, root)
+                found = _call_pattern_analyze(pattern, cir, tx_index, root, model)
                 all_findings.extend(found)
             except Exception:
                 pass
@@ -586,6 +625,7 @@ def run_tx_audit(
     scope: str = "all",
     min_severity: str = "low",
     patterns: Optional[list[TxPattern]] = None,
+    model: Optional[SpringSemanticModel] = None,
 ) -> SpringAuditResult:
     """Run TX anomaly detection and return a SpringAuditResult.
 
@@ -595,15 +635,18 @@ def run_tx_audit(
         scope:        "all" | "tx" (reserved — always "tx" for this function).
         min_severity: Filter findings below this severity.
         patterns:     Override default pattern list (for testing).
+        model:        Pre-built SpringSemanticModel (avoids duplicate build in CLI).
     """
     _sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     min_rank = _sev_rank.get(min_severity, 3)
 
     t0 = time.monotonic()
 
-    tx_index = build_tx_index(cir)
+    if model is None:
+        model = SpringSemanticModel.build(cir)
+    tx_index = model.tx_index
     engine = TxPatternEngine(patterns=patterns)
-    findings = engine.analyze(cir, tx_index, root=root)
+    findings = engine.analyze(cir, tx_index, root=root, model=model)
 
     # Filter by min_severity
     findings = [f for f in findings if _sev_rank.get(f.severity, 9) <= min_rank]

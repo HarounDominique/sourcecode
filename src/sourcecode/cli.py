@@ -3766,7 +3766,7 @@ def spring_audit_cmd(
     from sourcecode.spring_findings import SpringAuditResult, SpringFinding
     from sourcecode.spring_tx_analyzer import run_tx_audit
     from sourcecode.spring_security_audit import run_security_audit
-    from sourcecode.spring_semantic import build_tx_index
+    from sourcecode.spring_model import SpringSemanticModel
 
     target = path.resolve()
     if not target.exists() or not target.is_dir():
@@ -3816,13 +3816,13 @@ def spring_audit_cmd(
         return
 
     cir = build_canonical_ir(file_list, target)
-    tx_idx = build_tx_index(cir)
+    _model = SpringSemanticModel.build(cir)
 
     results: list[SpringAuditResult] = []
     if scope in ("all", "tx"):
-        results.append(run_tx_audit(cir, root=target, min_severity=min_severity))
+        results.append(run_tx_audit(cir, root=target, min_severity=min_severity, model=_model))
     if scope in ("all", "security"):
-        results.append(run_security_audit(cir, root=target, min_severity=min_severity, tx_index=tx_idx))
+        results.append(run_security_audit(cir, root=target, min_severity=min_severity, model=_model))
 
     if len(results) == 1:
         combined = results[0]
