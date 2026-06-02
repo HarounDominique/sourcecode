@@ -2242,6 +2242,9 @@ def _assemble(
             "role": spring_role_map.get(s.symbol, "other"),
             "in_degree": in_deg.get(s.symbol, 0),
             "out_degree": out_deg.get(s.symbol, 0),
+            "annotations": list(s.annotations),
+            "annotation_values": dict(s.annotation_values),
+            "modifiers": list(s.modifiers),
         }
         for s in sorted_syms
     ]

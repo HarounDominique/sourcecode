@@ -223,6 +223,8 @@ _SUBCOMMANDS: frozenset[str] = frozenset(
         "cache",
         # RIS bootstrap
         "cold-start",
+        # Spring semantic audit
+        "spring-audit",
     }
 )
 
@@ -3695,6 +3697,174 @@ def endpoints_cmd(
 
     from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
     _nudge()
+
+
+# ── Spring Semantic Audit ─────────────────────────────────────────────────────
+
+@app.command("spring-audit")
+def spring_audit_cmd(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository path to audit (default: current directory)",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    format: str = typer.Option(
+        "json",
+        "--format",
+        "-f",
+        help="Output format: json (default) or yaml.",
+        show_default=True,
+    ),
+    copy: bool = typer.Option(
+        False,
+        "--copy",
+        "-c",
+        help="Copy output to system clipboard after a successful run.",
+    ),
+    scope: str = typer.Option(
+        "all",
+        "--scope",
+        "-s",
+        help="Audit scope: all (default), tx, or security.",
+        show_default=True,
+    ),
+    min_severity: str = typer.Option(
+        "low",
+        "--min-severity",
+        help="Minimum severity to include: critical, high, medium, or low (default).",
+        show_default=True,
+    ),
+) -> None:
+    """Spring semantic audit: TX anomalies (TX-001..005) + security surface (SEC-001..003).
+
+    \b
+    Detects:
+      TX-001  @Transactional on private/final method (CGLIB proxy bypass)
+      TX-002  REQUIRES_NEW nested in REQUIRED call chain
+      TX-003  readOnly=true boundary propagating to write operation
+      TX-004  NOT_SUPPORTED/NEVER within active TX chain
+      TX-005  Exception swallowing inside @Transactional
+      SEC-001 Unsecured endpoint in annotation_based security model
+      SEC-002 CVE-2025-41248: @PreAuthorize on inherited method from generic supertype
+      SEC-003 @Transactional on @Controller/@RestController (TX in wrong layer)
+
+    \b
+    Examples:
+      sourcecode spring-audit .
+      sourcecode spring-audit /path/to/repo
+      sourcecode spring-audit . --scope security
+      sourcecode spring-audit . --min-severity high
+      sourcecode spring-audit . --output audit.json
+    """
+    import json as _json
+
+    from sourcecode.repository_ir import find_java_files
+    from sourcecode.canonical_ir import build_canonical_ir
+    from sourcecode.spring_findings import SpringAuditResult, SpringFinding
+    from sourcecode.spring_tx_analyzer import run_tx_audit
+    from sourcecode.spring_security_audit import run_security_audit
+    from sourcecode.spring_semantic import build_tx_index
+
+    target = path.resolve()
+    if not target.exists() or not target.is_dir():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"'{target}' is not a valid directory.",
+            path=str(target),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
+        )
+        raise typer.Exit(code=1)
+
+    if scope not in ("all", "tx", "security"):
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid scope '{scope}'.",
+            hint="scope must be one of: all, tx, security.",
+            expected="all | tx | security",
+        )
+        raise typer.Exit(code=1)
+
+    if min_severity not in ("critical", "high", "medium", "low"):
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid min-severity '{min_severity}'.",
+            hint="min-severity must be one of: critical, high, medium, low.",
+            expected="critical | high | medium | low",
+        )
+        raise typer.Exit(code=1)
+
+    file_list = find_java_files(target)
+    if not file_list:
+        data = SpringAuditResult(
+            spring_detected=False,
+            scope=scope,
+            limitations=["No Java files found in repository — Spring audit requires Java source."],
+            metadata={"java_files_found": 0},
+        ).finalize().to_dict()
+        output = _serialize_dict(data, format)
+        if output_path is not None:
+            output_path.write_text(output, encoding="utf-8")
+            typer.echo("Spring audit written to " + str(output_path), err=True)
+        else:
+            sys.stdout.buffer.write(output.encode("utf-8"))
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
+        return
+
+    cir = build_canonical_ir(file_list, target)
+    tx_idx = build_tx_index(cir)
+
+    results: list[SpringAuditResult] = []
+    if scope in ("all", "tx"):
+        results.append(run_tx_audit(cir, root=target, min_severity=min_severity))
+    if scope in ("all", "security"):
+        results.append(run_security_audit(cir, root=target, min_severity=min_severity, tx_index=tx_idx))
+
+    if len(results) == 1:
+        combined = results[0]
+    else:
+        all_findings: list[SpringFinding] = []
+        all_limitations: list[str] = []
+        merged_meta: dict = {}
+        for r in results:
+            all_findings.extend(r.findings)
+            all_limitations.extend(r.limitations)
+            merged_meta.update(r.metadata)
+        combined = SpringAuditResult(
+            repo_id=results[0].repo_id,
+            spring_detected=any(r.spring_detected for r in results),
+            scope="all",
+            findings=all_findings,
+            limitations=all_limitations,
+            metadata=merged_meta,
+        ).finalize()
+
+    data = combined.to_dict()
+
+    # Non-fatal RIS side-effect — persist summary only (not full findings).
+    try:
+        from sourcecode.ris import update_ris_spring_audit as _ris_sa
+        _ris_sa(target, data)
+    except Exception:
+        pass
+
+    output = _serialize_dict(data, format)
+
+    if output_path is not None:
+        output_path.write_text(output, encoding="utf-8")
+        total = combined.summary.get("total_findings", 0)
+        typer.echo(f"Spring audit written to {output_path} ({total} findings)", err=True)
+    else:
+        sys.stdout.buffer.write(output.encode("utf-8"))
+        sys.stdout.buffer.write(b"\n")
+        sys.stdout.buffer.flush()
+        if copy:
+            if _copy_to_clipboard(output):
+                typer.echo("✓ copied to clipboard", err=True)
 
 
 # ── Enterprise Workflow Commands ──────────────────────────────────────────────
