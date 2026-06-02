@@ -99,6 +99,32 @@ def _err(
 def _coerce_cli_error(exc: Exception, default_message: str) -> CallToolResult:
     payload = getattr(exc, "payload", None)
     if isinstance(payload, dict):
+        # P1-B: pro_required uses legacy flat format {error:"pro_required", feature, message}.
+        # exit code 2 = Pro license required.
+        if (
+            payload.get("error") == "pro_required"
+            or getattr(exc, "exit_code", None) == 2
+            and isinstance(payload.get("error"), str)
+            and "pro" in payload.get("error", "").lower()
+        ):
+            feature = payload.get("feature", "")
+            msg = payload.get("message", f"'{feature}' requires a Pro license. Run: sourcecode activate <key>")
+            structured = {
+                "success": False,
+                "data": None,
+                "error": build_error_object(
+                    "PRO_REQUIRED",
+                    msg,
+                    hint="sourcecode activate <license_key>",
+                    expected="Active Pro license.",
+                ),
+            }
+            if feature:
+                structured["feature"] = feature
+            return CallToolResult(
+                content=[TextContent(type="text", text=json.dumps(structured))],
+                isError=True,
+            )
         if "error" in payload and isinstance(payload["error"], dict):
             error = payload["error"]
             normalized = {

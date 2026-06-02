@@ -51,15 +51,20 @@ def run_command(args: list[str]) -> Any:
         stderr_raw = getattr(result, "stderr", "")
         stdout = stdout_raw.strip() if isinstance(stdout_raw, str) else ""
         stderr = stderr_raw.strip() if isinstance(stderr_raw, str) else ""
-        error_text = stderr or stdout
+        # P1-B: structured errors (e.g. pro_required) are written to stdout as
+        # JSON while stderr carries the human-readable message.  Try stdout first
+        # for JSON; fall back to stderr so we never lose a structured payload.
         payload = None
-        if error_text:
+        for _candidate in (stdout, stderr):
+            if not _candidate:
+                continue
             try:
-                parsed = json.loads(error_text)
+                _parsed = json.loads(_candidate)
             except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, dict):
-                payload = parsed
+                continue
+            if isinstance(_parsed, dict):
+                payload = _parsed
+                break
         raise CommandError(
             f"sourcecode command failed (exit {result.exit_code}). Args: {args}",
             exit_code=result.exit_code,

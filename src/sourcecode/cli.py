@@ -1249,12 +1249,29 @@ def main(
                 # ── Lookup ──────────────────────────────────────────────────────
                 # Step 1: try L1 to obtain the core_hash needed for L2 key
                 _l1_result = _cache_mod.read_core(target, _core_key)
+
+                # P1-A: --env-map misses L1 when base (em=False) exists.
+                # Try the base key so env analysis can be injected lazily (<1 s)
+                # instead of triggering a 17 s full rescan.
+                _l1_needs_env_inject = False
+                if _l1_result is None and env_map:
+                    _base_flags = _core_flags_str.replace(",em=True,", ",em=False,")
+                    _base_h8 = _hashlib.sha256(_base_flags.encode()).hexdigest()[:8]
+                    _base_key = f"{_git_sha}-{_base_h8}"
+                    _base_result = _cache_mod.read_core(target, _base_key)
+                    if _base_result is not None:
+                        _l1_result = _base_result
+                        _l1_needs_env_inject = True
+
                 if _l1_result is not None:
                     _core_dict_l1, _core_hash = _l1_result
                     _view_key = f"{_core_hash}-{_view_h}"
 
-                    # Step 2: try L2 (exact view match)
-                    _cache_hit_content = _cache_mod.read_view(target, _view_key)
+                    # Step 2: try L2 (exact view match).
+                    # Skip L2 for --changed-only: the stored view is a previous
+                    # diff snapshot that is stale for the current diff.
+                    if not changed_only:
+                        _cache_hit_content = _cache_mod.read_view(target, _view_key)
 
                     # Step 3: L1 hit but L2 miss → rebuild view from core dict
                     if _cache_hit_content is None:
@@ -1268,6 +1285,40 @@ def main(
                                 no_tree=no_tree,
                                 tree=tree,
                             )
+                            # P1-A: inject env analysis when base L1 (em=False) was used.
+                            # EnvAnalyzer walks only env/config files — typically <1 s.
+                            if _rebuilt is not None and _l1_needs_env_inject and compact:
+                                try:
+                                    from sourcecode.env_analyzer import EnvAnalyzer as _EnvA_p1a
+                                    _env_r_p1a, _env_s_p1a = _EnvA_p1a().analyze(target, {})
+                                    if _env_s_p1a and (getattr(_env_s_p1a, "total", 0) or _env_r_p1a):
+                                        _es_p1a: dict = {
+                                            "total": getattr(_env_s_p1a, "total", 0),
+                                            "required": getattr(_env_s_p1a, "required_count", 0),
+                                        }
+                                        _cats = getattr(_env_s_p1a, "categories", None)
+                                        if _cats:
+                                            _es_p1a["categories"] = _cats
+                                        _rebuilt = dict(_rebuilt)
+                                        _rebuilt["env_summary"] = _es_p1a
+                                        if _env_r_p1a:
+                                            _sorted_er = sorted(
+                                                _env_r_p1a,
+                                                key=lambda e: (
+                                                    not getattr(e, "required", False),
+                                                    getattr(e, "key", ""),
+                                                ),
+                                            )
+                                            _rebuilt["env_map"] = [
+                                                {
+                                                    "key": getattr(e, "key", ""),
+                                                    **({"required": True} if getattr(e, "required", False) else {}),
+                                                    **({"category": getattr(e, "category", None)} if getattr(e, "category", None) else {}),
+                                                }
+                                                for e in _sorted_er[:15]
+                                            ]
+                                except Exception:
+                                    pass  # env inject failed — continue without env data
                             if _rebuilt is not None:
                                 # Apply redaction
                                 if not no_redact:
@@ -1306,8 +1357,8 @@ def main(
                                     _cache_hit_content = _json_l1.dumps(
                                         _rebuilt, indent=2, ensure_ascii=False
                                     )
-                                # Cache rebuilt view in L2
-                                if _cache_hit_content:
+                                # Cache rebuilt view in L2 (skip for --changed-only: stale diff)
+                                if _cache_hit_content and not changed_only:
                                     _cache_mod.write_view(
                                         target,
                                         _view_key,
@@ -1323,40 +1374,104 @@ def main(
             _view_key = ""
             _core_hash = ""
 
-    if _cache_hit_content is not None and not changed_only:
+    if _cache_hit_content is not None:
         from sourcecode.serializer import write_output
-        if format == "json":
+        _hit_source = "L2_view" if (_view_key and _core_hash) else "L1_core"
+
+        # P0-A/B/C: --changed-only fast path via warm cache.
+        if changed_only:
+            _co_git_ok = False
+            _co_uc_files: set[str] = set()
             try:
-                from sourcecode.ris import _has_uncommitted_changes as _huc
-                _uncommitted = _huc(target)
-            except Exception:
-                _uncommitted = False
-            _hit_source = "L2_view" if (_view_key and _core_hash) else "L1_core"
-            _data_scope = "COMPACT" if compact else ("AGENT" if agent else "FULL")
-            # Recover generated_at from cached content before overwriting _cache block.
-            _cached_generated_at = None
-            try:
-                import json as _json_ga
-                _cached_generated_at = (
-                    _json_ga.loads(_cache_hit_content)
-                    .get("_cache", {})
-                    .get("generated_at")
-                )
+                from sourcecode.git_analyzer import GitAnalyzer as _GitAnalyzerCO
+                _gc_co = _GitAnalyzerCO().analyze(target, depth=1, days=1)
+                _bad_gc_co = {"no_git_repo", "git_not_found", "git_timeout"}
+                if _gc_co and not (_bad_gc_co & set(_gc_co.limitations)):
+                    _co_git_ok = True
+                    _uc_co = _gc_co.uncommitted_changes
+                    if _uc_co:
+                        _uc_untracked = {p for p in _uc_co.untracked if not p.endswith("/")}
+                        _co_uc_files = set(_uc_co.staged) | set(_uc_co.unstaged) | _uc_untracked
             except Exception:
                 pass
-            _cache_hit_content = _inject_cache_meta(_cache_hit_content, {
-                "cache_source": _hit_source,
-                "git_head_at_generation": _git_sha,
-                "current_git_head": _git_sha,
-                "is_stale": False,
-                "has_uncommitted_changes": _uncommitted,
-                "generated_at": _cached_generated_at,
-                "data_scope": _data_scope,
-            })
-        write_output(_cache_hit_content, output=output)
-        if copy and not output:
-            _copy_to_clipboard(_cache_hit_content)
-        return
+
+            if not _co_git_ok:
+                # Git unavailable — disable changed_only, fall through to normal cached output.
+                changed_only = False
+                typer.echo("[changed-only] git unavailable — falling back to full scan.", err=True)
+            elif not _co_uc_files:
+                # Clean repo — unified empty schema.
+                _co_clean = json.dumps({
+                    "schema_version": "1.0",
+                    "changed_files_count": 0,
+                    "changed_files": [],
+                    "analysis_scope": "empty",
+                    "context": None,
+                    "_meta": {"changed_only": True, "cache_source": _hit_source},
+                }, ensure_ascii=False)
+                write_output(_co_clean, output=output)
+                if copy and not output:
+                    _copy_to_clipboard(_co_clean)
+                return
+            else:
+                # Dirty repo — filter file_paths in cached compact, unified schema.
+                try:
+                    _co_base = json.loads(_cache_hit_content)
+                    _fps_all = _co_base.get("file_paths", [])
+                    _co_base["file_paths"] = [
+                        p for p in _fps_all
+                        if p in _co_uc_files or _is_always_include_ref(p)
+                    ]
+                    _co_base.pop("_cache", None)
+                    _co_dirty = json.dumps({
+                        "schema_version": "1.0",
+                        "changed_files_count": len(_co_uc_files),
+                        "changed_files": sorted(_co_uc_files),
+                        "analysis_scope": "partial",
+                        "context": _co_base,
+                        "_meta": {"changed_only": True, "cache_source": _hit_source},
+                    }, indent=2, ensure_ascii=False)
+                    write_output(_co_dirty, output=output)
+                    if copy and not output:
+                        _copy_to_clipboard(_co_dirty)
+                    return
+                except Exception:
+                    # Parse failed — fall through to full scan.
+                    changed_only = False
+                    typer.echo("[changed-only] cache parse failed — falling back to full scan.", err=True)
+
+        if not changed_only:
+            if format == "json":
+                try:
+                    from sourcecode.ris import _has_uncommitted_changes as _huc
+                    _uncommitted = _huc(target)
+                except Exception:
+                    _uncommitted = False
+                _data_scope = "COMPACT" if compact else ("AGENT" if agent else "FULL")
+                # Recover generated_at from cached content before overwriting _cache block.
+                _cached_generated_at = None
+                try:
+                    import json as _json_ga
+                    _cached_generated_at = (
+                        _json_ga.loads(_cache_hit_content)
+                        .get("_cache", {})
+                        .get("generated_at")
+                    )
+                except Exception:
+                    pass
+                _cache_hit_content = _inject_cache_meta(_cache_hit_content, {
+                    "cache_source": _hit_source,
+                    "git_head_at_generation": _git_sha,
+                    "current_git_head": _git_sha,
+                    "is_stale": False,
+                    "has_uncommitted_changes": _uncommitted,
+                    "generated_at": _cached_generated_at,
+                    "data_scope": _data_scope,
+                })
+            write_output(_cache_hit_content, output=output)
+            if copy and not output:
+                _copy_to_clipboard(_cache_hit_content)
+            return
 
     _extra_excludes: Optional[frozenset[str]] = None
     if exclude:
@@ -1993,12 +2108,12 @@ def main(
             changed_only = False
         if _git_confirmed_clean:
             _nc_payload = json.dumps({
+                "schema_version": "1.0",
                 "changed_files_count": 0,
                 "changed_files": [],
-                "message": "no uncommitted changes detected",
                 "analysis_scope": "empty",
-                "note": "No uncommitted changes detected. No output produced — use without --changed-only for full context.",
-                "_meta": {"changed_only": True},
+                "context": None,
+                "_meta": {"changed_only": True, "cache_source": "none"},
             }, ensure_ascii=False)
             write_output(_nc_payload, output=output)
             raise typer.Exit()
@@ -2092,20 +2207,17 @@ def main(
         # FIX-P0-2: agent mode must honour --format yaml (previously always emitted JSON).
         content = _serialize_dict(data, format)
     elif compact:
-        if changed_only and _allowed_changed_files:
-            # GAP-5: preserve full entry_points for architecture context even in
-            # --changed-only mode. Only filter file_paths and code_notes.
-            # ALWAYS-INCLUDE: security-const files must stay in file_paths even when
-            # not in the git diff — they resolve Java constant references used in
-            # @M3FiltroSeguridad annotations (read-only anchors, not diff output).
-            sm = _replace(sm,
-                file_paths=[
-                    p for p in sm.file_paths
-                    if p in _allowed_changed_files or _is_always_include_ref(p)
-                ],
-                code_notes=[n for n in sm.code_notes if n.path in _allowed_changed_files],
-            )
+        # P0-C: compute compact_view with full sm.file_paths so mybatis/angular
+        # counts are correct; filter file_paths in the output dict, not in sm.
         data = compact_view(sm, no_tree=no_tree, full=full)
+        if changed_only and _allowed_changed_files:
+            # GAP-5: preserve full entry_points; filter file_paths display only.
+            # ALWAYS-INCLUDE: security-const files stay for Java constant refs.
+            _fps_full = data.get("file_paths", [])
+            data["file_paths"] = [
+                p for p in _fps_full
+                if p in _allowed_changed_files or _is_always_include_ref(p)
+            ]
         if not no_redact:
             data = redact_dict(data)
         # P0-1: Apply output budget — safety net for large repos.
@@ -2157,6 +2269,20 @@ def main(
             "generated_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "data_scope": _data_scope_fresh,
         })
+        # P0-B: wrap --changed-only cold-start dirty output in unified schema.
+        if changed_only and compact:
+            try:
+                _co_inner = json.loads(content)
+                content = json.dumps({
+                    "schema_version": "1.0",
+                    "changed_files_count": len(_allowed_changed_files) if _allowed_changed_files else 0,
+                    "changed_files": sorted(_allowed_changed_files) if _allowed_changed_files else [],
+                    "analysis_scope": "partial" if _allowed_changed_files else "empty",
+                    "context": _co_inner,
+                    "_meta": {"changed_only": True, "cache_source": "fresh"},
+                }, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
     write_output(content, output=output)
 
     # Persist to two-layer cache (git SHA unchanged → re-use on next run).
@@ -2169,7 +2295,9 @@ def main(
     # Writes happen in a background daemon thread so cold-run latency is not
     # penalised by gzip encoding + disk I/O.  atexit join ensures writes
     # complete on clean exit without blocking the user-visible response.
-    if not no_cache and _core_key and not _pipeline_error:
+    # Skip cache write for --changed-only: content is a filtered diff view,
+    # not valid for reuse as a base compact on subsequent runs.
+    if not no_cache and _core_key and not _pipeline_error and not changed_only:
         import atexit as _atexit
         import threading as _threading
 
@@ -3124,6 +3252,11 @@ def repo_ir_cmd(
         "-c",
         help="Copy output to system clipboard after a successful run. No-op when --output is used or clipboard is unavailable.",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Bypass the token-size guard and emit output even when estimated tokens exceed 50K.",
+    ),
 ) -> None:
     """Deterministic symbol-level IR for Java repositories.
 
@@ -3222,13 +3355,23 @@ def repo_ir_cmd(
             )
     else:
         _ir_size = len(output.encode("utf-8"))
-        if _ir_size > 400_000:
-            _ir_tokens = _ir_size // 4
+        _ir_tokens_est = _ir_size // 4
+        # P1-C: abort when estimated tokens > 50K unless --force or --output is given.
+        if _ir_tokens_est > 50_000 and not force:
+            _emit_error_json(
+                "OUTPUT_TOO_LARGE",
+                f"Estimated output is ~{_ir_tokens_est // 1000}K tokens — too large for most LLM context windows.",
+                hint=(
+                    "Use --summary-only (~5K tokens), --max-nodes N --max-edges N, "
+                    "--output FILE to save to disk, or --force to bypass this guard."
+                ),
+                expected="Output under 50K estimated tokens.",
+            )
+            raise typer.Exit(1)
+        if _ir_tokens_est > 10_000:
             sys.stderr.write(
-                f"WARNING: Output is ~{_ir_tokens // 1000}K tokens. This exceeds the context window of "
-                "most LLMs (GPT-4o: 128K, Claude Sonnet: 200K). "
-                "Use --compact or --agent for LLM-consumable context. "
-                "Use --output FILE to save for local search tools.\n"
+                f"[repo-ir] ~{_ir_tokens_est // 1000}K tokens — "
+                "use --summary-only or --output FILE for smaller output.\n"
             )
             sys.stderr.flush()
         try:
@@ -3995,6 +4138,11 @@ def config_cmd() -> None:
 @app.command("cold-start")
 def cold_start_cmd(
     path: Path = typer.Argument(Path("."), help="Repository path (default: current directory)"),
+    compact: bool = typer.Option(
+        False,
+        "--compact",
+        help="Emit a compact subset (~10K tokens): status, git_head, stacks, entry_points, and key_dependencies only.",
+    ),
 ) -> None:
     """Output Repository Intelligence Snapshot bootstrap context as JSON.
 
@@ -4002,24 +4150,33 @@ def cold_start_cmd(
     status: cold_start_ready | cold_start_stale | no_ris
 
     \b
-    Note: Produces large output (~100K–200K tokens for medium repos).
-    Designed for bootstrap snapshots, not direct LLM injection.
-    Use --compact or --agent instead for LLM-consumable context.
-    Use --output FILE to save for local search tools.
+    Note: Full output is large (~100K–200K tokens for medium repos).
+    Use --compact for a ~10K token subset safe for direct LLM injection.
+    Use --output FILE to save the full snapshot for local search tools.
     """
     import json as _json
     from sourcecode.ris import get_cold_start_context as _gcs
     target = Path(path).resolve()
     result = _gcs(target)
+    if compact:
+        # P1-C: cap at ~10K tokens — keep only fields essential for orientation.
+        _cs_keys = {"status", "git_head", "stacks", "entry_points",
+                    "key_dependencies", "project_type", "project_summary",
+                    "validation", "_meta"}
+        result = {k: v for k, v in result.items() if k in _cs_keys}
+        result["_meta"] = {**(result.get("_meta") or {}), "compact_mode": True,
+                           "full_available": "sourcecode cold-start (without --compact)"}
     _out = _json.dumps(result, indent=2, ensure_ascii=False)
     _size = len(_out.encode("utf-8"))
-    if _size > 400_000:
-        _tokens = _size // 4
+    _tokens = _size // 4
+    _out_with_meta = _json.loads(_out)
+    _out_with_meta.setdefault("_meta", {})["estimated_tokens"] = _tokens
+    _out = _json.dumps(_out_with_meta, indent=2, ensure_ascii=False)
+    if not compact and _size > 400_000:
         sys.stderr.write(
             f"WARNING: Output is ~{_tokens // 1000}K tokens. This exceeds the context window of "
             "most LLMs (GPT-4o: 128K, Claude Sonnet: 200K). "
-            "Use --compact or --agent for LLM-consumable context. "
-            "Use --output FILE to save for local search tools.\n"
+            "Use --compact for a ~10K token subset, or --output FILE to save.\n"
         )
         sys.stderr.flush()
     typer.echo(_out)

@@ -1910,5 +1910,6 @@ class TestChangedOnlyCleanRepo:
         result = runner.invoke(app, [str(clean_git_repo), "--changed-only"])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert "note" in data
-        assert data["note"]  # non-empty
+        # Unified schema: no legacy "note" field; use analysis_scope and _meta instead.
+        assert data.get("analysis_scope") == "empty"
+        assert data.get("_meta", {}).get("changed_only") is True
