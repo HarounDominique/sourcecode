@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sourcecode"
-version = "1.33.19"
+version = "1.33.20"
 description = "Persistent structural context and ultra-fast repeated analysis for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.9"
