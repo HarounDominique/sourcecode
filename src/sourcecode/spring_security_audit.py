@@ -337,11 +337,12 @@ def _build_extends_map(cir: "CanonicalRepositoryIR") -> dict[str, str]:
 def _controller_source_file(cir: "CanonicalRepositoryIR", controller_fqn: str) -> str:
     """Return the source_file for a controller class from cir.files, or empty string."""
     simple = controller_fqn.split(".")[-1]
-    for f in cir.files:
-        if not isinstance(f, dict):
-            continue
-        path = f.get("path", "")
-        if simple and (path.endswith(f"{simple}.java") or path.endswith(f"{simple}.kt")):
+    if not simple:
+        return ""
+    for path in cir.files:
+        if isinstance(path, str) and (
+            path.endswith(f"{simple}.java") or path.endswith(f"{simple}.kt")
+        ):
             return path
     return ""
 

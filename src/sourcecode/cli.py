@@ -3843,6 +3843,18 @@ def spring_audit_cmd(
             metadata=merged_meta,
         ).finalize()
 
+    # Populate git_head from repo HEAD — non-fatal.
+    try:
+        import subprocess as _sub_sa
+        _sha_r = _sub_sa.run(
+            ["git", "-C", str(target), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if _sha_r.returncode == 0:
+            combined.git_head = _sha_r.stdout.strip()
+    except Exception:
+        pass
+
     data = combined.to_dict()
 
     # Non-fatal RIS side-effect — persist summary only (not full findings).
