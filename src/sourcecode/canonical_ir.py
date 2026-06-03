@@ -20,8 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from sourcecode.cir_graphs import ImplementationGraph, InjectionGraph
 from sourcecode.repository_ir import (
     build_repo_ir,
+)
+from sourcecode.repository_ir import (
     compute_blast_radius as _compute_blast_radius,
 )
 
@@ -78,7 +81,7 @@ class CanonicalSecurity:
     @classmethod
     def from_policy_dict(
         cls, d: dict, *, source_scope: str = "method"
-    ) -> "CanonicalSecurity":
+    ) -> CanonicalSecurity:
         """Build from the policy dict emitted by _route_security_from_sym."""
         return cls(
             policy=d.get("policy", ""),
@@ -165,6 +168,15 @@ class CanonicalRepositoryIR:
     endpoints: list[CanonicalEndpoint]                        # canonical endpoint list
     security_index: dict[str, CanonicalSecurity]              # handler_symbol → security
     metadata: dict[str, Any]                                  # stats, gaps, subsystems, etc.
+    # Derived graph indices — built from dependencies at CIR construction time.
+    # CH-001: interface → implementation(s) lookup
+    implementation_graph: ImplementationGraph = field(
+        default_factory=ImplementationGraph, repr=False, compare=False
+    )
+    # CH-002: DI injection dependency → dependents + field/constructor lifting
+    injection_graph: InjectionGraph = field(
+        default_factory=InjectionGraph, repr=False, compare=False
+    )
     # Raw IR dict retained for projections that need full IR fields
     # (e.g. project_blast_radius delegates to compute_blast_radius)
     _raw_ir: dict = field(default_factory=dict, repr=False, compare=False)
@@ -339,6 +351,11 @@ def ir_dict_to_canonical(
         IR_SCHEMA_VERSION, files, symbols, endpoints, call_graph
     )
 
+    # Derived graph indices built from dependency edges
+    known_symbols: set[str] = set(symbols)
+    impl_graph = ImplementationGraph.build(dependencies, known_symbols)
+    inj_graph = InjectionGraph.build(dependencies)
+
     return CanonicalRepositoryIR(
         schema_version=IR_SCHEMA_VERSION,
         cir_hash=cir_hash,
@@ -350,6 +367,8 @@ def ir_dict_to_canonical(
         endpoints=endpoints,
         security_index=security_index,
         metadata=metadata,
+        implementation_graph=impl_graph,
+        injection_graph=inj_graph,
         _raw_ir=ir,
     )
 

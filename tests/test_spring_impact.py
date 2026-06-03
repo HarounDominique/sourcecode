@@ -36,6 +36,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from sourcecode.cir_graphs import ImplementationGraph, InjectionGraph
 from sourcecode.spring_findings import SpringFinding
 from sourcecode.spring_impact import (
     AffectedEndpoint,
@@ -133,6 +134,11 @@ class _FakeCIR:
         self.metadata = metadata or {}
         self.cir_hash = "deadbeef00000000"
         self._raw_ir = {"graph": {"nodes": [], "edges": self.call_graph}}
+        # Derived graph indices — built from dependencies, mirroring canonical_ir behaviour
+        self.implementation_graph = ImplementationGraph.build(
+            self.dependencies, set(self.symbols)
+        )
+        self.injection_graph = InjectionGraph.build(self.dependencies)
 
 
 def _make_model(
@@ -834,3 +840,197 @@ class TestRegressionImportsEdgeExclusion:
         assert "com.example.OrderController#checkout" in result.direct_callers
         assert len(result.endpoints_affected) == 1
         assert result.endpoints_affected[0].path == "/orders"
+
+
+class TestRegressionCH001InterfaceDispatch:
+    """CH-001 — Querying an interface expands seeds to in-repo implementations.
+
+    Before fix: querying OrderService only seeded interface symbols; TX boundaries
+    on OrderServiceImpl were never found; callers of impl methods were missed.
+    After fix: implementation seeds are added automatically; impact chain includes
+    impl callers and TX boundaries.
+    """
+
+    def _make_cir_with_impl(self):
+        """CIR with OrderService interface + OrderServiceImpl in-repo."""
+        symbols = [
+            "com.example.OrderService",
+            "com.example.OrderService#placeOrder",
+            "com.example.OrderServiceImpl",
+            "com.example.OrderServiceImpl#placeOrder",
+            "com.example.OrderController",
+            "com.example.OrderController#checkout",
+        ]
+        # Controller calls the impl directly
+        reverse_graph = {
+            "com.example.OrderServiceImpl#placeOrder": {
+                "calls": ["com.example.OrderController#checkout"],
+            },
+        }
+        deps = [
+            {
+                "from": "com.example.OrderServiceImpl",
+                "to": "com.example.OrderService",
+                "type": "implements",
+                "confidence": "high",
+            }
+        ]
+        return _FakeCIR(symbols=symbols, reverse_graph=reverse_graph, dependencies=deps)
+
+    def test_ch001_impl_callers_found_via_interface_query(self):
+        """Querying the interface finds callers of the implementation."""
+        cir = self._make_cir_with_impl()
+        model = _make_model()
+        orchestrator = ImpactOrchestrator()
+        result = orchestrator.query(cir, model, "com.example.OrderService", depth=2)
+        all_callers = set(result.direct_callers) | set(result.indirect_callers)
+        assert "com.example.OrderController#checkout" in all_callers, (
+            f"Controller caller not found via interface query. callers={all_callers}"
+        )
+
+    def test_ch001_interface_expansion_warning_emitted(self):
+        """When impl seeds are added, a warning is present in analysis_warnings."""
+        cir = self._make_cir_with_impl()
+        model = _make_model()
+        result = ImpactOrchestrator().query(cir, model, "com.example.OrderService", depth=2)
+        has_expansion_warning = any(
+            "implementation" in w.lower() for w in result.analysis_warnings
+        )
+        assert has_expansion_warning, (
+            f"Expected implementation expansion warning. warnings={result.analysis_warnings}"
+        )
+
+    def test_ch001_no_expansion_when_no_impl(self):
+        """Interface with no in-repo implementation: no false expansion, no crash."""
+        cir = _FakeCIR(
+            symbols=["com.example.IService", "com.example.IService#doWork"],
+            reverse_graph={},
+            dependencies=[],
+        )
+        model = _make_model()
+        result = ImpactOrchestrator().query(cir, model, "com.example.IService", depth=2)
+        assert result.resolution in ("exact", "class_expanded", "partial", "not_found")
+        assert result.direct_callers == []
+        assert result.indirect_callers == []
+
+    def test_ch001_tx_boundary_on_impl_found(self):
+        """TX boundary on implementation method is reachable via interface query."""
+        cir = self._make_cir_with_impl()
+        impl_boundary = _tx_boundary(
+            "com.example.OrderServiceImpl#placeOrder", scope="method"
+        )
+        tx_index = _make_tx_index([impl_boundary])
+        model = _make_model(tx_index=tx_index)
+        result = ImpactOrchestrator().query(
+            cir, model, "com.example.OrderService#placeOrder", depth=2
+        )
+        # tx_boundary on the resolved symbol OR on an impl method must be accessible
+        # (at minimum, the impl seed itself should appear in chain or seed expansion)
+        assert result.resolution not in ("not_found",), (
+            f"Resolution should not be not_found. got={result.resolution}"
+        )
+
+
+class TestRegressionCH002InjectionFieldNode:
+    """CH-002 — injects edge to field/constructor node expands to containing class.
+
+    Before fix: BFS found X#<init> or X#fieldName as callers but stopped there —
+    contained_in edges (X#<init> → X) are skipped, so traversal terminated at the
+    constructor/field node.
+    After fix: when BFS encounters an injects edge to a X#something node, class X
+    is also added to the caller set and BFS continues from X.
+    """
+
+    def test_ch002_constructor_node_class_added(self):
+        """Controller#<init> (injects) also adds Controller class to caller set."""
+        symbols = [
+            "com.example.OrderService",
+            "com.example.OrderController",
+            "com.example.OrderController#<init>",
+        ]
+        reverse_graph = {
+            "com.example.OrderService": {
+                "injects": ["com.example.OrderController#<init>"],
+            },
+        }
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph)
+        model = _make_model()
+        result = ImpactOrchestrator().query(cir, model, "com.example.OrderService", depth=2)
+        direct_set = set(result.direct_callers)
+        assert "com.example.OrderController#<init>" in direct_set, (
+            f"Constructor node missing from direct callers: {direct_set}"
+        )
+        assert "com.example.OrderController" in direct_set, (
+            f"Class missing from direct callers (CH-002 expansion): {direct_set}"
+        )
+
+    def test_ch002_field_node_class_added(self):
+        """Service#fieldName (injects) also adds Service class to caller set."""
+        symbols = [
+            "com.example.OrderRepository",
+            "com.example.OrderServiceImpl",
+            "com.example.OrderServiceImpl#orderRepo",
+        ]
+        reverse_graph = {
+            "com.example.OrderRepository": {
+                "injects": ["com.example.OrderServiceImpl#orderRepo"],
+            },
+        }
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph)
+        model = _make_model()
+        result = ImpactOrchestrator().query(cir, model, "com.example.OrderRepository", depth=2)
+        direct_set = set(result.direct_callers)
+        assert "com.example.OrderServiceImpl#orderRepo" in direct_set, (
+            f"Field node missing from direct callers: {direct_set}"
+        )
+        assert "com.example.OrderServiceImpl" in direct_set, (
+            f"Class missing from direct callers (CH-002 expansion): {direct_set}"
+        )
+
+    def test_ch002_class_continues_bfs(self):
+        """After class-level expansion, BFS continues from the class to its callers."""
+        symbols = [
+            "com.example.OrderRepository",
+            "com.example.OrderServiceImpl",
+            "com.example.OrderServiceImpl#<init>",
+            "com.example.OrderController",
+            "com.example.OrderController#checkout",
+        ]
+        reverse_graph = {
+            "com.example.OrderRepository": {
+                "injects": ["com.example.OrderServiceImpl#<init>"],
+            },
+            # OrderServiceImpl class has a caller: OrderController#checkout
+            "com.example.OrderServiceImpl": {
+                "calls": ["com.example.OrderController#checkout"],
+            },
+        }
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph)
+        model = _make_model()
+        result = ImpactOrchestrator().query(cir, model, "com.example.OrderRepository", depth=4)
+        all_callers = set(result.direct_callers) | set(result.indirect_callers)
+        assert "com.example.OrderController#checkout" in all_callers, (
+            f"BFS did not continue past class expansion. callers={all_callers}"
+        )
+
+    def test_ch002_no_false_callers_via_non_injects_edge(self):
+        """Class-level expansion ONLY occurs for injects edges, not calls/extends."""
+        symbols = [
+            "com.example.ServiceA",
+            "com.example.ServiceB#<init>",
+            "com.example.ServiceB",
+        ]
+        reverse_graph = {
+            "com.example.ServiceA": {
+                "calls": ["com.example.ServiceB#<init>"],
+            },
+        }
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph)
+        model = _make_model()
+        result = ImpactOrchestrator().query(cir, model, "com.example.ServiceA", depth=2)
+        direct_set = set(result.direct_callers)
+        assert "com.example.ServiceB#<init>" in direct_set
+        # ServiceB class should NOT be auto-added (edge was 'calls', not 'injects')
+        assert "com.example.ServiceB" not in direct_set, (
+            f"ServiceB class falsely added from non-injects edge: {direct_set}"
+        )

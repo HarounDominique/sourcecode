@@ -239,6 +239,11 @@ def _bfs_callers(
     direct_callers: depth-1 callers (callers of the seed symbols themselves).
     indirect_callers: depth-2+ callers, up to max_depth.
     was_truncated: True when hub-class guard capped the traversal.
+
+    CH-002: when an injects edge leads to a field/constructor node (X#<init> or
+    X#fieldName), the containing class X is also added to the caller set and BFS
+    continues from X.  This resolves the DI traversal gap where contained_in edges
+    (which are skipped) were the only path from a field node back to its class.
     """
     visited: set[str] = set(seed_fqns)
     direct: list[str] = []
@@ -261,6 +266,17 @@ def _bfs_callers(
     # Queue: (fqn, depth)
     queue: list[tuple[str, int]] = [(s, 0) for s in seed_fqns]
 
+    def _add_caller(caller: str, depth: int) -> None:
+        if caller in visited:
+            return
+        visited.add(caller)
+        if depth == 0:
+            direct.append(caller)
+        else:
+            indirect.append(caller)
+        if depth + 1 < effective_depth:
+            queue.append((caller, depth + 1))
+
     while queue:
         fqn, depth = queue.pop(0)
         if depth >= effective_depth:
@@ -270,15 +286,12 @@ def _bfs_callers(
             if etype in _SKIP_EDGE_TYPES:
                 continue
             for caller in fqn_list:
-                if caller in visited:
-                    continue
-                visited.add(caller)
-                if depth == 0:
-                    direct.append(caller)
-                else:
-                    indirect.append(caller)
-                if depth + 1 < effective_depth:
-                    queue.append((caller, depth + 1))
+                _add_caller(caller, depth)
+                # CH-002: injects edge to a field/constructor node → also traverse
+                # the containing class, bypassing the skipped contained_in edge.
+                if etype == "injects" and "#" in caller:
+                    class_fqn = caller.rsplit("#", 1)[0]
+                    _add_caller(class_fqn, depth)
 
     return direct, indirect, was_truncated
 
@@ -519,6 +532,34 @@ class ImpactOrchestrator:
         else:
             seed_classes = {_class_of(s) for s in seed_fqns}
             resolved_symbol = next(iter(seed_classes)) if len(seed_classes) == 1 else symbol
+
+        # CH-001: expand interface seeds to include in-repo implementations.
+        # When the queried class is an interface, BFS should also start from
+        # implementation symbols so TX boundaries and callers on the impl are found.
+        impl_graph = getattr(cir, "implementation_graph", None)
+        if impl_graph is not None:
+            seed_classes_ch001 = {_class_of(s) for s in seed_fqns}
+            impl_seeds: list[str] = []
+            impl_classes_added: set[str] = set()
+            for seed_class in sorted(seed_classes_ch001):
+                impls = impl_graph.implementations_of(seed_class)
+                if not impls:
+                    continue
+                for impl_class in impls:
+                    if impl_class in impl_classes_added:
+                        continue
+                    impl_classes_added.add(impl_class)
+                    for sym in cir.symbols:
+                        if _class_of(sym) == impl_class and sym not in set(seed_fqns):
+                            impl_seeds.append(sym)
+            if impl_seeds:
+                seed_fqns = list(dict.fromkeys(seed_fqns + impl_seeds))
+                n_classes = len(impl_classes_added)
+                n_syms = len(impl_seeds)
+                warnings.append(
+                    f"Interface implementation expansion: "
+                    f"added {n_syms} symbol(s) from {n_classes} implementation(s)."
+                )
 
         # ── 2. BFS through reverse graph ─────────────────────────────────
         direct_callers, indirect_callers, truncated = _bfs_callers(
