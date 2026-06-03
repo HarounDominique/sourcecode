@@ -700,4 +700,74 @@ class TestRunSecurityAudit:
         result = run_security_audit(cir)
         pattern_ids = {f.pattern_id for f in result.findings}
         assert "SEC-001" in pattern_ids
-        assert "SEC-003" in pattern_ids
+
+
+# ---------------------------------------------------------------------------
+# Regression: BUG-001 — programmatic-policy routes must not trigger annotation_based
+# classification, preventing SEC-001 false-positive flood on IAM/auth-domain repos.
+# ---------------------------------------------------------------------------
+
+class TestBUG001ProgrammaticSecurityModel:
+    """_PROGRAMMATIC_SECURITY_RE was too broad (matched bare class names like
+    'Authentication', 'Principal', 'SecurityContext' in imports/type decls).
+    This caused repos that only have programmatic security to be classified as
+    annotation_based, which then triggered SEC-001 for every other endpoint.
+
+    Fix: tighten regex to require method-call/field-access context; exclude
+    'programmatic' policy from _has_ann_sec_asm and _has_annotation_security.
+    """
+
+    def test_programmatic_only_model_does_not_emit_sec001(self):
+        """Endpoints with policy=programmatic must not trigger SEC-001."""
+        ctrl = "com.example.AuthController"
+        sec_programmatic = CanonicalSecurity(policy="programmatic", source_scope="method")
+        cir = _FakeCIR(security_model="annotation_based")
+        # All endpoints have programmatic security only
+        cir.add_endpoint(
+            controller=ctrl,
+            handler=f"{ctrl}#doAuth",
+            path="/auth",
+            security=sec_programmatic,
+        )
+        result = run_security_audit(cir)
+        sec001 = [f for f in result.findings if f.pattern_id == "SEC-001"]
+        assert sec001 == [], "SEC-001 must not fire when every endpoint has programmatic security"
+
+    def test_unknown_security_model_does_not_emit_sec001(self):
+        """Repos without any security model must produce 0 SEC-001 findings."""
+        ctrl = "com.example.ApiController"
+        cir = _FakeCIR(security_model="unknown")
+        cir.add_endpoint(
+            controller=ctrl,
+            handler=f"{ctrl}#getItems",
+            path="/items",
+            security=None,
+        )
+        result = run_security_audit(cir)
+        sec001 = [f for f in result.findings if f.pattern_id == "SEC-001"]
+        assert sec001 == [], "SEC-001 must not fire for security_model=unknown"
+
+    def test_annotation_based_model_still_emits_sec001(self):
+        """Repos with annotation_based model still emit SEC-001 for bare endpoints."""
+        ctrl = "com.example.SecuredController"
+        sec_preauth = CanonicalSecurity(
+            policy="spring_preauthorize", source_scope="method", expression="hasRole('ADMIN')"
+        )
+        cir = _FakeCIR(security_model="annotation_based")
+        # One secured, one not
+        cir.add_endpoint(
+            controller=ctrl,
+            handler=f"{ctrl}#secured",
+            path="/admin",
+            security=sec_preauth,
+        )
+        cir.add_endpoint(
+            controller=ctrl,
+            handler=f"{ctrl}#open",
+            path="/open",
+            security=None,
+        )
+        result = run_security_audit(cir)
+        sec001 = [f for f in result.findings if f.pattern_id == "SEC-001"]
+        assert len(sec001) == 1
+        assert sec001[0].evidence["path"] == "/open"

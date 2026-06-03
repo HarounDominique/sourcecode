@@ -202,10 +202,13 @@ _FILTER_SECURITY_ANNOTATIONS: frozenset[str] = frozenset({
 })
 
 # Programmatic security: method-call patterns that indicate runtime auth enforcement.
+# Requires method-call or field-access context — bare class name mentions (imports,
+# type declarations) must NOT match or IAM/auth-domain repos generate false positives.
 _PROGRAMMATIC_SECURITY_RE = re.compile(
     r"\b(?:hasRole|hasAuthority|isAuthenticated|requirePermission|checkPermission"
     r"|assertAuthorized|authenticate)\s*\("
-    r"|(?:Authentication|SecurityContext|Principal|AuthorizationManager|AccessDecisionManager)\b"
+    r"|SecurityContextHolder\."
+    r"|\.(?:getAuthentication|getSecurityContext|getPrincipal|isAuthorized|checkAccess)\s*\("
     r"|throw\s+new\s+(?:AccessDeniedException|UnauthorizedException|ForbiddenException|AuthenticationException)\b",
     re.MULTILINE,
 )
@@ -2321,8 +2324,12 @@ def _assemble(
             for sym in _class_syms_asm
         )
     )
+    # Only real annotation-based policies count (not "programmatic" fallback).
+    # Programmatic security does not mean every unannotated endpoint is unsecured.
     _has_ann_sec_asm = any(
-        r.get("security_annotations") for r in _route_surface
+        isinstance(r.get("security_annotations"), dict)
+        and r["security_annotations"].get("policy") not in (None, "programmatic", "none_detected")
+        for r in _route_surface
         if isinstance(r, dict)
     )
     if _filter_based_asm and _has_ann_sec_asm:
@@ -3172,7 +3179,7 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
         )
     )
     _has_annotation_security = any(
-        e.get("security", {}).get("policy") != "none_detected"
+        e.get("security", {}).get("policy") not in (None, "none_detected", "programmatic")
         for e in endpoints
     )
     if _filter_based and _has_annotation_security:
