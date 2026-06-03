@@ -2,7 +2,7 @@
 
 Coverage:
   IC-01  Exact FQN resolution
-  IC-02  Simple class name resolution (suffix match)
+  IC-02  Simple class name resolution (suffix match) → class_expanded
   IC-03  Class#method resolution — found
   IC-04  Class#method resolution — class found, method not → partial + warning
   IC-05  Not-found symbol → not_found result
@@ -21,6 +21,11 @@ Coverage:
   IC-18  run_impact_chain() — no model → builds internally, no raise
   IC-19  contained_in edges excluded from BFS
   IC-20  class_expanded resolution returns all class methods as seeds
+  IC-V1  Duplicate symbols in CIR are deduplicated in seed_fqns (regression)
+  IC-V2  resolved_symbol is canonical class FQN for multi-seed class expansion
+  IC-V3  class_expanded → confidence=high (no confidence degradation)
+  IC-V5  Single-method seed only returns that method's endpoint (not all controller endpoints)
+  IC-V5b Class-level seed returns ALL controller endpoints
 """
 from __future__ import annotations
 
@@ -31,19 +36,18 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from sourcecode.spring_findings import SpringFinding
 from sourcecode.spring_impact import (
     AffectedEndpoint,
     ImpactChainResult,
     ImpactOrchestrator,
     _bfs_callers,
-    _class_of,
     _collect_endpoints,
     _compute_risk,
     _filter_findings,
     _resolve_symbol,
     run_impact_chain,
 )
-from sourcecode.spring_findings import SpringFinding
 from sourcecode.spring_model import (
     BeanGraph,
     CallAdjacency,
@@ -52,8 +56,7 @@ from sourcecode.spring_model import (
     InheritanceGraph,
     SpringSemanticModel,
 )
-from sourcecode.spring_semantic import TransactionBoundaryIndex, TransactionBoundary
-
+from sourcecode.spring_semantic import TransactionBoundary, TransactionBoundaryIndex
 
 # ---------------------------------------------------------------------------
 # Shared fake objects
@@ -204,7 +207,7 @@ class TestResolveSymbol:
             "com.example.OrderService#cancelOrder",
         ]
         res, fqns, warnings = _resolve_symbol("OrderService", symbols)
-        assert res in ("exact", "partial")
+        assert res == "class_expanded"
         assert all("OrderService" in f for f in fqns)
         assert len(fqns) == 3
 
@@ -467,7 +470,7 @@ class TestToDict:
     def test_ic17_all_keys_present(self):
         result = ImpactChainResult(symbol="com.example.Foo", resolution="exact")
         d = result.to_dict()
-        assert self.REQUIRED_KEYS <= set(d.keys())
+        assert set(d.keys()) >= self.REQUIRED_KEYS
 
     def test_ic17_json_serializable(self):
         result = ImpactChainResult(
@@ -548,7 +551,7 @@ class TestOrchestratorIntegration:
         orchestrator = ImpactOrchestrator()
         result = orchestrator.query(cir, model, "OrderService#placeOrder", depth=2)
 
-        assert result.resolution in ("exact", "partial")
+        assert result.resolution in ("exact", "partial", "class_expanded")
         assert "com.example.OrderController#checkout" in result.direct_callers
         assert "com.example.ApiGateway#route" in result.indirect_callers
         assert len(result.endpoints_affected) == 1
@@ -562,3 +565,272 @@ class TestOrchestratorIntegration:
         orchestrator = ImpactOrchestrator()
         result = orchestrator.query(cir, model, "OrderService#placeOrder", depth=2)
         json.dumps(result.to_dict())  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for IC-V1..V5 (validation-session bugs)
+# ---------------------------------------------------------------------------
+
+class TestRegressionV1DeduplicateSeeds:
+    """IC-V1 — duplicate symbols in CIR must not produce duplicate seeds."""
+
+    def test_ic_v1_dedup_class_expansion(self):
+        symbols = [
+            "com.example.OwnerController",
+            "com.example.OwnerController#addPaginationModel",
+            "com.example.OwnerController#addPaginationModel",  # duplicate
+            "com.example.OwnerController#processCreationForm",
+        ]
+        res, fqns, warnings = _resolve_symbol("OwnerController", symbols)
+        # No duplicates in output
+        assert len(fqns) == len(set(fqns)), f"Duplicate seeds: {fqns}"
+        assert res == "class_expanded"
+
+    def test_ic_v1_dedup_method_match(self):
+        symbols = [
+            "com.example.Svc",
+            "com.example.Svc#doWork",
+            "com.example.Svc#doWork",  # duplicate
+        ]
+        res, fqns, _ = _resolve_symbol("Svc#doWork", symbols)
+        assert len(fqns) == len(set(fqns)), f"Duplicate seeds: {fqns}"
+        assert len(fqns) == 1
+
+
+class TestRegressionV2ResolvedSymbol:
+    """IC-V2 — resolved_symbol must be canonical class FQN, not short input."""
+
+    def _build_controller_cir(self):
+        symbols = [
+            "com.example.OrderController",
+            "com.example.OrderController#checkout",
+            "com.example.OrderController#listOrders",
+        ]
+        ep1 = _FakeEndpoint("ep1", "POST", "/orders", "com.example.OrderController",
+                            "com.example.OrderController#checkout")
+        ep2 = _FakeEndpoint("ep2", "GET", "/orders", "com.example.OrderController",
+                            "com.example.OrderController#listOrders")
+        ei = _make_endpoint_index([ep1, ep2])
+        model = _make_model(endpoint_index=ei)
+        cir = _FakeCIR(symbols=symbols, reverse_graph={})
+        return cir, model
+
+    def test_ic_v2_class_expansion_resolved_symbol_is_fqn(self):
+        cir, model = self._build_controller_cir()
+        orchestrator = ImpactOrchestrator()
+        result = orchestrator.query(cir, model, "OrderController", depth=2)
+        # symbol output must be the full FQN, not the short input
+        assert result.symbol == "com.example.OrderController", (
+            f"Expected FQN, got: {result.symbol!r}"
+        )
+
+    def test_ic_v2_single_method_seed_resolved_symbol_is_fqn(self):
+        cir, model = self._build_controller_cir()
+        orchestrator = ImpactOrchestrator()
+        result = orchestrator.query(cir, model, "OrderController#checkout", depth=2)
+        assert result.symbol == "com.example.OrderController#checkout"
+
+
+class TestRegressionV3ClassExpandedConfidence:
+    """IC-V3 — class_expanded resolution yields confidence=high (not medium)."""
+
+    def test_ic_v3_class_expanded_confidence_high(self):
+        symbols = [
+            "com.example.OrderService",
+            "com.example.OrderService#placeOrder",
+        ]
+        res, fqns, warnings = _resolve_symbol("OrderService", symbols)
+        assert res == "class_expanded"
+        assert warnings == []
+
+        cir = _FakeCIR(symbols=symbols, reverse_graph={})
+        model = _make_model()
+        orchestrator = ImpactOrchestrator()
+        result = orchestrator.query(cir, model, "OrderService", depth=1)
+        assert result.resolution == "class_expanded"
+        assert result.confidence == "high", (
+            f"class_expanded without warnings should be high, got {result.confidence!r}"
+        )
+
+    def test_ic_v3_partial_resolution_still_medium(self):
+        # Ambiguous: two classes match the same short name
+        symbols = [
+            "com.a.OrderService",
+            "com.a.OrderService#placeOrder",
+            "com.b.OrderService",
+            "com.b.OrderService#placeOrder",
+        ]
+        res, fqns, warnings = _resolve_symbol("OrderService", symbols)
+        assert res == "partial"
+
+        cir = _FakeCIR(symbols=symbols, reverse_graph={})
+        model = _make_model()
+        orchestrator = ImpactOrchestrator()
+        result = orchestrator.query(cir, model, "OrderService", depth=1)
+        assert result.resolution == "partial"
+        assert result.confidence == "medium"
+
+
+class TestRegressionV5EndpointPrecision:
+    """IC-V5 — single-method seed returns only that method's endpoint.
+    Class-level seed returns all controller endpoints."""
+
+    def _build_multi_endpoint_controller(self):
+        symbols = [
+            "com.example.OwnerController",
+            "com.example.OwnerController#processCreationForm",
+            "com.example.OwnerController#processFindForm",
+            "com.example.OwnerController#showOwner",
+        ]
+        ep1 = _FakeEndpoint("ep1", "POST", "/owners/new", "com.example.OwnerController",
+                            "com.example.OwnerController#processCreationForm")
+        ep2 = _FakeEndpoint("ep2", "GET", "/owners", "com.example.OwnerController",
+                            "com.example.OwnerController#processFindForm")
+        ep3 = _FakeEndpoint("ep3", "GET", "/owners/{id}", "com.example.OwnerController",
+                            "com.example.OwnerController#showOwner")
+        ei = _make_endpoint_index([ep1, ep2, ep3])
+        model = _make_model(endpoint_index=ei)
+        cir = _FakeCIR(symbols=symbols, reverse_graph={})
+        return cir, model
+
+    def test_ic_v5_single_method_one_endpoint(self):
+        cir, model = self._build_multi_endpoint_controller()
+        orchestrator = ImpactOrchestrator()
+        # Query the exact handler method for POST /owners/new
+        result = orchestrator.query(
+            cir, model,
+            "com.example.OwnerController#processCreationForm",
+            depth=2,
+        )
+        assert len(result.endpoints_affected) == 1, (
+            f"Single-method seed should yield 1 endpoint, got {len(result.endpoints_affected)}: "
+            f"{[ep.path for ep in result.endpoints_affected]}"
+        )
+        assert result.endpoints_affected[0].path == "/owners/new"
+        assert result.endpoints_affected[0].method == "POST"
+
+    def test_ic_v5_class_seed_all_endpoints(self):
+        cir, model = self._build_multi_endpoint_controller()
+        orchestrator = ImpactOrchestrator()
+        # Query the entire controller class → all 3 endpoints
+        result = orchestrator.query(
+            cir, model,
+            "com.example.OwnerController",
+            depth=2,
+        )
+        assert len(result.endpoints_affected) == 3, (
+            f"Class-level seed should yield all 3 endpoints, got {len(result.endpoints_affected)}: "
+            f"{[ep.path for ep in result.endpoints_affected]}"
+        )
+
+    def test_ic_v5_caller_method_is_handler_adds_its_endpoint(self):
+        """When a caller of the seed IS a handler, that endpoint is included."""
+        symbols = [
+            "com.example.OrderService",
+            "com.example.OrderService#placeOrder",
+            "com.example.OrderController",
+            "com.example.OrderController#checkout",
+            "com.example.OrderController#listOrders",
+        ]
+        reverse_graph = {
+            "com.example.OrderService#placeOrder": {
+                "calls": ["com.example.OrderController#checkout"],
+            },
+        }
+        ep_checkout = _FakeEndpoint("ep1", "POST", "/orders/checkout",
+                                    "com.example.OrderController",
+                                    "com.example.OrderController#checkout")
+        ep_list = _FakeEndpoint("ep2", "GET", "/orders",
+                                "com.example.OrderController",
+                                "com.example.OrderController#listOrders")
+        ei = _make_endpoint_index([ep_checkout, ep_list])
+        model = _make_model(endpoint_index=ei)
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph)
+        orchestrator = ImpactOrchestrator()
+        result = orchestrator.query(cir, model, "com.example.OrderService#placeOrder", depth=2)
+        paths = [ep.path for ep in result.endpoints_affected]
+        assert "/orders/checkout" in paths, f"checkout endpoint missing: {paths}"
+        assert "/orders" not in paths, f"listOrders endpoint is false positive: {paths}"
+
+
+class TestRegressionImportsEdgeExclusion:
+    """IC-V6 — imports edges are type-references, not call edges.
+    They must not appear in caller BFS output."""
+
+    def test_ic_v6_imports_caller_excluded(self):
+        """A class that merely imports the seed (type reference) must not appear as a caller."""
+        symbols = [
+            "com.example.OrderService",
+            "com.example.OrderService#placeOrder",
+            "com.example.OrderItemDTO",   # imports OrderService as a type
+        ]
+        reverse_graph = {
+            # OrderItemDTO imports OrderService (type reference, not a call)
+            "com.example.OrderService": {
+                "imports": ["com.example.OrderItemDTO"],
+            },
+        }
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph)
+        model = _make_model()
+        orchestrator = ImpactOrchestrator()
+        result = orchestrator.query(cir, model, "com.example.OrderService#placeOrder", depth=4)
+        assert "com.example.OrderItemDTO" not in result.direct_callers, (
+            "Type-reference (imports edge) must not appear as direct_caller"
+        )
+        assert "com.example.OrderItemDTO" not in result.indirect_callers
+
+    def test_ic_v6_imports_chain_does_not_reach_endpoints(self):
+        """Endpoint false positives via imports chain are prevented."""
+        symbols = [
+            "com.example.OrderService",
+            "com.example.OrderService#placeOrder",
+            "com.example.OrderItemDTO",
+            "com.example.OrderController",
+            "com.example.OrderController#checkout",
+        ]
+        # Imports chain: OrderService ← [imports] OrderItemDTO ← [imports] OrderController
+        reverse_graph = {
+            "com.example.OrderService": {
+                "imports": ["com.example.OrderItemDTO"],
+            },
+            "com.example.OrderItemDTO": {
+                "imports": ["com.example.OrderController"],
+            },
+        }
+        ep = _FakeEndpoint("ep1", "POST", "/orders", "com.example.OrderController",
+                           "com.example.OrderController#checkout")
+        ei = _make_endpoint_index([ep])
+        model = _make_model(endpoint_index=ei)
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph)
+        orchestrator = ImpactOrchestrator()
+        result = orchestrator.query(cir, model, "com.example.OrderService#placeOrder", depth=4)
+        # No endpoints should be reached via imports chain
+        assert len(result.endpoints_affected) == 0, (
+            f"imports chain must not produce endpoint false positives: {[(ep.method, ep.path) for ep in result.endpoints_affected]}"
+        )
+        assert "com.example.OrderController" not in result.direct_callers
+        assert "com.example.OrderController" not in result.indirect_callers
+
+    def test_ic_v6_real_call_still_finds_endpoint(self):
+        """A real calls edge still routes to the endpoint correctly."""
+        symbols = [
+            "com.example.OrderService",
+            "com.example.OrderService#placeOrder",
+            "com.example.OrderController",
+            "com.example.OrderController#checkout",
+        ]
+        reverse_graph = {
+            "com.example.OrderService#placeOrder": {
+                "calls": ["com.example.OrderController#checkout"],
+            },
+        }
+        ep = _FakeEndpoint("ep1", "POST", "/orders", "com.example.OrderController",
+                           "com.example.OrderController#checkout")
+        ei = _make_endpoint_index([ep])
+        model = _make_model(endpoint_index=ei)
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph)
+        orchestrator = ImpactOrchestrator()
+        result = orchestrator.query(cir, model, "com.example.OrderService#placeOrder", depth=4)
+        assert "com.example.OrderController#checkout" in result.direct_callers
+        assert len(result.endpoints_affected) == 1
+        assert result.endpoints_affected[0].path == "/orders"

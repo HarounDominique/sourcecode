@@ -37,9 +37,13 @@ if TYPE_CHECKING:
 
 _SCHEMA_VERSION = "1.0"
 
-# Edge types excluded from caller BFS (structural membership, not actual calls).
-# Mirrors repository_ir._all_callers_from_rg exclusion rule.
-_SKIP_EDGE_TYPES: frozenset[str] = frozenset({"contained_in"})
+# Edge types excluded from caller BFS.
+# contained_in — structural membership (method → enclosing class), not a call.
+# imports      — type reference (A imports B as a type); NOT a runtime call.
+#                Only appears on class nodes, never method nodes. Including it
+#                chains through DTOs and entities that merely reference the service
+#                type, inflating caller counts without semantic value.
+_SKIP_EDGE_TYPES: frozenset[str] = frozenset({"contained_in", "imports"})
 
 # Max BFS depth guard — caller growth is bounded per _bfs_callers
 _BFS_DEFAULT_DEPTH = 4
@@ -144,10 +148,18 @@ def _resolve_symbol(
       2. If input has no '#': expand to all FQNs whose class part equals or ends
          with '.<input>' — covers both the class node and its method nodes.
       3. If input has '#': try matching class + method suffix.
-      4. Simple-name fallback: match classes ending with '.<ClassPart>'.
-      5. Not found.
+      4. Not found.
+
+    Resolution values:
+      "exact"          — full FQN provided and matched exactly.
+      "class_expanded" — short class name matched one class by suffix; all its
+                         symbols included. Confidence stays high.
+      "partial"        — ambiguous (multiple classes matched) or method not found
+                         on matched class. Confidence degrades to medium.
+      "not_found"      — no match.
 
     Returns (resolution, matched_fqns, warnings).
+    Returned list is always deduplicated (preserving order).
     """
     warnings: list[str] = []
 
@@ -164,26 +176,43 @@ def _resolve_symbol(
     # Build a lookup set of all class FQNs (the part before '#')
     cir_classes: set[str] = {_class_of(s) for s in cir_symbols}
 
-    # 2. Try class match first — exact FQN for the class part
+    # 2. Try class match — exact FQN for the class part, or suffix
     def _class_matches(fqn: str) -> bool:
         cls = _class_of(fqn)
         return cls == class_input or cls.endswith("." + class_input)
 
-    class_matched = [s for s in cir_symbols if _class_matches(s)]
+    class_matched_raw = [s for s in cir_symbols if _class_matches(s)]
+    # Deduplicate preserving order (upstream CIR may contain duplicate symbols)
+    class_matched = list(dict.fromkeys(class_matched_raw))
 
     if class_matched:
+        # Determine how many distinct classes were matched
+        matched_class_fqns: set[str] = {_class_of(s) for s in class_matched}
+        unambiguous = len(matched_class_fqns) == 1
+
         if not method_input:
             # Expand to all symbols of the matched class(es)
-            resolution = "exact" if class_input in cir_classes else "partial"
+            if class_input in cir_classes:
+                resolution = "exact"
+            elif unambiguous:
+                resolution = "class_expanded"
+            else:
+                resolution = "partial"
             return resolution, class_matched, []
         else:
             # Filter by method name
-            method_matched = [
+            method_matched = list(dict.fromkeys(
                 s for s in class_matched
                 if "#" in s and s.rsplit("#", 1)[1] == method_input
-            ]
+            ))
             if method_matched:
-                resolution = "exact" if f"{class_input}#{method_input}" in cir_symbols else "partial"
+                method_matched_classes = {_class_of(s) for s in method_matched}
+                if f"{class_input}#{method_input}" in cir_symbols:
+                    resolution = "exact"
+                elif len(method_matched_classes) == 1:
+                    resolution = "class_expanded"
+                else:
+                    resolution = "partial"
                 return resolution, method_matched, []
             # Class found, method not found → fall back to class-level
             warnings.append(
@@ -265,22 +294,43 @@ def _collect_endpoints(
 ) -> list[AffectedEndpoint]:
     """Map callers + seeds to affected HTTP endpoints via model.endpoint_index.
 
-    A symbol is an endpoint entry point if its class FQN is a known controller.
+    An endpoint is affected if its handler_symbol is in the call chain, OR if
+    the seed is the controller class itself (class-level query — all its endpoints
+    are in scope).
+
+    Precision rule: a single-method seed only captures endpoints that method
+    handles directly, not all endpoints of its controller.
     """
     all_fqns = set(seed_fqns) | set(all_callers)
-    affected_controllers: set[str] = set()
 
-    for fqn in all_fqns:
-        cls = _class_of(fqn)
-        if cls in model.endpoint_index.controller_fqns:
-            affected_controllers.add(cls)
+    # Class-level seeds: controller class nodes (no '#') that are controllers.
+    # These arise when the user queries an entire class, not a specific method.
+    class_level_controllers: set[str] = {
+        fqn for fqn in seed_fqns
+        if "#" not in fqn and fqn in model.endpoint_index.controller_fqns
+    }
 
     result: list[AffectedEndpoint] = []
     seen_ep_ids: set[str] = set()
 
-    for controller in sorted(affected_controllers):
+    # Collect candidate controllers: those whose handler_symbol is in the chain
+    # OR whose class node was a seed (class-level query).
+    candidate_controllers: set[str] = set(class_level_controllers)
+    for fqn in all_fqns:
+        cls = _class_of(fqn)
+        if cls in model.endpoint_index.controller_fqns:
+            candidate_controllers.add(cls)
+
+    for controller in sorted(candidate_controllers):
         for ep in model.endpoint_index.endpoints_for(controller):
+            handler = getattr(ep, "handler_symbol", "") or ""
             ep_id = getattr(ep, "id", "") or ""
+
+            # Include if: handler is directly in call chain OR controller is a
+            # class-level seed (whole-class query, all its endpoints in scope).
+            if handler not in all_fqns and controller not in class_level_controllers:
+                continue
+
             if ep_id in seen_ep_ids:
                 continue
             seen_ep_ids.add(ep_id)
@@ -291,7 +341,7 @@ def _collect_endpoints(
                 method=getattr(ep, "method", ""),
                 path=getattr(ep, "path", ""),
                 controller_class=controller,
-                handler_symbol=getattr(ep, "handler_symbol", ""),
+                handler_symbol=handler,
                 source_file=model.endpoint_index.source_file(controller),
                 security_policy=policy,
             ))
@@ -462,7 +512,13 @@ class ImpactOrchestrator:
                 metadata={"analysis_depth": depth},
             )
 
-        resolved_symbol = seed_fqns[0] if len(seed_fqns) == 1 else symbol
+        # Canonical symbol: single seed → use it; multiple seeds from one class
+        # expansion → use the class FQN; truly ambiguous → keep original input.
+        if len(seed_fqns) == 1:
+            resolved_symbol = seed_fqns[0]
+        else:
+            seed_classes = {_class_of(s) for s in seed_fqns}
+            resolved_symbol = next(iter(seed_classes)) if len(seed_classes) == 1 else symbol
 
         # ── 2. BFS through reverse graph ─────────────────────────────────
         direct_callers, indirect_callers, truncated = _bfs_callers(
