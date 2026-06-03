@@ -558,9 +558,9 @@ class TestSecurityScanner:
         findings = scanner.analyze(cir)
         # SEC-002 (high) should appear before SEC-001 (high, same severity) sorted by symbol
         sev_order = [f.severity for f in findings]
+        from sourcecode.spring_findings import SEVERITY_ORDER
         for i in range(len(sev_order) - 1):
-            from sourcecode.spring_security_audit import _SEVERITY_ORDER
-            assert _SEVERITY_ORDER.get(sev_order[i], 9) <= _SEVERITY_ORDER.get(sev_order[i + 1], 9)
+            assert SEVERITY_ORDER.get(sev_order[i], 9) <= SEVERITY_ORDER.get(sev_order[i + 1], 9)
 
     def test_custom_pattern_override(self):
         class _AlwaysFindsOne:

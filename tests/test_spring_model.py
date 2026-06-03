@@ -4,6 +4,8 @@ Coverage:
   CA  CallAdjacency — build from CIR call_graph
   IG  InheritanceGraph — build from CIR dependencies
   BG  BeanGraph — build from _raw_ir nodes + injects edges
+  EI  EndpointIndex — build from CIR endpoints
+  EG  EventGraph — build from call_graph event edges
   SM  SpringSemanticModel — umbrella build, tx_index reuse
 """
 from __future__ import annotations
@@ -17,6 +19,8 @@ from sourcecode.spring_model import (
     BeanGraph,
     BeanNode,
     CallAdjacency,
+    EndpointIndex,
+    EventGraph,
     InheritanceGraph,
     SpringSemanticModel,
 )
@@ -27,17 +31,27 @@ from sourcecode.spring_semantic import TransactionBoundaryIndex
 # Shared fake CIR
 # ---------------------------------------------------------------------------
 
+class _FakeEndpoint:
+    def __init__(self, controller_class: str, source_file: str = "") -> None:
+        self.controller_class = controller_class
+        self.source_file = source_file
+
+
 class _FakeCIR:
     def __init__(
         self,
         nodes: list[dict] | None = None,
         edges: list[dict] | None = None,
         dependencies: list[dict] | None = None,
+        endpoints: list | None = None,
+        files: list[str] | None = None,
     ):
         self._raw_ir = {"graph": {"nodes": nodes or [], "edges": edges or []}}
         self.cir_hash = "deadbeef00000000"
         self.call_graph = edges or []
         self.dependencies = dependencies or []
+        self.endpoints = endpoints or []
+        self.files = files or []
         self.metadata: dict = {}
 
 
@@ -199,6 +213,125 @@ class TestBeanGraph:
 
 
 # ---------------------------------------------------------------------------
+# EI — EndpointIndex
+# ---------------------------------------------------------------------------
+
+class TestEndpointIndex:
+    def test_empty(self):
+        cir = _FakeCIR()
+        ei = EndpointIndex.build(cir)
+        assert ei.by_controller == {}
+        assert ei.controller_fqns == frozenset()
+
+    def test_single_endpoint_indexed(self):
+        ep = _FakeEndpoint("pkg.FooController", source_file="FooController.java")
+        cir = _FakeCIR(endpoints=[ep])
+        ei = EndpointIndex.build(cir)
+        assert "pkg.FooController" in ei.controller_fqns
+        assert ep in ei.endpoints_for("pkg.FooController")
+
+    def test_source_file_from_endpoint(self):
+        ep = _FakeEndpoint("pkg.FooController", source_file="FooController.java")
+        cir = _FakeCIR(endpoints=[ep])
+        ei = EndpointIndex.build(cir)
+        assert ei.source_file("pkg.FooController") == "FooController.java"
+
+    def test_source_file_fallback_from_files(self):
+        ep = _FakeEndpoint("pkg.FooController", source_file="")
+        cir = _FakeCIR(
+            endpoints=[ep],
+            files=["src/main/java/pkg/FooController.java"],
+        )
+        ei = EndpointIndex.build(cir)
+        assert ei.source_file("pkg.FooController") == "src/main/java/pkg/FooController.java"
+
+    def test_missing_controller_fqn_skipped(self):
+        ep = _FakeEndpoint("", source_file="X.java")
+        cir = _FakeCIR(endpoints=[ep])
+        ei = EndpointIndex.build(cir)
+        assert ei.by_controller == {}
+
+    def test_multiple_endpoints_same_controller(self):
+        ep1 = _FakeEndpoint("pkg.Ctrl", source_file="Ctrl.java")
+        ep2 = _FakeEndpoint("pkg.Ctrl", source_file="Ctrl.java")
+        cir = _FakeCIR(endpoints=[ep1, ep2])
+        ei = EndpointIndex.build(cir)
+        assert len(ei.endpoints_for("pkg.Ctrl")) == 2
+
+    def test_unknown_controller_returns_empty(self):
+        cir = _FakeCIR()
+        ei = EndpointIndex.build(cir)
+        assert ei.endpoints_for("pkg.Unknown") == []
+        assert ei.source_file("pkg.Unknown") == ""
+
+
+# ---------------------------------------------------------------------------
+# EG — EventGraph
+# ---------------------------------------------------------------------------
+
+class TestEventGraph:
+    def test_empty(self):
+        cir = _FakeCIR()
+        eg = EventGraph.build(cir)
+        assert eg.publishers == {}
+        assert eg.listeners == {}
+        assert eg.event_types == frozenset()
+        assert eg.total_edges == 0
+        assert not eg.has_events()
+
+    def test_publish_edge_captured(self):
+        edges = [{"from": "pkg.OrderService#place", "to": "OrderPlacedEvent", "type": "publishes_event"}]
+        cir = _FakeCIR(edges=edges)
+        eg = EventGraph.build(cir)
+        assert "OrderPlacedEvent" in eg.event_types
+        assert "pkg.OrderService#place" in eg.publishers_of("OrderPlacedEvent")
+        assert eg.total_edges == 1
+        assert eg.has_events()
+
+    def test_listen_edge_captured(self):
+        edges = [{"from": "pkg.NotifService#onOrder", "to": "OrderPlacedEvent", "type": "listens_to_event"}]
+        cir = _FakeCIR(edges=edges)
+        eg = EventGraph.build(cir)
+        assert "OrderPlacedEvent" in eg.event_types
+        assert "pkg.NotifService#onOrder" in eg.listeners_of("OrderPlacedEvent")
+
+    def test_publisher_and_listener_same_event(self):
+        edges = [
+            {"from": "pkg.A#pub", "to": "MyEvent", "type": "publishes_event"},
+            {"from": "pkg.B#listen", "to": "MyEvent", "type": "listens_to_event"},
+        ]
+        cir = _FakeCIR(edges=edges)
+        eg = EventGraph.build(cir)
+        assert "pkg.A#pub" in eg.publishers_of("MyEvent")
+        assert "pkg.B#listen" in eg.listeners_of("MyEvent")
+        assert eg.total_edges == 2
+
+    def test_non_event_edges_excluded(self):
+        edges = [
+            {"from": "pkg.A", "to": "pkg.B", "type": "calls"},
+            {"from": "pkg.C", "to": "pkg.D", "type": "annotated_with"},
+        ]
+        cir = _FakeCIR(edges=edges)
+        eg = EventGraph.build(cir)
+        assert not eg.has_events()
+
+    def test_missing_from_or_to_skipped(self):
+        edges = [
+            {"from": "", "to": "SomeEvent", "type": "publishes_event"},
+            {"from": "pkg.A", "to": "", "type": "publishes_event"},
+        ]
+        cir = _FakeCIR(edges=edges)
+        eg = EventGraph.build(cir)
+        assert not eg.has_events()
+
+    def test_unknown_event_returns_empty_list(self):
+        cir = _FakeCIR()
+        eg = EventGraph.build(cir)
+        assert eg.publishers_of("NonExistent") == []
+        assert eg.listeners_of("NonExistent") == []
+
+
+# ---------------------------------------------------------------------------
 # SM — SpringSemanticModel
 # ---------------------------------------------------------------------------
 
@@ -216,7 +349,8 @@ class TestSpringSemanticModel:
         ]
         edges = [{"from": "pkg.Svc#doWork", "to": "pkg.Repo#save", "type": "calls"}]
         deps = [{"from": "pkg.Child", "to": "pkg.Base<T>", "type": "extends"}]
-        cir = _FakeCIR(nodes=nodes, edges=edges, dependencies=deps)
+        ep = _FakeEndpoint("pkg.FooController", "FooController.java")
+        cir = _FakeCIR(nodes=nodes, edges=edges, dependencies=deps, endpoints=[ep])
 
         model = SpringSemanticModel.build(cir)
 
@@ -224,6 +358,8 @@ class TestSpringSemanticModel:
         assert isinstance(model.call_adj, CallAdjacency)
         assert isinstance(model.inheritance, InheritanceGraph)
         assert isinstance(model.bean_graph, BeanGraph)
+        assert isinstance(model.endpoint_index, EndpointIndex)
+        assert isinstance(model.event_graph, EventGraph)
         assert model.build_time_ms >= 0.0
 
     def test_tx_index_reuse(self):
@@ -250,12 +386,28 @@ class TestSpringSemanticModel:
         model = SpringSemanticModel.build(cir)
         assert model.bean_graph.is_bean("pkg.Svc")
 
+    def test_endpoint_index_populated(self):
+        ep = _FakeEndpoint("pkg.MyCtrl", "MyCtrl.java")
+        cir = _FakeCIR(endpoints=[ep])
+        model = SpringSemanticModel.build(cir)
+        assert "pkg.MyCtrl" in model.endpoint_index.controller_fqns
+        assert model.endpoint_index.source_file("pkg.MyCtrl") == "MyCtrl.java"
+
+    def test_event_graph_populated(self):
+        edges = [{"from": "pkg.Pub#send", "to": "MyEvent", "type": "publishes_event"}]
+        cir = _FakeCIR(edges=edges)
+        model = SpringSemanticModel.build(cir)
+        assert model.event_graph.has_events()
+        assert "pkg.Pub#send" in model.event_graph.publishers_of("MyEvent")
+
     def test_never_raises_on_bad_cir(self):
         class _BadCIR:
             _raw_ir = None
             cir_hash = ""
             call_graph = None  # type: ignore[assignment]
             dependencies = None  # type: ignore[assignment]
+            endpoints = None  # type: ignore[assignment]
+            files = None  # type: ignore[assignment]
             metadata: dict = {}
 
         model = SpringSemanticModel.build(_BadCIR())  # type: ignore[arg-type]

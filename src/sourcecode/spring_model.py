@@ -7,12 +7,15 @@ Components:
   CallAdjacency      — forward call adjacency (caller → callees)
   InheritanceGraph   — extends/implements graph with generic-parent detection
   BeanGraph          — Spring bean registry + injection graph
-  SpringSemanticModel — umbrella: tx_index + call_adj + inheritance + bean_graph
+  EndpointIndex      — endpoints pre-indexed by controller (replaces O(n) scans)
+  EventGraph         — Spring event topology (foundation for EVT-001/002)
+  SpringSemanticModel — umbrella: all sub-models built once per run
 
 Eliminates per-pattern duplicate traversals:
-  build_tx_index()        was called 2× per scope=all run → now 1×
+  build_tx_index()           was called 2× per scope=all run → now 1×
   _build_forward_adjacency() was called 3× (TX-002/003/004) → now 1×
-  _build_extends_map()    was called per-run (SEC-002)    → now 1×
+  _build_extends_map()       was called per-run (SEC-002)    → now 1×
+  controller source_file scan was O(n) per finding (SEC-001/002) → now 1×
 
 Usage:
     model = SpringSemanticModel.build(cir)
@@ -187,6 +190,128 @@ class BeanGraph:
 
 
 # ---------------------------------------------------------------------------
+# EndpointIndex
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EndpointIndex:
+    """Endpoints pre-indexed from CIR, built once per analysis run.
+
+    Replaces per-pattern O(n) cir.files scans and ad-hoc controller_fqns set
+    comprehensions in SEC-001/002/003. Foundation for future EVT, impact-chain,
+    and test-selection patterns that need controller → endpoint chains.
+
+    by_controller:       controller_fqn → [CanonicalEndpoint]
+    source_by_controller: controller_fqn → source file path (best-effort)
+    controller_fqns:     frozenset for O(1) membership tests (SEC-003)
+    """
+    by_controller: dict[str, list] = field(default_factory=dict)
+    source_by_controller: dict[str, str] = field(default_factory=dict)
+    controller_fqns: frozenset = field(default_factory=frozenset)
+
+    @classmethod
+    def build(cls, cir: "CanonicalRepositoryIR") -> "EndpointIndex":
+        by_controller: dict[str, list] = {}
+        source_by_controller: dict[str, str] = {}
+
+        for ep in (getattr(cir, "endpoints", None) or []):
+            fqn = getattr(ep, "controller_class", "") or ""
+            if not fqn:
+                continue
+            by_controller.setdefault(fqn, []).append(ep)
+            if fqn not in source_by_controller:
+                sf = getattr(ep, "source_file", "") or ""
+                if not sf:
+                    simple = fqn.split(".")[-1]
+                    for path in (getattr(cir, "files", None) or []):
+                        if isinstance(path, str) and (
+                            path.endswith(f"{simple}.java") or path.endswith(f"{simple}.kt")
+                        ):
+                            sf = path
+                            break
+                source_by_controller[fqn] = sf
+
+        return cls(
+            by_controller=by_controller,
+            source_by_controller=source_by_controller,
+            controller_fqns=frozenset(by_controller.keys()),
+        )
+
+    def source_file(self, controller_fqn: str) -> str:
+        """Return source file for controller_fqn, or empty string."""
+        return self.source_by_controller.get(controller_fqn, "")
+
+    def endpoints_for(self, controller_fqn: str) -> list:
+        """Return endpoints declared on controller_fqn."""
+        return self.by_controller.get(controller_fqn, [])
+
+
+# ---------------------------------------------------------------------------
+# EventGraph
+# ---------------------------------------------------------------------------
+
+_EVENT_EDGE_TYPES: frozenset[str] = frozenset({"publishes_event", "listens_to_event"})
+
+
+@dataclass
+class EventGraph:
+    """Spring event topology built from call_graph edges.
+
+    Foundation for EVT-001 (@EventListener chains) and EVT-002 patterns.
+    BeanGraph is a prerequisite (already in SpringSemanticModel).
+
+    publishers:  event_type → [FQNs of publishing symbols]
+    listeners:   event_type → [FQNs of listening symbols]
+    event_types: all event types seen (union of publisher + listener keys)
+    total_edges: total publishes_event + listens_to_event edge count
+    """
+    publishers: dict[str, list[str]] = field(default_factory=dict)
+    listeners: dict[str, list[str]] = field(default_factory=dict)
+    event_types: frozenset[str] = field(default_factory=frozenset)
+    total_edges: int = 0
+
+    @classmethod
+    def build(cls, cir: "CanonicalRepositoryIR") -> "EventGraph":
+        publishers: dict[str, list[str]] = {}
+        listeners: dict[str, list[str]] = {}
+        total = 0
+
+        for edge in (getattr(cir, "call_graph", None) or []):
+            if not isinstance(edge, dict):
+                continue
+            etype = edge.get("type") or ""
+            if etype not in _EVENT_EDGE_TYPES:
+                continue
+            frm = edge.get("from") or ""
+            to = edge.get("to") or ""
+            if not frm or not to:
+                continue
+            if etype == "publishes_event":
+                publishers.setdefault(to, []).append(frm)
+            else:
+                listeners.setdefault(to, []).append(frm)
+            total += 1
+
+        return cls(
+            publishers=publishers,
+            listeners=listeners,
+            event_types=frozenset(publishers.keys()) | frozenset(listeners.keys()),
+            total_edges=total,
+        )
+
+    def publishers_of(self, event_type: str) -> list[str]:
+        """Return FQNs that publish event_type."""
+        return self.publishers.get(event_type, [])
+
+    def listeners_of(self, event_type: str) -> list[str]:
+        """Return FQNs that listen for event_type."""
+        return self.listeners.get(event_type, [])
+
+    def has_events(self) -> bool:
+        return self.total_edges > 0
+
+
+# ---------------------------------------------------------------------------
 # SpringSemanticModel
 # ---------------------------------------------------------------------------
 
@@ -199,17 +324,21 @@ class SpringSemanticModel:
     re-deriving from the CIR.
 
     Fields:
-        tx_index:      @Transactional boundary index.
-        call_adj:      Forward call adjacency (caller → callees).
-        inheritance:   Extends/implements graph + generic-parent detection.
-        bean_graph:    Spring bean registry and injection graph.
-        build_time_ms: Wall-clock ms to build all sub-models (not counting
-                       a pre-built tx_index passed by the caller).
+        tx_index:       @Transactional boundary index.
+        call_adj:       Forward call adjacency (caller → callees).
+        inheritance:    Extends/implements graph + generic-parent detection.
+        bean_graph:     Spring bean registry and injection graph.
+        endpoint_index: Endpoints pre-indexed by controller (SEC patterns, EVT).
+        event_graph:    Spring event topology for EVT-001/002 patterns.
+        build_time_ms:  Wall-clock ms to build all sub-models (not counting
+                        a pre-built tx_index passed by the caller).
     """
     tx_index: TransactionBoundaryIndex
     call_adj: CallAdjacency
     inheritance: InheritanceGraph
     bean_graph: BeanGraph
+    endpoint_index: EndpointIndex
+    event_graph: EventGraph
     build_time_ms: float = 0.0
 
     @classmethod
@@ -248,11 +377,23 @@ class SpringSemanticModel:
         except Exception:
             bg = BeanGraph()
 
+        try:
+            ei = EndpointIndex.build(cir)
+        except Exception:
+            ei = EndpointIndex()
+
+        try:
+            eg = EventGraph.build(cir)
+        except Exception:
+            eg = EventGraph()
+
         elapsed = round((time.monotonic() - t0) * 1000, 2)
         return cls(
             tx_index=tx,
             call_adj=adj,
             inheritance=inh,
             bean_graph=bg,
+            endpoint_index=ei,
+            event_graph=eg,
             build_time_ms=elapsed,
         )

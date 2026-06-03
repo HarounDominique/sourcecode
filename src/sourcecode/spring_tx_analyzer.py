@@ -21,8 +21,13 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
-from sourcecode.spring_findings import SpringAuditResult, SpringFinding
-from sourcecode.spring_model import SpringSemanticModel
+from sourcecode.spring_findings import (
+    SpringAuditResult,
+    SpringFinding,
+    SEVERITY_ORDER,
+    deduplicate_findings,
+)
+from sourcecode.spring_model import CallAdjacency, SpringSemanticModel
 from sourcecode.spring_semantic import (
     PROPAGATION_DEFAULT,
     TransactionBoundary,
@@ -169,25 +174,9 @@ class _TX001ProxyBypass:
 # BFS helpers (shared by TX-002 and TX-004)
 # ---------------------------------------------------------------------------
 
-def _build_forward_adjacency(
-    cir: "CanonicalRepositoryIR",
-) -> dict[str, list[str]]:
-    """Build forward call adjacency: caller → [callees].
-
-    Uses call_graph edges excluding annotated_with / mapped_to / contained_in.
-    """
-    _skip = frozenset({"annotated_with", "mapped_to", "contained_in"})
-    adj: dict[str, list[str]] = {}
-    for edge in cir.call_graph:
-        if not isinstance(edge, dict):
-            continue
-        if edge.get("type") in _skip:
-            continue
-        frm = edge.get("from") or ""
-        to = edge.get("to") or ""
-        if frm and to:
-            adj.setdefault(frm, []).append(to)
-    return adj
+def _build_forward_adjacency(cir: "CanonicalRepositoryIR") -> dict[str, list[str]]:
+    """Fallback adjacency for no-model paths. Delegates to CallAdjacency.build()."""
+    return CallAdjacency.build(cir).adjacency
 
 
 def _bfs_pairs(
@@ -567,19 +556,6 @@ _DEFAULT_TX_PATTERNS: list[TxPattern] = [
 # Engine
 # ---------------------------------------------------------------------------
 
-def _deduplicate(findings: list[SpringFinding]) -> list[SpringFinding]:
-    seen: set[str] = set()
-    out: list[SpringFinding] = []
-    for f in findings:
-        if f.id not in seen:
-            seen.add(f.id)
-            out.append(f)
-    return out
-
-
-_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-
-
 class TxPatternEngine:
     """Runs registered TX patterns against a CIR + TransactionBoundaryIndex.
 
@@ -610,8 +586,8 @@ class TxPatternEngine:
                 all_findings.extend(found)
             except Exception:
                 pass
-        deduped = _deduplicate(all_findings)
-        return sorted(deduped, key=lambda f: (_SEVERITY_ORDER.get(f.severity, 9), f.symbol))
+        deduped = deduplicate_findings(all_findings)
+        return sorted(deduped, key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.symbol))
 
 
 # ---------------------------------------------------------------------------
@@ -637,8 +613,7 @@ def run_tx_audit(
         patterns:     Override default pattern list (for testing).
         model:        Pre-built SpringSemanticModel (avoids duplicate build in CLI).
     """
-    _sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    min_rank = _sev_rank.get(min_severity, 3)
+    min_rank = SEVERITY_ORDER.get(min_severity, 3)
 
     t0 = time.monotonic()
 
@@ -648,8 +623,7 @@ def run_tx_audit(
     engine = TxPatternEngine(patterns=patterns)
     findings = engine.analyze(cir, tx_index, root=root, model=model)
 
-    # Filter by min_severity
-    findings = [f for f in findings if _sev_rank.get(f.severity, 9) <= min_rank]
+    findings = [f for f in findings if SEVERITY_ORDER.get(f.severity, 9) <= min_rank]
 
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 

@@ -15,8 +15,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
-from sourcecode.spring_findings import SpringAuditResult, SpringFinding
-from sourcecode.spring_model import SpringSemanticModel
+from sourcecode.spring_findings import (
+    SpringAuditResult,
+    SpringFinding,
+    SEVERITY_ORDER,
+    deduplicate_findings,
+)
+from sourcecode.spring_model import InheritanceGraph, SpringSemanticModel
 from sourcecode.spring_semantic import TransactionBoundaryIndex, build_tx_index
 
 if TYPE_CHECKING:
@@ -355,18 +360,8 @@ class _SEC003TransactionalOnController:
 # ---------------------------------------------------------------------------
 
 def _build_extends_map(cir: "CanonicalRepositoryIR") -> dict[str, str]:
-    """Build child_fqn → parent_signature from `extends` edges in cir.dependencies."""
-    result: dict[str, str] = {}
-    for edge in cir.dependencies:
-        if not isinstance(edge, dict):
-            continue
-        if edge.get("type") != "extends":
-            continue
-        child = edge.get("from") or ""
-        parent = edge.get("to") or ""
-        if child and parent:
-            result[child] = parent
-    return result
+    """Fallback extends map for no-model paths. Delegates to InheritanceGraph.build()."""
+    return InheritanceGraph.build(cir).parent_of
 
 
 def _controller_source_file(cir: "CanonicalRepositoryIR", controller_fqn: str) -> str:
@@ -381,18 +376,6 @@ def _controller_source_file(cir: "CanonicalRepositoryIR", controller_fqn: str) -
             return path
     return ""
 
-
-def _deduplicate(findings: list[SpringFinding]) -> list[SpringFinding]:
-    seen: set[str] = set()
-    out: list[SpringFinding] = []
-    for f in findings:
-        if f.id not in seen:
-            seen.add(f.id)
-            out.append(f)
-    return out
-
-
-_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 # ---------------------------------------------------------------------------
 # Default pattern registry
@@ -441,8 +424,8 @@ class SecurityScanner:
                 all_findings.extend(found)
             except Exception:
                 pass
-        deduped = _deduplicate(all_findings)
-        return sorted(deduped, key=lambda f: (_SEVERITY_ORDER.get(f.severity, 9), f.symbol))
+        deduped = deduplicate_findings(all_findings)
+        return sorted(deduped, key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.symbol))
 
 
 # ---------------------------------------------------------------------------
@@ -470,8 +453,7 @@ def run_security_audit(
         tx_index:     Pre-built TransactionBoundaryIndex (built from cir if None).
         model:        Pre-built SpringSemanticModel (avoids duplicate build in CLI).
     """
-    _sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    min_rank = _sev_rank.get(min_severity, 3)
+    min_rank = SEVERITY_ORDER.get(min_severity, 3)
 
     t0 = time.monotonic()
 
@@ -483,7 +465,7 @@ def run_security_audit(
     scanner = SecurityScanner(patterns=patterns)
     findings = scanner.analyze(cir, tx_index=tx_index, root=root, model=model)
 
-    findings = [f for f in findings if _sev_rank.get(f.severity, 9) <= min_rank]
+    findings = [f for f in findings if SEVERITY_ORDER.get(f.severity, 9) <= min_rank]
 
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 

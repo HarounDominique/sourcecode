@@ -128,3 +128,20 @@ class SpringAuditResult:
             "limitations": self.limitations,
             "metadata": self.metadata,
         }
+
+
+# ---------------------------------------------------------------------------
+# Shared engine utilities — used by TxPatternEngine and SecurityScanner
+# ---------------------------------------------------------------------------
+
+SEVERITY_ORDER: dict[str, int] = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def deduplicate_findings(findings: list[SpringFinding]) -> list[SpringFinding]:
+    seen: set[str] = set()
+    out: list[SpringFinding] = []
+    for f in findings:
+        if f.id not in seen:
+            seen.add(f.id)
+            out.append(f)
+    return out
