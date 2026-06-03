@@ -650,6 +650,46 @@ def get_spring_audit(repo_path: str = ".", scope: str = "all") -> dict:
 
 
 @mcp.tool()
+def get_impact_chain(repo_path: str = ".", symbol: str = "", depth: int = 4) -> dict:
+    """Spring impact-chain: systemic blast radius of a symbol with TX/SEC semantic enrichment. JAVA/SPRING ONLY.
+
+    Do NOT call this on non-Java repositories — it will return resolution=not_found.
+
+    Maps to: sourcecode impact-chain <symbol> <repo_path> [--depth <depth>]
+    Returns: ImpactChainResult with schema_version, symbol, resolution,
+             direct_callers, indirect_callers, endpoints_affected,
+             transaction_boundary (propagation/isolation/read_only),
+             security_surfaces (per-endpoint policy + finding IDs),
+             impact_findings (TX-001..005 + SEC-001..003 findings in call chain),
+             analysis_warnings, risk_level, confidence, metadata.
+
+    symbol: FQN, class name, or Class#method. Examples:
+            "OrderService", "com.example.OrderService#placeOrder"
+    repo_path: absolute path to the Java repository (default: current working directory).
+    depth: BFS depth for indirect caller traversal (1–8, default: 4).
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        if not isinstance(symbol, str) or not symbol.strip():
+            return _err("symbol must be a non-empty string", "INVALID_ARGUMENT")
+        if not isinstance(depth, int) or depth < 1 or depth > 8:
+            return _err("depth must be an integer between 1 and 8", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
+        args = ["impact-chain", symbol.strip(), repo_path, "--depth", str(depth)]
+        return _execute(args)
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
+@mcp.tool()
 def get_module_context(repo_path: str = ".", module: str = "") -> dict:
     """Compact analysis of a specific module or subdirectory within a repository.
 

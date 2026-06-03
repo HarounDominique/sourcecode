@@ -225,6 +225,8 @@ _SUBCOMMANDS: frozenset[str] = frozenset(
         "cold-start",
         # Spring semantic audit
         "spring-audit",
+        # Spring impact chain
+        "impact-chain",
     }
 )
 
@@ -3870,6 +3872,139 @@ def spring_audit_cmd(
         output_path.write_text(output, encoding="utf-8")
         total = combined.summary.get("total_findings", 0)
         typer.echo(f"Spring audit written to {output_path} ({total} findings)", err=True)
+    else:
+        sys.stdout.buffer.write(output.encode("utf-8"))
+        sys.stdout.buffer.write(b"\n")
+        sys.stdout.buffer.flush()
+        if copy:
+            if _copy_to_clipboard(output):
+                typer.echo("✓ copied to clipboard", err=True)
+
+
+# ── Spring Impact Chain ───────────────────────────────────────────────────────
+
+
+@app.command("impact-chain")
+def impact_chain_cmd(
+    symbol: str = typer.Argument(
+        ...,
+        help=(
+            "Symbol to query: FQN, class name, or Class#method. "
+            "Examples: OrderService, com.example.OrderService#placeOrder"
+        ),
+    ),
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository root (default: current directory)",
+    ),
+    depth: int = typer.Option(
+        4,
+        "--depth",
+        help="Indirect caller BFS depth (1–8, default: 4).",
+        min=1,
+        max=8,
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    format: str = typer.Option(
+        "json", "--format", "-f",
+        help="Output format: json (default) or yaml.",
+        show_default=True,
+    ),
+    copy: bool = typer.Option(
+        False, "--copy", "-c",
+        help="Copy output to clipboard after a successful run.",
+    ),
+) -> None:
+    """Spring impact-chain: systemic blast radius of a symbol with TX/SEC enrichment.
+
+    \b
+    Given a symbol (class or method), returns:
+      - direct_callers      — symbols that directly call the target
+      - indirect_callers    — transitive callers (BFS up to --depth hops)
+      - endpoints_affected  — HTTP endpoints reachable through the call chain
+      - transaction_boundary — @Transactional semantics on the target (if any)
+      - security_surfaces   — per-endpoint security policy + SEC findings
+      - impact_findings     — TX/SEC audit findings touching the call chain
+      - risk_level          — critical | high | medium | low
+
+    \b
+    Consumes SpringSemanticModel — zero duplicate CIR traversals.
+    JAVA/SPRING ONLY.
+
+    \b
+    Examples:
+      sourcecode impact-chain OrderService .
+      sourcecode impact-chain com.example.OrderService#placeOrder /path/to/repo
+      sourcecode impact-chain PaymentService . --depth 6 --output impact.json
+    """
+    import json as _json
+
+    from sourcecode.repository_ir import find_java_files
+    from sourcecode.canonical_ir import build_canonical_ir
+    from sourcecode.spring_model import SpringSemanticModel
+    from sourcecode.spring_impact import run_impact_chain
+    from sourcecode.spring_findings import SpringAuditResult
+
+    target = path.resolve()
+    if not target.exists() or not target.is_dir():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"'{target}' is not a valid directory.",
+            path=str(target),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
+        )
+        raise typer.Exit(code=1)
+
+    if format not in ("json", "yaml"):
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid format '{format}'.",
+            hint="format must be: json or yaml.",
+            expected="json | yaml",
+        )
+        raise typer.Exit(code=1)
+
+    file_list = find_java_files(target)
+    if not file_list:
+        data = {
+            "schema_version": "1.0",
+            "symbol": symbol,
+            "resolution": "not_found",
+            "analysis_warnings": ["No Java files found in repository — Spring analysis requires Java source."],
+            "risk_level": "unknown",
+            "confidence": "low",
+            "metadata": {},
+        }
+        output = _serialize_dict(data, format)
+        if output_path is not None:
+            output_path.write_text(output, encoding="utf-8")
+            typer.echo("Impact chain written to " + str(output_path), err=True)
+        else:
+            sys.stdout.buffer.write(output.encode("utf-8"))
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
+        return
+
+    cir = build_canonical_ir(file_list, target)
+    _model = SpringSemanticModel.build(cir)
+    result = run_impact_chain(cir, symbol, depth=depth, root=target, model=_model)
+
+    data = result.to_dict()
+    output = _serialize_dict(data, format)
+
+    if output_path is not None:
+        output_path.write_text(output, encoding="utf-8")
+        typer.echo(
+            f"Impact chain written to {output_path} "
+            f"(risk: {result.risk_level}, "
+            f"{len(result.direct_callers)} direct callers, "
+            f"{len(result.endpoints_affected)} endpoints)",
+            err=True,
+        )
     else:
         sys.stdout.buffer.write(output.encode("utf-8"))
         sys.stdout.buffer.write(b"\n")
