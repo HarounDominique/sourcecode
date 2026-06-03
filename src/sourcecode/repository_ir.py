@@ -326,6 +326,18 @@ _PUBLISH_EVENT_RE = re.compile(r'\.publishEvent\s*\(\s*new\s+(\w+)\s*[(\{]')
 # Keycloak SPI event fire pattern: XxxEvent.fire(session, ...)
 _FIRE_EVENT_RE = re.compile(r'\b(\w+Event)\.fire\s*\(')
 
+# Block comment stripper — removes /* ... */ (including Javadoc) to prevent
+# _PUBLISH_EVENT_RE / _FIRE_EVENT_RE from matching example code in comments.
+_BLOCK_COMMENT_RE = re.compile(r'/\*.*?\*/', re.DOTALL)
+_LINE_COMMENT_RE = re.compile(r'//[^\n]*')
+
+
+def _strip_java_comments(source: str) -> str:
+    """Remove // line comments and /* */ block comments from Java source."""
+    source = _BLOCK_COMMENT_RE.sub(' ', source)
+    source = _LINE_COMMENT_RE.sub(' ', source)
+    return source
+
 # Edge types used for subsystem grouping — semantic hierarchy only, not imports
 _SUBSYSTEM_STRUCTURAL_EDGES: frozenset[str] = frozenset({
     "extends", "implements", "injects", "contained_in",
@@ -1125,10 +1137,15 @@ def _build_relations(
 
     _class_syms = [s for s in symbols if s.type in ("class", "interface") and "#" not in s.symbol]
 
+    # Strip comments before event scanning to prevent Javadoc examples from
+    # generating false publisher edges (BUG-003).
+    _source_no_comments = _strip_java_comments(source)
+
     # Spring: class that calls publishEvent(new XxxEvent(...)) → event type FQN.
-    for m in _PUBLISH_EVENT_RE.finditer(source):
+    for m in _PUBLISH_EVENT_RE.finditer(_source_no_comments):
         event_simple = m.group(1)
-        event_fqn = import_map.get(event_simple, event_simple)
+        # BUG-004: try import_map first, then same-package map, then keep simple name.
+        event_fqn = import_map.get(event_simple) or _same_pkg.get(event_simple) or event_simple
         for cls_sym in _class_syms:
             edges.append(RelationEdge(
                 from_symbol=cls_sym.symbol,
@@ -1139,9 +1156,9 @@ def _build_relations(
             ))
 
     # Keycloak SPI: XxxEvent.fire(...) static dispatch → publishes_event.
-    for m in _FIRE_EVENT_RE.finditer(source):
+    for m in _FIRE_EVENT_RE.finditer(_source_no_comments):
         event_simple = m.group(1)
-        event_fqn = import_map.get(event_simple, event_simple)
+        event_fqn = import_map.get(event_simple) or _same_pkg.get(event_simple) or event_simple
         for cls_sym in _class_syms:
             edges.append(RelationEdge(
                 from_symbol=cls_sym.symbol,

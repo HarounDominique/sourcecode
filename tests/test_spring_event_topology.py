@@ -547,3 +547,49 @@ class TestExtractTxPhase:
     def test_after_rollback_parsed(self):
         vals = {"@TransactionalEventListener": "phase = TransactionPhase.AFTER_ROLLBACK"}
         assert _extract_tx_phase(vals, ["@TransactionalEventListener"]) == "AFTER_ROLLBACK"
+
+
+# ---------------------------------------------------------------------------
+# BUG-003 regression — Javadoc false positive in publishEvent detection
+# BUG-004 regression — same-package event FQN resolution
+# ---------------------------------------------------------------------------
+
+class TestBUG003JavadocFalsePositive:
+    """BUG-003: _PUBLISH_EVENT_RE must not match publishEvent() inside Javadoc comments."""
+
+    def test_javadoc_publishevent_does_not_produce_edge(self):
+        """publishEvent() inside /** ... */ Javadoc must not generate a publisher edge."""
+        from sourcecode.repository_ir import _strip_java_comments, _PUBLISH_EVENT_RE
+
+        javadoc_source = '''\
+/**
+ * To publish an event:
+ * <pre>
+ * appCtx.publishEvent(new OrderCreatedEvent(order));
+ * </pre>
+ */
+public class OrderService {
+    // no publishEvent in real code
+}
+'''
+        stripped = _strip_java_comments(javadoc_source)
+        matches = list(_PUBLISH_EVENT_RE.finditer(stripped))
+        assert matches == [], (
+            f"publishEvent in Javadoc must not produce edges, but got: {matches}"
+        )
+
+    def test_real_publishevent_still_detected(self):
+        """publishEvent() in real code must still generate a publisher edge."""
+        from sourcecode.repository_ir import _strip_java_comments, _PUBLISH_EVENT_RE
+
+        real_source = '''\
+public class OrderService {
+    public void placeOrder(Order o) {
+        eventPublisher.publishEvent(new OrderCreatedEvent(o));
+    }
+}
+'''
+        stripped = _strip_java_comments(real_source)
+        matches = list(_PUBLISH_EVENT_RE.finditer(stripped))
+        assert len(matches) == 1
+        assert matches[0].group(1) == "OrderCreatedEvent"

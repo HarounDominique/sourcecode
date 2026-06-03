@@ -580,8 +580,13 @@ class ImpactOrchestrator:
         try:
             boundary = model.tx_index.effective_boundary(resolved_symbol)
             if boundary is None and "#" not in resolved_symbol:
-                # Class-level symbol — try class_level directly
+                # Class-level symbol — try class_level directly, then fall back
+                # to first method-level boundary if class has only method-level TX.
                 boundary = model.tx_index.class_level.get(resolved_symbol)
+                if boundary is None:
+                    method_boundaries = model.tx_index.by_class.get(resolved_symbol, [])
+                    if method_boundaries:
+                        boundary = method_boundaries[0]
             if boundary is not None:
                 tx_boundary = boundary.to_dict()
         except Exception:

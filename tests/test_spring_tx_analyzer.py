@@ -570,6 +570,49 @@ class TestTX005:
         findings = self._run_with_source(source, "com.example.Service#doWork")
         assert findings == []
 
+    def test_other_method_swallow_no_finding_for_clean_method(self):
+        # BUG-005 regression: only the method body is scanned, not the whole file.
+        # A swallowed catch in a sibling method must NOT flag a clean TX method.
+        source = dedent("""\
+            @Transactional
+            public void doWork() {
+                repository.save(entity);
+            }
+
+            @Transactional
+            public void doOtherWork() {
+                try {
+                    riskyOp();
+                } catch (Exception e) {
+                    logger.error("Failed", e);
+                }
+            }
+        """)
+        findings = self._run_with_source(source, "com.example.Service#doWork")
+        assert findings == [], "sibling method swallow must not flag doWork"
+
+    def test_only_affected_method_flagged_not_sibling(self):
+        # BUG-005 regression: sibling with swallow gets finding; clean sibling does not.
+        source = dedent("""\
+            @Transactional
+            public void cleanMethod() {
+                repository.save(entity);
+            }
+
+            @Transactional
+            public void swallowMethod() {
+                try {
+                    riskyOp();
+                } catch (Exception e) {
+                    LOG.warn("oops", e);
+                }
+            }
+        """)
+        findings_clean = self._run_with_source(source, "com.example.Service#cleanMethod")
+        findings_swallow = self._run_with_source(source, "com.example.Service#swallowMethod")
+        assert findings_clean == [], "cleanMethod must not be flagged"
+        assert len(findings_swallow) == 1, "swallowMethod must be flagged"
+
 
 # ---------------------------------------------------------------------------
 # E — TxPatternEngine

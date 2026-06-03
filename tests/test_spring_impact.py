@@ -1034,3 +1034,32 @@ class TestRegressionCH002InjectionFieldNode:
         assert "com.example.ServiceB" not in direct_set, (
             f"ServiceB class falsely added from non-injects edge: {direct_set}"
         )
+
+
+class TestBUG002TxBoundaryClassLevelQuery:
+    """BUG-002: class-level impact-chain query must return tx_boundary when class
+    has only method-level @Transactional (no class-level annotation)."""
+
+    def _make_cir(self):
+        symbols = ["com.example.AssetService", "com.example.AssetService#save"]
+        return _FakeCIR(symbols=symbols, reverse_graph={})
+
+    def test_method_level_tx_visible_in_class_query(self):
+        """Class query must expose a tx_boundary when methods have @Transactional."""
+        from sourcecode.spring_semantic import TransactionBoundary, TransactionBoundaryIndex
+
+        method_boundary = _tx_boundary(
+            "com.example.AssetService#save", scope="method"
+        )
+        tx_index = _make_tx_index([method_boundary])
+        # by_class must be populated for the containing class
+        tx_index.by_class["com.example.AssetService"] = [method_boundary]
+
+        model = _make_model(tx_index=tx_index)
+        cir = self._make_cir()
+        result = ImpactOrchestrator().query(cir, model, "com.example.AssetService", depth=1)
+
+        assert result.transaction_boundary is not None, (
+            "Class with method-level @Transactional must expose tx_boundary"
+        )
+        assert result.transaction_boundary.get("scope") == "method"

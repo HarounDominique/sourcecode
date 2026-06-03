@@ -63,6 +63,30 @@ _CATCH_SWALLOW_RE = re.compile(
 _RETHROW_IN_CATCH_RE = re.compile(r'\bthrow\b')
 
 
+def _extract_method_body(source: str, method_name: str) -> str:
+    """Extract the first method body matching method_name using brace counting.
+
+    Returns the text from '{' to the matching '}', or empty string if not found.
+    Needed to scope TX-005 regex to the specific method instead of the whole file.
+    """
+    pattern = re.compile(r'\b' + re.escape(method_name) + r'\s*\(')
+    for m in pattern.finditer(source):
+        brace_pos = source.find('{', m.end())
+        if brace_pos < 0:
+            continue
+        depth = 1
+        i = brace_pos + 1
+        while i < len(source) and depth > 0:
+            c = source[i]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+            i += 1
+        return source[brace_pos:i]
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Pattern protocol
 # ---------------------------------------------------------------------------
@@ -531,8 +555,16 @@ class _TX005ExceptionSwallowing:
         return findings
 
     def _has_swallowed_exception(self, source: str, symbol: str) -> bool:
-        """Return True if source contains a catch-log-no-rethrow pattern."""
-        for match in _CATCH_SWALLOW_RE.finditer(source):
+        """Return True if the specific method body has a catch-log-no-rethrow pattern.
+
+        Scopes the search to the method body only (not the whole file) to avoid
+        false positives when other methods in the same file have swallowed exceptions.
+        """
+        method_name = symbol.split("#")[-1] if "#" in symbol else symbol.rsplit(".", 1)[-1]
+        body = _extract_method_body(source, method_name)
+        if not body:
+            return False
+        for match in _CATCH_SWALLOW_RE.finditer(body):
             block = match.group(0)
             if not _RETHROW_IN_CATCH_RE.search(block):
                 return True
