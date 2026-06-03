@@ -3917,6 +3917,11 @@ def impact_chain_cmd(
         False, "--copy", "-c",
         help="Copy output to clipboard after a successful run.",
     ),
+    query_type: str = typer.Option(
+        "impact", "--type", "-t",
+        help="Query type: impact (default) or events.",
+        show_default=True,
+    ),
 ) -> None:
     """Spring impact-chain: systemic blast radius of a symbol with TX/SEC enrichment.
 
@@ -3929,6 +3934,14 @@ def impact_chain_cmd(
       - security_surfaces   — per-endpoint security policy + SEC findings
       - impact_findings     — TX/SEC audit findings touching the call chain
       - risk_level          — critical | high | medium | low
+
+    \b
+    With --type events, returns event topology:
+      - publishers          — FQNs that publish the event class
+      - consumers           — listeners with TX phase metadata
+      - event_graph         — publisher → event → consumer edges (BFS ≤ 2)
+      - transaction_context — AFTER_COMMIT consumers, BEFORE_COMMIT risks
+      - risk_level          — high | medium | low
 
     \b
     Consumes SpringSemanticModel — zero duplicate CIR traversals.
@@ -3947,6 +3960,19 @@ def impact_chain_cmd(
     from sourcecode.spring_model import SpringSemanticModel
     from sourcecode.spring_impact import run_impact_chain
     from sourcecode.spring_findings import SpringAuditResult
+
+    _VALID_TYPES = ("impact", "events")
+    if query_type not in _VALID_TYPES:
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid --type '{query_type}'. Valid values: {', '.join(_VALID_TYPES)}",
+            flag="--type",
+            value=query_type,
+            valid_values=list(_VALID_TYPES),
+            hint="Use --type impact (default) or --type events.",
+            expected="impact | events",
+        )
+        raise typer.Exit(code=1)
 
     target = path.resolve()
     if not target.exists() or not target.is_dir():
@@ -3970,7 +3996,7 @@ def impact_chain_cmd(
 
     file_list = find_java_files(target)
     if not file_list:
-        data = {
+        data: dict = {
             "schema_version": "1.0",
             "symbol": symbol,
             "resolution": "not_found",
@@ -3991,6 +4017,30 @@ def impact_chain_cmd(
 
     cir = build_canonical_ir(file_list, target)
     _model = SpringSemanticModel.build(cir)
+
+    if query_type == "events":
+        from sourcecode.spring_event_topology import run_event_topology
+        evt_result = run_event_topology(cir, symbol, model=_model)
+        data = evt_result.to_dict()
+        output = _serialize_dict(data, format)
+        if output_path is not None:
+            output_path.write_text(output, encoding="utf-8")
+            typer.echo(
+                f"Event topology written to {output_path} "
+                f"(risk: {evt_result.risk_level}, "
+                f"{evt_result.metadata.get('publisher_count', 0)} publishers, "
+                f"{evt_result.metadata.get('consumer_count', 0)} consumers)",
+                err=True,
+            )
+        else:
+            sys.stdout.buffer.write(output.encode("utf-8"))
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
+            if copy:
+                if _copy_to_clipboard(output):
+                    typer.echo("✓ copied to clipboard", err=True)
+        return
+
     result = run_impact_chain(cir, symbol, depth=depth, root=target, model=_model)
 
     data = result.to_dict()

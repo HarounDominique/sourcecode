@@ -239,7 +239,7 @@ _LOMBOK_CTOR_ANNOTATIONS: frozenset[str] = frozenset({
 })
 
 # Transaction annotations whose args must be captured for semantic analysis.
-_TX_ANNOTATIONS: frozenset[str] = frozenset({"@Transactional"})
+_TX_ANNOTATIONS: frozenset[str] = frozenset({"@Transactional", "@TransactionalEventListener"})
 
 # Combined set used in _extract_symbols annotation-value capture.
 _CAPTURE_ANN_ARGS: frozenset[str] = (
@@ -307,7 +307,9 @@ _SPRING_OTHER: frozenset[str] = frozenset({
     "@PutMapping", "@DeleteMapping", "@PatchMapping", "@Autowired",
     "@Inject", "@Value", "@Qualifier", "@EnableWebSecurity",
     "@SpringBootApplication", "@EnableAutoConfiguration",
-    "@EventListener", "@Async", "@Scheduled", "@Cacheable", "@CacheEvict",
+    "@EventListener", "@TransactionalEventListener",
+    "@KafkaListener", "@RabbitListener",
+    "@Async", "@Scheduled", "@Cacheable", "@CacheEvict",
     # CDI / Jakarta EE
     "@ApplicationScoped", "@RequestScoped", "@SessionScoped", "@Dependent",
     "@Named", "@Produces", "@Consumes",
@@ -1101,16 +1103,21 @@ def _build_relations(
                 ))
 
     # Event flow edges — listens_to_event and publishes_event.
-    # Spring: method with @EventListener → resolved event parameter type(s).
+    # Spring: method with @EventListener or @TransactionalEventListener → resolved event type(s).
+    _LISTENER_ANNOTATIONS: frozenset[str] = frozenset({
+        "@EventListener", "@TransactionalEventListener",
+    })
     for sym in symbols:
-        if sym.type == "method" and "@EventListener" in sym.annotations:
+        if sym.type == "method" and (sym.annotations and
+                any(a in _LISTENER_ANNOTATIONS for a in sym.annotations)):
+            ann = next(a for a in sym.annotations if a in _LISTENER_ANNOTATIONS)
             for imp_fqn in sym.imports_used:
                 edges.append(RelationEdge(
                     from_symbol=sym.symbol,
                     to_symbol=imp_fqn,
                     type="listens_to_event",
                     confidence="high",
-                    evidence={"type": "annotation", "value": "@EventListener"},
+                    evidence={"type": "annotation", "value": ann},
                 ))
 
     _class_syms = [s for s in symbols if s.type in ("class", "interface") and "#" not in s.symbol]
