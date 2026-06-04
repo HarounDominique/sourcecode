@@ -10,7 +10,7 @@ Internal helpers remain explicitly marked and are not exported to MCP.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import inspect
 from functools import lru_cache
 from typing import Any, Callable, Mapping
@@ -69,6 +69,7 @@ class ToolSpec:
     aliases: tuple[str, ...] = ()
     internal: bool = False
     not_exposed_to_cli: bool = False
+    mcp_hidden: bool = False
     docstring: str = ""
     runtime_command: str = ""
     _argv_builder: Callable[[Mapping[str, Any]], list[str]] | None = field(
@@ -81,6 +82,10 @@ class ToolSpec:
     @property
     def public(self) -> bool:
         return not self.internal and not self.not_exposed_to_cli
+
+    @property
+    def mcp_visible(self) -> bool:
+        return self.public and not self.mcp_hidden
 
     def build_argv(self, inputs: Mapping[str, Any]) -> list[str]:
         if self._argv_builder is None:
@@ -488,8 +493,11 @@ def _alias_spec(
     aliases: tuple[str, ...] = (),
     internal: bool = False,
     not_exposed_to_cli: bool = False,
+    mcp_hidden: bool = False,
+    docstring_override: str | None = None,
     validator: Callable[[Mapping[str, Any]], str | None] | None = None,
 ) -> ToolSpec:
+    doc = docstring_override or _build_contract_doc(description, params, cli_path, supported_targets, unsupported_targets)
     return ToolSpec(
         name=name,
         description=description,
@@ -500,7 +508,8 @@ def _alias_spec(
         aliases=aliases,
         internal=internal,
         not_exposed_to_cli=not_exposed_to_cli,
-        docstring=_build_contract_doc(description, params, cli_path, supported_targets, unsupported_targets),
+        mcp_hidden=mcp_hidden,
+        docstring=doc,
         runtime_command=" ".join(cli_path) if cli_path else "sourcecode",
         _argv_builder=argv_builder,
         validator=validator,
@@ -788,17 +797,169 @@ def _internal_specs() -> list[ToolSpec]:
     ]
 
 
+# Canonical CLI tools that are MCP-noise: raw passthroughs, meta-commands, and duplicates
+# superseded by cleaner alias variants. Still tracked by validate_registry(); just not served.
+_MCP_HIDDEN_CANONICAL_TOOLS: frozenset[str] = frozenset({
+    # Raw CLI passthroughs (clean alias exists)
+    "sourcecode_root",    # 40+ flags, no agent guidance; use get_compact_context / get_agent_context
+    "prepare_context",    # requires knowing subtask string; use task-specific aliases
+    "repo_ir",            # raw IR dump; use get_ir_summary
+    "fix_bug",            # raw Pro command; use fix_bug_context for MCP
+    "review_pr",          # raw Pro command; use review_pr_context for MCP
+    "onboard",            # raw with llm_prompt/copy flags; use onboard_context
+    # Duplicates (inferior params — cleaner alias exists)
+    "impact",             # path/target order reversed vs get_impact_context; use get_impact_context
+    "cold_start",         # duplicate of get_cold_start_context
+    "cache_freshness",    # duplicate of check_freshness
+    "modernize",          # duplicate of modernize_context
+    # Curated overrides — canonical CLI spec replaced by cleaner alias with same name.
+    # Listed here so validate_registry() skips CLI param-drift checks on the alias.
+    "spring_audit",       # curated: repo_path + scope + min_severity only (strips output_path/format/copy)
+    "impact_chain",       # curated: repo_path + symbol + depth + query_type with choices
+    # MCP self-management (an agent is not the MCP client admin)
+    "mcp_init",
+    "mcp_serve",
+    "mcp_status",
+    "mcp_remove",
+    "mcp_list_tools",
+    # Telemetry sub-commands (consolidated into telemetry(action=))
+    "telemetry_status",
+    "telemetry_enable",
+    "telemetry_disable",
+})
+
+
+def _java_spring_aliases() -> list[ToolSpec]:
+    """Curated MCP overrides for Java/Spring tools.
+
+    These replace the auto-generated canonical specs with cleaner param surfaces:
+    - repo_path (not raw `path`) for consistency with all other MCP tools
+    - MCP-irrelevant CLI flags (output_path, format, copy) stripped
+    - query_type choices documented so agents discover event topology
+    - Rich docstrings instead of contract-format stubs
+    """
+    validate_repo_path = _repo_path_validator()
+
+    _SPRING_AUDIT_DOC = """\
+Spring semantic audit: TX anomalies + security surface. JAVA/SPRING ONLY.
+
+Do NOT call on non-Java repositories — returns spring_detected=false with no findings.
+
+Patterns detected:
+  TX-001: @Transactional missing rollbackFor for checked exceptions
+  TX-002: propagation=NEVER/NOT_SUPPORTED inside @Transactional scope
+  TX-003: readOnly=true method calling write operations
+  TX-004: REQUIRES_NEW nested inside REQUIRED (TX isolation breach risk)
+  TX-005: @Async method called within @Transactional context (TX context lost)
+  SEC-001: public endpoint with no security annotation (none_detected policy)
+  SEC-002: security annotation on non-endpoint method (misplaced)
+  SEC-003: missing auth on admin-pattern operations
+
+Returns: schema_version, spring_detected, scope, summary, findings[], limitations, metadata.
+findings fields: id, pattern_id, category, severity, confidence, title, symbol,
+  source_file, evidence, explanation, fix_hint.
+
+repo_path: absolute path to the Java repository (default: current working directory).
+scope: "all" (default) | "tx" (TX-001..005 only) | "security" (SEC-001..003 only)
+min_severity: "low" (default) | "medium" | "high" | "critical"
+"""
+
+    _IMPACT_CHAIN_DOC = """\
+Spring impact-chain: blast radius of a symbol with TX/SEC semantic enrichment. JAVA/SPRING ONLY.
+
+Do NOT call on non-Java repositories — returns resolution=not_found.
+
+Two query modes via query_type:
+  "impact" (default) — BFS call graph: direct_callers, indirect_callers, endpoints_affected,
+    transaction_boundary, security_surfaces, impact_findings (TX/SEC patterns in call chain).
+  "events" — event topology: publishers, consumers, propagation graph for an event class
+    or event publisher. Use when symbol is an event class (e.g. OrderPlacedEvent).
+
+Returns: schema_version, symbol, resolution, direct_callers, indirect_callers,
+  endpoints_affected, transaction_boundary, security_surfaces, impact_findings,
+  analysis_warnings, risk_level, confidence, metadata.
+
+symbol: FQN, class name, or Class#method.
+  Examples: "OrderService", "com.example.OrderService#placeOrder",
+            "OrderPlacedEvent" (with query_type="events" for event topology)
+repo_path: absolute path to the Java repository (default: current working directory).
+depth: BFS traversal depth 1–8 (default 4).
+query_type: "impact" (default) | "events"
+"""
+
+    spring_audit = _alias_spec(
+        "spring_audit",
+        "Spring semantic audit: TX anomalies + security surface. JAVA/SPRING ONLY.",
+        ("spring-audit",),
+        (
+            ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True,
+                          help="Absolute path to the Java repository."),
+            ToolParamSpec("scope", "option", str, required=False, default="all",
+                          option_names=("--scope",), choices=("all", "tx", "security"),
+                          help="all (default) | tx | security"),
+            ToolParamSpec("min_severity", "option", str, required=False, default="low",
+                          option_names=("--min-severity",), choices=("low", "medium", "high", "critical"),
+                          help="low (default) | medium | high | critical"),
+        ),
+        lambda inputs: [
+            "spring-audit",
+            str(inputs.get("repo_path", ".")),
+            "--scope", str(inputs.get("scope", "all")),
+            "--min-severity", str(inputs.get("min_severity", "low")),
+        ],
+        supported_targets=("repo_path",),
+        unsupported_targets=("file_path",),
+        validator=validate_repo_path,
+        docstring_override=_SPRING_AUDIT_DOC,
+    )
+
+    impact_chain = _alias_spec(
+        "impact_chain",
+        "Spring impact-chain: blast radius + TX/SEC enrichment. JAVA/SPRING ONLY.",
+        ("impact-chain",),
+        (
+            ToolParamSpec("symbol", "argument", str, required=True, default=None,
+                          help="FQN, class name, or Class#method."),
+            ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True,
+                          help="Absolute path to the Java repository."),
+            ToolParamSpec("depth", "option", int, required=False, default=4,
+                          option_names=("--depth",), help="BFS depth 1–8 (default 4)."),
+            ToolParamSpec("query_type", "option", str, required=False, default="impact",
+                          option_names=("--type",), choices=("impact", "events"),
+                          help="impact (default) = call-chain blast radius; events = event topology"),
+        ),
+        lambda inputs: [
+            "impact-chain",
+            str(inputs["symbol"]),
+            str(inputs.get("repo_path", ".")),
+            "--depth", str(inputs.get("depth", 4)),
+            "--type", str(inputs.get("query_type", "impact")),
+        ],
+        supported_targets=("repo_path", "class_name"),
+        unsupported_targets=("file_path",),
+        validator=validate_repo_path,
+        docstring_override=_IMPACT_CHAIN_DOC,
+    )
+
+    return [spring_audit, impact_chain]
+
+
 @lru_cache(maxsize=1)
 def build_tool_specs() -> tuple[ToolSpec, ...]:
     """Build the full MCP registry from the live CLI runtime."""
-    canonical = [
+    canonical_raw = [
         _canonical_spec_for_runtime_command(runtime)
         for runtime in discover_runtime_commands()
         if (runtime.callback is not None or runtime.path == ())
         and (not runtime.hidden or runtime.path == ("analyze",))
     ]
+    # Mark canonical tools that should not be served via MCP (validate_registry still checks them)
+    canonical = [
+        replace(spec, mcp_hidden=True) if spec.name in _MCP_HIDDEN_CANONICAL_TOOLS else spec
+        for spec in canonical_raw
+    ]
 
-    aliases = _root_aliases() + _prepare_context_aliases()
+    aliases = _root_aliases() + _prepare_context_aliases() + _java_spring_aliases()
     internals = _internal_specs()
 
     merged: dict[str, ToolSpec] = {}
@@ -842,6 +1003,11 @@ def validate_registry() -> list[str]:
         spec = registry_by_path.get(path)
         if spec is None:
             continue
+        # Skip docstring/param drift for mcp_hidden tools and intentional curated overrides.
+        # Curated aliases (e.g. spring_audit, impact_chain) replace canonical CLI specs with
+        # cleaner MCP surfaces — their params diverge from the raw CLI by design.
+        if spec.name in _MCP_HIDDEN_CANONICAL_TOOLS or spec.mcp_hidden:
+            continue
         expected_doc = _first_doc_line(runtime.docstring or runtime.help or "")
         if expected_doc and expected_doc not in spec.description:
             issues.append(f"docstring_mismatch:{spec.name}")
@@ -853,9 +1019,15 @@ def validate_registry() -> list[str]:
     return issues
 
 
+@lru_cache(maxsize=1)
+def build_mcp_tool_specs() -> tuple[ToolSpec, ...]:
+    """Tool specs actually served via MCP: public and not mcp_hidden."""
+    return tuple(spec for spec in build_tool_specs() if spec.mcp_visible)
+
+
 def mcp_tool_specs() -> tuple[ToolSpec, ...]:
-    """Public tool specs only."""
-    return build_public_tool_specs()
+    """Tool specs served via MCP (public, not mcp_hidden)."""
+    return build_mcp_tool_specs()
 
 
 def mcp_internal_tool_specs() -> tuple[ToolSpec, ...]:

@@ -1179,17 +1179,36 @@ def telemetry(action: str) -> dict:
     return _execute(["telemetry", action])
 
 
-def _finalize_mcp_registry() -> None:
-    """Replace manual tool registration with the runtime-generated registry."""
-    from sourcecode.mcp.registry import build_public_tool_specs, make_tool_callable, validate_registry
+_NATIVE_MCP_TOOLS: frozenset[str] = frozenset({
+    "start_session",
+    "analyze_task",
+    "run_pr_review_flow",
+    "run_bug_investigation_flow",
+    "run_feature_flow",
+})
 
+
+def _finalize_mcp_registry() -> None:
+    """Sync the MCP server with the runtime-generated registry.
+
+    Removes every tool except the 5 native orchestration tools (start_session,
+    analyze_task, flow runners) which are registered via @mcp.tool() in this
+    module and have no backing CLI command. All other tools are rebuilt from the
+    runtime-derived registry (build_mcp_tool_specs).
+    """
+    from sourcecode.mcp.registry import build_mcp_tool_specs, make_tool_callable, validate_registry
+
+    mcp_specs = build_mcp_tool_specs()
+
+    # Remove everything except the native orchestration tools
     try:
         for tool in list(mcp._tool_manager.list_tools()):  # type: ignore[attr-defined]
-            mcp.remove_tool(tool.name)
+            if tool.name not in _NATIVE_MCP_TOOLS:
+                mcp.remove_tool(tool.name)
     except Exception:
         pass
 
-    for spec in build_public_tool_specs():
+    for spec in mcp_specs:
         tool_fn = make_tool_callable(spec)
         tool_fn.__doc__ = spec.docstring
         globals()[spec.name] = tool_fn

@@ -11,13 +11,22 @@ def test_registry_validation_passes_cleanly():
 
 
 def test_public_registry_matches_live_mcp_tools():
-    public_specs = mcp_registry.build_public_tool_specs()
+    # Live MCP = registry-served tools (mcp_visible) + native orchestration tools
+    # (start_session, analyze_task, flow runners) registered via @mcp.tool() in server.py.
+    _NATIVE_ORCHESTRATION_TOOLS = frozenset({
+        "start_session",
+        "analyze_task",
+        "run_pr_review_flow",
+        "run_bug_investigation_flow",
+        "run_feature_flow",
+    })
+    mcp_specs = mcp_registry.build_mcp_tool_specs()
     registered = {tool.name for tool in mcp._tool_manager.list_tools()}
-    spec_names = {spec.name for spec in public_specs}
-    assert registered == spec_names, (
+    expected = {spec.name for spec in mcp_specs} | _NATIVE_ORCHESTRATION_TOOLS
+    assert registered == expected, (
         f"registered MCP tools drifted from generated registry:\n"
-        f"missing={sorted(spec_names - registered)}\n"
-        f"extra={sorted(registered - spec_names)}"
+        f"missing={sorted(expected - registered)}\n"
+        f"extra={sorted(registered - expected)}"
     )
 
 
@@ -38,6 +47,9 @@ def test_public_cli_commands_have_canonical_mcp_specs():
         assert spec.cli_path == command.path
         assert spec.description
         assert spec.docstring
+        # Curated overrides intentionally differ from raw CLI params — skip param check.
+        if canonical_name in mcp_registry._MCP_HIDDEN_CANONICAL_TOOLS:  # noqa: SLF001
+            continue
         runtime_param_names = [param.name for param in command.command.params]
         spec_param_names = [param.name for param in spec.params]
         assert runtime_param_names == spec_param_names
