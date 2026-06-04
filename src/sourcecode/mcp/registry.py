@@ -544,41 +544,86 @@ def _root_aliases() -> list[ToolSpec]:
         module = str(inputs["module"]).strip("/")
         return [f"{repo_path}/{module}", "--compact"]
 
+    _GET_COMPACT_DOC = """\
+Compact human/LLM summary of a repository (~1000-3000 tokens). USE THIS FIRST.
+
+Best for: quick project orientation, first-time context, token-budget constrained tasks.
+Returns: stacks, entry points, dependency summary, architecture summary, confidence, gaps.
+Includes security_surface, mybatis, and transactional_boundaries for Java/Spring projects.
+For richer machine-oriented detail (deeper signals, more sections), use get_agent_context.
+
+Maps to: sourcecode <repo_path> --compact [--git-context]
+repo_path: absolute path to the repository (default: current working directory).
+git_context: include git log and branch context in the analysis.
+"""
+
+    _GET_AGENT_DOC = """\
+Full structured agent context with extended machine-oriented signals (~5000-15000 tokens).
+
+Best for: deep analysis, bug investigation, code review, or when get_compact_context
+lacks sufficient detail. Includes all compact fields plus: env_map, code_notes,
+architecture layers, security surface, transactional boundaries, module graph summary.
+Prefer get_compact_context for quick orientation or token-constrained workflows.
+
+Maps to: sourcecode <repo_path> --agent [--git-context]
+repo_path: absolute path to the repository (default: current working directory).
+git_context: include git log and branch context in the analysis.
+"""
+
+    _GET_MODULE_DOC = """\
+Compact analysis of a specific module or subdirectory within a repository.
+
+Maps to: sourcecode <repo_path>/<module> --compact
+repo_path: absolute path to the repository root.
+module: subdirectory name relative to repo_path (e.g. 'src/auth', 'api', 'core').
+Returns: same fields as get_compact_context but scoped to the module subtree.
+"""
+
+    _TELEMETRY_DOC = """\
+Manage telemetry settings.
+
+Maps to: sourcecode telemetry <action>
+action: one of "status" (show current state), "enable" (opt in), "disable" (opt out).
+Valid values: "status" | "enable" | "disable"
+"""
+
     return [
         _alias_spec(
             "get_compact_context",
-            "Compact repository summary derived from the root CLI command. "
-            "Use get_agent_context for richer detail.",
+            "Compact human/LLM summary of a repository (~1000-3000 tokens). USE THIS FIRST.",
             ("sourcecode",),
             params_compact,
             compact_argv,
             supported_targets=("repo_path",),
             unsupported_targets=("file_path",),
             validator=validate_repo_path,
+            docstring_override=_GET_COMPACT_DOC,
         ),
         _alias_spec(
             "get_agent_context",
-            "Extended repository context derived from the root CLI command.",
+            "Full structured agent context with extended machine-oriented signals (~5000-15000 tokens).",
             ("sourcecode",),
             params_compact,
             agent_argv,
             supported_targets=("repo_path",),
             unsupported_targets=("file_path",),
             validator=validate_repo_path,
+            docstring_override=_GET_AGENT_DOC,
         ),
         _alias_spec(
             "get_module_context",
-            "Compact context for a specific module path derived from the root CLI command.",
+            "Compact analysis of a specific module or subdirectory within a repository.",
             ("sourcecode",),
             params_module,
             module_argv,
             supported_targets=("repo_path", "module_path"),
             unsupported_targets=("file_path",),
             validator=validate_repo_path,
+            docstring_override=_GET_MODULE_DOC,
         ),
         _alias_spec(
             "telemetry",
-            "Telemetry action helper alias that dispatches to the telemetry CLI group.",
+            "Manage telemetry settings: status | enable | disable.",
             ("telemetry",),
             (
                 ToolParamSpec(
@@ -591,6 +636,7 @@ def _root_aliases() -> list[ToolSpec]:
             ),
             lambda inputs: ["telemetry", str(inputs["action"])],
             supported_targets=("action",),
+            docstring_override=_TELEMETRY_DOC,
         ),
     ]
 
@@ -598,10 +644,20 @@ def _root_aliases() -> list[ToolSpec]:
 def _prepare_context_aliases() -> list[ToolSpec]:
     validate_repo_path = _repo_path_validator()
 
-    def task_alias(name: str, task: str, description: str, *, supported_targets: tuple[str, ...]) -> ToolSpec:
+    # Only used for prepare-context tasks that genuinely accept --since (delta, review-pr).
+    def _since_task_alias(
+        name: str,
+        task: str,
+        description: str,
+        *,
+        supported_targets: tuple[str, ...],
+        docstring_override: str | None = None,
+    ) -> ToolSpec:
         params = (
             ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
-            ToolParamSpec("since", "argument", str, required=False, default=""),
+            ToolParamSpec("since", "option", str, required=False, default="",
+                          option_names=("--since",),
+                          help="Git ref to diff against (e.g. HEAD~3, origin/main)."),
         )
 
         def argv_builder(inputs: Mapping[str, Any]) -> list[str]:
@@ -611,7 +667,6 @@ def _prepare_context_aliases() -> list[ToolSpec]:
             if not value and name == "get_delta":
                 try:
                     from sourcecode.mcp.server import _auto_since as _resolve_since
-
                     value = _resolve_since(repo_path)
                 except Exception:
                     value = "HEAD~1"
@@ -628,31 +683,310 @@ def _prepare_context_aliases() -> list[ToolSpec]:
             supported_targets=supported_targets,
             unsupported_targets=("file_path",),
             validator=validate_repo_path,
+            docstring_override=docstring_override,
         )
 
+    _GET_DELTA_DOC = """\
+Incremental context: git-changed files since a reference commit.
+
+Maps to: sourcecode prepare-context delta <repo_path> --since <since>
+repo_path: absolute path to the repository (default: current working directory).
+since: git ref to diff against (e.g. HEAD~3, main, origin/main).
+       If empty or omitted, auto-detects merge-base with origin/main (or
+       origin/master). Falls back to HEAD~1 if no remote branch found.
+       Pass "HEAD~1" explicitly to force single-commit diff.
+"""
+
+    _REVIEW_PR_DOC = """\
+Execution paths and risk analysis for changed files in a pull request.
+
+Maps to: sourcecode prepare-context review-pr <repo_path> [--since <since>]
+Returns: compact_base + execution_paths (diff-scoped) + hotspots for changed files.
+repo_path: absolute path to the repository (default: current working directory).
+since: git ref to diff against (e.g. HEAD~3, main, origin/main).
+       If omitted, diffs against uncommitted changes or HEAD~1 fallback.
+"""
+
+    _FIX_BUG_DOC = """\
+Risk-ranked files for bug investigation, optionally focused by symptom.
+
+Maps to: sourcecode prepare-context fix-bug <repo_path> [--symptom <symptom>]
+Includes compact_base: security_surface, transactional_boundaries, spring_profiles.
+repo_path: absolute path to the repository (default: current working directory).
+symptom: optional error message or class name to focus the file ranking
+         (e.g. "NullPointerException in UserService.findById").
+         Without symptom, ranking is generic (by churn/complexity). With symptom,
+         the matching class and its callers are ranked first.
+"""
+
+    _ONBOARD_DOC = """\
+Onboarding context: structured overview for new contributors.
+
+Maps to: sourcecode prepare-context onboard <repo_path>
+Returns: project structure, key entry points, architectural patterns, getting-started guide.
+repo_path: absolute path to the repository (default: current working directory).
+"""
+
+    _EXPLAIN_DOC = """\
+Architecture and entry-point explanation for a repository.
+
+Maps to: sourcecode prepare-context explain <repo_path>
+Returns: project summary, architecture overview, entry points, key dependencies.
+repo_path: absolute path to the repository (default: current working directory).
+"""
+
+    _REFACTOR_DOC = """\
+Structural issues and refactor opportunities for a repository.
+
+Maps to: sourcecode prepare-context refactor <repo_path>
+Returns: structural issues, coupling hotspots, high-churn files, improvement opportunities.
+repo_path: absolute path to the repository (default: current working directory).
+"""
+
+    _GENERATE_TESTS_DOC = """\
+Untested source files and test gap analysis for a repository.
+
+Maps to: sourcecode prepare-context generate-tests <repo_path> [--all]
+Returns: test_gaps list of untested files ranked by risk.
+        On large repos (>2000 classes) analysis is bounded by SOURCECODE_TESTS_TIMEOUT_MS
+        (default: 15000 ms). If timeout elapses, returns truncated=true with partial results.
+repo_path: absolute path to the repository (default: current working directory).
+include_all: return full test_gaps list without truncating to top 20.
+"""
+
+    _IR_SUMMARY_DOC = """\
+Deterministic symbol-level IR summary for Java repositories. Java only.
+
+Maps to: sourcecode repo-ir <repo_path> --summary-only
+Returns: reverse_graph (top 10 hubs), route_surface (top 50 endpoints),
+         subsystems (top 15), impact, analysis. Full graph nodes/edges omitted.
+
+Output is bounded to ~100 KB for LLM safety. For full IR (can exceed 10 MB
+on large repos), use the CLI: sourcecode repo-ir <path> --output ir.json
+Use get_compact_context or get_agent_context for non-Java repos.
+
+repo_path: absolute path to the Java repository (default: current working directory).
+"""
+
+    _IMPACT_CONTEXT_DOC = """\
+Blast-radius analysis: who calls a class and what breaks if it changes? Java only.
+
+Maps to: sourcecode impact <target> <repo_path> [--depth <depth>]
+Returns: direct_callers, indirect_callers, endpoints_affected,
+         transactional_boundaries_touched, risk_score, risk_level, stats.
+
+Use this when:
+- Planning a refactor: understand the full call chain before changing a class
+- PR review: assess blast radius of a changed service or utility class
+- Incident triage: find all paths that reach a faulty component
+
+target: class name (simple or FQN) or Java file path. Examples:
+        "UserService", "org.example.UserService", "UserService.java"
+repo_path: absolute path to the Java repository (default: current working directory).
+depth: BFS depth for indirect caller traversal (1–8, default: 4).
+"""
+
+    _MODERNIZE_DOC = """\
+Analyzes codebase for modernization opportunities: dead zones, hotspot scores, upgrade candidates.
+
+Maps to: sourcecode modernize <repo_path>
+Returns: hotspot_candidates (high fan-in + git churn), dead_zone_candidates (isolated classes),
+         high_coupling_nodes, subsystem_summary, cross_module_tangles, recommendation.
+
+Best for: refactor planning, identifying where to start, finding safe removal candidates.
+Use get_compact_context or get_agent_context first for project orientation.
+
+repo_path: absolute path to the Java repository (default: current working directory).
+"""
+
+    _CHECK_FRESHNESS_DOC = """\
+Report RIS freshness relative to the current git HEAD.
+
+Answers instantly: is the cached snapshot current? How many commits behind?
+Use before deciding whether to call get_compact_context for a refresh.
+
+Returns:
+  fresh (bool)             — True when RIS HEAD == current HEAD and no uncommitted changes
+  current_git_head (str)   — Current repo HEAD (short SHA)
+  ris_git_head (str|null)  — HEAD stored in RIS at last build
+  delta_commits (int|null) — Commits between ris_git_head and HEAD (0 = in sync)
+  has_uncommitted_changes  — Working tree has staged or unstaged changes
+  ris_exists (bool)        — False when no RIS built yet
+  ris_last_updated_at (str)— ISO-8601 timestamp of last RIS write
+
+repo_path: absolute path to the repository (default: current working directory).
+"""
+
+    _COLD_START_DOC = """\
+Instant session bootstrap from persisted Repository Intelligence Snapshot (RIS).
+
+PREFER start_session over this tool — it provides orchestration guidance on top
+of the same RIS data. Use get_cold_start_context when you only need the raw
+RIS bootstrap object without tool sequencing recommendations.
+
+Returns cached structural context built from prior analysis runs — zero re-analysis cost.
+
+status values:
+  "cold_start_ready"  — RIS exists and matches the current git HEAD.
+  "cold_start_stale"  — RIS exists but HEAD has changed since last analysis.
+                        Data is still useful; run get_compact_context to refresh.
+  "no_ris"            — No RIS yet for this repo; run get_compact_context first.
+
+Returns: status, repo_id, git_head, stale (bool), last_updated_at,
+         summary (compact snapshot), entrypoints, endpoints, hotspots.
+
+repo_path: absolute path to the repository (default: current working directory).
+"""
+
+    _GET_ENDPOINTS_DOC = """\
+REST API endpoint surface extraction from Java source files. JAVA ONLY.
+
+Do NOT call this on non-Java repositories — it will return empty results.
+Use get_compact_context or get_agent_context for non-Java repos.
+
+Maps to: sourcecode endpoints <repo_path>
+Returns: endpoints list with method, path, controller, handler fields;
+         security dict always present (policy: roles_allowed|permit_all|deny_all|
+         authenticated|...|none_detected); none_detected = no auth annotation found.
+         total (int), no_security_signal (int), and security_model (str) fields.
+         no_security_signal counts endpoints where security.policy == "none_detected".
+         security_model values: "filter_based" (centralized Spring Security config —
+         high no_security_signal is expected and does NOT mean endpoints are unprotected),
+         "annotation_based" (per-endpoint annotations only), "mixed" (both),
+         "unknown" (no security signals detected).
+Supports Spring MVC (@GetMapping etc.) and JAX-RS (@GET/@POST etc.).
+repo_path: absolute path to the Java repository (default: current working directory).
+"""
+
+    _CACHE_STATUS_DOC = """\
+Report cache metadata for a repository.
+
+Maps to: sourcecode cache status <repo_path> --json
+Returns: cache entries with git_head, timestamps, size info.
+Use check_freshness for RIS-specific freshness checking (faster, richer).
+repo_path: absolute path to the repository (default: current working directory).
+"""
+
+    _CACHE_WARM_DOC = """\
+Warm the cache for a repository (builds compact and agent analysis snapshots).
+
+Maps to: sourcecode cache warm <repo_path>
+Builds or refreshes the Repository Intelligence Snapshot (RIS).
+Use before analytical workflows to ensure fast subsequent tool calls (~8s first run,
+instant after).
+repo_path: absolute path to the repository (default: current working directory).
+"""
+
+    _CACHE_CLEAR_DOC = """\
+Clear cached analysis for a repository.
+
+Maps to: sourcecode cache clear <repo_path> [--include-ris]
+Removes cached context files. After clearing, run get_compact_context or cache_warm to rebuild.
+include_ris: also remove the RIS snapshot in addition to analysis cache (default: False).
+repo_path: absolute path to the repository (default: current working directory).
+"""
+
     return [
-        task_alias("get_delta", "delta", "Incremental delta context from prepare-context.", supported_targets=("repo_path", "git_ref")),
-        task_alias("fix_bug_context", "fix-bug", "Bug investigation context from prepare-context.", supported_targets=("repo_path", "symptom")),
-        task_alias("review_pr_context", "review-pr", "Pull-request review context from prepare-context.", supported_targets=("repo_path", "git_ref")),
-        task_alias("onboard_context", "onboard", "Onboarding context from prepare-context.", supported_targets=("repo_path",)),
-        task_alias("explain_context", "explain", "Architecture explanation from prepare-context.", supported_targets=("repo_path",)),
-        task_alias("refactor_context", "refactor", "Refactor context from prepare-context.", supported_targets=("repo_path",)),
+        # --- get_delta / review_pr_context: both genuinely use --since ---
+        _since_task_alias(
+            "get_delta", "delta",
+            "Incremental context: git-changed files since a reference commit.",
+            supported_targets=("repo_path", "git_ref"),
+            docstring_override=_GET_DELTA_DOC,
+        ),
+        _since_task_alias(
+            "review_pr_context", "review-pr",
+            "Execution paths and risk analysis for changed files in a pull request.",
+            supported_targets=("repo_path", "git_ref"),
+            docstring_override=_REVIEW_PR_DOC,
+        ),
+
+        # --- fix_bug_context: --symptom (not --since) ---
         _alias_spec(
-            "generate_tests_context",
-            "Test gap analysis from prepare-context.",
+            "fix_bug_context",
+            "Risk-ranked files for bug investigation, optionally focused by symptom.",
             ("prepare-context",),
             (
                 ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
-                ToolParamSpec("include_all", "argument", bool, required=False, default=False, option_names=("--all",), is_flag=True),
+                ToolParamSpec("symptom", "option", str, required=False, default=None,
+                              option_names=("--symptom",),
+                              help="Error message or class name to focus file ranking."),
             ),
-            lambda inputs: ["prepare-context", "generate-tests", str(inputs.get("repo_path", "."))] + (["--all"] if bool(inputs.get("include_all")) else []),
+            lambda inputs: (
+                ["prepare-context", "fix-bug", str(inputs.get("repo_path", "."))]
+                + (["--symptom", str(inputs["symptom"])] if inputs.get("symptom") else [])
+            ),
+            supported_targets=("repo_path", "symptom"),
+            unsupported_targets=("file_path",),
+            validator=validate_repo_path,
+            docstring_override=_FIX_BUG_DOC,
+        ),
+
+        # --- onboard / explain / refactor: no --since ---
+        _alias_spec(
+            "onboard_context",
+            "Onboarding context: structured overview for new contributors.",
+            ("prepare-context",),
+            (
+                ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
+            ),
+            lambda inputs: ["prepare-context", "onboard", str(inputs.get("repo_path", "."))],
             supported_targets=("repo_path",),
             unsupported_targets=("file_path",),
             validator=validate_repo_path,
+            docstring_override=_ONBOARD_DOC,
         ),
         _alias_spec(
+            "explain_context",
+            "Architecture and entry-point explanation for a repository.",
+            ("prepare-context",),
+            (
+                ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
+            ),
+            lambda inputs: ["prepare-context", "explain", str(inputs.get("repo_path", "."))],
+            supported_targets=("repo_path",),
+            unsupported_targets=("file_path",),
+            validator=validate_repo_path,
+            docstring_override=_EXPLAIN_DOC,
+        ),
+        _alias_spec(
+            "refactor_context",
+            "Structural issues and refactor opportunities for a repository.",
+            ("prepare-context",),
+            (
+                ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
+            ),
+            lambda inputs: ["prepare-context", "refactor", str(inputs.get("repo_path", "."))],
+            supported_targets=("repo_path",),
+            unsupported_targets=("file_path",),
+            validator=validate_repo_path,
+            docstring_override=_REFACTOR_DOC,
+        ),
+
+        # --- other prepare-context aliases ---
+        _alias_spec(
+            "generate_tests_context",
+            "Untested source files and test gap analysis for a repository.",
+            ("prepare-context",),
+            (
+                ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
+                ToolParamSpec("include_all", "option", bool, required=False, default=False,
+                              option_names=("--all",), is_flag=True),
+            ),
+            lambda inputs: (
+                ["prepare-context", "generate-tests", str(inputs.get("repo_path", "."))]
+                + (["--all"] if bool(inputs.get("include_all")) else [])
+            ),
+            supported_targets=("repo_path",),
+            unsupported_targets=("file_path",),
+            validator=validate_repo_path,
+            docstring_override=_GENERATE_TESTS_DOC,
+        ),
+
+        # --- Java analysis aliases ---
+        _alias_spec(
             "get_ir_summary",
-            "Summary-mode Java IR context from repo-ir.",
+            "Deterministic symbol-level IR summary for Java repositories. Java only.",
             ("repo-ir",),
             (
                 ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
@@ -661,10 +995,11 @@ def _prepare_context_aliases() -> list[ToolSpec]:
             supported_targets=("repo_path",),
             unsupported_targets=("file_path",),
             validator=validate_repo_path,
+            docstring_override=_IR_SUMMARY_DOC,
         ),
         _alias_spec(
             "get_impact_context",
-            "Blast-radius analysis from impact.",
+            "Blast-radius analysis: who calls a class and what breaks if it changes? Java only.",
             ("impact",),
             (
                 ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
@@ -681,10 +1016,11 @@ def _prepare_context_aliases() -> list[ToolSpec]:
             supported_targets=("repo_path", "class_name"),
             unsupported_targets=("file_path",),
             validator=validate_repo_path,
+            docstring_override=_IMPACT_CONTEXT_DOC,
         ),
         _alias_spec(
             "modernize_context",
-            "Modernization analysis from modernize.",
+            "Modernization analysis: dead zones, hotspot scores, upgrade candidates.",
             ("modernize",),
             (
                 ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
@@ -693,10 +1029,13 @@ def _prepare_context_aliases() -> list[ToolSpec]:
             supported_targets=("repo_path",),
             unsupported_targets=("file_path",),
             validator=validate_repo_path,
+            docstring_override=_MODERNIZE_DOC,
         ),
+
+        # --- cache / freshness aliases ---
         _alias_spec(
             "check_freshness",
-            "Cache freshness check derived from cache freshness.",
+            "Report RIS freshness relative to the current git HEAD.",
             ("cache", "freshness"),
             (
                 ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
@@ -705,10 +1044,11 @@ def _prepare_context_aliases() -> list[ToolSpec]:
             supported_targets=("repo_path",),
             unsupported_targets=("file_path",),
             validator=validate_repo_path,
+            docstring_override=_CHECK_FRESHNESS_DOC,
         ),
         _alias_spec(
             "get_cold_start_context",
-            "Cold-start snapshot from the cold-start CLI command.",
+            "Instant session bootstrap from persisted Repository Intelligence Snapshot (RIS).",
             ("cold-start",),
             (
                 ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
@@ -717,6 +1057,69 @@ def _prepare_context_aliases() -> list[ToolSpec]:
             supported_targets=("repo_path",),
             unsupported_targets=("file_path",),
             validator=validate_repo_path,
+            docstring_override=_COLD_START_DOC,
+        ),
+
+        # --- get_endpoints: clean alias replacing raw canonical with 7 CLI params ---
+        _alias_spec(
+            "get_endpoints",
+            "REST API endpoint surface extraction from Java source files. JAVA ONLY.",
+            ("endpoints",),
+            (
+                ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
+            ),
+            lambda inputs: ["endpoints", str(inputs.get("repo_path", "."))],
+            supported_targets=("repo_path",),
+            unsupported_targets=("file_path",),
+            validator=validate_repo_path,
+            docstring_override=_GET_ENDPOINTS_DOC,
+        ),
+
+        # --- cache management: curated aliases stripping CLI noise params ---
+        _alias_spec(
+            "cache_status",
+            "Report cache metadata for a repository.",
+            ("cache", "status"),
+            (
+                ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
+            ),
+            lambda inputs: ["cache", "status", str(inputs.get("repo_path", ".")), "--json"],
+            supported_targets=("repo_path",),
+            unsupported_targets=("file_path",),
+            validator=validate_repo_path,
+            docstring_override=_CACHE_STATUS_DOC,
+        ),
+        _alias_spec(
+            "cache_warm",
+            "Warm the cache for a repository (builds compact and agent analysis snapshots).",
+            ("cache", "warm"),
+            (
+                ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
+            ),
+            lambda inputs: ["cache", "warm", str(inputs.get("repo_path", "."))],
+            supported_targets=("repo_path",),
+            unsupported_targets=("file_path",),
+            validator=validate_repo_path,
+            docstring_override=_CACHE_WARM_DOC,
+        ),
+        _alias_spec(
+            "cache_clear",
+            "Clear cached analysis for a repository.",
+            ("cache", "clear"),
+            (
+                ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
+                ToolParamSpec("include_ris", "option", bool, required=False, default=False,
+                              option_names=("--include-ris",), is_flag=True,
+                              help="Also remove RIS snapshot (default: False)."),
+            ),
+            lambda inputs: (
+                ["cache", "clear", str(inputs.get("repo_path", ".")), "--yes"]
+                + (["--include-ris"] if bool(inputs.get("include_ris")) else [])
+            ),
+            supported_targets=("repo_path",),
+            unsupported_targets=("file_path",),
+            validator=validate_repo_path,
+            docstring_override=_CACHE_CLEAR_DOC,
         ),
     ]
 
@@ -812,6 +1215,11 @@ _MCP_HIDDEN_CANONICAL_TOOLS: frozenset[str] = frozenset({
     "cold_start",         # duplicate of get_cold_start_context
     "cache_freshness",    # duplicate of check_freshness
     "modernize",          # duplicate of modernize_context
+    # Raw CLI tools with output-format/noise params — clean alias with only repo_path exists
+    "endpoints",          # 7 CLI params (output_path/format/copy/etc.); use get_endpoints
+    "cache_status",       # path + json_output flag; curated alias strips json_output, renames path→repo_path
+    "cache_warm",         # path + compact/agent output flags; curated alias keeps only repo_path
+    "cache_clear",        # path + yes/all_ destructive flags; curated alias keeps repo_path + include_ris only
     # Curated overrides — canonical CLI spec replaced by cleaner alias with same name.
     # Listed here so validate_registry() skips CLI param-drift checks on the alias.
     "spring_audit",       # curated: repo_path + scope + min_severity only (strips output_path/format/copy)
