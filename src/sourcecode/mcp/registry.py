@@ -758,8 +758,16 @@ include_all: return full test_gaps list without truncating to top 20.
 Deterministic symbol-level IR summary for Java repositories. Java only.
 
 Maps to: sourcecode repo-ir <repo_path> --summary-only
-Returns: reverse_graph (top 10 hubs), route_surface (top 50 endpoints),
+Returns: reverse_graph, route_surface (top 50 endpoints),
          subsystems (top 15), impact, analysis. Full graph nodes/edges omitted.
+
+reverse_graph: dict[class_FQN → {"contained_in": [method_FQNs], ...}]
+  Top 10 most-referenced (highest in-degree) classes in the dependency graph.
+  Keys are fully-qualified class names. Iterate with:
+    for fqn, data in result["reverse_graph"].items(): ...
+route_surface: list of endpoint dicts (method, path, handler, security).
+subsystems: list of detected subsystem cluster dicts.
+analysis: metadata — total_classes, total_edges, analysis_ms.
 
 Output is bounded to ~100 KB for LLM safety. For full IR (can exceed 10 MB
 on large repos), use the CLI: sourcecode repo-ir <path> --output ir.json
@@ -1234,6 +1242,9 @@ _MCP_HIDDEN_CANONICAL_TOOLS: frozenset[str] = frozenset({
     "telemetry_status",
     "telemetry_enable",
     "telemetry_disable",
+    # Human admin actions — not agent actions
+    "activate",    # Pro license key activation; human admin only, not an agent operation
+    "config",      # returns plain-text config dump (not JSON); version via `version`, telemetry via `telemetry`
 })
 
 
