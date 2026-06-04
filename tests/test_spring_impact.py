@@ -1226,3 +1226,98 @@ class TestRegressionCH001bImplToInterfaceExpansion:
         result = ImpactOrchestrator().query(cir, _make_model(), "com.example.StandaloneServiceImpl", depth=1)
         assert result.direct_callers == []
         assert result.indirect_callers == []
+
+
+# ---------------------------------------------------------------------------
+# BUG-004 — BFS dead-end on class-level FQN intermediates
+# ---------------------------------------------------------------------------
+
+class TestRegressionBUG004ClassLevelDeadEnd:
+    """BUG-004: class-level FQN in BFS queue must traverse method-level rg keys.
+
+    reverse_graph is keyed by method FQNs ("Foo#doWork"), never by class FQNs
+    ("Foo").  When BFS enqueues a class-level node (e.g. via CH-002 expansion),
+    reverse_graph.get("Foo") returns {} and traversal silently terminates.
+
+    Fix: class_method_index maps class FQN → method-level rg keys so _edges_for()
+    includes those entries when processing a class-level node.
+    """
+
+    def test_bug004_class_seed_finds_method_level_callers(self):
+        """Class-level seed must find callers living on method-level rg keys."""
+        rg = {
+            # No entry for "com.example.Service" itself — only method-level
+            "com.example.Service#doWork": {"calls": ["com.example.Client#run"]},
+        }
+        direct, indirect, _ = _bfs_callers(["com.example.Service"], rg, 1)
+        assert "com.example.Client#run" in direct, (
+            f"BUG-004: class-level seed missed method-level callers. direct={direct}"
+        )
+
+    def test_bug004_class_intermediate_finds_deeper_callers(self):
+        """Class-level node added by CH-002 must continue BFS via method-level keys.
+
+        Scenario: Repository injected into ServiceImpl (CH-002 adds ServiceImpl
+        class node to direct callers). ServiceImpl has no class-level rg entry —
+        only method-level. Without the fix indirect_callers stays empty.
+        """
+        rg = {
+            "com.example.Repository": {
+                "injects": ["com.example.ServiceImpl#<init>"],
+            },
+            # Callers of ServiceImpl live on method-level keys only
+            "com.example.ServiceImpl#placeOrder": {
+                "calls": ["com.example.Controller#checkout"],
+            },
+            "com.example.ServiceImpl#save": {
+                "calls": ["com.example.Controller#create"],
+            },
+        }
+        direct, indirect, _ = _bfs_callers(["com.example.Repository"], rg, 2)
+        all_callers = set(direct) | set(indirect)
+        assert "com.example.Controller#checkout" in all_callers, (
+            f"BUG-004: ServiceImpl class dead-end — checkout missing. callers={all_callers}"
+        )
+        assert "com.example.Controller#create" in all_callers, (
+            f"BUG-004: ServiceImpl class dead-end — create missing. callers={all_callers}"
+        )
+
+    def test_bug004_no_duplicate_callers_when_class_and_method_both_in_rg(self):
+        """When rg has BOTH a class entry and method entries, callers are deduplicated."""
+        rg = {
+            "com.example.Service": {"calls": ["com.example.Client#run"]},
+            "com.example.Service#doWork": {"calls": ["com.example.Client#run"]},
+        }
+        direct, _, _ = _bfs_callers(["com.example.Service"], rg, 1)
+        assert direct.count("com.example.Client#run") == 1, (
+            f"BUG-004: duplicate callers from class+method rg entries. direct={direct}"
+        )
+
+    def test_bug004_orchestrator_indirect_callers_via_class_node(self):
+        """Integration: indirect callers found through class-level intermediate node."""
+        symbols = [
+            "com.example.Repository",
+            "com.example.Repository#findById",
+            "com.example.ServiceImpl",
+            "com.example.ServiceImpl#<init>",
+            "com.example.ServiceImpl#load",
+            "com.example.Controller",
+            "com.example.Controller#show",
+        ]
+        reverse_graph = {
+            # DI: ServiceImpl#<init> injects Repository — CH-002 adds ServiceImpl class
+            "com.example.Repository": {
+                "injects": ["com.example.ServiceImpl#<init>"],
+            },
+            # Controller#show calls ServiceImpl — stored on method-level key
+            "com.example.ServiceImpl#load": {
+                "calls": ["com.example.Controller#show"],
+            },
+        }
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph)
+        result = ImpactOrchestrator().query(cir, _make_model(), "com.example.Repository", depth=3)
+        all_callers = set(result.direct_callers) | set(result.indirect_callers)
+        assert "com.example.Controller#show" in all_callers, (
+            f"BUG-004: Controller#show not found via class-level intermediate. "
+            f"direct={result.direct_callers} indirect={result.indirect_callers}"
+        )

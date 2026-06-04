@@ -244,11 +244,35 @@ def _bfs_callers(
     X#fieldName), the containing class X is also added to the caller set and BFS
     continues from X.  This resolves the DI traversal gap where contained_in edges
     (which are skipped) were the only path from a field node back to its class.
+
+    BUG-004 fix: when BFS reaches a class-level node (no '#'), callers of that
+    class live on method-level keys (e.g. 'Foo#doWork') rather than the class key
+    ('Foo').  A class→method-key index is built upfront so the BFS also traverses
+    method-level entries when processing a class-level FQN.
     """
     visited: set[str] = set(seed_fqns)
     direct: list[str] = []
     indirect: list[str] = []
     was_truncated = False
+
+    # BUG-004: index class FQN → list of method-level keys in reverse_graph.
+    # Callers of Foo#doWork are stored under reverse_graph["Foo#doWork"], never
+    # under reverse_graph["Foo"].  Without this index, BFS silently terminates
+    # whenever a class-level node is enqueued (e.g. via CH-002 expansion).
+    class_method_index: dict[str, list[str]] = {}
+    for rg_key in reverse_graph:
+        if "#" in rg_key:
+            cls = rg_key.split("#")[0]
+            class_method_index.setdefault(cls, []).append(rg_key)
+
+    def _edges_for(fqn: str) -> list[tuple[str, list[str]]]:
+        """Return all (etype, fqn_list) pairs from reverse_graph for fqn.
+        For class-level FQNs also includes method-level entries (BUG-004)."""
+        edges: list[tuple[str, list[str]]] = list((reverse_graph.get(fqn) or {}).items())
+        if "#" not in fqn:
+            for mk in class_method_index.get(fqn, []):
+                edges.extend((reverse_graph.get(mk) or {}).items())
+        return edges
 
     # Hub-class guard: cap depth to 1 when the UNIQUE direct caller set exceeds
     # _BFS_CALLER_CAP, to avoid O(n^depth) BFS explosion on high-fanout seeds.
@@ -257,8 +281,7 @@ def _bfs_callers(
     # guard prematurely — a 36-method interface still has ~20 unique calling classes.
     unique_direct_callers: set[str] = set()
     for seed in seed_fqns:
-        entry = reverse_graph.get(seed) or {}
-        for etype, fqn_list in entry.items():
+        for etype, fqn_list in _edges_for(seed):
             if etype not in _SKIP_EDGE_TYPES:
                 unique_direct_callers.update(fqn_list)
 
@@ -284,8 +307,7 @@ def _bfs_callers(
         fqn, depth = queue.pop(0)
         if depth >= effective_depth:
             continue
-        entry = reverse_graph.get(fqn) or {}
-        for etype, fqn_list in entry.items():
+        for etype, fqn_list in _edges_for(fqn):
             if etype in _SKIP_EDGE_TYPES:
                 continue
             for caller in fqn_list:
