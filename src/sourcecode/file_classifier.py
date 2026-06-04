@@ -83,18 +83,30 @@ _DEF_RE = re.compile(r"\b(class|def|function|const|export\s+class|interface|type
 _JAVA_ANNOTATION_RE = re.compile(
     r'@(RestController|Controller|Service|Repository|Mapper|Entity|Data|Configuration'
     r'|EnableWebSecurity|ControllerAdvice|Transactional'
+    r'|RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping'  # HTTP mappings
     r'|Path|Provider'  # JAX-RS
     r'|ApplicationScoped|RequestScoped|SessionScoped|Singleton|Dependent'  # CDI
     r'|Inject|Named'  # CDI DI
     r')\b'
 )
 
+# Handler-count regex — method-level only (Get/Post/Put/Delete/Patch, not class-level RequestMapping)
+_HANDLER_MAPPING_RE = re.compile(r'@(Get|Post|Put|Delete|Patch)Mapping\b')
+
 # (annotation_set, category, relevance, why_template)
 # Checked in priority order; first match wins.
+# @Controller rules use 0.80 base; _count_handlers() bonus in classify() differentiates
+# by HTTP handler count. @RestController stays at 0.90 (no boost — already high tier).
 _JAVA_STEREOTYPE_RULES: list[tuple[frozenset, str, float, str]] = [
     (frozenset({"EnableWebSecurity"}),               "security",          0.85, "Spring Security configuration"),
     (frozenset({"RestController"}),                  "api_endpoint",      0.90, "Spring REST controller — defines HTTP API surface"),
     (frozenset({"Controller", "RequestMapping"}),    "api_endpoint",      0.80, "Spring MVC controller"),
+    (frozenset({"Controller", "GetMapping"}),        "api_endpoint",      0.80, "Spring MVC controller"),
+    (frozenset({"Controller", "PostMapping"}),       "api_endpoint",      0.80, "Spring MVC controller"),
+    (frozenset({"Controller", "PutMapping"}),        "api_endpoint",      0.80, "Spring MVC controller"),
+    (frozenset({"Controller", "DeleteMapping"}),     "api_endpoint",      0.80, "Spring MVC controller"),
+    (frozenset({"Controller", "PatchMapping"}),      "api_endpoint",      0.80, "Spring MVC controller"),
+    (frozenset({"Controller"}),                      "api_endpoint",      0.72, "Spring MVC controller"),
     (frozenset({"ControllerAdvice"}),                "exception_handler", 0.75, "Spring @ControllerAdvice — cross-cutting exception handling"),
     # JAX-RS
     (frozenset({"Path"}),                            "api_endpoint",      0.85, "JAX-RS resource — defines REST endpoint surface"),
@@ -178,14 +190,26 @@ class FileClassifier:
         if norm in self.cli_entry_paths:
             return FileClassification(norm, "cli_entrypoint", "high", 1.0, "declared production CLI entrypoint", ["entry_points"])
 
-        if norm in self.production_entry_paths:
-            return FileClassification(norm, "runtime_core", "high", 0.95, "declared production runtime entrypoint", ["entry_points"])
-
-        # Java Spring stereotype detection (Java/Kotlin files only)
+        # Java Spring stereotype detection runs BEFORE the generic entrypoint fallback
+        # so that controllers and services keep their content-based category and relevance
+        # rather than collapsing to runtime_core/0.95 for every declared entry point.
         if suffix in {".java", ".kt"}:
             java_class = self._classify_java_stereotype(norm, content)
             if java_class is not None:
+                if java_class.category == "api_endpoint" and java_class.relevance < 0.85:
+                    # Boost @Controller-tier (base 0.72–0.80) by handler count so controllers
+                    # with more HTTP handlers rank above single-endpoint system controllers.
+                    # @RestController (0.90) and JAX-RS Path (0.85) are already high-tier — skip.
+                    h = self._count_handlers(content)
+                    if h > 0:
+                        bonus = min(h * 0.03, 0.12)
+                        java_class.relevance = round(min(0.95, java_class.relevance + bonus), 3)
+                if norm in self.production_entry_paths and "entry_points" not in java_class.evidence:
+                    java_class.evidence = list(java_class.evidence) + ["entry_points"]
                 return java_class
+
+        if norm in self.production_entry_paths:
+            return FileClassification(norm, "runtime_core", "high", 0.95, "declared production runtime entrypoint", ["entry_points"])
 
         # Fix 4: call _matched_imports once per category instead of twice
         # (_has_any_import was calling _matched_imports and discarding the result,
@@ -261,6 +285,10 @@ class FileClassifier:
         if parts & {"domain", "models", "model", "entities", "entity"}:
             return True
         return "@dataclass" in content or "pydantic" in content.lower()
+
+    def _count_handlers(self, content: str) -> int:
+        """Count method-level HTTP handler annotations as proxy for controller complexity."""
+        return len(_HANDLER_MAPPING_RE.findall(content))
 
     def _sample(self, imports: list[str]) -> list[str]:
         return [f"import:{imp}" for imp in imports[:4]]

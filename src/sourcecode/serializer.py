@@ -954,11 +954,18 @@ def _file_relevance(sm: SourceMap, *, limit: int = _FILE_RELEVANCE_LIMIT) -> lis
             runtime_impact, dep_centrality, fw_signal, change_sev, test_risk
         )
 
-        # T1 override: confirmed production entrypoints → 0.92–1.00.
-        # Only runtime_core / cli_entrypoint categories justify scores ≥ 0.92.
+        # T1 override: confirmed production entrypoints use content-evidence relevance as score.
+        # runtime_core/cli_entrypoint: 0.92 floor (bootstrap + non-Java entries).
+        # api_endpoint/security/exception_handler: stereotype relevance directly (0.70 floor)
+        # so that controllers differentiate by annotation table + handler-count bonus rather
+        # than collapsing to a flat 0.95.
         if path in entry_paths and cat in ("runtime_core", "cli_entrypoint"):
             score_val = round(
                 min(1.0, max(0.92, file_class.relevance if file_class else 0.92)), 3
+            )
+        elif path in entry_paths and cat in ("api_endpoint", "security", "exception_handler"):
+            score_val = round(
+                min(1.0, max(0.70, file_class.relevance if file_class else 0.75)), 3
             )
         else:
             score_val = round(formula_raw, 3)
