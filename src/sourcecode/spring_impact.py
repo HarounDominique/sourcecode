@@ -289,9 +289,16 @@ def _bfs_callers(
                 _add_caller(caller, depth)
                 # CH-002: injects edge to a field/constructor node → also traverse
                 # the containing class, bypassing the skipped contained_in edge.
-                if etype == "injects" and "#" in caller:
-                    class_fqn = caller.rsplit("#", 1)[0]
-                    _add_caller(class_fqn, depth)
+                # Two formats emitted by the CIR parser:
+                #   Constructor injection: pkg.Class#<init>  (hash separator)
+                #   Field injection:       pkg.Class.field   (dot, lowercase last segment)
+                if etype == "injects":
+                    if "#" in caller:
+                        _add_caller(caller.rsplit("#", 1)[0], depth)
+                    elif "." in caller:
+                        last_seg = caller.rsplit(".", 1)[1]
+                        if last_seg and last_seg[0].islower():
+                            _add_caller(caller.rsplit(".", 1)[0], depth)
 
     return direct, indirect, was_truncated
 
@@ -565,6 +572,32 @@ class ImpactOrchestrator:
                 warnings.append(
                     f"Interface implementation expansion: "
                     f"added {n_syms} symbol(s) from {n_classes} implementation(s)."
+                )
+
+        # CH-001b: expand impl seeds to include their interfaces for BFS (BUG-IC-002).
+        # Callers typically inject the interface type, so reverse-graph edges live on
+        # the interface node, not on the implementation node.  Without this expansion,
+        # querying 'OrderServiceImpl' finds 0 callers even though 36 classes inject it.
+        if impl_graph is not None:
+            current_seed_classes = {_class_of(s) for s in seed_fqns}
+            iface_seeds: list[str] = []
+            iface_classes_added: set[str] = set()
+            for seed_class in sorted(current_seed_classes):
+                ifaces = impl_graph.interfaces_of(seed_class)
+                for iface_class in ifaces:
+                    if iface_class in iface_classes_added or iface_class in current_seed_classes:
+                        continue
+                    iface_classes_added.add(iface_class)
+                    for sym in cir.symbols:
+                        if _class_of(sym) == iface_class and sym not in set(seed_fqns):
+                            iface_seeds.append(sym)
+            if iface_seeds:
+                seed_fqns = list(dict.fromkeys(seed_fqns + iface_seeds))
+                n_classes = len(iface_classes_added)
+                n_syms = len(iface_seeds)
+                warnings.append(
+                    f"Implementation-to-interface expansion (CH-001b): "
+                    f"added {n_syms} symbol(s) from {n_classes} interface(s) for caller BFS."
                 )
 
         # ── 2. BFS through reverse graph ─────────────────────────────────

@@ -327,8 +327,12 @@ _PUBLISH_EVENT_RE = re.compile(r'\.publishEvent\s*\(\s*new\s+(\w+)\s*[(\{]')
 _FIRE_EVENT_RE = re.compile(r'\b(\w+Event)\.fire\s*\(')
 
 # Class-level consumer detection from class signature (not annotations).
-# Pattern 1: implements ApplicationListener<EventType> — standard Spring interface.
-_APP_LISTENER_RE = re.compile(r'\bApplicationListener\s*<\s*(\w+)\s*>')
+# Pattern 1: implements [Prefix]ApplicationListener<EventType>
+#            Matches both the standard Spring interface (ApplicationListener<E>) and
+#            framework-specific subinterfaces (BroadleafApplicationListener<E>,
+#            SmartApplicationListener<E>, etc.).  Uses \w* prefix instead of \b so
+#            that "Broadleaf" prefix does not break the word boundary. (BUG-EVT-001)
+_APP_LISTENER_RE = re.compile(r'\w*ApplicationListener\s*<\s*(\w+)\s*>')
 # Pattern 2: extends AbstractXxxEventListener<EventType> — abstract base class pattern
 #            (Broadleaf's AbstractBroadleafApplicationEventListener and similar).
 #            Matches any parent class name that contains "EventListener".
@@ -569,9 +573,37 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
     pending_ann_values: dict[str, str] = {}
     in_block_comment = False
 
+    # BUG-PARSER-001: normalize multi-line class declarations where the opening brace
+    # appears on a continuation line (e.g. "implements A,\n  B, C {").
+    # _CLASS_DECL_RE requires '{' on the same line as 'class' — joining the continuation
+    # here makes the regex work without changing the per-line brace-depth counter.
+    _raw_lines = source.splitlines()
+    _joined: list[str] = []
+    _i = 0
+    _CLASS_KW_RE = re.compile(r'\b(?:class|interface|enum)\s+[A-Z]')
+    while _i < len(_raw_lines):
+        _line = _raw_lines[_i]
+        _stripped = _line.strip()
+        if (_CLASS_KW_RE.search(_stripped) and '{' not in _stripped
+                and not _stripped.startswith('//')
+                and not _stripped.startswith('*')):
+            # Continuation: join until we hit a line containing '{'
+            _buf = _line
+            _i += 1
+            while _i < len(_raw_lines):
+                _cont = _raw_lines[_i]
+                _buf = _buf.rstrip() + ' ' + _cont.strip()
+                _i += 1
+                if '{' in _cont:
+                    break
+            _joined.append(_buf)
+        else:
+            _joined.append(_line)
+            _i += 1
+
     # P1 fix: normalize multiline annotations (e.g. @RequestMapping(\n  value="..."\n))
     # into single lines so the per-line regex can capture annotation args correctly.
-    _normalized_lines = _normalize_multiline_annotations(source.splitlines())
+    _normalized_lines = _normalize_multiline_annotations(_joined)
 
     for line in _normalized_lines:
         stripped = line.strip()

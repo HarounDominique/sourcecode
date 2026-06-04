@@ -68,11 +68,23 @@ class ImplementationGraph:
             dependencies:  cir.dependencies — list of edge dicts with 'from'/'to'/'type'
             known_symbols: set(cir.symbols) — only in-repo FQNs
 
-        Excludes implements edges where the interface (to_fqn) is NOT in known_symbols
-        (e.g. java.io.Serializable, org.springframework.* framework interfaces).
+        The Java parser stores 'implements' edges with the simple class name in the 'to'
+        field (e.g. 'OrderService') rather than the FQN.  We resolve these via a
+        precomputed simple-name → FQN map built from known_symbols.  Only unambiguous
+        resolutions are accepted; external framework interfaces and ambiguous names are
+        excluded.
+
         Includes edges where the implementing class (from_fqn) is NOT in known_symbols
         only when the interface IS known — this handles partial-parse edge cases.
         """
+        # Pre-build simple-name → [FQN] lookup for class-level symbols only (no '#').
+        # Used to resolve unqualified interface names (BUG-IC-001).
+        _simple_to_fqn: dict[str, list[str]] = {}
+        for sym in known_symbols:
+            if "#" not in sym and "." in sym:
+                simple = sym.rsplit(".", 1)[1]
+                _simple_to_fqn.setdefault(simple, []).append(sym)
+
         impl_of: dict[str, list[str]] = {}
         ifaces_of: dict[str, list[str]] = {}
 
@@ -83,9 +95,13 @@ class ImplementationGraph:
             to_fqn = (edge.get("to") or "").strip()
             if not from_fqn or not to_fqn:
                 continue
-            # Only track when the interface is an in-repo symbol
+            # Resolve to_fqn: prefer exact known-symbol match, then try simple-name lookup.
+            # Rejects external interfaces (java.*, org.springframework.*) and ambiguous names.
             if to_fqn not in known_symbols:
-                continue
+                candidates = _simple_to_fqn.get(to_fqn, [])
+                if len(candidates) != 1:
+                    continue
+                to_fqn = candidates[0]
             # Ignore malformed FQNs (e.g. generic type fragments like "Long>")
             if ">" in to_fqn or "<" in to_fqn:
                 continue
