@@ -555,19 +555,47 @@ class _TX005ExceptionSwallowing:
         return findings
 
     def _has_swallowed_exception(self, source: str, symbol: str) -> bool:
-        """Return True if the specific method body has a catch-log-no-rethrow pattern.
+        """Return True if a @Transactional overload of method_name has a catch-log-no-rethrow pattern.
 
-        Scopes the search to the method body only (not the whole file) to avoid
-        false positives when other methods in the same file have swallowed exceptions.
+        Guards against two false-positive sources:
+        1. Overloaded methods — only checks the overload whose declaration is immediately
+           preceded by @Transactional (preamble anchored to last '}').
+        2. Call sites — skips any match where ';' appears before the next '{', which
+           is true for call expressions (e.g. dao.method(arg);) but not definitions.
         """
         method_name = symbol.split("#")[-1] if "#" in symbol else symbol.rsplit(".", 1)[-1]
-        body = _extract_method_body(source, method_name)
-        if not body:
-            return False
-        for match in _CATCH_SWALLOW_RE.finditer(body):
-            block = match.group(0)
-            if not _RETHROW_IN_CATCH_RE.search(block):
-                return True
+        pattern = re.compile(r'\b' + re.escape(method_name) + r'\s*\(')
+        for m in pattern.finditer(source):
+            # Preamble: text between the previous closing brace and this method name.
+            # Anchoring to the last '}' prevents @Transactional from a prior method
+            # from leaking into this overload's preamble.
+            prev_brace = source.rfind('}', 0, m.start())
+            preamble_start = prev_brace + 1 if prev_brace >= 0 else 0
+            preamble = source[preamble_start:m.start()]
+            if '@Transactional' not in preamble:
+                continue
+            # Guard: if ';' comes before '{', this is a call site, not a definition.
+            brace_pos = source.find('{', m.end())
+            semi_pos = source.find(';', m.end())
+            if brace_pos < 0:
+                continue
+            if semi_pos >= 0 and semi_pos < brace_pos:
+                continue
+            # Extract this overload's body
+            depth = 1
+            i = brace_pos + 1
+            while i < len(source) and depth > 0:
+                c = source[i]
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                i += 1
+            body = source[brace_pos:i]
+            for match in _CATCH_SWALLOW_RE.finditer(body):
+                block = match.group(0)
+                if not _RETHROW_IN_CATCH_RE.search(block):
+                    return True
         return False
 
 

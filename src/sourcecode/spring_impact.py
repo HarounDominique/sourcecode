@@ -250,16 +250,19 @@ def _bfs_callers(
     indirect: list[str] = []
     was_truncated = False
 
-    # Hub-class guard: if seeds have > _BFS_CALLER_CAP direct callers combined,
-    # cap effective depth to 1 to avoid O(n^depth) explosion.
-    total_direct_count = 0
+    # Hub-class guard: cap depth to 1 when the UNIQUE direct caller set exceeds
+    # _BFS_CALLER_CAP, to avoid O(n^depth) BFS explosion on high-fanout seeds.
+    # Uses unique callers (not raw sum per seed) so that interface-expansion seeds
+    # (which add many method-level FQNs sharing the same callers) don't trigger the
+    # guard prematurely — a 36-method interface still has ~20 unique calling classes.
+    unique_direct_callers: set[str] = set()
     for seed in seed_fqns:
         entry = reverse_graph.get(seed) or {}
         for etype, fqn_list in entry.items():
             if etype not in _SKIP_EDGE_TYPES:
-                total_direct_count += len(fqn_list)
+                unique_direct_callers.update(fqn_list)
 
-    effective_depth = 1 if total_direct_count > _BFS_CALLER_CAP else max_depth
+    effective_depth = 1 if len(unique_direct_callers) > _BFS_CALLER_CAP else max_depth
     if effective_depth < max_depth:
         was_truncated = True
 

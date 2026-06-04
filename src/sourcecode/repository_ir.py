@@ -323,6 +323,11 @@ _SPRING_OTHER: frozenset[str] = frozenset({
 
 _PUBLISH_EVENT_RE = re.compile(r'\.publishEvent\s*\(\s*new\s+(\w+)\s*[(\{]')
 
+# Two-step publish: SomeEvent var = new SomeEvent(...); publisher.publishEvent(var)
+# Used when event is created before passing to publishEvent (common pattern).
+_PUBLISH_EVENT_CALL_RE = re.compile(r'\.publishEvent\s*\(')
+_NEW_EVENT_INSTANTIATION_RE = re.compile(r'\bnew\s+(\w+Event)\s*[\({]')
+
 # Keycloak SPI event fire pattern: XxxEvent.fire(session, ...)
 _FIRE_EVENT_RE = re.compile(r'\b(\w+Event)\.fire\s*\(')
 
@@ -1194,6 +1199,27 @@ def _build_relations(
                 confidence="medium",
                 evidence={"type": "method_call", "value": f"publishEvent(new {event_simple})"},
             ))
+
+    # Two-step publish: `SomeEvent var = new SomeEvent(...); publisher.publishEvent(var)`.
+    # The inline regex above only catches publishEvent(new Evt(...)).  Many Spring services
+    # instantiate the event first and then pass the variable.  When the source contains
+    # publishEvent( (any form) we also scan for new XxxEvent instantiations that the inline
+    # regex would have missed (i.e. not already emitted), using confidence=low.
+    if _PUBLISH_EVENT_CALL_RE.search(_source_no_comments):
+        inline_matched: set[str] = {m.group(1) for m in _PUBLISH_EVENT_RE.finditer(_source_no_comments)}
+        for m in _NEW_EVENT_INSTANTIATION_RE.finditer(_source_no_comments):
+            event_simple = m.group(1)
+            if event_simple in inline_matched:
+                continue  # already captured by inline regex at higher confidence
+            event_fqn = import_map.get(event_simple) or _same_pkg.get(event_simple) or event_simple
+            for cls_sym in _class_syms:
+                edges.append(RelationEdge(
+                    from_symbol=cls_sym.symbol,
+                    to_symbol=event_fqn,
+                    type="publishes_event",
+                    confidence="low",
+                    evidence={"type": "method_call", "value": f"publishEvent(var) + new {event_simple}"},
+                ))
 
     # Keycloak SPI: XxxEvent.fire(...) static dispatch → publishes_event.
     for m in _FIRE_EVENT_RE.finditer(_source_no_comments):
