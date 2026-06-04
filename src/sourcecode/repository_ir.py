@@ -326,6 +326,14 @@ _PUBLISH_EVENT_RE = re.compile(r'\.publishEvent\s*\(\s*new\s+(\w+)\s*[(\{]')
 # Keycloak SPI event fire pattern: XxxEvent.fire(session, ...)
 _FIRE_EVENT_RE = re.compile(r'\b(\w+Event)\.fire\s*\(')
 
+# Class-level consumer detection from class signature (not annotations).
+# Pattern 1: implements ApplicationListener<EventType> — standard Spring interface.
+_APP_LISTENER_RE = re.compile(r'\bApplicationListener\s*<\s*(\w+)\s*>')
+# Pattern 2: extends AbstractXxxEventListener<EventType> — abstract base class pattern
+#            (Broadleaf's AbstractBroadleafApplicationEventListener and similar).
+#            Matches any parent class name that contains "EventListener".
+_ABSTRACT_LISTENER_RE = re.compile(r'\bextends\s+\w+EventListener\w*\s*<\s*(\w+)\s*>')
+
 # Block comment stripper — removes /* ... */ (including Javadoc) to prevent
 # _PUBLISH_EVENT_RE / _FIRE_EVENT_RE from matching example code in comments.
 _BLOCK_COMMENT_RE = re.compile(r'/\*.*?\*/', re.DOTALL)
@@ -1180,6 +1188,34 @@ def _build_relations(
                 confidence="high",
                 evidence={"type": "signature", "value": f"implements {_ELP_IFACE}"},
             ))
+
+    # Class-level consumer detection via class signature (EVT-003 / EVT-004).
+    # Pattern A: class Foo implements ApplicationListener<XxxEvent>
+    #            → standard Spring interface, event type = generic param.
+    # Pattern B: class Foo extends AbstractXxxEventListener<XxxEvent>
+    #            → abstract base class pattern (Broadleaf and similar frameworks),
+    #              event type = generic param of the parent class.
+    for sym in _class_syms:
+        sig = sym.signature or ""
+        for pattern, ev_label in (
+            (_APP_LISTENER_RE, "implements ApplicationListener"),
+            (_ABSTRACT_LISTENER_RE, "extends *EventListener"),
+        ):
+            m = pattern.search(sig)
+            if m:
+                event_simple = m.group(1)
+                event_fqn = (
+                    import_map.get(event_simple)
+                    or _same_pkg.get(event_simple)
+                    or event_simple
+                )
+                edges.append(RelationEdge(
+                    from_symbol=sym.symbol,
+                    to_symbol=event_fqn,
+                    type="listens_to_event",
+                    confidence="high",
+                    evidence={"type": "signature", "value": f"{ev_label}<{event_simple}>"},
+                ))
 
     seen: set[tuple[str, str, str]] = set()
     unique: list[RelationEdge] = []

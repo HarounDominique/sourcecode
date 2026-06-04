@@ -233,6 +233,10 @@ class TestSpringAuditCLI:
 
 class TestUpdateRisSpringAudit:
 
+    @pytest.fixture(autouse=True)
+    def _isolate_cache(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SOURCECODE_CACHE_DIR", str(tmp_path / ".cache"))
+
     def _make_ris(self, tmp_path: Path) -> RepositoryIntelligenceSnapshot:
         from sourcecode.ris import save_ris
         ris = RepositoryIntelligenceSnapshot(

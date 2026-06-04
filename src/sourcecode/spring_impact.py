@@ -316,10 +316,16 @@ def _collect_endpoints(
     """
     all_fqns = set(seed_fqns) | set(all_callers)
 
-    # Class-level seeds: controller class nodes (no '#') that are controllers.
-    # These arise when the user queries an entire class, not a specific method.
+    # Class-level controller FQNs (no '#') that appear anywhere in the chain.
+    # Two cases produce a class-level controller node in the chain:
+    #   1. Seed is the controller class itself (user queried the whole controller).
+    #   2. Caller is the controller class node — happens when a service/repository
+    #      is injected into a controller: the BFS reverse edge lands on the class
+    #      node (e.g. "OwnerController" with no '#'), not a specific method.
+    #      All endpoints of that controller are affected because any change to the
+    #      injected dependency impacts every handler that uses it.
     class_level_controllers: set[str] = {
-        fqn for fqn in seed_fqns
+        fqn for fqn in all_fqns
         if "#" not in fqn and fqn in model.endpoint_index.controller_fqns
     }
 
@@ -327,7 +333,7 @@ def _collect_endpoints(
     seen_ep_ids: set[str] = set()
 
     # Collect candidate controllers: those whose handler_symbol is in the chain
-    # OR whose class node was a seed (class-level query).
+    # OR whose class node appears in the chain (class-level).
     candidate_controllers: set[str] = set(class_level_controllers)
     for fqn in all_fqns:
         cls = _class_of(fqn)
@@ -339,8 +345,8 @@ def _collect_endpoints(
             handler = getattr(ep, "handler_symbol", "") or ""
             ep_id = getattr(ep, "id", "") or ""
 
-            # Include if: handler is directly in call chain OR controller is a
-            # class-level seed (whole-class query, all its endpoints in scope).
+            # Include if: handler method is in call chain OR the controller's class
+            # node appears at class-level in the chain (seed or DI-injected class).
             if handler not in all_fqns and controller not in class_level_controllers:
                 continue
 

@@ -1063,3 +1063,93 @@ class TestBUG002TxBoundaryClassLevelQuery:
             "Class with method-level @Transactional must expose tx_boundary"
         )
         assert result.transaction_boundary.get("scope") == "method"
+
+
+# ---------------------------------------------------------------------------
+# IC-DI — Endpoint propagation when controller appears as class-level caller
+# ---------------------------------------------------------------------------
+
+class TestRegressionDIControllerCaller:
+    """IC-DI — When a repository/service is injected into a controller, the
+    controller class node (no '#') appears in the BFS reverse graph.
+    All endpoints of that controller must be included in endpoints_affected.
+
+    Root cause of original bug: class_level_controllers only included seeds
+    that were controllers; DI-injected callers (class node) were in
+    candidate_controllers but failed the handler-in-chain check.
+    """
+
+    def _build_fixture(self):
+        # OwnerRepository injected into OwnerController (class-level BFS edge)
+        symbols = [
+            "com.example.OwnerRepository",
+            "com.example.OwnerRepository#findById",
+            "com.example.OwnerController",
+            "com.example.OwnerController#<init>",
+            "com.example.OwnerController#showOwner",
+            "com.example.OwnerController#listOwners",
+        ]
+        reverse_graph = {
+            # DI: OwnerController class-node and <init> both depend on repo
+            "com.example.OwnerRepository": {
+                "injects": [
+                    "com.example.OwnerController#<init>",
+                    "com.example.OwnerController",
+                ],
+            },
+        }
+        ep1 = _FakeEndpoint("ep1", "GET", "/owners", "com.example.OwnerController",
+                            "com.example.OwnerController#listOwners")
+        ep2 = _FakeEndpoint("ep2", "GET", "/owners/{id}", "com.example.OwnerController",
+                            "com.example.OwnerController#showOwner")
+        ei = _make_endpoint_index([ep1, ep2])
+        model = _make_model(endpoint_index=ei)
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph)
+        return cir, model
+
+    def test_di_caller_class_node_populates_endpoints(self):
+        """Controller class-level BFS caller → all its endpoints included."""
+        cir, model = self._build_fixture()
+        result = ImpactOrchestrator().query(cir, model, "com.example.OwnerRepository", depth=2)
+        paths = [ep.path for ep in result.endpoints_affected]
+        assert "/owners" in paths, f"missing /owners: {paths}"
+        assert "/owners/{{id}}" in paths or "/owners/{id}" in paths, (
+            f"missing /owners/{{id}}: {paths}"
+        )
+
+    def test_di_caller_both_endpoints_found(self):
+        """Both endpoints of an injected controller appear."""
+        cir, model = self._build_fixture()
+        result = ImpactOrchestrator().query(cir, model, "com.example.OwnerRepository", depth=2)
+        assert len(result.endpoints_affected) == 2, (
+            f"Expected 2, got {len(result.endpoints_affected)}: "
+            f"{[ep.path for ep in result.endpoints_affected]}"
+        )
+
+    def test_method_caller_precision_preserved(self):
+        """When caller is a specific handler method, only its endpoint is included."""
+        symbols = [
+            "com.example.OrderService",
+            "com.example.OrderService#placeOrder",
+            "com.example.OrderController",
+            "com.example.OrderController#checkout",
+            "com.example.OrderController#listOrders",
+        ]
+        reverse_graph = {
+            "com.example.OrderService#placeOrder": {
+                "calls": ["com.example.OrderController#checkout"],
+            },
+        }
+        ep_checkout = _FakeEndpoint("ep1", "POST", "/orders/checkout",
+                                    "com.example.OrderController",
+                                    "com.example.OrderController#checkout")
+        ep_list = _FakeEndpoint("ep2", "GET", "/orders",
+                                "com.example.OrderController",
+                                "com.example.OrderController#listOrders")
+        ei = _make_endpoint_index([ep_checkout, ep_list])
+        model = _make_model(endpoint_index=ei)
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph)
+        result = ImpactOrchestrator().query(cir, model, "com.example.OrderService#placeOrder", depth=2)
+        paths = [ep.path for ep in result.endpoints_affected]
+        assert "/orders/checkout" in paths, f"checkout missing: {paths}"
+        assert "/orders" not in paths, f"listOrders is false positive: {paths}"

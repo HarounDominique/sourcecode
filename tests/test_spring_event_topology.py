@@ -593,3 +593,91 @@ public class OrderService {
         matches = list(_PUBLISH_EVENT_RE.finditer(stripped))
         assert len(matches) == 1
         assert matches[0].group(1) == "OrderCreatedEvent"
+
+
+# ---------------------------------------------------------------------------
+# EVT-APP-LISTENER — ApplicationListener<T> and AbstractXxxEventListener<T>
+# consumer detection via class signature (EVT-003 / EVT-004)
+# ---------------------------------------------------------------------------
+
+class TestApplicationListenerConsumerDetection:
+    """Regression tests for class-level consumer detection patterns.
+
+    EVT-APP-1: implements ApplicationListener<T> — standard Spring interface regex
+    EVT-APP-2: extends AbstractXxxEventListener<T> — abstract base class regex
+    EVT-APP-3: No false positives for unrelated generic parents
+    EVT-APP-4: Full pipeline — ApplicationListener<T> produces listens_to_event edge
+    EVT-APP-5: Full pipeline — AbstractBroadleafApplicationEventListener<T>
+    """
+
+    def _parse(self, source: str) -> list:
+        """Run _extract_symbols + _build_relations on a Java source snippet."""
+        from sourcecode.repository_ir import _build_relations, _extract_symbols
+        package, symbols, raw_imports = _extract_symbols(source, "com/example/Foo.java")
+        return _build_relations(
+            symbols=symbols,
+            raw_imports=raw_imports,
+            source=source,
+            package=package or "com.example",
+            rel_path="com/example/Foo.java",
+        )
+
+    def test_evt_app1_app_listener_regex(self):
+        """_APP_LISTENER_RE matches ApplicationListener<XxxEvent> in signature."""
+        from sourcecode.repository_ir import _APP_LISTENER_RE
+        sig = "class CartStateRefresher implements ApplicationListener<OrderPersistedEvent>"
+        m = _APP_LISTENER_RE.search(sig)
+        assert m is not None, "regex must match ApplicationListener<T>"
+        assert m.group(1) == "OrderPersistedEvent"
+
+    def test_evt_app2_abstract_listener_regex(self):
+        """_ABSTRACT_LISTENER_RE matches AbstractXxxEventListener<T> in signature."""
+        from sourcecode.repository_ir import _ABSTRACT_LISTENER_RE
+        sig = "class Foo extends AbstractBroadleafApplicationEventListener<RegisterCustomerEvent>"
+        m = _ABSTRACT_LISTENER_RE.search(sig)
+        assert m is not None, "regex must match AbstractXxxEventListener<T>"
+        assert m.group(1) == "RegisterCustomerEvent"
+
+    def test_evt_app3_no_false_positive_unrelated_generic(self):
+        """_ABSTRACT_LISTENER_RE must NOT match ExtensionManager<T>."""
+        from sourcecode.repository_ir import _ABSTRACT_LISTENER_RE
+        sig = "class Foo extends ExtensionManager<CartStateRequestProcessorExtensionHandler>"
+        assert _ABSTRACT_LISTENER_RE.search(sig) is None, (
+            "ExtensionManager<T> must not match abstract listener pattern"
+        )
+
+    def test_evt_app4_full_pipeline_application_listener(self):
+        """Full parse: implements ApplicationListener<T> → listens_to_event edge."""
+        source = """\
+package com.example;
+import com.example.events.OrderPersistedEvent;
+@Component
+public class CartStateRefresher implements ApplicationListener<OrderPersistedEvent> {
+    public void onApplicationEvent(OrderPersistedEvent event) {}
+}
+"""
+        edges = self._parse(source)
+        listen_edges = [e for e in edges if e.type == "listens_to_event"]
+        assert any(
+            e.from_symbol == "com.example.CartStateRefresher"
+            and "OrderPersistedEvent" in e.to_symbol
+            for e in listen_edges
+        ), f"ApplicationListener<T> pipeline failed. listen_edges={[(e.from_symbol, e.to_symbol) for e in listen_edges]}"
+
+    def test_evt_app5_full_pipeline_abstract_broadleaf_listener(self):
+        """Full parse: extends AbstractBroadleafApplicationEventListener<T> → listens_to_event."""
+        source = """\
+package com.example;
+import com.example.events.RegisterCustomerEvent;
+@Component
+public class NotificationRegisterCustomerEventListener extends AbstractBroadleafApplicationEventListener<RegisterCustomerEvent> {
+    protected void handleApplicationEvent(RegisterCustomerEvent event) {}
+}
+"""
+        edges = self._parse(source)
+        listen_edges = [e for e in edges if e.type == "listens_to_event"]
+        assert any(
+            e.from_symbol == "com.example.NotificationRegisterCustomerEventListener"
+            and "RegisterCustomerEvent" in e.to_symbol
+            for e in listen_edges
+        ), f"AbstractBroadleafEventListener<T> pipeline failed. listen_edges={[(e.from_symbol, e.to_symbol) for e in listen_edges]}"
