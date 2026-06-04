@@ -76,7 +76,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.33.4
+# sourcecode 1.35.4
 ```
 
 ---
@@ -95,6 +95,15 @@ sourcecode --agent
 
 # Blast radius: what breaks if this class changes?
 sourcecode impact OrderService /path/to/repo
+
+# Spring semantic audit: TX anomalies + security surface (free)
+sourcecode spring-audit /path/to/repo
+
+# Impact chain: systemic blast radius with TX/SEC enrichment (free)
+sourcecode impact-chain OrderService /path/to/repo
+
+# Event topology: publisher → event → consumer graph (free)
+sourcecode impact-chain OrderPlacedEvent /path/to/repo --type events
 
 # REST endpoint surface
 sourcecode endpoints /path/to/repo
@@ -150,15 +159,21 @@ sourcecode /repo --agent               # ~4,500–5,500 tokens — more detail
 sourcecode onboard /repo               # task-structured: entry points, key files, gaps
 ```
 
-### Before every change — blast radius check
+### Before every change — blast radius + TX/SEC check
 
 ```bash
 # Always target the INTERFACE in Spring projects, not the implementation:
 sourcecode impact OrderService /repo           # ✓ 30 callers, 11 endpoints
 sourcecode impact OrderServiceImpl /repo       # ✗ 0 callers (Spring DI blindness)
 
-# Large hub interfaces — depth=1 is faster and still the most actionable signal:
-sourcecode impact KeycloakSession /repo --depth 1
+# Impact chain: blast radius enriched with TX boundary and security surfaces
+sourcecode impact-chain OrderService /repo
+
+# Event topology: who publishes/consumes this event, and in what TX phase?
+sourcecode impact-chain OrderPlacedEvent /repo --type events
+
+# Spring audit: catch TX anomalies before they hit production
+sourcecode spring-audit /repo --scope tx
 ```
 
 ### Continuous agent loop — delta context
@@ -225,6 +240,9 @@ Specifically:
 - Endpoint recall for JAX-RS subresource locator pattern is ~65%
 - `impact` on implementation classes (e.g. `OrderServiceImpl`) returns 0 callers in Spring Boot — callers inject the interface via `@Autowired`. Always target the interface. When `direct_callers: []` with `confidence_level: high` for a `@Service` class, re-query the interface.
 - `no_security_signal` on endpoints means no method-level annotations found — does **not** mean the endpoint is unsecured. Projects using Spring Security filter chains show 100% `no_security_signal` even when fully secured.
+- `spring-audit` and `impact-chain` are **Java/Spring only** — non-Java repos return `spring_detected: false`
+- Event topology via `--type events` does not resolve Kafka/RabbitMQ/Redis message routes — only Spring ApplicationEvent and `@EventListener` chains
+- Self-invocation TX bypass (calling `@Transactional` method from the same class without going through the proxy) is not detected
 
 ---
 
@@ -274,6 +292,81 @@ sourcecode endpoints /path/to/repo --output endpoints.json
 ```
 
 Extracts all Spring MVC (`@GetMapping`, `@PostMapping`, `@RequestMapping`, etc.) and JAX-RS (`@GET`, `@POST`, `@Path`) endpoint methods. Returns HTTP method, path, controller class, and handler method.
+
+### `spring-audit` — Spring semantic audit [free]
+
+```bash
+sourcecode spring-audit /path/to/repo
+sourcecode spring-audit /path/to/repo --scope tx          # TX anomalies only
+sourcecode spring-audit /path/to/repo --scope security     # security surface only
+sourcecode spring-audit /path/to/repo --min-severity high
+```
+
+Detects structural Spring anomalies that survive code review and tests, but cause production failures:
+
+| Pattern | Description |
+|---------|-------------|
+| `TX-001` | `@Transactional` on private/final method — CGLIB proxy bypass, TX silently ignored |
+| `TX-002` | `REQUIRES_NEW` nested inside `REQUIRED` call chain — unexpected transaction nesting |
+| `TX-003` | `readOnly=true` boundary propagating to write operation |
+| `TX-004` | `NOT_SUPPORTED`/`NEVER` called within active TX chain |
+| `TX-005` | Exception swallowing inside `@Transactional` — silent TX rollback suppression |
+| `SEC-001` | Unsecured endpoint in annotation-based security model |
+| `SEC-002` | CVE-2025-41248: `@PreAuthorize` on inherited method from generic supertype |
+| `SEC-003` | `@Transactional` on `@Controller`/`@RestController` — TX in wrong layer |
+
+Returns structured findings with `severity`, `confidence`, `symbol`, `source_file`, `evidence`, `explanation`, and `fix_hint`. JAVA/SPRING ONLY.
+
+### `impact-chain` — systemic blast radius with TX/SEC enrichment [free]
+
+```bash
+sourcecode impact-chain OrderService /path/to/repo
+sourcecode impact-chain com.example.OrderService#placeOrder /path/to/repo
+sourcecode impact-chain PaymentService . --depth 6
+```
+
+Unlike `impact` (which traces the caller graph), `impact-chain` builds on the SpringSemanticModel to enrich every step of the blast cone with transaction and security context:
+
+| Field | Description |
+|-------|-------------|
+| `direct_callers` | Symbols that directly call the target |
+| `indirect_callers` | Transitive callers (BFS up to `--depth` hops, default: 4) |
+| `endpoints_affected` | HTTP endpoints reachable through the call chain |
+| `transaction_boundary` | `@Transactional` semantics on the target: propagation, isolation, readOnly |
+| `security_surfaces` | Per-endpoint security policy + SEC finding IDs |
+| `impact_findings` | TX-001..005 and SEC-001..003 findings that touch the call chain |
+| `risk_level` | `critical` \| `high` \| `medium` \| `low` |
+
+**Event topology** — query the publisher/consumer graph for a Spring event class:
+
+```bash
+sourcecode impact-chain OrderPlacedEvent /path/to/repo --type events
+```
+
+| Field | Description |
+|-------|-------------|
+| `publishers` | FQNs that publish this event class |
+| `consumers` | Listeners with TX phase metadata (`AFTER_COMMIT`, `BEFORE_COMMIT`, etc.) |
+| `event_graph` | Publisher → event → consumer edges (BFS ≤ 2 hops) |
+| `transaction_context` | `AFTER_COMMIT` consumers, `BEFORE_COMMIT` risks |
+| `risk_level` | Derived from TX phase and consumer count |
+
+**Limitations of event topology:**
+- Resolves Spring `ApplicationEvent` / `@EventListener` chains only
+- Does not trace Kafka, RabbitMQ, Redis, or other message brokers
+- Does not detect self-invocation proxy bypass
+- Conditional beans (`@ConditionalOnProperty`) are not evaluated at analysis time
+
+### `cold-start` — RIS bootstrap context
+
+```bash
+sourcecode cold-start /path/to/repo
+sourcecode cold-start /path/to/repo --compact   # ~10K token subset
+```
+
+Returns the Repository Intelligence Snapshot (RIS) instantly — zero re-analysis. The RIS is built by a prior warm cache pass and includes stacks, entry points, endpoint surface, and Spring semantic signals. Status field: `cold_start_ready` | `cold_start_stale` | `no_ris`.
+
+Use `--compact` to get a ~10K token subset safe for direct LLM injection. Full snapshot can exceed 100K tokens on medium repos — use `--output FILE` for local search tooling.
 
 ### `repo-ir` — symbol-level IR
 

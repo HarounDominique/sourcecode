@@ -20,6 +20,10 @@ Enough to understand an unfamiliar codebase and feed an LLM.
 | Endpoint surface extraction | `sourcecode endpoints .` | Spring MVC + JAX-RS, security annotations |
 | Canonical IR (CIR) | `sourcecode repo-ir .` | Stable, deterministic, fingerprinted |
 | Basic blast radius | `sourcecode impact <class>` | Direct + indirect callers, endpoints affected |
+| **Spring semantic audit** | `sourcecode spring-audit .` | TX-001..005 anomalies + SEC-001..003 security surface; JAVA/SPRING only |
+| **Impact chain + TX/SEC enrichment** | `sourcecode impact-chain <symbol>` | Systemic blast radius with transaction boundary and security surfaces per hop |
+| **Event topology** | `sourcecode impact-chain <event> --type events` | Publisher → event → consumer graph; AFTER_COMMIT/BEFORE_COMMIT TX phase |
+| RIS bootstrap context | `sourcecode cold-start .` | Repository Intelligence Snapshot; instant return from persisted cache |
 | Onboarding context | `sourcecode onboard .` | Architecture, entry points, subsystems |
 | MCP local server | `sourcecode mcp serve` | Works with Claude Code, Cursor, Copilot |
 | Offline, no data egress | all commands | IR never leaves the machine |

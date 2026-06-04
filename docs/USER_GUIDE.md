@@ -1,6 +1,6 @@
 # sourcecode — User Guide
 
-**sourcecode** analyzes Java/Spring/Maven repositories and produces structured JSON for AI coding agents and CI/CD pipelines. It answers two questions: *what breaks if I change X* and *what does this codebase do*.
+**sourcecode** analyzes Java/Spring/Maven repositories and produces structured JSON for AI coding agents and CI/CD pipelines. It answers: *what breaks if I change X*, *what TX and security anomalies exist today*, and *what does this codebase do*.
 
 ---
 
@@ -27,7 +27,7 @@ pipx install sourcecode   # isolated install, no venv needed
 
 # Verify
 sourcecode version
-# sourcecode 1.32.0
+# sourcecode 1.35.4
 ```
 
 Requires Python 3.10+.
@@ -36,7 +36,7 @@ Requires Python 3.10+.
 
 ## License activation (Pro features)
 
-Free features work immediately after install. Pro commands (`impact`, `review-pr`, `fix-bug`, `modernize`, `generate-tests`) require an active license.
+Free features work immediately after install. Pro commands (`impact` full output, `review-pr`, `fix-bug`, `modernize`) require an active license. `spring-audit`, `impact-chain`, `endpoints`, `onboard`, `repo-ir`, and `cold-start` are free.
 
 ```bash
 sourcecode activate SC-XXXX-XXXX-XXXX
@@ -101,6 +101,45 @@ sourcecode endpoints . --format yaml
 Output: list of `{method, path, controller, handler}`. Covers `@GetMapping`, `@PostMapping`, `@PutMapping`, `@DeleteMapping`, `@PatchMapping`, `@RequestMapping`, `@GET`, `@POST`, `@PUT`, `@DELETE`, `@PATCH` + `@Path`.
 
 **Note:** JAX-RS sub-resource locator pattern (endpoints mounted dynamically via factory methods) is not individually counted — ~65% recall for JAX-RS.
+
+### `sourcecode spring-audit` [free]
+
+Detects Spring-specific structural anomalies: TX propagation bugs, security annotation gaps, and architectural anti-patterns that tests won't catch.
+
+```bash
+sourcecode spring-audit /path/to/repo
+sourcecode spring-audit . --scope tx          # TX anomalies only
+sourcecode spring-audit . --scope security    # security surface only
+sourcecode spring-audit . --min-severity high
+sourcecode spring-audit . --output audit.json
+```
+
+**TX patterns (TX-001..TX-005):** proxy bypass, nested transactions, readOnly propagation, NOT_SUPPORTED in active TX, exception swallowing.
+**SEC patterns (SEC-001..SEC-003):** unsecured endpoints, CVE-2025-41248 `@PreAuthorize` inheritance bypass, `@Transactional` on controllers.
+
+Each finding includes `severity`, `confidence`, `symbol`, `source_file`, `evidence`, `explanation`, and `fix_hint`. JAVA/SPRING ONLY.
+
+### `sourcecode impact-chain` [free]
+
+Systemic blast-radius analysis enriched with Spring TX and security context at every hop.
+
+```bash
+sourcecode impact-chain OrderService /repo
+sourcecode impact-chain com.example.OrderService#placeOrder /repo
+sourcecode impact-chain PaymentService . --depth 6
+```
+
+Returns `direct_callers`, `indirect_callers`, `endpoints_affected`, `transaction_boundary` (propagation/isolation/readOnly on the target), `security_surfaces` (per-endpoint policy + SEC finding IDs), `impact_findings` (TX/SEC findings touching the call chain), and `risk_level`.
+
+**Event topology** — maps the publisher/consumer graph for a Spring event:
+
+```bash
+sourcecode impact-chain OrderPlacedEvent . --type events
+```
+
+Returns `publishers`, `consumers` with TX phase metadata (`AFTER_COMMIT`, `BEFORE_COMMIT`), `event_graph` edges, `transaction_context`, and `risk_level`.
+
+**Limitations:** resolves Spring `ApplicationEvent`/`@EventListener` only; does not trace Kafka/RabbitMQ; self-invocation proxy bypass not detected.
 
 ### `sourcecode impact` [Pro]
 
@@ -367,5 +406,9 @@ For very large repos (15K+ Java files), consider:
 - JAX-RS subresource locator pattern: ~65% endpoint recall
 - `impact` on implementation classes returns implementation-specific callers only — always target the interface in Spring Boot
 - `no_security_signal` on endpoints = no method-level annotations found. Does not mean the endpoint is unsecured (Spring Security filter chains are not analyzed)
+- `spring-audit` and `impact-chain`: Java/Spring only — non-Java repos return `spring_detected: false`
+- Event topology (`--type events`): resolves Spring `ApplicationEvent`/`@EventListener` only. Kafka, RabbitMQ, Redis message routes not traced
+- Self-invocation TX bypass (calling `@Transactional` method from same class without proxy) not detected
+- Conditional beans (`@ConditionalOnProperty`) not evaluated at analysis time
 - `project_summary` is extracted from README — may reflect marketing copy rather than architectural description
 - Works offline; no AI inference — outputs structural facts, not quality judgments
