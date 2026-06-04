@@ -613,6 +613,62 @@ class TestTX005:
         assert findings_clean == [], "cleanMethod must not be flagged"
         assert len(findings_swallow) == 1, "swallowMethod must be flagged"
 
+    def test_readonly_transaction_no_finding(self):
+        # BUG-001 regression: TX-005 was firing on readOnly=true methods.
+        # readOnly transactions do not write data — swallowed exceptions cannot
+        # cause dirty commits, so TX-005 is not applicable.
+        source = dedent("""\
+            @Transactional(readOnly = true)
+            public String getUnknownConcept() {
+                try {
+                    return dao.findConcept("unknown");
+                } catch (Exception e) {
+                    log.warn("concept not found", e);
+                    return null;
+                }
+            }
+        """)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            src_file = root / "Service.java"
+            src_file.write_text(source, encoding="utf-8")
+            nodes = [{
+                "fqn": "org.openmrs.api.impl.ConceptServiceImpl#getUnknownConcept",
+                "symbol_kind": "method",
+                "annotations": ["@Transactional"],
+                "annotation_values": {"@Transactional": "readOnly = true"},
+                "modifiers": ["public"],
+                "source_file": "Service.java",
+            }]
+            cir = _FakeCIR(nodes)
+            tx_index = build_tx_index(cir)
+            findings = _TX005ExceptionSwallowing().analyze(cir, tx_index, root=root)
+        assert findings == [], "readOnly=true method must not emit TX-005"
+
+    def test_recovery_return_in_catch_no_finding(self):
+        # BUG-002 regression: _CATCH_SWALLOW_RE used [^}]* which terminated at the
+        # first nested '}' inside the catch block, missing a `return method()` at
+        # the end. A catch that logs AND ends with a non-trivial method-call return
+        # indicates recovery, not silent swallowing — must not emit TX-005.
+        source = dedent("""\
+            @Transactional
+            public String loadOrCreate(String key) {
+                try {
+                    return dao.find(key);
+                } catch (NoResultException e) {
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("Not found: " + key);
+                    }
+                    dao.create(key);
+                    return loadOrCreate(key);
+                }
+            }
+        """)
+        findings = self._run_with_source(
+            source, "com.example.Service#loadOrCreate"
+        )
+        assert findings == [], "catch with recovery return must not emit TX-005"
+
 
 # ---------------------------------------------------------------------------
 # E — TxPatternEngine

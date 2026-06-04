@@ -52,15 +52,16 @@ _WRITE_METHOD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Exception swallowing pattern for TX-005:
-# catch block that contains a log/print but no throw/rethrow
-_CATCH_SWALLOW_RE = re.compile(
-    r'catch\s*\([^)]+\)\s*\{[^}]*'          # catch(...) {
-    r'(?:log|logger|LOG|System\.out|e\.print)'  # logging call
-    r'[^}]*\}',                               # closing brace (no throw inside)
-    re.DOTALL,
-)
+# TX-005 catch-block detection helpers.
+# _CATCH_SWALLOW_RE is retained for reference but replaced by brace-counting
+# extraction in _has_swallowed_exception to avoid false positives from nested
+# braces (nested if/try blocks inside catch terminating the match prematurely).
+_CATCH_HEADER_RE = re.compile(r'\bcatch\s*\([^)]+\)\s*\{')
+_LOG_IN_CATCH_RE = re.compile(r'\b(?:log|logger|LOG|System\.out|e\.print)\b')
 _RETHROW_IN_CATCH_RE = re.compile(r'\bthrow\b')
+# Non-trivial return (method call) inside a catch block indicates recovery, not
+# silent swallowing — e.g. `return findNextId(idType)` after creating a missing row.
+_RECOVERY_RETURN_RE = re.compile(r'\breturn\s+\w[\w.<>]*\s*\(')
 
 
 def _extract_method_body(source: str, method_name: str) -> str:
@@ -507,6 +508,10 @@ class _TX005ExceptionSwallowing:
                 continue
             if not boundary.source_file:
                 continue
+            # readOnly=true transactions do not write data — swallowed exceptions
+            # cannot cause dirty commits, so TX-005 is not applicable.
+            if boundary.read_only:
+                continue
 
             abs_path = root / boundary.source_file
             try:
@@ -592,11 +597,38 @@ class _TX005ExceptionSwallowing:
                     depth -= 1
                 i += 1
             body = source[brace_pos:i]
-            for match in _CATCH_SWALLOW_RE.finditer(body):
-                block = match.group(0)
-                if not _RETHROW_IN_CATCH_RE.search(block):
-                    return True
+            for catch_block in self._extract_catch_blocks(body):
+                if not _LOG_IN_CATCH_RE.search(catch_block):
+                    continue
+                if _RETHROW_IN_CATCH_RE.search(catch_block):
+                    continue
+                # Non-trivial return (method call) indicates recovery, not swallowing.
+                if _RECOVERY_RETURN_RE.search(catch_block):
+                    continue
+                return True
         return False
+
+    @staticmethod
+    def _extract_catch_blocks(body: str) -> list[str]:
+        """Extract full catch block bodies from a method body using brace counting.
+
+        Handles nested braces correctly — unlike a simple [^}]* regex which
+        terminates at the first nested '}' inside the catch block.
+        """
+        blocks: list[str] = []
+        for m in _CATCH_HEADER_RE.finditer(body):
+            brace_pos = m.end() - 1
+            depth = 1
+            i = brace_pos + 1
+            while i < len(body) and depth > 0:
+                c = body[i]
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                i += 1
+            blocks.append(body[brace_pos:i])
+        return blocks
 
 
 # ---------------------------------------------------------------------------
