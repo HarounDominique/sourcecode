@@ -2699,3 +2699,90 @@ public class DataService {
             f"Same-package Lombok @RequiredArgsConstructor not resolved. "
             f"affected={all_affected}"
         )
+
+
+# ---------------------------------------------------------------------------
+# BUG-PARSER-001 — multi-line class declaration produces symbols
+# ---------------------------------------------------------------------------
+
+class TestBugParser001MultilineClassDeclaration:
+    """BUG-PARSER-001 — class declaration with { on a different line than 'class'.
+
+    Before fix: _CLASS_DECL_RE required { on the same line as 'class'. Any class
+    with a multi-line implements/extends clause (common in large repos) produced 0
+    symbols — the entire class was invisible to the parser.
+    After fix: continuation lines are pre-joined until { is found, so the class
+    declaration is normalised to a single line before regex matching.
+    """
+
+    def test_multiline_implements_extracts_class_symbol(self) -> None:
+        """Class with implements split across lines must yield the class symbol."""
+        source = """\
+package com.example;
+
+public class OrderServiceImpl
+        implements OrderService,
+                   AuditableService {
+
+    public void placeOrder() {}
+}
+"""
+        pkg, syms, _ = _extract_symbols(source, "OrderServiceImpl.java")
+        fqns = [s.symbol for s in syms]
+        assert any("OrderServiceImpl" in f for f in fqns), (
+            f"OrderServiceImpl not extracted from multi-line impl clause. got={fqns}"
+        )
+
+    def test_multiline_extends_extracts_class_symbol(self) -> None:
+        """Class that extends on the next line from 'class' keyword is parsed."""
+        source = """\
+package com.example;
+
+public class SpecialController
+        extends BaseController {
+
+    public String index() { return "ok"; }
+}
+"""
+        pkg, syms, _ = _extract_symbols(source, "SpecialController.java")
+        fqns = [s.symbol for s in syms]
+        assert any("SpecialController" in f for f in fqns), (
+            f"SpecialController not extracted from multi-line extends. got={fqns}"
+        )
+
+    def test_multiline_class_methods_extracted(self) -> None:
+        """Methods inside a multi-line-declared class are also extracted."""
+        source = """\
+package com.example.persistence;
+
+public class TransactionMonitor
+        implements TransactionLifecycleListener,
+                   AnotherInterface {
+
+    public void beforeCommit(boolean readOnly) {}
+    public void afterCommit() {}
+}
+"""
+        pkg, syms, _ = _extract_symbols(source, "TransactionMonitor.java")
+        method_fqns = [s.symbol for s in syms if "#" in s.symbol]
+        assert any("beforeCommit" in f for f in method_fqns), (
+            f"Method inside multi-line-declared class not extracted. got={method_fqns}"
+        )
+        assert any("afterCommit" in f for f in method_fqns), (
+            f"afterCommit missing from multi-line-declared class. got={method_fqns}"
+        )
+
+    def test_single_line_class_unaffected(self) -> None:
+        """Single-line class declaration still works (regression guard)."""
+        source = """\
+package com.example;
+
+public class SimpleService {
+    public void doWork() {}
+}
+"""
+        pkg, syms, _ = _extract_symbols(source, "SimpleService.java")
+        fqns = [s.symbol for s in syms]
+        assert any("SimpleService" in f for f in fqns), (
+            f"Single-line class broken by PARSER-001 fix. got={fqns}"
+        )

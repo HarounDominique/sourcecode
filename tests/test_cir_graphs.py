@@ -9,6 +9,8 @@ Coverage:
   IG-06  ImplementationGraph.primary_implementation — single impl → returns impl
   IG-07  ImplementationGraph.primary_implementation — multiple impls → returns None
   IG-08  ImplementationGraph.build — malformed generic fragment excluded
+  IG-09  ImplementationGraph.build — simple name (unqualified) to-fqn resolved (BUG-IC-001)
+  IG-10  ImplementationGraph.build — ambiguous simple name rejected (BUG-IC-001 safety)
   INJ-01 InjectionGraph.build — constructor injection lifts to class
   INJ-02 InjectionGraph.build — field injection lifts to class
   INJ-03 InjectionGraph.build — Lombok class-level injection (no # in from)
@@ -363,3 +365,56 @@ class TestInjectionGraphIgnoresOtherEdges:
         graph = InjectionGraph.build(deps)
         assert graph.dependencies_of("com.example.A") == []
         assert graph.dependents_of("com.example.B") == []
+
+
+# ---------------------------------------------------------------------------
+# IG-09  Simple name resolution (BUG-IC-001)
+# ---------------------------------------------------------------------------
+
+class TestImplementationGraphSimpleNameResolution:
+    """BUG-IC-001 — implements edges stored with unqualified interface name.
+
+    The Java parser emits 'to' as a simple name (e.g. 'OrderService') rather
+    than the FQN.  Before the fix, all such edges were dropped because
+    'OrderService' is not in known_symbols (which contains FQNs only).
+    After the fix, a precomputed simple-name→FQN map resolves unambiguous names.
+    """
+
+    def test_simple_name_resolved_to_fqn(self) -> None:
+        """Single unambiguous simple name resolved and edge accepted."""
+        deps = [_impl_edge("com.example.OrderServiceImpl", "OrderService")]
+        known = {
+            "com.example.OrderService",
+            "com.example.OrderServiceImpl",
+        }
+        graph = ImplementationGraph.build(deps, known)
+        assert graph.implementations_of("com.example.OrderService") == [
+            "com.example.OrderServiceImpl"
+        ], "Simple name 'OrderService' must be resolved to FQN"
+        assert graph.interfaces_of("com.example.OrderServiceImpl") == [
+            "com.example.OrderService"
+        ], "interfaces_of reverse lookup must work after simple-name resolution"
+
+    def test_ambiguous_simple_name_rejected(self) -> None:
+        """When two classes share a simple name, no resolution — edge dropped."""
+        deps = [_impl_edge("com.example.impl.FooImpl", "Foo")]
+        known = {
+            "com.example.a.Foo",
+            "com.example.b.Foo",
+            "com.example.impl.FooImpl",
+        }
+        graph = ImplementationGraph.build(deps, known)
+        assert graph.implementations_of("com.example.a.Foo") == []
+        assert graph.implementations_of("com.example.b.Foo") == []
+        assert graph.interfaces_of("com.example.impl.FooImpl") == [], (
+            "Ambiguous simple name must not be resolved"
+        )
+
+    def test_external_simple_name_dropped(self) -> None:
+        """Simple name with no match in known_symbols (external) is excluded."""
+        deps = [_impl_edge("com.example.MyRunnable", "Runnable")]
+        known = {"com.example.MyRunnable"}
+        graph = ImplementationGraph.build(deps, known)
+        assert graph.interfaces_of("com.example.MyRunnable") == [], (
+            "External interface 'Runnable' not in known_symbols must be excluded"
+        )

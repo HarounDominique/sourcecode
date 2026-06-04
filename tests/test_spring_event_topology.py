@@ -608,6 +608,8 @@ class TestApplicationListenerConsumerDetection:
     EVT-APP-3: No false positives for unrelated generic parents
     EVT-APP-4: Full pipeline — ApplicationListener<T> produces listens_to_event edge
     EVT-APP-5: Full pipeline — AbstractBroadleafApplicationEventListener<T>
+    EVT-APP-6: BUG-EVT-001 — implements BroadleafApplicationListener<T> (prefixed subinterface)
+    EVT-APP-7: BUG-EVT-001 — full pipeline for prefixed subinterface produces edge
     """
 
     def _parse(self, source: str) -> list:
@@ -681,3 +683,41 @@ public class NotificationRegisterCustomerEventListener extends AbstractBroadleaf
             and "RegisterCustomerEvent" in e.to_symbol
             for e in listen_edges
         ), f"AbstractBroadleafEventListener<T> pipeline failed. listen_edges={[(e.from_symbol, e.to_symbol) for e in listen_edges]}"
+
+    def test_evt_app6_broadleaf_prefixed_listener_regex(self):
+        """BUG-EVT-001 — _APP_LISTENER_RE matches BroadleafApplicationListener<T>.
+
+        Before fix: regex used \\b before 'ApplicationListener', which fails when
+        preceded by a word character (e.g. 'f' in 'BroadleafApplicationListener').
+        After fix: \\w* prefix allows any word-character prefix before the interface name.
+        """
+        from sourcecode.repository_ir import _APP_LISTENER_RE
+        sig = "class TransactionLifecycleMonitor implements BroadleafApplicationListener<TransactionLifecycleEvent>"
+        m = _APP_LISTENER_RE.search(sig)
+        assert m is not None, (
+            "BUG-EVT-001: _APP_LISTENER_RE must match BroadleafApplicationListener<T> "
+            "(word-boundary before 'ApplicationListener' breaks on prefix)"
+        )
+        assert m.group(1) == "TransactionLifecycleEvent"
+
+    def test_evt_app7_full_pipeline_broadleaf_prefixed_listener(self):
+        """BUG-EVT-001 — full pipeline: implements BroadleafApplicationListener<T> → edge."""
+        source = """\
+package com.example.persistence;
+import com.example.events.TransactionLifecycleEvent;
+@Component
+public class TransactionLifecycleMonitor
+        implements BroadleafApplicationListener<TransactionLifecycleEvent> {
+    public void onApplicationEvent(TransactionLifecycleEvent event) {}
+}
+"""
+        edges = self._parse(source)
+        listen_edges = [e for e in edges if e.type == "listens_to_event"]
+        assert any(
+            "TransactionLifecycleMonitor" in e.from_symbol
+            and "TransactionLifecycleEvent" in e.to_symbol
+            for e in listen_edges
+        ), (
+            "BUG-EVT-001: BroadleafApplicationListener<T> must produce listens_to_event edge. "
+            f"listen_edges={[(e.from_symbol, e.to_symbol) for e in listen_edges]}"
+        )

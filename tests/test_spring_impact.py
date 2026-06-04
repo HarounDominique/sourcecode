@@ -1153,3 +1153,76 @@ class TestRegressionDIControllerCaller:
         paths = [ep.path for ep in result.endpoints_affected]
         assert "/orders/checkout" in paths, f"checkout missing: {paths}"
         assert "/orders" not in paths, f"listOrders is false positive: {paths}"
+
+
+class TestRegressionCH001bImplToInterfaceExpansion:
+    """BUG-IC-002 / CH-001b — Querying an impl class expands seeds to its interfaces.
+
+    Before fix: querying OrderServiceImpl found 0 callers because callers inject
+    the interface (OrderService), so reverse_graph edges live on the interface node.
+    BFS from impl seeds never reached those edges.
+    After fix: CH-001b adds interface symbols to the seed set before BFS, so callers
+    of the interface are found when querying the implementation.
+    """
+
+    def _make_cir_impl_query(self):
+        """CIR where callers inject the interface, not the impl."""
+        symbols = [
+            "com.example.OrderService",
+            "com.example.OrderService#placeOrder",
+            "com.example.OrderServiceImpl",
+            "com.example.OrderServiceImpl#placeOrder",
+            "com.example.CheckoutService",
+            "com.example.CheckoutService#checkout",
+            "com.example.CheckoutService#orderService",  # field injection
+        ]
+        # Callers inject OrderService (the interface), not OrderServiceImpl.
+        reverse_graph = {
+            "com.example.OrderService": {
+                "injects": [
+                    "com.example.CheckoutService#orderService",
+                    "com.example.CheckoutService",
+                ],
+            },
+        }
+        deps = [
+            {
+                "from": "com.example.OrderServiceImpl",
+                "to": "com.example.OrderService",
+                "type": "implements",
+                "confidence": "high",
+            }
+        ]
+        return _FakeCIR(symbols=symbols, reverse_graph=reverse_graph, dependencies=deps)
+
+    def test_ch001b_impl_query_finds_interface_callers(self):
+        """Querying impl finds callers that inject the interface (CH-001b expansion)."""
+        cir = self._make_cir_impl_query()
+        result = ImpactOrchestrator().query(cir, _make_model(), "com.example.OrderServiceImpl", depth=1)
+        all_callers = set(result.direct_callers)
+        assert "com.example.CheckoutService" in all_callers, (
+            f"CheckoutService caller not found via impl query (CH-001b). callers={all_callers}"
+        )
+
+    def test_ch001b_warning_emitted_for_interface_expansion(self):
+        """CH-001b expansion emits an analysis warning."""
+        cir = self._make_cir_impl_query()
+        result = ImpactOrchestrator().query(cir, _make_model(), "com.example.OrderServiceImpl", depth=1)
+        has_warning = any(
+            "interface" in w.lower() or "ch-001b" in w.lower()
+            for w in result.analysis_warnings
+        )
+        assert has_warning, (
+            f"Expected CH-001b interface-expansion warning. warnings={result.analysis_warnings}"
+        )
+
+    def test_ch001b_no_expansion_when_no_interfaces(self):
+        """Impl class with no in-repo interface: no false expansion, no crash."""
+        symbols = [
+            "com.example.StandaloneServiceImpl",
+            "com.example.StandaloneServiceImpl#doWork",
+        ]
+        cir = _FakeCIR(symbols=symbols, reverse_graph={}, dependencies=[])
+        result = ImpactOrchestrator().query(cir, _make_model(), "com.example.StandaloneServiceImpl", depth=1)
+        assert result.direct_callers == []
+        assert result.indirect_callers == []
