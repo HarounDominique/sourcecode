@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from sourcecode.fqn_utils import normalize_owner_fqn
+
 # ---------------------------------------------------------------------------
 # ImplementationGraph — CH-001
 # ---------------------------------------------------------------------------
@@ -179,12 +181,14 @@ class InjectionGraph:
             if not from_fqn or not to_fqn:
                 continue
 
-            # Resolve injector to class level
-            if "#" in from_fqn:
-                class_fqn = from_fqn.rsplit("#", 1)[0]
+            # Resolve injector to class level.
+            # Three formats emitted by the CIR parser:
+            #   Constructor: pkg.Class#<init>   → class = pkg.Class
+            #   Field:       pkg.Class.field    → class = pkg.Class  (normalize_owner_fqn)
+            #   Lombok:      pkg.Class          → class = pkg.Class  (already class-level)
+            class_fqn = normalize_owner_fqn(from_fqn)
+            if class_fqn != from_fqn:
                 injector_to_class[from_fqn] = class_fqn
-            else:
-                class_fqn = from_fqn
 
             # Build class → [dep, ...] and service → [class, ...] indices
             deps = deps_of.setdefault(class_fqn, [])

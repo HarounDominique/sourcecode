@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
+from sourcecode.fqn_utils import normalize_owner_fqn
+
 if TYPE_CHECKING:
     from sourcecode.canonical_ir import CanonicalRepositoryIR
     from sourcecode.spring_model import SpringSemanticModel
@@ -255,8 +257,8 @@ def _build_callers(class_fqn: str, cir: "CanonicalRepositoryIR") -> list[str]:
     rev: dict = (getattr(cir, "reverse_graph", None) or {}).get(class_fqn) or {}
     for callers in rev.values():
         for caller_fqn in (callers or []):
-            # Strip method part to get class
-            cls_fqn = caller_fqn.rsplit("#", 1)[0] if "#" in caller_fqn else caller_fqn
+            # Normalize: field (pkg.Class.field) and method (pkg.Class#method) → class FQN
+            cls_fqn = normalize_owner_fqn(caller_fqn)
             if cls_fqn == class_fqn:
                 continue
             s = _simple(cls_fqn)

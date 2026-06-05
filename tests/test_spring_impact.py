@@ -304,6 +304,31 @@ class TestBfsCallers:
         assert "com.example.ActualCaller" in direct
         assert "com.example.Service" not in direct  # no self-reference via contained_in
 
+    def test_ic20_field_fqn_not_in_callers(self):
+        # Regression: field FQN (pkg.Class.field) must not appear in direct_callers.
+        # Only the owning class must appear.
+        rg = {
+            "com.example.PatientDAO": {
+                "injects": ["com.example.PatientServiceImpl.dao"],
+            }
+        }
+        direct, indirect, _ = _bfs_callers(["com.example.PatientDAO"], rg, 1)
+        assert "com.example.PatientServiceImpl" in direct
+        assert "com.example.PatientServiceImpl.dao" not in direct
+        assert "com.example.PatientServiceImpl.dao" not in indirect
+
+    def test_ic21_constructor_fqn_not_in_callers(self):
+        # Regression: constructor FQN (pkg.Class#<init>) must not appear in callers.
+        rg = {
+            "com.example.PatientDAO": {
+                "injects": ["com.example.PatientServiceImpl#<init>"],
+            }
+        }
+        direct, indirect, _ = _bfs_callers(["com.example.PatientDAO"], rg, 1)
+        assert "com.example.PatientServiceImpl" in direct
+        assert "com.example.PatientServiceImpl#<init>" not in direct
+        assert "com.example.PatientServiceImpl#<init>" not in indirect
+
 
 # ---------------------------------------------------------------------------
 # IC-09  Endpoint mapping
@@ -957,15 +982,16 @@ class TestRegressionCH002InjectionFieldNode:
         model = _make_model()
         result = ImpactOrchestrator().query(cir, model, "com.example.OrderService", depth=2)
         direct_set = set(result.direct_callers)
-        assert "com.example.OrderController#<init>" in direct_set, (
-            f"Constructor node missing from direct callers: {direct_set}"
-        )
+        # Constructor FQN is normalized to owning class — member FQN must not appear.
         assert "com.example.OrderController" in direct_set, (
-            f"Class missing from direct callers (CH-002 expansion): {direct_set}"
+            f"Class missing from direct callers: {direct_set}"
+        )
+        assert "com.example.OrderController#<init>" not in direct_set, (
+            f"Constructor FQN must not appear in callers: {direct_set}"
         )
 
     def test_ch002_field_node_class_added(self):
-        """Service#fieldName (injects) also adds Service class to caller set."""
+        """Service#fieldName (injects) normalizes to Service class in caller set."""
         symbols = [
             "com.example.OrderRepository",
             "com.example.OrderServiceImpl",
@@ -980,11 +1006,12 @@ class TestRegressionCH002InjectionFieldNode:
         model = _make_model()
         result = ImpactOrchestrator().query(cir, model, "com.example.OrderRepository", depth=2)
         direct_set = set(result.direct_callers)
-        assert "com.example.OrderServiceImpl#orderRepo" in direct_set, (
-            f"Field node missing from direct callers: {direct_set}"
-        )
+        # Field FQN is normalized to owning class — member FQN must not appear.
         assert "com.example.OrderServiceImpl" in direct_set, (
-            f"Class missing from direct callers (CH-002 expansion): {direct_set}"
+            f"Class missing from direct callers: {direct_set}"
+        )
+        assert "com.example.OrderServiceImpl#orderRepo" not in direct_set, (
+            f"Field FQN must not appear in callers: {direct_set}"
         )
 
     def test_ch002_class_continues_bfs(self):

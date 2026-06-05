@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from sourcecode.fqn_utils import normalize_owner_fqn
 from sourcecode.spring_findings import SEVERITY_ORDER, SpringFinding
 from sourcecode.spring_model import SpringSemanticModel
 
@@ -311,19 +312,13 @@ def _bfs_callers(
             if etype in _SKIP_EDGE_TYPES:
                 continue
             for caller in fqn_list:
-                _add_caller(caller, depth)
-                # CH-002: injects edge to a field/constructor node → also traverse
-                # the containing class, bypassing the skipped contained_in edge.
-                # Two formats emitted by the CIR parser:
-                #   Constructor injection: pkg.Class#<init>  (hash separator)
-                #   Field injection:       pkg.Class.field   (dot, lowercase last segment)
                 if etype == "injects":
-                    if "#" in caller:
-                        _add_caller(caller.rsplit("#", 1)[0], depth)
-                    elif "." in caller:
-                        last_seg = caller.rsplit(".", 1)[1]
-                        if last_seg and last_seg[0].islower():
-                            _add_caller(caller.rsplit(".", 1)[0], depth)
+                    # CH-002: field (pkg.Class.field) and constructor (pkg.Class#<init>)
+                    # FQNs are injection sites, not callers.  Normalize to owning class so
+                    # member FQNs never appear in direct_callers / indirect_callers.
+                    _add_caller(normalize_owner_fqn(caller), depth)
+                else:
+                    _add_caller(caller, depth)
 
     return direct, indirect, was_truncated
 

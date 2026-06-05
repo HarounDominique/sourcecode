@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from sourcecode.fqn_utils import is_member_fqn
+
 if TYPE_CHECKING:
     from sourcecode.canonical_ir import CanonicalRepositoryIR
     from sourcecode.spring_model import SpringSemanticModel
@@ -147,7 +149,7 @@ def _build_file_class_index(cir: "CanonicalRepositoryIR") -> dict[str, list[str]
     for node in nodes:
         fqn: str = node.get("fqn") or ""
         sf: str = node.get("source_file") or ""
-        if not fqn or not sf or "#" in fqn:
+        if not fqn or not sf or is_member_fqn(fqn):
             continue
         index.setdefault(sf, []).append(fqn)
     return index

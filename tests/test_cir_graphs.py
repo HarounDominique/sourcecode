@@ -249,6 +249,29 @@ class TestInjectionGraphField:
             "com.example.ServiceImpl"
         )
 
+    def test_dot_format_field_lifted_to_class(self) -> None:
+        # Regression: CIR parser emits field FQNs as pkg.Class.field (dot, lowercase).
+        # InjectionGraph must normalize these to the owning class, not store the field FQN.
+        deps = [_inj_edge("com.example.PatientServiceImpl.dao", "com.example.PatientDAO", "annotation")]
+        graph = InjectionGraph.build(deps)
+
+        assert graph.dependents_of("com.example.PatientDAO") == ["com.example.PatientServiceImpl"]
+        assert graph.dependencies_of("com.example.PatientServiceImpl") == ["com.example.PatientDAO"]
+
+    def test_dot_format_field_class_of_injector(self) -> None:
+        deps = [_inj_edge("com.example.PatientServiceImpl.dao", "com.example.PatientDAO", "annotation")]
+        graph = InjectionGraph.build(deps)
+        assert graph.class_of_injector("com.example.PatientServiceImpl.dao") == (
+            "com.example.PatientServiceImpl"
+        )
+
+    def test_dot_format_field_not_stored_as_class(self) -> None:
+        # The field FQN must never appear as a class key in deps_of or dependents_of.
+        deps = [_inj_edge("com.example.PatientServiceImpl.dao", "com.example.PatientDAO", "annotation")]
+        graph = InjectionGraph.build(deps)
+
+        assert graph.dependencies_of("com.example.PatientServiceImpl.dao") == []
+
 
 # ---------------------------------------------------------------------------
 # INJ-03  Lombok class-level injection (no # in from)
