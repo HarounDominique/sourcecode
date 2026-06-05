@@ -1090,10 +1090,14 @@ def _architecture_context(sm: SourceMap) -> dict[str, Any]:
                 if arch.limitations:
                     ctx["limitations"] = arch.limitations
                 return ctx
+        # Promote low→medium when a real pattern was detected.
+        # "low" in that case reflects missing docs (no OpenAPI/ADR), not structural
+        # uncertainty — mirrors the same promotion in confidence_analyzer._compute_overall().
+        _eff_confidence = "medium" if arch.confidence == "low" and pattern else arch.confidence
         ctx = {
             "summary": sm.architecture_summary,
             "pattern": pattern or "insufficient_evidence",
-            "confidence": arch.confidence,
+            "confidence": _eff_confidence,
             "method": arch.method,
         }
         if arch.layers:
@@ -1197,6 +1201,9 @@ def _section_confidence(sm: SourceMap) -> dict[str, str]:
     arch_conf = "low"
     if sm.architecture is not None and sm.architecture.requested:
         arch_conf = sm.architecture.confidence
+        _arch_pattern = sm.architecture.pattern
+        if arch_conf == "low" and _arch_pattern not in (None, "unknown", "flat"):
+            arch_conf = "medium"
     file_conf = "medium" if sm.file_paths else "low"
     return {
         "stack": cs.stack_confidence if cs else "low",
