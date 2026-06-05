@@ -227,6 +227,8 @@ _SUBCOMMANDS: frozenset[str] = frozenset(
         "spring-audit",
         # Spring impact chain
         "impact-chain",
+        # PR blast-radius report
+        "pr-impact",
     }
 )
 
@@ -266,6 +268,7 @@ _OPTIONS_WITH_VALUE: frozenset[str] = frozenset({
     "--symbol",
     "--max-importers",
     "--exclude",
+    "--files",
 })
 
 
@@ -4016,6 +4019,155 @@ def impact_chain_cmd(
             f"(risk: {result.risk_level}, "
             f"{len(result.direct_callers)} direct callers, "
             f"{len(result.endpoints_affected)} endpoints)",
+            err=True,
+        )
+    else:
+        sys.stdout.buffer.write(output.encode("utf-8"))
+        sys.stdout.buffer.write(b"\n")
+        sys.stdout.buffer.flush()
+        if copy:
+            if _copy_to_clipboard(output):
+                typer.echo("✓ copied to clipboard", err=True)
+
+
+# ── PR Impact Report ──────────────────────────────────────────────────────────
+
+@app.command("pr-impact")
+def pr_impact_cmd(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository root (default: current directory)",
+    ),
+    files: Path = typer.Option(
+        ...,
+        "--files",
+        help="File containing the list of changed Java files, one path per line.",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    format: str = typer.Option(
+        "text", "--format", "-f",
+        help="Output format: text (default) or json.",
+        show_default=True,
+    ),
+    copy: bool = typer.Option(
+        False, "--copy", "-c",
+        help="Copy output to clipboard after a successful run.",
+    ),
+) -> None:
+    """PR blast-radius report: what can break if this PR is merged?
+
+    \b
+    Reads a list of changed Java files and produces a consolidated report:
+      - Modified classes found in the changed files
+      - Affected REST endpoints reachable through the call chain
+      - Direct callers of each modified class
+      - Event publishers and consumers triggered by the change
+      - @Transactional methods in the changed classes
+      - Consolidated risk level (CRITICAL / HIGH / MEDIUM / LOW)
+
+    \b
+    Reuses existing graph and impact analysis — no new parsers.
+    JAVA/SPRING ONLY.
+
+    \b
+    Examples:
+      sourcecode pr-impact --files changed_files.txt
+      sourcecode pr-impact /path/to/repo --files diff.txt --format json
+      sourcecode pr-impact --files changes.txt --output pr_report.txt
+    """
+    import json as _json
+
+    from sourcecode.repository_ir import find_java_files
+    from sourcecode.canonical_ir import build_canonical_ir
+    from sourcecode.spring_model import SpringSemanticModel
+    from sourcecode.pr_impact import run_pr_impact
+
+    target = path.resolve()
+    if not target.exists() or not target.is_dir():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"'{target}' is not a valid directory.",
+            path=str(target),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
+        )
+        raise typer.Exit(code=1)
+
+    if not files.exists():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"--files path '{files}' does not exist.",
+            path=str(files),
+            hint="Pass a file containing one Java file path per line.",
+            expected="An existing file path.",
+        )
+        raise typer.Exit(code=1)
+
+    if format not in ("text", "json"):
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid format '{format}'.",
+            hint="format must be: text or json.",
+            expected="text | json",
+        )
+        raise typer.Exit(code=1)
+
+    # Read changed-files list
+    changed_files = [
+        line.strip()
+        for line in files.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if not changed_files:
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"--files '{files}' is empty.",
+            hint="File must contain at least one Java file path.",
+            expected="One Java file path per line.",
+        )
+        raise typer.Exit(code=1)
+
+    file_list = find_java_files(target)
+    if not file_list:
+        data: dict = {
+            "schema_version": "1.0",
+            "modified_classes": [],
+            "risk_level": "UNKNOWN",
+            "risk_reason": "No Java files found in repository — Spring analysis requires Java source.",
+            "analysis_warnings": ["No Java files found."],
+            "metadata": {"changed_files_count": len(changed_files)},
+        }
+        output = _json.dumps(data, indent=2, ensure_ascii=False) if format == "json" else (
+            "No Java files found in repository — Spring analysis requires Java source."
+        )
+        if output_path is not None:
+            output_path.write_text(output, encoding="utf-8")
+            typer.echo("PR impact report written to " + str(output_path), err=True)
+        else:
+            sys.stdout.buffer.write(output.encode("utf-8"))
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
+        return
+
+    cir = build_canonical_ir(file_list, target)
+    model = SpringSemanticModel.build(cir)
+    report = run_pr_impact(cir, changed_files, root=target, model=model)
+
+    if format == "json":
+        output = _json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+    else:
+        output = report.render_text()
+
+    if output_path is not None:
+        output_path.write_text(output, encoding="utf-8")
+        typer.echo(
+            f"PR impact report written to {output_path} "
+            f"(risk: {report.risk_level}, "
+            f"{len(report.modified_classes)} classes, "
+            f"{len(report.affected_endpoints)} endpoints)",
             err=True,
         )
     else:
