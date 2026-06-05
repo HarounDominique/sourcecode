@@ -1135,17 +1135,6 @@ repo_path: absolute path to the repository (default: current working directory).
 def _internal_specs() -> list[ToolSpec]:
     return [
         _alias_spec(
-            "analyze",
-            "Hidden legacy CLI alias. Not exposed to MCP.",
-            ("analyze",),
-            (
-                ToolParamSpec("path", "argument", str, required=False, default=".", is_path=True),
-            ),
-            lambda inputs: ["analyze", str(inputs.get("path", "."))],
-            internal=True,
-            not_exposed_to_cli=True,
-        ),
-        _alias_spec(
             "start_session",
             "Internal orchestration helper. Not exposed to MCP.",
             ("internal", "start-session"),
@@ -1370,7 +1359,7 @@ def build_tool_specs() -> tuple[ToolSpec, ...]:
         _canonical_spec_for_runtime_command(runtime)
         for runtime in discover_runtime_commands()
         if (runtime.callback is not None or runtime.path == ())
-        and (not runtime.hidden or runtime.path == ("analyze",))
+        and not runtime.hidden
     ]
     # Mark canonical tools that should not be served via MCP (validate_registry still checks them)
     canonical = [

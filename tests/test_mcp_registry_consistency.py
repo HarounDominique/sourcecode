@@ -58,9 +58,7 @@ def test_public_cli_commands_have_canonical_mcp_specs():
 
 def test_hidden_cli_commands_are_internal_only():
     internal_specs = {spec.name: spec for spec in mcp_registry.build_internal_tool_specs()}
-    assert "analyze" in internal_specs
-    assert internal_specs["analyze"].internal is True
-    assert internal_specs["analyze"].not_exposed_to_cli is True
+    assert "analyze" not in internal_specs  # legacy tombstone removed
     assert "analyze" not in {spec.name for spec in mcp_registry.build_public_tool_specs()}
 
 

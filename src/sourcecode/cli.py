@@ -213,7 +213,7 @@ _HELP = _build_help_text()
 # not consumed as a repository path.
 _SUBCOMMANDS: frozenset[str] = frozenset(
     {
-        "telemetry", "prepare-context", "version", "config", "analyze",
+        "telemetry", "prepare-context", "version", "config",
         "repo-ir", "mcp", "endpoints", "impact",
         # Enterprise workflow commands
         "onboard", "modernize", "fix-bug", "review-pr",
@@ -641,12 +641,6 @@ def main(
         hidden=True,
         help="Edge types for --graph-modules, comma-separated: imports,calls,contains,extends.",
     ),
-    no_tree: bool = typer.Option(
-        False,
-        "--no-tree",
-        hidden=True,
-        help="(Removed) No-op. File tree is excluded by default. Use --tree to include it.",
-    ),
     tree: bool = typer.Option(
         False,
         "--tree",
@@ -766,14 +760,6 @@ def main(
         help="Limit total exported semantic nodes across all file contracts.",
         min=1,
     ),
-    dependency_depth: int = typer.Option(
-        0,
-        "--dependency-depth",
-        hidden=True,
-        help="(Removed) Transitive resolution is not implemented. Pass 0 or omit.",
-        min=0,
-        max=5,
-    ),
     entrypoints_only: bool = typer.Option(
         False,
         "--entrypoints-only",
@@ -796,12 +782,6 @@ def main(
         "--emit-graph",
         hidden=True,
         help="Include a compact dependency graph in contract output.",
-    ),
-    compress_types: bool = typer.Option(
-        False,
-        "--compress-types",
-        hidden=True,
-        help="(Removed) No observable effect when type signatures are not extracted. Omit.",
     ),
     symbol: Optional[str] = typer.Option(
         None,
@@ -853,6 +833,7 @@ def main(
         return
 
     _t0 = time.monotonic()
+    no_tree: bool = False  # set True by --agent; --no-tree flag removed
 
     # Validate new flag choices
     _MODE_CHOICES = ("contract", "minimal", "standard", "raw")
@@ -924,22 +905,6 @@ def main(
             expected="A contract or standard analysis mode.",
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
-
-    if dependency_depth > 0:
-        typer.echo(
-            f"[warning] --dependency-depth {dependency_depth} has no effect: "
-            "transitive import resolution is not implemented for npm/yarn/pip projects. "
-            "Using depth=0 (direct dependencies only).",
-            err=True,
-        )
-        dependency_depth = 0
-
-    if compress_types:
-        typer.echo(
-            "[deprecated] --compress-types is removed: type signatures are rarely extracted "
-            "at default depth. Flag ignored.",
-            err=True,
-        )
 
     # Pro gate for --full: removing truncation limits is enterprise-scale functionality.
     if full:
@@ -2174,11 +2139,9 @@ def main(
                 mode=mode,
                 rank_by=rank_by,  # type: ignore[arg-type]
                 max_symbols=max_symbols,
-                dependency_depth=dependency_depth,
                 entrypoints_only=entrypoints_only,
                 changed_only=changed_only,
                 symbol=symbol,
-                compress_types=compress_types,
                 max_importers=max_importers,
                 semantic_calls=sm.semantic_calls or None,
                 code_notes=sm.code_notes or None,
@@ -4609,22 +4572,6 @@ def cold_start_cmd(
         )
         sys.stderr.flush()
     typer.echo(_out)
-
-
-# ── analyze (legacy alias) ────────────────────────────────────────────────────
-
-@app.command("analyze", hidden=True)
-def analyze_cmd(
-    path: Path = typer.Argument(Path("."), help="Repository path to analyze"),
-) -> None:
-    """[deprecated] Use: sourcecode [PATH]"""
-    typer.echo(
-        "Warning: 'analyze' subcommand is deprecated.\n"
-        "Use:  sourcecode .\n"
-        "      sourcecode /path/to/repo",
-        err=True,
-    )
-    raise typer.Exit(code=1)
 
 
 # ── MCP server ────────────────────────────────────────────────────────────────
