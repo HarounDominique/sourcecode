@@ -2,7 +2,7 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.35.13-blue)
+![Version](https://img.shields.io/badge/version-1.35.14-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
@@ -76,7 +76,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.35.13
+# sourcecode 1.35.14
 ```
 
 ---
