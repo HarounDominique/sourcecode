@@ -229,6 +229,8 @@ _SUBCOMMANDS: frozenset[str] = frozenset(
         "impact-chain",
         # PR blast-radius report
         "pr-impact",
+        # Class architectural summary
+        "explain",
     }
 )
 
@@ -4177,6 +4179,121 @@ def pr_impact_cmd(
         if copy:
             if _copy_to_clipboard(output):
                 typer.echo("✓ copied to clipboard", err=True)
+
+
+# ── Explain Command ───────────────────────────────────────────────────────────
+
+@app.command("explain")
+def explain_cmd(
+    class_name: str = typer.Argument(
+        ...,
+        help="Simple class name to explain (e.g. UserService, OrderController).",
+    ),
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository root (default: current directory)",
+    ),
+    format: str = typer.Option(
+        "text", "--format", "-f",
+        help="Output format: text (default) or json.",
+        show_default=True,
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    copy: bool = typer.Option(
+        False, "--copy", "-c",
+        help="Copy output to clipboard after a successful run.",
+    ),
+) -> None:
+    """Human-readable architectural summary for a class.
+
+    \b
+    Generates a structured explanation derived entirely from static analysis:
+      - Purpose and Spring stereotype
+      - Public methods
+      - Incoming callers (who uses this class)
+      - Outgoing dependencies (what this class calls)
+      - Events published and consumed
+      - @Transactional boundaries
+      - Security constraints (@PreAuthorize, @Secured, etc.)
+      - REST endpoints related
+
+    \b
+    JAVA/SPRING ONLY. Reads from existing CIR — no new parsers.
+
+    \b
+    Examples:
+      sourcecode explain UserService
+      sourcecode explain OrderController /path/to/repo
+      sourcecode explain UserService --format json
+    """
+    import json as _json
+
+    from sourcecode.repository_ir import find_java_files
+    from sourcecode.canonical_ir import build_canonical_ir
+    from sourcecode.spring_model import SpringSemanticModel
+    from sourcecode.explain import explain_class
+
+    target = path.resolve()
+    if not target.exists() or not target.is_dir():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"'{target}' is not a valid directory.",
+            path=str(target),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
+        )
+        raise typer.Exit(code=1)
+
+    if format not in ("text", "json"):
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid format '{format}'.",
+            hint="format must be: text or json.",
+            expected="text | json",
+        )
+        raise typer.Exit(code=1)
+
+    file_list = find_java_files(target)
+    if not file_list:
+        msg = f"No Java files found in '{target}'. sourcecode explain requires a Java/Spring repository."
+        if format == "json":
+            output = _json.dumps({
+                "error": "no_java_files",
+                "message": msg,
+                "class_name": class_name,
+            }, indent=2)
+        else:
+            output = msg
+        if output_path is not None:
+            output_path.write_text(output, encoding="utf-8")
+        else:
+            sys.stdout.buffer.write(output.encode("utf-8"))
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
+        raise typer.Exit(code=1)
+
+    cir = build_canonical_ir(file_list, target)
+    model = SpringSemanticModel.build(cir)
+    explanation = explain_class(class_name, cir, model)
+
+    if format == "json":
+        output = _json.dumps(explanation.to_dict(), indent=2, ensure_ascii=False)
+    else:
+        output = explanation.render_text()
+
+    if output_path is not None:
+        output_path.write_text(output, encoding="utf-8")
+        typer.echo(f"Explanation written to {output_path}", err=True)
+    else:
+        sys.stdout.buffer.write(output.encode("utf-8"))
+        sys.stdout.buffer.write(b"\n")
+        sys.stdout.buffer.flush()
+
+    if copy and _copy_to_clipboard(output):
+        typer.echo("✓ copied to clipboard", err=True)
 
 
 # ── Enterprise Workflow Commands ──────────────────────────────────────────────
