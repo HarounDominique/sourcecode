@@ -767,7 +767,7 @@ class TestRunTxAudit:
         cir = _FakeCIR()
         result = run_tx_audit(cir)
         assert isinstance(result, SpringAuditResult)
-        assert result.spring_detected is True
+        assert result.spring_detected is False  # empty CIR has no Spring beans or @Transactional
         assert result.findings == []
         assert result.summary["total_findings"] == 0
 

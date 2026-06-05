@@ -719,9 +719,11 @@ def run_tx_audit(
 
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
+    _spring_detected = tx_index.stats()["total"] > 0 or bool(model.bean_graph.beans)
+
     result = SpringAuditResult(
         repo_id=getattr(cir, "cir_hash", "")[:16],
-        spring_detected=True,
+        spring_detected=_spring_detected,
         scope="tx",
         findings=findings,
         limitations=[

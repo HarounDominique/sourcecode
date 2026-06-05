@@ -469,9 +469,15 @@ def run_security_audit(
 
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
+    _spring_detected = (
+        (model is not None and bool(model.bean_graph.beans))
+        or tx_index.stats()["total"] > 0
+        or cir.metadata.get("security_model", "unknown") != "unknown"
+    )
+
     result = SpringAuditResult(
         repo_id=getattr(cir, "cir_hash", "")[:16],
-        spring_detected=True,
+        spring_detected=_spring_detected,
         scope="security",
         findings=findings,
         limitations=[
