@@ -42,8 +42,11 @@ if _SUPABASE_URL != _DEFAULT_SUPABASE_URL:
 _LICENSE_DIR: Path = Path.home() / ".sourcecode"
 _LICENSE_FILE: Path = _LICENSE_DIR / "license.json"
 _DELTA_RUNS_FILE: Path = _LICENSE_DIR / "delta_runs.json"
-_CACHE_TTL_SECONDS: int = 86400  # 24 hours
+_CACHE_TTL_SECONDS: int = 1800  # 30 minutes — Supabase is source of truth; cache is perf only
 _DELTA_FREE_LIMIT: int = 30
+_DEVICE_POLL_INTERVAL_S: float = 2.5
+_DEVICE_POLL_TIMEOUT_S: float = 300.0  # 5-minute window for user to complete browser auth
+_AUTH_BASE_URL: str = "https://sourcecode.dev"
 _LICENSE_KEY_RE = re.compile(r"^[A-Za-z0-9_\-]{1,200}$")
 
 # ---------------------------------------------------------------------------
@@ -213,6 +216,78 @@ def _call_get_license(license_key: str) -> Optional[dict]:
         return None  # Network error — caller decides what to do
 
 
+def _generate_device_code() -> str:
+    """Generate a human-readable device code: XXXX-XXXX-XXXX."""
+    import uuid
+    raw = uuid.uuid4().hex.upper()
+    return f"{raw[:4]}-{raw[4:8]}-{raw[8:12]}"
+
+
+def _call_device_check(device_code: str) -> Optional[dict]:
+    """Poll /device-check edge function. Returns dict or None on network error.
+
+    Expected responses:
+      {"status": "pending"}
+      {"status": "complete", "device_token": "...", "email": "...", "plan": "pro", ...}
+      {"status": "error", "message": "..."}
+    """
+    import urllib.error
+    import urllib.request
+
+    if not _SUPABASE_ANON_KEY:
+        return None
+
+    url = f"{_SUPABASE_URL}/functions/v1/device-check"
+    body = json.dumps({"device_code": device_code}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("apikey", _SUPABASE_ANON_KEY)
+    req.add_header("Authorization", f"Bearer {_SUPABASE_ANON_KEY}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            return json.loads(exc.read().decode("utf-8", errors="replace"))
+        except Exception:
+            return {"status": "error", "message": f"HTTP {exc.code}"}
+    except Exception:
+        return None
+
+
+def _call_get_user_plan(device_token: str) -> Optional[dict]:
+    """Fetch current plan/status for an authenticated device token.
+
+    Expected response:
+      {"valid": true, "plan": "pro", "status": "active", "features": [...], "email": "..."}
+      {"valid": false, "error": "token_revoked"}
+    """
+    import urllib.error
+    import urllib.request
+
+    if not _SUPABASE_ANON_KEY:
+        return None
+
+    url = f"{_SUPABASE_URL}/functions/v1/get-user-plan"
+    body = json.dumps({"device_token": device_token}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("apikey", _SUPABASE_ANON_KEY)
+    req.add_header("Authorization", f"Bearer {_SUPABASE_ANON_KEY}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            return json.loads(exc.read().decode("utf-8", errors="replace"))
+        except Exception:
+            return {"valid": False, "error": f"HTTP {exc.code}"}
+    except Exception:
+        return None
+
+
 def _maybe_revalidate() -> None:
     """Re-validate cached license if stale. Mutates globals; never raises."""
     global _license_data, is_pro
@@ -220,7 +295,11 @@ def _maybe_revalidate() -> None:
     if not _license_data:
         return
 
-    validated_at_str = _license_data.get("validated_at") or _license_data.get("activated_at")
+    validated_at_str = (
+        _license_data.get("validated_at")
+        or _license_data.get("activated_at")
+        or _license_data.get("authenticated_at")
+    )
     if validated_at_str:
         try:
             validated_at = datetime.fromisoformat(validated_at_str)
@@ -232,6 +311,39 @@ def _maybe_revalidate() -> None:
         except Exception:
             pass
 
+    auth_method = _license_data.get("auth_method")
+
+    if auth_method == "device_flow":
+        device_token = _license_data.get("device_token")
+        if not device_token:
+            return
+        result = _call_get_user_plan(device_token)
+        if result is None:
+            return  # Network error — keep cached (offline-first)
+        if not result.get("valid", True):
+            _license_data = None
+            is_pro = False
+            try:
+                if _LICENSE_FILE.exists():
+                    _LICENSE_FILE.unlink()
+            except Exception:
+                pass
+            return
+        _license_data["plan"] = result.get("plan", "free")
+        _license_data["status"] = result.get("status", "active")
+        _license_data["features"] = result.get("features", [])
+        _license_data["validated_at"] = datetime.now(timezone.utc).isoformat()
+        is_pro = (
+            _license_data.get("plan") == "pro"
+            and _license_data.get("status", "active") != "inactive"
+        )
+        try:
+            _write_license_file(_license_data)
+        except Exception:
+            pass
+        return
+
+    # Key-based auth (existing flow / legacy)
     key = _license_data.get("license_key")
     if not key:
         return
@@ -266,6 +378,7 @@ def _init() -> None:
     is_pro = (
         _license_data is not None
         and _license_data.get("plan") == "pro"
+        and _license_data.get("status", "active") != "inactive"
     )
 
 
@@ -354,7 +467,105 @@ def require_pro(feature_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Activation
+# Device-flow authentication
+# ---------------------------------------------------------------------------
+
+def _finish_device_auth(result: dict) -> None:
+    """Persist device-flow credentials and emit success JSON. Exits on error."""
+    global _license_data, is_pro
+
+    device_token = result.get("device_token") or result.get("access_token") or ""
+    email = result.get("email", "")
+    plan = result.get("plan", "free")
+    plan_status = (
+        result.get("status_detail")
+        or result.get("user_status")
+        or result.get("status", "active")
+    )
+    features = result.get("features") or []
+
+    if not device_token:
+        sys.stderr.write("\n")
+        _fail("auth_error", "Authentication completed but no session token received. Contact support.")
+
+    _LICENSE_DIR.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
+    data: dict = {
+        "auth_method": "device_flow",
+        "device_token": device_token,
+        "email": email,
+        "plan": plan,
+        "status": plan_status,
+        "features": features,
+        "authenticated_at": now,
+        "validated_at": now,
+    }
+    _write_license_file(data)
+    _license_data = data
+    is_pro = plan == "pro" and plan_status != "inactive"
+
+    sys.stderr.write(f"\n  Authenticated as {email}.  Plan: {plan}\n\n")
+    sys.stderr.flush()
+
+    output: dict = {"status": "authenticated", "email": email, "plan": plan, "pro": is_pro}
+    if not is_pro:
+        output["upgrade_hint"] = "https://sourcecode.dev/pricing"
+    else:
+        output["features"] = features
+    sys.stdout.write(json.dumps(output, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def auth_login() -> None:
+    """Device code authentication flow.
+
+    Shows a browser URL; polls the backend every 2.5 s until the user
+    completes authentication or the 5-minute window expires.
+    Writes credentials to ~/.sourcecode/license.json on success.
+    Exits 0 on success, 1 on any failure.
+    """
+    import time
+
+    device_code = _generate_device_code()
+    activate_url = f"{_AUTH_BASE_URL}/activate?code={device_code}"
+
+    sys.stderr.write(f"\n  Open this URL to authenticate:\n  {activate_url}\n\n  Waiting")
+    sys.stderr.flush()
+
+    deadline = time.monotonic() + _DEVICE_POLL_TIMEOUT_S
+    _tick = 0
+
+    while time.monotonic() < deadline:
+        time.sleep(_DEVICE_POLL_INTERVAL_S)
+        _tick += 1
+        if _tick % 4 == 0:
+            sys.stderr.write(".")
+            sys.stderr.flush()
+
+        result = _call_device_check(device_code)
+        if result is None:
+            continue  # network blip — keep polling
+
+        status = result.get("status")
+        if status == "pending":
+            continue
+
+        if status == "complete":
+            _finish_device_auth(result)
+            return
+
+        if status == "error" or result.get("error"):
+            sys.stderr.write("\n")
+            _fail("auth_error", result.get("message") or result.get("error") or "Authentication failed.")
+
+        # Unknown status — keep polling
+
+    sys.stderr.write("\n")
+    _fail("auth_timeout", "Authentication timed out after 5 minutes. Please try again.")
+
+
+# ---------------------------------------------------------------------------
+# Activation (key-based — legacy / direct key entry)
 # ---------------------------------------------------------------------------
 
 def activate_license(license_key: str) -> None:

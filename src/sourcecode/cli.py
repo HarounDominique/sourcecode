@@ -167,6 +167,11 @@ Cold scan: 2–10s depending on repo size. Warm cache: 0.3–0.6s.
   sourcecode --compact --git-context    include git hotspots and uncommitted files
   sourcecode --agent                    full structured JSON for AI agents
 
+[bold]Auth commands:[/bold]
+  auth login                   [dim]# authenticate via browser (device code)[/dim]
+  auth status                  [dim]# show current plan and auth state[/dim]
+  auth logout                  [dim]# remove local credentials[/dim]
+
 [bold]Cache commands:[/bold]
   cache status                 [dim]# cache size, hit keys, last-warmed timestamp[/dim]
   cache warm                   [dim]# pre-build cache ahead of an agent session[/dim]
@@ -221,8 +226,8 @@ _SUBCOMMANDS: frozenset[str] = frozenset(
         "repo-ir", "mcp", "endpoints", "impact",
         # Enterprise workflow commands
         "onboard", "modernize", "fix-bug", "review-pr",
-        # License
-        "activate",
+        # License / auth
+        "activate", "auth",
         # Cache observability
         "cache",
         # RIS bootstrap
@@ -511,6 +516,9 @@ app.add_typer(mcp_app, name="mcp")
 
 cache_app = typer.Typer(help="Cache inspection and management.", rich_markup_mode="rich")
 app.add_typer(cache_app, name="cache")
+
+auth_app = typer.Typer(help="Authentication: login, status, logout.", rich_markup_mode="rich")
+app.add_typer(auth_app, name="auth")
 
 
 def _maybe_ask_consent() -> None:
@@ -4797,6 +4805,73 @@ def activate_cmd(
     """
     from sourcecode.license import activate_license as _activate
     _activate(license_key)
+
+
+# ---------------------------------------------------------------------------
+# Auth commands (device-flow login / status / logout)
+# ---------------------------------------------------------------------------
+
+@auth_app.command("login")
+def auth_login_cmd() -> None:
+    """Authenticate via browser (device code flow).
+
+    \b
+    The CLI shows a URL. Open it in your browser, log in with your account,
+    and the CLI completes authentication automatically.
+    Credentials are stored in ~/.sourcecode/license.json (30-min cache; Supabase is source of truth).
+
+    \b
+    Examples:
+      sourcecode auth login
+    """
+    from sourcecode.license import auth_login as _auth_login
+    _auth_login()
+
+
+@auth_app.command("status")
+def auth_status_cmd() -> None:
+    """Show current authentication and plan status."""
+    import json as _json
+    try:
+        from sourcecode.license import _license_data as _ld, is_pro as _ip
+    except Exception:
+        _ld = None
+        _ip = False
+
+    if not _ld:
+        out: dict = {"status": "unauthenticated", "pro": False}
+        sys.stdout.write(_json.dumps(out, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+        return
+
+    out = {
+        "status": "authenticated",
+        "auth_method": _ld.get("auth_method", "license_key"),
+        "email": _ld.get("email", ""),
+        "plan": _ld.get("plan", "unknown"),
+        "plan_status": _ld.get("status", "unknown"),
+        "pro": _ip,
+        "validated_at": _ld.get("validated_at") or _ld.get("activated_at") or "",
+    }
+    sys.stdout.write(_json.dumps(out, indent=2, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+@auth_app.command("logout")
+def auth_logout_cmd() -> None:
+    """Remove local credentials (does not cancel your subscription)."""
+    import json as _json
+    _lf = Path.home() / ".sourcecode" / "license.json"
+    if _lf.exists():
+        try:
+            _lf.unlink()
+            out: dict = {"status": "logged_out", "message": "Local credentials removed."}
+        except Exception as _exc:
+            out = {"status": "error", "message": str(_exc)}
+    else:
+        out = {"status": "logged_out", "message": "No local credentials found."}
+    sys.stdout.write(_json.dumps(out, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
 
 
 @app.command("version")
