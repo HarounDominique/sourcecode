@@ -41,7 +41,9 @@ if _SUPABASE_URL != _DEFAULT_SUPABASE_URL:
 
 _LICENSE_DIR: Path = Path.home() / ".sourcecode"
 _LICENSE_FILE: Path = _LICENSE_DIR / "license.json"
+_DELTA_RUNS_FILE: Path = _LICENSE_DIR / "delta_runs.json"
 _CACHE_TTL_SECONDS: int = 86400  # 24 hours
+_DELTA_FREE_LIMIT: int = 30
 _LICENSE_KEY_RE = re.compile(r"^[A-Za-z0-9_\-]{1,200}$")
 
 # ---------------------------------------------------------------------------
@@ -83,11 +85,36 @@ _FEATURE_INFO: dict[str, dict[str, str]] = {
         "value": "Reduces test debt systematically across the entire codebase.",
     },
     "--full": {
-        "display": "--full flag",
+        "display": "--full flag (large repos)",
         "description": (
             "Removes truncation limits on transactional boundaries, DTO mappers, and large result sets."
+            " Free tier may use --full on repositories under 500 Java source files."
         ),
         "value": "Essential for complete analysis of enterprise-scale codebases.",
+    },
+    "git-history": {
+        "display": "git history analysis",
+        "description": (
+            "Churn ranking, commit frequency per file, volatility signals over 90-day window."
+        ),
+        "value": "Identifies which files change most — the highest-risk targets in any refactor.",
+    },
+    "multi-repo": {
+        "display": "multi-repo analysis",
+        "description": (
+            "Cross-repository dependency graphs, shared module impact, and org-level blast radius."
+        ),
+        "value": "Required for microservices and monorepo architectures.",
+    },
+    "export-rich": {
+        "display": "rich exports (HTML/PDF/CI)",
+        "description": "Structured HTML reports, PDF exports, and CI-consumable risk summaries.",
+        "value": "Embed analysis into your CI pipeline or share with non-CLI stakeholders.",
+    },
+    "team-snapshots": {
+        "display": "team snapshot sharing",
+        "description": "Shared org-level snapshots and multi-user cache access.",
+        "value": "Eliminates cold-cache overhead across the entire engineering team.",
     },
 }
 
@@ -111,6 +138,40 @@ def _write_license_file(data: dict) -> None:
         except Exception:
             pass
         raise
+
+
+def _read_delta_runs() -> dict:
+    try:
+        if _DELTA_RUNS_FILE.exists():
+            return json.loads(_DELTA_RUNS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def check_delta_free_tier(repo_path: str) -> "tuple[bool, int, int]":
+    """Check and consume one delta free-tier run for repo_path.
+
+    Returns (allowed, runs_used, runs_remaining).
+    When allowed=True the run count is incremented atomically.
+    When allowed=False the quota is exhausted — caller should gate to Pro.
+    """
+    import hashlib
+    key = hashlib.sha256(str(Path(repo_path).resolve()).encode()).hexdigest()[:16]
+    runs = _read_delta_runs()
+    used = int(runs.get(key, 0))
+    if used >= _DELTA_FREE_LIMIT:
+        return False, used, 0
+    new_used = used + 1
+    runs[key] = new_used
+    try:
+        _LICENSE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _DELTA_RUNS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(runs, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_DELTA_RUNS_FILE)
+    except Exception:
+        pass
+    return True, new_used, max(0, _DELTA_FREE_LIMIT - new_used)
 
 
 def _load_license_file() -> Optional[dict]:

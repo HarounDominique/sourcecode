@@ -1810,9 +1810,11 @@ class TestProLockExitCode:
     """CRÍTICO 2/3 — Pro-locked features exit with code 2, not 0 or 1."""
 
     def test_delta_exits_2_without_pro(self, keycloak_like_repo: Path) -> None:
+        # Simulate free-tier quota exhausted (30/30 runs used).
         with patch("sourcecode.license.is_pro", False), \
              patch("sourcecode.license._license_data", None), \
-             patch("sourcecode.license._maybe_revalidate", return_value=None):
+             patch("sourcecode.license._maybe_revalidate", return_value=None), \
+             patch("sourcecode.license.check_delta_free_tier", return_value=(False, 30, 0)):
             result = runner.invoke(
                 app,
                 ["prepare-context", "delta", str(keycloak_like_repo), "--since", "HEAD~1"],
@@ -1820,9 +1822,11 @@ class TestProLockExitCode:
         assert result.exit_code == 2
 
     def test_delta_error_json_has_free_tier_alternative(self, keycloak_like_repo: Path) -> None:
+        # Simulate free-tier quota exhausted (30/30 runs used).
         with patch("sourcecode.license.is_pro", False), \
              patch("sourcecode.license._license_data", None), \
-             patch("sourcecode.license._maybe_revalidate", return_value=None):
+             patch("sourcecode.license._maybe_revalidate", return_value=None), \
+             patch("sourcecode.license.check_delta_free_tier", return_value=(False, 30, 0)):
             result = runner.invoke(
                 app,
                 ["prepare-context", "delta", str(keycloak_like_repo), "--since", "HEAD~1"],
@@ -1851,9 +1855,11 @@ class TestProLockExitCode:
         assert "pro" in combined.lower() or "license" in combined.lower()
 
     def test_delta_and_impact_exit_codes_consistent(self, keycloak_like_repo: Path) -> None:
+        # Simulate free-tier quota exhausted so delta gates like impact.
         with patch("sourcecode.license.is_pro", False), \
              patch("sourcecode.license._license_data", None), \
-             patch("sourcecode.license._maybe_revalidate", return_value=None):
+             patch("sourcecode.license._maybe_revalidate", return_value=None), \
+             patch("sourcecode.license.check_delta_free_tier", return_value=(False, 30, 0)):
             r_delta = runner.invoke(
                 app,
                 ["prepare-context", "delta", str(keycloak_like_repo), "--since", "HEAD~1"],

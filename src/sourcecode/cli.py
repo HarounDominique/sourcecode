@@ -197,9 +197,13 @@ Cold scan: 2–10s depending on repo size. Warm cache: 0.3–0.6s.
   [dim]modernize (full)                    dead zones, tangles, full coupling[/dim]
   [dim]fix-bug (full)                      complete risk-ranked file list[/dim]
   [dim]review-pr (expanded)               CI-grade PR review[/dim]
-  [dim]prepare-context delta               incremental context for CI/CD[/dim]
+  [dim]prepare-context delta               incremental context for CI/CD (30 free runs/repo)[/dim]
   [dim]prepare-context generate-tests      test gap analysis[/dim]
-  [dim]--full                              removes all truncation limits[/dim]
+  [dim]--full                              removes all truncation limits (free up to 500 files)[/dim]
+  [dim]--rank-by git-churn                 file volatility ranking via git history[/dim]
+  [dim]rich exports (HTML/PDF/CI)          structured reports for CI and stakeholders[/dim]
+  [dim]multi-repo analysis                 cross-repository blast radius[/dim]
+  [dim]team snapshots                      shared org-level cache[/dim]
 
   [dim cyan]→ sourcecode activate <key>[/dim cyan]
 """
@@ -573,7 +577,8 @@ GRAPH_EDGE_CHOICES = {"imports", "calls", "contains", "extends"}
 DOCS_DEPTH_CHOICES = ["module", "symbols", "full"]
 
 # ── Module-level constants ─────────────────────────────────────────────────────
-_FREE_TIER_NODE_CAP: int = 10  # semantic cap for graph nodes and semantic symbols in free tier
+_FREE_TIER_NODE_CAP: int = 50  # semantic cap for graph nodes and semantic symbols in free tier
+_FREE_FULL_FILE_THRESHOLD: int = 500  # Java source files; above this --full requires Pro
 _JAVA_MIN_SCAN_DEPTH: int = 12  # Maven src/main/java/<pkg>/<module>/File depth floor
 _JVM_STACKS: frozenset[str] = frozenset({"java", "kotlin", "scala", "groovy"})
 _IMPACT_PRIORITY_THRESHOLDS: list[tuple[float, str]] = [
@@ -878,6 +883,11 @@ def main(
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
+    # Pro gate for --rank-by git-churn: git history analysis is a Pro feature.
+    if rank_by == "git-churn":
+        from sourcecode.license import require_feature as _req_git_history
+        _req_git_history("git-history")
+
     if symbol is not None and not symbol.strip():
         _emit_error_json(
             INVALID_INPUT_CODE,
@@ -911,10 +921,21 @@ def main(
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
-    # Pro gate for --full: removing truncation limits is enterprise-scale functionality.
+    # Pro gate for --full: free tier allowed up to _FREE_FULL_FILE_THRESHOLD Java files.
     if full:
-        from sourcecode.license import require_feature as _req_full
-        _req_full("--full")
+        from sourcecode.license import is_pro as _full_is_pro
+        if not _full_is_pro:
+            from itertools import islice as _islice
+            _full_check_path = Path(_get_detected_path()).resolve()
+            _java_count = sum(
+                1 for _ in _islice(
+                    (p for p in _full_check_path.rglob("*.java") if ".git" not in p.parts),
+                    _FREE_FULL_FILE_THRESHOLD + 1,
+                )
+            )
+            if _java_count > _FREE_FULL_FILE_THRESHOLD:
+                from sourcecode.license import require_feature as _req_full
+                _req_full("--full")
 
     # P0-2 FIX: --compact and --full are mutually exclusive.
     # compact is designed to be a bounded summary; --full removes truncation limits,
@@ -2633,14 +2654,34 @@ def prepare_context_cmd(
         )
         raise typer.Exit(code=1)
 
-    # Pro gate: generate-tests and delta require an active Pro license.
-    _PRO_TASKS: frozenset[str] = frozenset({"generate-tests", "delta"})
-    if task in _PRO_TASKS:
+    # Pro gate: generate-tests requires Pro. delta allows 30 free runs per repo.
+    if task == "generate-tests":
         from sourcecode.license import require_feature as _require_feature
-        _extra: dict = {}
-        if task == "delta":
-            _extra["free_tier_alternative"] = "sourcecode prepare-context review-pr --since <ref>"
-        _require_feature(task, extra_fields=_extra if _extra else None)
+        _require_feature("generate-tests")
+    elif task == "delta":
+        from sourcecode.license import is_pro as _delta_is_pro
+        if not _delta_is_pro:
+            from sourcecode.license import check_delta_free_tier as _check_delta
+            _delta_allowed, _delta_used, _delta_remaining = _check_delta(str(path.resolve()))
+            if not _delta_allowed:
+                from sourcecode.license import require_feature as _require_feature_delta
+                _require_feature_delta(
+                    "delta",
+                    extra_fields={
+                        "free_tier_note": (
+                            f"Free quota of {30} delta runs per repository exhausted."
+                        ),
+                        "free_tier_alternative": "sourcecode prepare-context review-pr --since <ref>",
+                    },
+                )
+            # Within quota: emit a header note so CI logs show remaining runs.
+            elif _delta_remaining <= 5:
+                import sys as _sys_delta
+                _sys_delta.stderr.write(
+                    f"[sourcecode] delta free tier: {_delta_remaining} run(s) remaining"
+                    f" (used {_delta_used}/{30}). Upgrade to Pro for unlimited CI runs.\n"
+                )
+                _sys_delta.stderr.flush()
 
     # Validate --format: only "json" and "github-comment" are valid for prepare-context.
     # "yaml" is intentionally NOT supported here (use main command for yaml output).
