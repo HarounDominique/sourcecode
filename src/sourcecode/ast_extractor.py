@@ -1196,7 +1196,7 @@ def _detect_role(path: str, contract: FileContract) -> str:
 def _extract_mybatis_xml(rel_path: str, source: str) -> FileContract:
     """Extract namespace and SQL operations from a MyBatis *Mapper.xml file."""
     import re as _re
-    from xml.etree import ElementTree
+    import defusedxml.ElementTree as ElementTree  # type: ignore[import]
 
     _NS_STRIP = _re.compile(r"\{[^}]+\}")
     _SQL_OPS = frozenset({"select", "insert", "update", "delete"})

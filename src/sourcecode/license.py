@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,18 +26,23 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 # Supabase endpoint config — hardcoded for production; override via env for dev
 # ---------------------------------------------------------------------------
-_SUPABASE_URL: str = os.environ.get(
-    "SOURCECODE_SUPABASE_URL",
-    "https://qkndlmyekvujjdgthtmz.supabase.co",
-)
+_DEFAULT_SUPABASE_URL: str = "https://qkndlmyekvujjdgthtmz.supabase.co"
+_SUPABASE_URL: str = os.environ.get("SOURCECODE_SUPABASE_URL", _DEFAULT_SUPABASE_URL)
 _SUPABASE_ANON_KEY: str = os.environ.get(
     "SOURCECODE_SUPABASE_ANON_KEY",
     "",  # Set SOURCECODE_SUPABASE_ANON_KEY to your project anon key
 )
+if _SUPABASE_URL != _DEFAULT_SUPABASE_URL:
+    sys.stderr.write(
+        f"[sourcecode] WARNING: SOURCECODE_SUPABASE_URL overridden to {_SUPABASE_URL!r}."
+        " License requests will be sent to this server.\n"
+    )
+    sys.stderr.flush()
 
 _LICENSE_DIR: Path = Path.home() / ".sourcecode"
 _LICENSE_FILE: Path = _LICENSE_DIR / "license.json"
 _CACHE_TTL_SECONDS: int = 86400  # 24 hours
+_LICENSE_KEY_RE = re.compile(r"^[A-Za-z0-9_\-]{1,200}$")
 
 # ---------------------------------------------------------------------------
 # Per-feature descriptions for upgrade UX
@@ -90,6 +96,21 @@ _FEATURE_INFO: dict[str, dict[str, str]] = {
 # ---------------------------------------------------------------------------
 _license_data: Optional[dict] = None
 is_pro: bool = False
+
+
+def _write_license_file(data: dict) -> None:
+    """Atomically write license data via tmp file + rename."""
+    payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+    tmp = _LICENSE_FILE.with_suffix(".tmp")
+    try:
+        tmp.write_bytes(payload)
+        tmp.replace(_LICENSE_FILE)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
 
 
 def _load_license_file() -> Optional[dict]:
@@ -173,10 +194,7 @@ def _maybe_revalidate() -> None:
     _license_data["validated_at"] = datetime.now(timezone.utc).isoformat()
     is_pro = _license_data.get("plan") == "pro"
     try:
-        _LICENSE_FILE.write_text(
-            json.dumps(_license_data, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _write_license_file(_license_data)
     except Exception:
         pass
 
@@ -284,6 +302,9 @@ def activate_license(license_key: str) -> None:
     Outputs JSON to stdout; exits 0 on success, 1 on any failure.
     Never raises — all error paths emit JSON and call sys.exit(1).
     """
+    if not _LICENSE_KEY_RE.match(license_key):
+        _fail("invalid_license", "License key format is invalid.")
+
     if not _SUPABASE_ANON_KEY:
         _fail("configuration_error", "SOURCECODE_SUPABASE_ANON_KEY not set. Contact support.")
 
@@ -308,10 +329,7 @@ def activate_license(license_key: str) -> None:
         "activated_at": now,
         "validated_at": now,
     }
-    _LICENSE_FILE.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _write_license_file(data)
 
     output = {"status": "activated", "plan": "pro", "features": data["features"]}
     sys.stdout.write(json.dumps(output, ensure_ascii=False) + "\n")

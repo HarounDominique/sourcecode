@@ -20,7 +20,10 @@ _TIMEOUT_S = 3
 
 
 def _endpoint() -> str:
-    return os.environ.get("SOURCECODE_TELEMETRY_ENDPOINT", _DEFAULT_ENDPOINT)
+    override = os.environ.get("SOURCECODE_TELEMETRY_ENDPOINT")
+    if override and override.startswith("https://"):
+        return override
+    return _DEFAULT_ENDPOINT
 
 
 def _send_blocking(payload: dict[str, Any]) -> None:

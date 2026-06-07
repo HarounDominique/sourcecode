@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET  # type: ignore[import]
 from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path

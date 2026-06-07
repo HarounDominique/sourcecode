@@ -4892,7 +4892,7 @@ def mcp_serve() -> None:
     except KeyboardInterrupt:
         log.info("sourcecode-mcp stopped")
     except Exception as exc:
-        log.critical("sourcecode-mcp fatal error: %s", exc, exc_info=True)
+        log.critical("sourcecode-mcp fatal error: %s: %s", type(exc).__name__, exc)
         raise typer.Exit(code=1)
 
 
