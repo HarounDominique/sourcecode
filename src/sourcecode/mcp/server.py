@@ -650,6 +650,56 @@ def get_spring_audit(repo_path: str = ".", scope: str = "all") -> dict:
 
 
 @mcp.tool()
+def get_migration_readiness(repo_path: str = ".", min_severity: str = "low") -> dict:
+    """Spring Boot 2→3 migration readiness: javax→jakarta namespace blockers. JAVA ONLY.
+
+    When to call: when asked about Spring Boot migration readiness, javax vs jakarta imports,
+    or upgrading from Spring Boot 2.x to 3.x. Call this BEFORE get_spring_audit when
+    the goal is migration planning — not ongoing audit.
+    Do NOT call on non-Java repositories — returns readiness_score=100 with no findings.
+
+    Maps to: sourcecode migrate-check <repo_path> --min-severity <min_severity>
+    Returns: MigrationReport with schema_version, readiness_score (0–100; 100=ready to migrate),
+             blocking_count, estimated_effort_days, spring_boot_2_detected,
+             summary (total_findings, affected_files, by_severity, by_rule),
+             findings[], limitations, metadata.
+    findings fields: id, rule_id, severity, title, source_file, first_line,
+             imports_found, explanation, fix_hint.
+    Rules:
+      MIG-001 critical — javax.persistence (JPA, will not compile after migration)
+      MIG-002 high     — javax.servlet (Servlet API)
+      MIG-003 high     — javax.validation (Bean Validation)
+      MIG-004 high     — javax.transaction (TX API)
+      MIG-005 high     — extends WebSecurityConfigurerAdapter (removed in Spring Security 6)
+      MIG-006 medium   — javax.annotation (CDI annotations)
+      MIG-007 medium   — javax.inject (DI annotations)
+      MIG-008 medium   — javax.ws.rs (JAX-RS API)
+
+    repo_path: absolute path to the Java repository (default: current working directory).
+    min_severity: "low" (default) | "medium" | "high" | "critical" — filter threshold.
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        if min_severity not in ("critical", "high", "medium", "low"):
+            return _err(
+                f"Invalid min_severity '{min_severity}' — must be one of: critical, high, medium, low",
+                "INVALID_ARGUMENT",
+            )
+        repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
+        return _execute(["migrate-check", repo_path, "--min-severity", min_severity])
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
+@mcp.tool()
 def get_impact_chain(repo_path: str = ".", symbol: str = "", depth: int = 4) -> dict:
     """Spring impact-chain: systemic blast radius of a symbol with TX/SEC semantic enrichment. JAVA/SPRING ONLY.
 

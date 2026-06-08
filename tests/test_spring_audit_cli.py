@@ -360,3 +360,146 @@ class TestGetSpringAuditMCP:
         for scope in ("all", "tx", "security"):
             result = get_spring_audit(repo_path=str(non_java_repo), scope=scope)
             assert _mcp_success(result), f"scope={scope!r} should succeed"
+
+
+# ---------------------------------------------------------------------------
+# TestSpringAuditCIFlag — --ci exit code + --format github-comment
+# ---------------------------------------------------------------------------
+
+class TestSpringAuditCIFlag:
+
+    def test_ci_exits_1_when_findings(self, java_repo: Path):
+        result = invoke(["spring-audit", str(java_repo), "--ci"])
+        assert result.exit_code == 1
+
+    def test_ci_exits_0_when_no_findings(self, non_java_repo: Path):
+        result = invoke(["spring-audit", str(non_java_repo), "--ci"])
+        assert result.exit_code == 0
+
+    def test_ci_with_min_severity_high_exits_0_when_only_medium(self, tmp_path: Path):
+        # A repo that only triggers medium/low findings should exit 0 under --min-severity high
+        src = tmp_path / "src"
+        src.mkdir()
+        # Create a file that triggers no high/critical findings
+        (src / "Clean.java").write_text(
+            "package com.example;\npublic class Clean {}\n"
+        )
+        result = invoke(["spring-audit", str(tmp_path), "--ci", "--min-severity", "high"])
+        assert result.exit_code == 0
+
+    def test_ci_output_still_emitted_before_exit(self, java_repo: Path):
+        result = invoke(["spring-audit", str(java_repo), "--ci"])
+        # Output should still be valid JSON even when exit_code == 1
+        data = json.loads(result.output)
+        assert "findings" in data
+
+    def test_ci_with_output_file_writes_and_exits_1(self, java_repo: Path, tmp_path: Path):
+        out = tmp_path / "audit.json"
+        result = invoke(["spring-audit", str(java_repo), "--ci", "--output", str(out)])
+        assert result.exit_code == 1
+        assert out.exists()
+
+    def test_format_github_comment_exits_0_no_ci(self, non_java_repo: Path):
+        result = invoke(["spring-audit", str(non_java_repo), "--format", "github-comment"])
+        assert result.exit_code == 0
+
+    def test_format_github_comment_contains_header(self, non_java_repo: Path):
+        result = invoke(["spring-audit", str(non_java_repo), "--format", "github-comment"])
+        assert "Spring Audit" in result.output
+
+    def test_format_github_comment_no_findings_shows_checkmark(self, non_java_repo: Path):
+        result = invoke(["spring-audit", str(non_java_repo), "--format", "github-comment"])
+        assert "✅" in result.output
+
+    def test_format_github_comment_with_findings_shows_table(self, java_repo: Path):
+        result = invoke(["spring-audit", str(java_repo), "--format", "github-comment"])
+        assert result.exit_code == 0
+        assert "| Sev |" in result.output
+        assert "TX-001" in result.output
+
+    def test_format_github_comment_with_ci_exits_1_on_findings(self, java_repo: Path):
+        result = invoke(["spring-audit", str(java_repo), "--ci", "--format", "github-comment"])
+        assert result.exit_code == 1
+        assert "Spring Audit" in result.output
+
+    def test_format_github_comment_details_section(self, java_repo: Path):
+        result = invoke(["spring-audit", str(java_repo), "--format", "github-comment"])
+        assert "<details>" in result.output
+        assert "Finding details" in result.output
+
+    def test_invalid_format_exits_1(self, java_repo: Path):
+        result = invoke(["spring-audit", str(java_repo), "--format", "xml"])
+        assert result.exit_code == 1
+
+    def test_github_comment_output_file(self, java_repo: Path, tmp_path: Path):
+        out = tmp_path / "comment.md"
+        result = invoke([
+            "spring-audit", str(java_repo),
+            "--format", "github-comment",
+            "--output", str(out),
+        ])
+        assert result.exit_code == 0
+        content = out.read_text()
+        assert "Spring Audit" in content
+
+
+# ---------------------------------------------------------------------------
+# TestGetMigrationReadinessMCP — validation layer (no subprocess)
+# ---------------------------------------------------------------------------
+
+class TestGetMigrationReadinessMCP:
+
+    def test_invalid_repo_path_type(self):
+        from sourcecode.mcp.server import get_migration_readiness
+        result = get_migration_readiness(repo_path=123)  # type: ignore[arg-type]
+        assert _mcp_is_error(result)
+
+    def test_invalid_min_severity(self, tmp_path: Path):
+        from sourcecode.mcp.server import get_migration_readiness
+        result = get_migration_readiness(repo_path=str(tmp_path), min_severity="extreme")
+        assert _mcp_is_error(result)
+
+    def test_nonexistent_path(self, tmp_path: Path):
+        from sourcecode.mcp.server import get_migration_readiness
+        result = get_migration_readiness(repo_path=str(tmp_path / "no_such_dir"))
+        assert _mcp_is_error(result)
+
+    def test_valid_on_non_java_repo(self, non_java_repo: Path):
+        from sourcecode.mcp.server import get_migration_readiness
+        result = get_migration_readiness(repo_path=str(non_java_repo))
+        assert _mcp_success(result)
+
+    def test_valid_severities_accepted(self, non_java_repo: Path):
+        from sourcecode.mcp.server import get_migration_readiness
+        for sev in ("critical", "high", "medium", "low"):
+            result = get_migration_readiness(repo_path=str(non_java_repo), min_severity=sev)
+            assert _mcp_success(result), f"min_severity={sev!r} should succeed"
+
+    def test_returns_readiness_score(self, non_java_repo: Path):
+        from sourcecode.mcp.server import get_migration_readiness
+        result = get_migration_readiness(repo_path=str(non_java_repo))
+        assert _mcp_success(result)
+        data = result["data"] if isinstance(result, dict) else json.loads(result.content[0].text)["data"]
+        assert "readiness_score" in data
+        assert data["readiness_score"] == 100
+
+    def test_returns_schema_version(self, non_java_repo: Path):
+        from sourcecode.mcp.server import get_migration_readiness
+        result = get_migration_readiness(repo_path=str(non_java_repo))
+        data = result["data"] if isinstance(result, dict) else json.loads(result.content[0].text)["data"]
+        assert data.get("schema_version") == "1.0"
+
+    def test_java_repo_with_javax_findings(self, tmp_path: Path):
+        from sourcecode.mcp.server import get_migration_readiness
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "OldEntity.java").write_text(
+            "package com.example;\nimport javax.persistence.Entity;\n@Entity public class OldEntity {}\n"
+        )
+        result = get_migration_readiness(repo_path=str(tmp_path))
+        assert _mcp_success(result)
+        data = result["data"] if isinstance(result, dict) else json.loads(result.content[0].text)["data"]
+        assert data["readiness_score"] < 100
+        assert data["blocking_count"] > 0
+        rule_ids = {f["rule_id"] for f in data["findings"]}
+        assert "MIG-001" in rule_ids

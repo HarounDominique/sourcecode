@@ -1,0 +1,54 @@
+# Spring Audit CI gate — posts findings as a PR comment and fails the build
+# on any finding at or above --min-severity.
+#
+# Setup:
+#   1. pip install sourcecode  (or add to requirements-dev.txt)
+#   2. Copy this file to .github/workflows/spring-audit.yml
+#   3. Adjust --min-severity to taste (high recommended for initial rollout)
+#
+# Outputs:
+#   - Annotated PR comment with a Markdown findings table
+#   - Exit 1 (build failure) when violations are found
+
+name: Spring Audit
+
+on:
+  pull_request:
+    paths:
+      - "**/*.java"
+
+jobs:
+  spring-audit:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write   # needed for PR comment
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install sourcecode
+        run: pip install sourcecode
+
+      - name: Run Spring Audit
+        id: audit
+        run: |
+          sourcecode spring-audit . \
+            --min-severity high \
+            --format github-comment \
+            --output /tmp/spring-audit-comment.md \
+            --ci
+        # --ci causes exit 1 when findings exist → build fails
+        # Remove --ci (or raise --min-severity to critical) for advisory-only mode
+
+      - name: Post PR comment
+        if: always()   # post comment even when --ci triggers exit 1
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: /tmp/spring-audit-comment.md
+          edit-mode: replace

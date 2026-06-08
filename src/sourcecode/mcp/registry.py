@@ -1221,6 +1221,7 @@ _MCP_HIDDEN_CANONICAL_TOOLS: frozenset[str] = frozenset({
     # Listed here so validate_registry() skips CLI param-drift checks on the alias.
     "spring_audit",       # curated: repo_path + scope + min_severity only (strips output_path/format/copy)
     "impact_chain",       # curated: repo_path + symbol + depth + query_type with choices
+    "migrate_check",      # curated: repo_path + min_severity only (strips output_path/format/copy/ci)
     # MCP self-management (an agent is not the MCP client admin)
     "mcp_init",
     "mcp_serve",
@@ -1349,7 +1350,57 @@ query_type: "impact" (default) | "events"
         docstring_override=_IMPACT_CHAIN_DOC,
     )
 
-    return [spring_audit, impact_chain]
+    _MIGRATE_CHECK_DOC = """\
+Spring Boot 2→3 migration readiness: javax→jakarta namespace blockers. JAVA ONLY.
+
+When to call: when asked about Spring Boot migration readiness, javax vs jakarta imports,
+or upgrading from Spring Boot 2.x to 3.x. Use BEFORE get_spring_audit when the goal
+is migration planning rather than ongoing Spring semantic audit.
+Do NOT call on non-Java repositories — returns readiness_score=100 with no findings.
+
+Rules detected:
+  MIG-001 critical — javax.persistence imports (JPA; will not compile after migration)
+  MIG-002 high     — javax.servlet imports (Servlet API changed)
+  MIG-003 high     — javax.validation imports (Bean Validation changed)
+  MIG-004 high     — javax.transaction imports (TX API changed)
+  MIG-005 high     — extends WebSecurityConfigurerAdapter (removed in Spring Security 6)
+  MIG-006 medium   — javax.annotation imports (CDI annotations)
+  MIG-007 medium   — javax.inject imports (DI annotations)
+  MIG-008 medium   — javax.ws.rs imports (JAX-RS API)
+
+Returns: schema_version, readiness_score (0–100; 100=ready to migrate), blocking_count,
+  estimated_effort_days, spring_boot_2_detected, summary (total_findings, affected_files,
+  by_severity, by_rule), findings[], limitations, metadata.
+findings fields: id, rule_id, severity, title, source_file, first_line,
+  imports_found, explanation, fix_hint.
+
+repo_path: absolute path to the Java repository (default: current working directory).
+min_severity: "low" (default) | "medium" | "high" | "critical" — filter threshold.
+"""
+
+    migrate_check = _alias_spec(
+        "migrate_check",
+        "Spring Boot 2→3 migration readiness: javax→jakarta blockers. JAVA ONLY.",
+        ("migrate-check",),
+        (
+            ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True,
+                          help="Absolute path to the Java repository."),
+            ToolParamSpec("min_severity", "option", str, required=False, default="low",
+                          option_names=("--min-severity",), choices=("low", "medium", "high", "critical"),
+                          help="low (default) | medium | high | critical"),
+        ),
+        lambda inputs: [
+            "migrate-check",
+            str(inputs.get("repo_path", ".")),
+            "--min-severity", str(inputs.get("min_severity", "low")),
+        ],
+        supported_targets=("repo_path",),
+        unsupported_targets=("file_path",),
+        validator=validate_repo_path,
+        docstring_override=_MIGRATE_CHECK_DOC,
+    )
+
+    return [spring_audit, impact_chain, migrate_check]
 
 
 @lru_cache(maxsize=1)
