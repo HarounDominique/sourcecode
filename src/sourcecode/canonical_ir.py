@@ -244,11 +244,11 @@ def _route_to_canonical_endpoint(route: dict) -> CanonicalEndpoint:
     security_dict = route.get("security_annotations")
     security: Optional[CanonicalSecurity] = None
     if security_dict:
-        # Determine source_scope from inheritance_depth:
-        # depth=0 → annotation on method or class (method takes precedence)
-        # depth>0 → inherited from parent class
         depth = route.get("inheritance_depth") or 0
-        scope = "inherited" if depth > 0 else "method"
+        if depth > 0:
+            scope = "inherited"
+        else:
+            scope = security_dict.get("_scope", "method")
         security = CanonicalSecurity.from_policy_dict(security_dict, source_scope=scope)
 
     endpoint_id = CanonicalEndpoint.make_id(method, path, controller_class, handler_symbol)

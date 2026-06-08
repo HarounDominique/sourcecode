@@ -422,7 +422,7 @@ def run_migrate_check(
 
 def _detect_spring_boot_2(root: Path) -> bool:
     """Return True if any pom.xml or build.gradle declares spring-boot 2.x."""
-    _SB2 = re.compile(r"spring.boot[^\"'\n]*[\"']?2\.\d+", re.IGNORECASE)
+    _SB2 = re.compile(r"spring[-.]boot[^\"'\n]*[\"']?2\.\d+", re.IGNORECASE)
     for name in ("pom.xml", "build.gradle", "build.gradle.kts"):
         candidate = root / name
         try:

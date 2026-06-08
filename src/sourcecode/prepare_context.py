@@ -1034,6 +1034,12 @@ class TaskContextBuilder:
                 if g
             ]
 
+            _ris_key_deps = compact.get("key_dependencies") or []
+            # Fall through to full analysis if deps expected but RIS has none.
+            # RIS may have been built before dependency analysis was run on this repo.
+            if spec.enable_dependencies and not _ris_key_deps:
+                return None
+
             return TaskOutput(
                 task=task_name,
                 goal=spec.goal,
@@ -1043,7 +1049,7 @@ class TaskContextBuilder:
                 suspected_areas=[],
                 improvement_opportunities=[],
                 test_gaps=[],
-                key_dependencies=compact.get("key_dependencies") or [],
+                key_dependencies=_ris_key_deps,
                 code_notes_summary=None,
                 limitations=[],
                 confidence=compact.get("confidence") or compact.get("confidence_summary") or "high",
@@ -1303,7 +1309,20 @@ class TaskContextBuilder:
             from dataclasses import asdict
             from sourcecode.dependency_analyzer import DependencyAnalyzer
 
-            dep_records, dep_summary = DependencyAnalyzer().analyze(self.root)
+            _dep_analyzer = DependencyAnalyzer()
+            dep_records, dep_summary = _dep_analyzer.analyze(self.root)
+            # For multi-module repos (Maven/Gradle), root pom.xml is a parent POM
+            # with few deps. Per-workspace analysis finds the actual module deps.
+            if workspace_analysis.workspaces:
+                for _ws in workspace_analysis.workspaces:
+                    _ws_root = self.root / _ws.path
+                    if _ws_root.exists() and _ws_root.is_dir():
+                        try:
+                            _ws_deps, _ws_summary = _dep_analyzer.analyze(_ws_root)
+                            dep_records = dep_records + _ws_deps
+                            dep_summary.limitations.extend(_ws_summary.limitations)
+                        except Exception:
+                            pass
             primary_eco = stacks[0].stack if stacks else ""
             _direct_raw = [
                 d for d in dep_records

@@ -2543,6 +2543,7 @@ def _route_security_from_sym(
     for candidate in filter(None, [method_sym, class_sym]):
         result = _extract_from(candidate)
         if result is not None:
+            result["_scope"] = "class" if candidate is class_sym else "method"
             return result
     return None
 
