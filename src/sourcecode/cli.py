@@ -3912,7 +3912,8 @@ def spring_audit_cmd(
         )
         raise typer.Exit(code=1)
 
-    file_list = find_java_files(target)
+    _file_limitations: list[str] = []
+    file_list = find_java_files(target, limitations=_file_limitations)
     if not file_list:
         empty_result = SpringAuditResult(
             spring_detected=False,
@@ -3960,6 +3961,9 @@ def spring_audit_cmd(
             limitations=all_limitations,
             metadata=merged_meta,
         ).finalize()
+
+    if _file_limitations:
+        combined.limitations.extend(_file_limitations)
 
     # Populate git_head from repo HEAD — non-fatal.
     try:
@@ -4088,8 +4092,11 @@ def migrate_check_cmd(
         )
         raise typer.Exit(code=1)
 
-    file_list = find_java_files(target)
+    _file_limitations: list[str] = []
+    file_list = find_java_files(target, limitations=_file_limitations)
     report = run_migrate_check(file_list, target, min_severity=min_severity)
+    if _file_limitations:
+        report.limitations.extend(_file_limitations)
 
     if format == "text":
         output = report.to_text(min_severity=min_severity)

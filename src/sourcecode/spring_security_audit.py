@@ -418,12 +418,15 @@ class SecurityScanner:
         model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         all_findings: list[SpringFinding] = []
+        self._last_analysis_errors: list[str] = []
         for pattern in self.patterns:
             try:
                 found = _call_pattern_analyze(pattern, cir, tx_index, root, model)
                 all_findings.extend(found)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._last_analysis_errors.append(
+                    f"{pattern.pattern_id}: {type(exc).__name__}: {exc}"
+                )
         deduped = deduplicate_findings(all_findings)
         return sorted(deduped, key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.symbol))
 
@@ -475,16 +478,20 @@ def run_security_audit(
         or cir.metadata.get("security_model", "unknown") != "unknown"
     )
 
+    _sec_limitations = [
+        "SEC-001: only emitted for annotation_based security model",
+        "SEC-002: generic type detection is regex-based on extends edge signatures",
+        "SEC-003: only detects controllers visible via cir.endpoints",
+    ]
+    for _err in getattr(scanner, "_last_analysis_errors", []):
+        _sec_limitations.append(f"PATTERN_ERROR: {_err}")
+
     result = SpringAuditResult(
         repo_id=getattr(cir, "cir_hash", "")[:16],
         spring_detected=_spring_detected,
         scope="security",
         findings=findings,
-        limitations=[
-            "SEC-001: only emitted for annotation_based security model",
-            "SEC-002: generic type detection is regex-based on extends edge signatures",
-            "SEC-003: only detects controllers visible via cir.endpoints",
-        ],
+        limitations=_sec_limitations,
         metadata={
             "endpoints_analyzed": len(cir.endpoints),
             "security_model": cir.metadata.get("security_model", "unknown"),

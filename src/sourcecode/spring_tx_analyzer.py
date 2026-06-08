@@ -672,12 +672,15 @@ class TxPatternEngine:
         model: Optional[SpringSemanticModel] = None,
     ) -> list[SpringFinding]:
         all_findings: list[SpringFinding] = []
+        self._last_analysis_errors: list[str] = []
         for pattern in self.patterns:
             try:
                 found = _call_pattern_analyze(pattern, cir, tx_index, root, model)
                 all_findings.extend(found)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._last_analysis_errors.append(
+                    f"{pattern.pattern_id}: {type(exc).__name__}: {exc}"
+                )
         deduped = deduplicate_findings(all_findings)
         return sorted(deduped, key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.symbol))
 
@@ -721,15 +724,19 @@ def run_tx_audit(
 
     _spring_detected = tx_index.stats()["total"] > 0 or bool(model.bean_graph.beans)
 
+    _tx_limitations = [
+        "Self-invocation via this.method() not detected — requires AST-level analysis",
+        "Dynamic dispatch (interface/polymorphic calls) may produce incomplete call chains",
+    ]
+    for _err in getattr(engine, "_last_analysis_errors", []):
+        _tx_limitations.append(f"PATTERN_ERROR: {_err}")
+
     result = SpringAuditResult(
         repo_id=getattr(cir, "cir_hash", "")[:16],
         spring_detected=_spring_detected,
         scope="tx",
         findings=findings,
-        limitations=[
-            "Self-invocation via this.method() not detected — requires AST-level analysis",
-            "Dynamic dispatch (interface/polymorphic calls) may produce incomplete call chains",
-        ],
+        limitations=_tx_limitations,
         metadata={
             "symbols_analyzed": len(getattr(cir, "symbols", [])),
             "tx_boundaries_found": tx_index.stats()["total"],

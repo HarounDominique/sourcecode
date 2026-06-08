@@ -232,6 +232,8 @@ def _cap_mcp_output(tool_name: str, data: Any) -> Any:
 
 
 _DEFAULT_TESTS_TIMEOUT_MS = 15_000
+_DEFAULT_SPRING_AUDIT_TIMEOUT_MS = 120_000   # 2 min
+_DEFAULT_IMPACT_TIMEOUT_MS = 60_000          # 1 min
 
 # Regex for MINGW paths: /c/some/path → C:/some/path
 _MINGW_PATH_RE = re.compile(r"^/([a-zA-Z])(/.*)?$")
@@ -683,7 +685,23 @@ def get_spring_audit(repo_path: str = ".", scope: str = "all") -> dict:
         _path_err = _check_repo_path(repo_path)
         if _path_err is not None:
             return _path_err
-        result = _execute(["spring-audit", repo_path, "--scope", scope])
+        timeout_ms = int(os.environ.get("SOURCECODE_SPRING_AUDIT_TIMEOUT_MS", str(_DEFAULT_SPRING_AUDIT_TIMEOUT_MS)))
+        timeout_s = timeout_ms / 1000.0
+        _exec = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            _fut = _exec.submit(_execute, ["spring-audit", repo_path, "--scope", scope])
+            _done, _pending = concurrent.futures.wait([_fut], timeout=timeout_s)
+            if _pending:
+                _exec.shutdown(wait=False)
+                return _ok({
+                    "truncated": True,
+                    "truncated_reason": f"timeout_{timeout_s:.0f}s",
+                    "analysis": "timed out — repository may be too large for MCP transport",
+                    "suggestion": f"Increase SOURCECODE_SPRING_AUDIT_TIMEOUT_MS (current: {timeout_ms}ms) or run via CLI directly",
+                })
+            result = _fut.result()
+        finally:
+            _exec.shutdown(wait=True)
         if isinstance(result, dict) and result.get("success"):
             result = _ok(_cap_mcp_output("get_spring_audit", result.get("data")))
         return result
@@ -779,7 +797,23 @@ def get_impact_chain(repo_path: str = ".", symbol: str = "", depth: int = 4) -> 
         if _path_err is not None:
             return _path_err
         args = ["impact-chain", symbol.strip(), repo_path, "--depth", str(depth)]
-        return _execute(args)
+        timeout_ms = int(os.environ.get("SOURCECODE_IMPACT_TIMEOUT_MS", str(_DEFAULT_IMPACT_TIMEOUT_MS)))
+        timeout_s = timeout_ms / 1000.0
+        _exec = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            _fut = _exec.submit(_execute, args)
+            _done, _pending = concurrent.futures.wait([_fut], timeout=timeout_s)
+            if _pending:
+                _exec.shutdown(wait=False)
+                return _ok({
+                    "truncated": True,
+                    "truncated_reason": f"timeout_{timeout_s:.0f}s",
+                    "analysis": "timed out — repository may be too large for MCP transport",
+                    "suggestion": f"Increase SOURCECODE_IMPACT_TIMEOUT_MS (current: {timeout_ms}ms) or run via CLI directly",
+                })
+            return _fut.result()
+        finally:
+            _exec.shutdown(wait=True)
     except Exception as exc:
         return _err(
             f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
@@ -1196,7 +1230,23 @@ def get_impact_context(repo_path: str = ".", target: str = "", depth: int = 4) -
         if _path_err is not None:
             return _path_err
         args = ["impact", target.strip(), repo_path, "--depth", str(depth)]
-        return _execute(args)
+        timeout_ms = int(os.environ.get("SOURCECODE_IMPACT_TIMEOUT_MS", str(_DEFAULT_IMPACT_TIMEOUT_MS)))
+        timeout_s = timeout_ms / 1000.0
+        _exec = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            _fut = _exec.submit(_execute, args)
+            _done, _pending = concurrent.futures.wait([_fut], timeout=timeout_s)
+            if _pending:
+                _exec.shutdown(wait=False)
+                return _ok({
+                    "truncated": True,
+                    "truncated_reason": f"timeout_{timeout_s:.0f}s",
+                    "analysis": "timed out — repository may be too large for MCP transport",
+                    "suggestion": f"Increase SOURCECODE_IMPACT_TIMEOUT_MS (current: {timeout_ms}ms) or run via CLI directly",
+                })
+            return _fut.result()
+        finally:
+            _exec.shutdown(wait=True)
     except Exception as exc:
         return _err(
             f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
@@ -1317,9 +1367,22 @@ def _finalize_mcp_registry() -> None:
             structured_output=False,
         )
 
-    drift = validate_registry()
-    if drift:
-        raise RuntimeError(f"MCP registry drift detected: {drift}")
+    try:
+        drift = validate_registry()
+        if drift:
+            import warnings
+            warnings.warn(
+                f"MCP registry drift detected — server running with potential tool mismatch: {drift}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    except Exception as _reg_exc:
+        import warnings
+        warnings.warn(
+            f"MCP registry validation failed — server starting in degraded mode: {_reg_exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 _finalize_mcp_registry()

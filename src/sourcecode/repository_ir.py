@@ -3312,11 +3312,13 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
     }
 
 
-def find_java_files(root: Path, *, max_files: int = 8000) -> list[str]:
+def find_java_files(root: Path, *, max_files: int = 8000, limitations: list[str] | None = None) -> list[str]:
     """Return relative paths to Java files under root, excluding test dirs and vendor."""
     results: list[str] = []
+    _capped = False
     for p in sorted(root.rglob("*.java")):
         if len(results) >= max_files:
+            _capped = True
             break
         try:
             rel = str(p.relative_to(root)).replace("\\", "/")
@@ -3334,6 +3336,10 @@ def find_java_files(root: Path, *, max_files: int = 8000) -> list[str]:
         if any(f in rel for f in ("/admin-client/", "/rest-client/", "/client-api/", "/api-client/")):
             continue
         results.append(rel)
+    if _capped and limitations is not None:
+        limitations.append(
+            f"MAX_JAVA_FILES_REACHED: scanned {max_files} files — repository likely has more"
+        )
     return results
 
 

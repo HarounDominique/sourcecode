@@ -1148,7 +1148,12 @@ class DependencyAnalyzer:
                 submodule_records: list[DependencyRecord] = []
                 submodule_limitations: list[str] = []
                 seen_submodule_deps: set[str] = set()
-                for mod_elem in list(modules_elem.findall(f"{ns}module"))[:5]:
+                _all_modules = list(modules_elem.findall(f"{ns}module"))
+                if len(_all_modules) > 5:
+                    submodule_limitations.append(
+                        f"MAX_SUBMODULES_REACHED: scanned 5 of {len(_all_modules)} declared Maven submodules"
+                    )
+                for mod_elem in _all_modules[:5]:
                     mod_name = (mod_elem.text or "").strip()
                     if not mod_name:
                         continue
