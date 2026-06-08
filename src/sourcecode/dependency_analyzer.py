@@ -1142,6 +1142,73 @@ class DependencyAnalyzer:
         records: list[DependencyRecord] = []
         deps_elem = root_elem.find(f"{ns}dependencies")
         if deps_elem is None:
+            # Multi-module aggregator POM: scan up to 5 declared submodule pom.xml files.
+            modules_elem = root_elem.find(f"{ns}modules")
+            if modules_elem is not None:
+                submodule_records: list[DependencyRecord] = []
+                submodule_limitations: list[str] = []
+                seen_submodule_deps: set[str] = set()
+                for mod_elem in list(modules_elem.findall(f"{ns}module"))[:5]:
+                    mod_name = (mod_elem.text or "").strip()
+                    if not mod_name:
+                        continue
+                    sub_pom = root / mod_name / "pom.xml"
+                    if not sub_pom.exists():
+                        continue
+                    try:
+                        sub_tree = ET.parse(sub_pom)
+                    except (ET.ParseError, OSError):
+                        continue
+                    sub_root = sub_tree.getroot()
+                    sub_ns_match = re.match(r"\{[^}]+\}", sub_root.tag)
+                    sub_ns = sub_ns_match.group(0) if sub_ns_match else ""
+                    sub_props = self._parse_maven_properties(sub_root, sub_ns)
+                    sub_dm = self._parse_dependency_management(sub_root, sub_ns, sub_props)
+                    # Inherit parent properties for version resolution
+                    for k, v in properties.items():
+                        sub_props.setdefault(k, v)
+                    for k, v in dm_versions.items():
+                        sub_dm.setdefault(k, v)
+                    sub_deps_elem = sub_root.find(f"{sub_ns}dependencies")
+                    if sub_deps_elem is None:
+                        continue
+                    for dep in sub_deps_elem.findall(f"{sub_ns}dependency"):
+                        gid = (dep.findtext(f"{sub_ns}groupId") or "").strip()
+                        aid = (dep.findtext(f"{sub_ns}artifactId") or "").strip()
+                        if not gid or not aid:
+                            continue
+                        dep_key = f"{gid}:{aid}"
+                        if dep_key in seen_submodule_deps:
+                            continue
+                        seen_submodule_deps.add(dep_key)
+                        ver_raw = (dep.findtext(f"{sub_ns}version") or "").strip() or None
+                        declared = self._resolve_maven_version(ver_raw, sub_props)
+                        if declared is None:
+                            declared = sub_dm.get(dep_key)
+                        scope_text = (dep.findtext(f"{sub_ns}scope") or "compile").strip().lower()
+                        if scope_text == "test":
+                            scope = "dev"
+                        elif scope_text == "provided":
+                            scope = "provided"
+                        else:
+                            scope = "direct"
+                        resolved_version = None
+                        if declared is None and parent_version:
+                            if gid == "org.springframework.boot":
+                                resolved_version = parent_version
+                            elif gid == "org.springframework.security" and "spring-security.version" in sub_props:
+                                resolved_version = sub_props["spring-security.version"]
+                        submodule_records.append(DependencyRecord(
+                            name=dep_key,
+                            ecosystem="java",
+                            scope=scope,
+                            declared_version=declared,
+                            resolved_version=resolved_version,
+                            source="manifest",
+                            manifest_path=f"{mod_name}/pom.xml",
+                        ))
+                if submodule_records:
+                    return submodule_records, submodule_limitations
             return [], ["java: pom.xml has no <dependencies> block"]
 
         for dep in deps_elem.findall(f"{ns}dependency"):

@@ -192,6 +192,45 @@ def _execute(args: list[str]) -> dict | CallToolResult:
     return _ok(result)
 
 
+# Per-tool character budgets (4 chars ≈ 1 token; keeps Cursor under its 10k token limit).
+# List fields are trimmed front-to-back until output fits.
+_MCP_CHAR_BUDGETS: dict[str, int] = {
+    "get_agent_context":       38_000,
+    "get_spring_audit":        38_000,
+    "get_migration_readiness": 38_000,
+}
+_MCP_TRIM_FIELDS = (
+    "findings", "relevant_files", "key_dependencies",
+    "entry_points", "limitations", "gaps", "code_notes",
+)
+
+
+def _cap_mcp_output(tool_name: str, data: Any) -> Any:
+    """Trim list fields in data until JSON serialisation fits within the tool's char budget."""
+    budget = _MCP_CHAR_BUDGETS.get(tool_name)
+    if not budget or not isinstance(data, dict):
+        return data
+    if len(json.dumps(data, default=str)) <= budget:
+        return data
+    result = dict(data)
+    for field in _MCP_TRIM_FIELDS:
+        if field not in result or not isinstance(result[field], list):
+            continue
+        items = list(result[field])
+        while items and len(json.dumps(result, default=str)) > budget:
+            items = items[:-1]
+            result[field] = items
+        if len(json.dumps(result, default=str)) <= budget:
+            break
+    if len(json.dumps(result, default=str)) > budget:
+        result["_mcp_truncated"] = True
+        result["_mcp_truncation_note"] = (
+            f"Output capped at ~{budget // 4}k tokens for MCP compatibility. "
+            "Use CLI directly for full output."
+        )
+    return result
+
+
 _DEFAULT_TESTS_TIMEOUT_MS = 15_000
 
 # Regex for MINGW paths: /c/some/path → C:/some/path
@@ -568,7 +607,10 @@ def get_agent_context(repo_path: str = ".", git_context: bool = False) -> dict:
         args = [repo_path, "--agent"]
         if git_context:
             args.append("--git-context")
-        return _execute(args)
+        result = _execute(args)
+        if isinstance(result, dict) and result.get("success"):
+            result = _ok(_cap_mcp_output("get_agent_context", result.get("data")))
+        return result
     except Exception as exc:
         return _err(
             f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
@@ -641,7 +683,10 @@ def get_spring_audit(repo_path: str = ".", scope: str = "all") -> dict:
         _path_err = _check_repo_path(repo_path)
         if _path_err is not None:
             return _path_err
-        return _execute(["spring-audit", repo_path, "--scope", scope])
+        result = _execute(["spring-audit", repo_path, "--scope", scope])
+        if isinstance(result, dict) and result.get("success"):
+            result = _ok(_cap_mcp_output("get_spring_audit", result.get("data")))
+        return result
     except Exception as exc:
         return _err(
             f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
@@ -691,7 +736,10 @@ def get_migration_readiness(repo_path: str = ".", min_severity: str = "low") -> 
         _path_err = _check_repo_path(repo_path)
         if _path_err is not None:
             return _path_err
-        return _execute(["migrate-check", repo_path, "--min-severity", min_severity])
+        result = _execute(["migrate-check", repo_path, "--min-severity", min_severity])
+        if isinstance(result, dict) and result.get("success"):
+            result = _ok(_cap_mcp_output("get_migration_readiness", result.get("data")))
+        return result
     except Exception as exc:
         return _err(
             f"Internal error: {type(exc).__name__}: {exc} — repo_path recibido: {_raw}",
