@@ -1,6 +1,8 @@
 """Tests for migrate_check — Spring Boot 2→3 migration readiness scanner."""
 from __future__ import annotations
 
+import json
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -9,7 +11,14 @@ from sourcecode.migrate_check import (
     MigrationFinding,
     MigrationReport,
     _scan_file,
+    _scan_xml_file,
+    _scan_dep_file,
+    _find_xml_config_files,
+    _find_build_files,
+    _is_spring_xml_candidate,
     _ALL_RULES,
+    _XML_RULES,
+    _DEP_RULES,
     run_migrate_check,
     SEVERITY_ORDER,
 )
@@ -701,3 +710,432 @@ class TestFullFixtureScanExtended:
         )
         findings = _scan_file(source, "Modern.java", _ALL_RULES)
         assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# New Java source rules: CORBA, Thread, ReflectionFactory
+# ---------------------------------------------------------------------------
+
+class TestCorbaRule:
+    def test_detects_org_omg_import(self) -> None:
+        source = "import org.omg.CORBA.Object;\nimport org.omg.PortableServer.Servant;\n"
+        findings = _scan_file(source, "CORBAService.java", _ALL_RULES)
+        assert any(f.rule_id == "MIG-023" for f in findings)
+
+    def test_detects_javax_rmi_corba(self) -> None:
+        source = "import javax.rmi.CORBA.Tie;\n"
+        findings = _scan_file(source, "RMIService.java", _ALL_RULES)
+        assert any(f.rule_id == "MIG-023" for f in findings)
+
+    def test_no_fp_javax_annotation(self) -> None:
+        source = "import javax.annotation.PostConstruct;\n"
+        findings = _scan_file(source, "Bean.java", _ALL_RULES)
+        assert not any(f.rule_id == "MIG-023" for f in findings)
+
+    def test_no_fp_jakarta(self) -> None:
+        source = "import jakarta.enterprise.context.ApplicationScoped;\n"
+        findings = _scan_file(source, "Bean.java", _ALL_RULES)
+        assert not any(f.rule_id == "MIG-023" for f in findings)
+
+    def test_severity_is_critical(self) -> None:
+        source = "import org.omg.CORBA.Object;\n"
+        findings = _scan_file(source, "C.java", _ALL_RULES)
+        corba = next(f for f in findings if f.rule_id == "MIG-023")
+        assert corba.severity == "critical"
+
+    def test_migration_target_java_11(self) -> None:
+        source = "import org.omg.CosNaming.NamingContext;\n"
+        findings = _scan_file(source, "C.java", _ALL_RULES)
+        corba = next(f for f in findings if f.rule_id == "MIG-023")
+        assert corba.migration_target == "java_11"
+
+
+class TestThreadRule:
+    def test_detects_thread_stop(self) -> None:
+        source = "Thread myThread = new Thread(r);\nmyThread.stop();\n"
+        findings = _scan_file(source, "X.java", _ALL_RULES)
+        assert any(f.rule_id == "MIG-024" for f in findings)
+
+    def test_detects_worker_thread_suspend(self) -> None:
+        source = "workerThread.suspend();\n"
+        findings = _scan_file(source, "X.java", _ALL_RULES)
+        assert any(f.rule_id == "MIG-024" for f in findings)
+
+    def test_detects_thread_currentthread_stop(self) -> None:
+        source = "Thread.currentThread().stop();\n"
+        findings = _scan_file(source, "X.java", _ALL_RULES)
+        assert any(f.rule_id == "MIG-024" for f in findings)
+
+    def test_no_fp_server_stop(self) -> None:
+        source = "server.stop();\nservice.stop();\n"
+        findings = _scan_file(source, "X.java", _ALL_RULES)
+        assert not any(f.rule_id == "MIG-024" for f in findings)
+
+    def test_no_fp_thread_pool_stop(self) -> None:
+        source = "threadPool.stop();\nexecutorPool.stop();\n"
+        findings = _scan_file(source, "X.java", _ALL_RULES)
+        assert not any(f.rule_id == "MIG-024" for f in findings)
+
+    def test_detects_resume_method(self) -> None:
+        source = "backgroundThread.resume();\n"
+        findings = _scan_file(source, "X.java", _ALL_RULES)
+        assert any(f.rule_id == "MIG-024" for f in findings)
+
+
+class TestReflectionFactoryRule:
+    def test_detects_import(self) -> None:
+        source = "import sun.reflect.ReflectionFactory;\n"
+        findings = _scan_file(source, "R.java", _ALL_RULES)
+        assert any(f.rule_id == "MIG-025" for f in findings)
+
+    def test_detects_getreflectionfactory_call(self) -> None:
+        source = "ReflectionFactory rf = ReflectionFactory.getReflectionFactory();\n"
+        findings = _scan_file(source, "R.java", _ALL_RULES)
+        assert any(f.rule_id == "MIG-025" for f in findings)
+
+    def test_detects_private_lookup_in(self) -> None:
+        source = "MethodHandles.privateLookupIn(Foo.class, MethodHandles.lookup());\n"
+        findings = _scan_file(source, "R.java", _ALL_RULES)
+        assert any(f.rule_id == "MIG-025" for f in findings)
+
+    def test_severity_is_medium(self) -> None:
+        source = "import sun.reflect.ReflectionFactory;\n"
+        findings = _scan_file(source, "R.java", _ALL_RULES)
+        r25 = next(f for f in findings if f.rule_id == "MIG-025")
+        assert r25.severity == "medium"
+
+
+# ---------------------------------------------------------------------------
+# XML scanning rules
+# ---------------------------------------------------------------------------
+
+class TestXmlCandidateFilter:
+    def test_web_xml_matches(self) -> None:
+        assert _is_spring_xml_candidate("web.xml")
+
+    def test_applicationContext_matches(self) -> None:
+        assert _is_spring_xml_candidate("applicationContext.xml")
+
+    def test_applicationContext_dash_matches(self) -> None:
+        assert _is_spring_xml_candidate("applicationContext-servlet.xml")
+
+    def test_security_xml_matches(self) -> None:
+        assert _is_spring_xml_candidate("bl-applicationContext-test-security.xml")
+
+    def test_spring_context_matches(self) -> None:
+        assert _is_spring_xml_candidate("spring-context.xml")
+
+    def test_pom_xml_not_candidate(self) -> None:
+        assert not _is_spring_xml_candidate("pom.xml")
+
+    def test_random_xml_not_candidate(self) -> None:
+        assert not _is_spring_xml_candidate("report.xml")
+        assert not _is_spring_xml_candidate("checkstyle.xml")
+
+
+class TestXmlRule030:
+    """MIG-030: javax.* class attribute in Spring XML bean definitions."""
+
+    def test_detects_class_javax_persistence(self) -> None:
+        xml = '<bean class="javax.persistence.EntityManagerFactory"/>'
+        findings = _scan_xml_file(xml, "appCtx.xml")
+        assert any(f.rule_id == "MIG-030" for f in findings)
+
+    def test_detects_class_javax_validation(self) -> None:
+        xml = '<bean class="javax.validation.Validator"/>'
+        findings = _scan_xml_file(xml, "appCtx.xml")
+        assert any(f.rule_id == "MIG-030" for f in findings)
+
+    def test_detects_type_javax(self) -> None:
+        xml = '<property type="javax.transaction.UserTransaction" />'
+        findings = _scan_xml_file(xml, "appCtx.xml")
+        assert any(f.rule_id == "MIG-030" for f in findings)
+
+    def test_no_fp_jakarta_class(self) -> None:
+        xml = '<bean class="jakarta.persistence.EntityManagerFactory"/>'
+        findings = _scan_xml_file(xml, "appCtx.xml")
+        assert not any(f.rule_id == "MIG-030" for f in findings)
+
+    def test_no_fp_spring_class(self) -> None:
+        xml = '<bean class="org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean"/>'
+        findings = _scan_xml_file(xml, "appCtx.xml")
+        assert not any(f.rule_id == "MIG-030" for f in findings)
+
+    def test_severity_high(self) -> None:
+        xml = '<bean class="javax.validation.Validator"/>'
+        findings = _scan_xml_file(xml, "appCtx.xml")
+        r = next(f for f in findings if f.rule_id == "MIG-030")
+        assert r.severity == "high"
+
+
+class TestXmlRule031:
+    """MIG-031: Spring Security XML old auto-config or old schema."""
+
+    def test_detects_auto_config_true(self) -> None:
+        xml = '<sec:http auto-config="true"><sec:intercept-url /></sec:http>'
+        findings = _scan_xml_file(xml, "security.xml")
+        assert any(f.rule_id == "MIG-031" for f in findings)
+
+    def test_detects_security_namespace_auto_config(self) -> None:
+        xml = '<security:http auto-config="true">'
+        findings = _scan_xml_file(xml, "security.xml")
+        assert any(f.rule_id == "MIG-031" for f in findings)
+
+    def test_detects_old_security_xsd_version3(self) -> None:
+        xml = 'xsi:schemaLocation="... spring-security-3.2.xsd"'
+        findings = _scan_xml_file(xml, "security.xml")
+        assert any(f.rule_id == "MIG-031" for f in findings)
+
+    def test_detects_old_security_xsd_version5(self) -> None:
+        xml = 'http://www.springframework.org/schema/security/spring-security-5.8.xsd'
+        findings = _scan_xml_file(xml, "security.xml")
+        assert any(f.rule_id == "MIG-031" for f in findings)
+
+    def test_no_fp_modern_security_no_version(self) -> None:
+        xml = 'xsi:schemaLocation="... spring-security.xsd"'
+        findings = _scan_xml_file(xml, "security.xml")
+        assert not any(f.rule_id == "MIG-031" for f in findings)
+
+    def test_openrewrite_recipe_present(self) -> None:
+        xml = '<sec:http auto-config="true"/>'
+        findings = _scan_xml_file(xml, "security.xml")
+        r = next(f for f in findings if f.rule_id == "MIG-031")
+        assert r.openrewrite_recipe is not None
+
+
+class TestXmlRule032:
+    """MIG-032: web.xml with old javax servlet namespace."""
+
+    def test_detects_java_sun_namespace(self) -> None:
+        xml = 'xmlns="http://java.sun.com/xml/ns/javaee"'
+        findings = _scan_xml_file(xml, "web.xml")
+        assert any(f.rule_id == "MIG-032" for f in findings)
+
+    def test_detects_xmlns_jcp_namespace(self) -> None:
+        xml = 'xmlns="http://xmlns.jcp.org/xml/ns/javaee"'
+        findings = _scan_xml_file(xml, "web.xml")
+        assert any(f.rule_id == "MIG-032" for f in findings)
+
+    def test_no_fp_jakarta_namespace(self) -> None:
+        xml = 'xmlns="https://jakarta.ee/xml/ns/jakartaee"'
+        findings = _scan_xml_file(xml, "web.xml")
+        assert not any(f.rule_id == "MIG-032" for f in findings)
+
+    def test_severity_high(self) -> None:
+        xml = 'xmlns="http://java.sun.com/xml/ns/javaee"'
+        findings = _scan_xml_file(xml, "web.xml")
+        r = next(f for f in findings if f.rule_id == "MIG-032")
+        assert r.severity == "high"
+
+    def test_first_line_accurate(self) -> None:
+        xml = '<?xml version="1.0"?>\n<web-app xmlns="http://java.sun.com/xml/ns/javaee">'
+        findings = _scan_xml_file(xml, "web.xml")
+        r = next(f for f in findings if f.rule_id == "MIG-032")
+        assert r.first_line == 2
+
+
+# ---------------------------------------------------------------------------
+# Dependency scanning rules
+# ---------------------------------------------------------------------------
+
+class TestDepRule040SpringFox:
+    def test_maven_detects_springfox(self) -> None:
+        pom = "<groupId>io.springfox</groupId>\n<artifactId>springfox-swagger2</artifactId>"
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert any(f.rule_id == "MIG-040" for f in findings)
+
+    def test_gradle_detects_springfox(self) -> None:
+        gradle = "implementation 'io.springfox:springfox-swagger2:3.0.0'"
+        findings = _scan_dep_file(gradle, "build.gradle")
+        assert any(f.rule_id == "MIG-040" for f in findings)
+
+    def test_no_fp_springdoc(self) -> None:
+        pom = "<groupId>org.springdoc</groupId>\n<artifactId>springdoc-openapi</artifactId>"
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert not any(f.rule_id == "MIG-040" for f in findings)
+
+    def test_severity_high(self) -> None:
+        pom = "<groupId>io.springfox</groupId>"
+        findings = _scan_dep_file(pom, "pom.xml")
+        r = next(f for f in findings if f.rule_id == "MIG-040")
+        assert r.severity == "high"
+
+
+class TestDepRule041Hibernate5:
+    def test_maven_detects_hibernate5(self) -> None:
+        pom = (
+            "<dependency>\n"
+            "  <groupId>org.hibernate</groupId>\n"
+            "  <artifactId>hibernate-core</artifactId>\n"
+            "  <version>5.6.15.Final</version>\n"
+            "</dependency>"
+        )
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert any(f.rule_id == "MIG-041" for f in findings)
+
+    def test_gradle_detects_hibernate5(self) -> None:
+        gradle = "implementation 'org.hibernate:hibernate-core:5.6.15.Final'"
+        findings = _scan_dep_file(gradle, "build.gradle")
+        assert any(f.rule_id == "MIG-041" for f in findings)
+
+    def test_no_fp_hibernate6(self) -> None:
+        pom = (
+            "<dependency>\n"
+            "  <groupId>org.hibernate</groupId>\n"
+            "  <artifactId>hibernate-core</artifactId>\n"
+            "  <version>6.4.4.Final</version>\n"
+            "</dependency>"
+        )
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert not any(f.rule_id == "MIG-041" for f in findings)
+
+    def test_no_fp_hibernate_core_jakarta(self) -> None:
+        # hibernate-core-jakarta (a transitional artifact) should not match
+        pom = (
+            "<dependency>\n"
+            "  <artifactId>hibernate-core-jakarta</artifactId>\n"
+            "  <version>5.6.15.Final</version>\n"
+            "</dependency>"
+        )
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert not any(f.rule_id == "MIG-041" for f in findings)
+
+
+class TestDepRule042ByteBuddy:
+    def test_maven_detects_bytebuddy_111(self) -> None:
+        pom = (
+            "<dependency>\n"
+            "  <groupId>net.bytebuddy</groupId>\n"
+            "  <artifactId>byte-buddy</artifactId>\n"
+            "  <version>1.11.22</version>\n"
+            "</dependency>"
+        )
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert any(f.rule_id == "MIG-042" for f in findings)
+
+    def test_maven_detects_bytebuddy_single_digit_minor(self) -> None:
+        pom = (
+            "<dependency>\n"
+            "  <groupId>net.bytebuddy</groupId>\n"
+            "  <artifactId>byte-buddy</artifactId>\n"
+            "  <version>1.9.0</version>\n"
+            "</dependency>"
+        )
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert any(f.rule_id == "MIG-042" for f in findings)
+
+    def test_no_fp_bytebuddy_114(self) -> None:
+        pom = (
+            "<dependency>\n"
+            "  <groupId>net.bytebuddy</groupId>\n"
+            "  <artifactId>byte-buddy</artifactId>\n"
+            "  <version>1.14.3</version>\n"
+            "</dependency>"
+        )
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert not any(f.rule_id == "MIG-042" for f in findings)
+
+
+class TestDepRule043EhCache2:
+    def test_maven_detects_ehcache2(self) -> None:
+        pom = "<groupId>net.sf.ehcache</groupId>\n<artifactId>ehcache</artifactId>"
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert any(f.rule_id == "MIG-043" for f in findings)
+
+    def test_no_fp_ehcache3(self) -> None:
+        pom = "<groupId>org.ehcache</groupId>\n<artifactId>ehcache</artifactId>"
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert not any(f.rule_id == "MIG-043" for f in findings)
+
+
+# ---------------------------------------------------------------------------
+# run_migrate_check integration with XML + dep scanning
+# ---------------------------------------------------------------------------
+
+class TestRunMigrateCheckXmlDep:
+    def test_xml_and_dep_scanned_in_metadata(self, tmp_path: Path) -> None:
+        # Create a minimal repo with one Java file, one web.xml, one pom.xml
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "Main.java").write_text(
+            "import javax.persistence.Entity;\npublic class Main {}\n"
+        )
+        web_xml = (
+            '<?xml version="1.0"?>\n'
+            '<web-app xmlns="http://java.sun.com/xml/ns/javaee" version="3.1">'
+            '</web-app>'
+        )
+        webapp = tmp_path / "src" / "main" / "webapp" / "WEB-INF"
+        webapp.mkdir(parents=True)
+        (webapp / "web.xml").write_text(web_xml)
+        (tmp_path / "pom.xml").write_text(
+            "<project><groupId>io.springfox</groupId></project>"
+        )
+
+        report = run_migrate_check(["src/Main.java"], tmp_path)
+
+        assert report.metadata["xml_files_scanned"] >= 1
+        assert report.metadata["build_files_scanned"] >= 1
+        rule_ids = {f.rule_id for f in report.findings}
+        assert "MIG-001" in rule_ids   # javax.persistence in Java file
+        assert "MIG-032" in rule_ids   # old namespace in web.xml
+        assert "MIG-040" in rule_ids   # springfox in pom.xml
+
+    def test_schema_version_is_1_2(self, tmp_path: Path) -> None:
+        report = run_migrate_check([], tmp_path)
+        assert report.schema_version == "1.2"
+
+    def test_to_dict_contains_schema_version(self, tmp_path: Path) -> None:
+        report = run_migrate_check([], tmp_path)
+        d = report.to_dict()
+        assert d["schema_version"] == "1.2"
+
+    def test_modern_repo_still_100(self, tmp_path: Path) -> None:
+        # A clean Spring Boot 3 repo: Jakarta imports, modern namespace
+        (tmp_path / "Main.java").write_text(
+            "import jakarta.persistence.Entity;\npublic class Main {}\n"
+        )
+        modern_pom = (
+            "<project>\n"
+            "  <parent>\n"
+            "    <groupId>org.springframework.boot</groupId>\n"
+            "    <artifactId>spring-boot-starter-parent</artifactId>\n"
+            "    <version>3.2.0</version>\n"
+            "  </parent>\n"
+            "</project>\n"
+        )
+        (tmp_path / "pom.xml").write_text(modern_pom)
+        report = run_migrate_check(["Main.java"], tmp_path)
+        assert report.readiness_score == 100
+        assert report.findings == []
+
+
+# ---------------------------------------------------------------------------
+# auto_fix_available field in to_dict
+# ---------------------------------------------------------------------------
+
+class TestAutoFixAvailable:
+    def test_rule_with_recipe_has_auto_fix_true(self) -> None:
+        f = MigrationFinding(
+            id="x", rule_id="MIG-001", severity="critical", title="t",
+            source_file="F.java", first_line=1,
+            openrewrite_recipe="org.openrewrite.java.migrate.jakarta.JavaxPersistenceToJakartaPersistence",
+        )
+        d = f.to_dict()
+        assert d["auto_fix_available"] is True
+        assert "manual_migration" not in d
+
+    def test_rule_without_recipe_has_auto_fix_false(self) -> None:
+        f = MigrationFinding(
+            id="x", rule_id="MIG-010", severity="critical", title="t",
+            source_file="F.java", first_line=1,
+        )
+        d = f.to_dict()
+        assert d["auto_fix_available"] is False
+        assert d["manual_migration"] is True
+
+    def test_mig015_finalize_has_recipe(self) -> None:
+        source = "protected void finalize() throws Throwable {}"
+        findings = _scan_file(source, "X.java", _ALL_RULES)
+        r = next(f for f in findings if f.rule_id == "MIG-015")
+        assert r.openrewrite_recipe == "org.openrewrite.java.migrate.RemoveFinalizeMethod"
+        assert r.to_dict()["auto_fix_available"] is True

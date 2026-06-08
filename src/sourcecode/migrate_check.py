@@ -1,14 +1,19 @@
 """migrate_check.py — Java 8/Spring Boot 2 migration readiness checker.
 
-Scans Java source files for patterns that must be addressed when migrating:
+Scans Java source files, Spring XML config, and build descriptors for patterns
+that must be addressed when migrating:
   - Spring Boot 2 → 3 (javax → jakarta, Spring Security 6)
   - Java 8 → 17 / 21 (SecurityManager, Nashorn, Unsafe, reflection, etc.)
+  - XML Spring config (applicationContext.xml, web.xml, security XML)
+  - Dependency incompatibilities (SpringFox, Hibernate 5, ByteBuddy old)
 
 Entry point: run_migrate_check(file_paths, root) → MigrationReport
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -17,7 +22,7 @@ from typing import Optional
 
 
 # ---------------------------------------------------------------------------
-# Rule catalogue
+# Rule catalogue — Java source rules
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -27,11 +32,11 @@ class _Rule:
     title: str
     explanation: str
     fix_hint: str
-    migration_target: str = "spring_boot_3"   # jakarta | spring_security_6 | java_11 | java_15 | java_17 | java_9_plus | java_18_plus
-    openrewrite_recipe: Optional[str] = None  # Official OpenRewrite recipe ID, if one exists
-    import_pattern: Optional[re.Pattern] = None   # matches the import statement
-    extends_pattern: Optional[re.Pattern] = None  # matches an extends clause
-    code_pattern: Optional[re.Pattern] = None     # matches arbitrary code anywhere in the file
+    migration_target: str = "spring_boot_3"
+    openrewrite_recipe: Optional[str] = None
+    import_pattern: Optional[re.Pattern] = None
+    extends_pattern: Optional[re.Pattern] = None
+    code_pattern: Optional[re.Pattern] = None
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +220,7 @@ _SPRING_SECURITY_RULES: list[_Rule] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Java 11 — APIs removed from the JDK (must add as explicit deps)
+# Java 11 — APIs removed from the JDK
 # ---------------------------------------------------------------------------
 
 _JAVA_11_RULES: list[_Rule] = [
@@ -252,6 +257,28 @@ _JAVA_11_RULES: list[_Rule] = [
         openrewrite_recipe=None,
         import_pattern=re.compile(r"^[ \t]*import\s+(javax\.xml\.ws[^;]+);", re.MULTILINE),
     ),
+    _Rule(
+        id="MIG-023",
+        severity="critical",
+        title="CORBA APIs (org.omg.* / javax.rmi.*) — removed from JDK in Java 11",
+        explanation=(
+            "The CORBA APIs (org.omg.* and javax.rmi.CORBA / javax.rmi.ssl) were deprecated "
+            "in Java 9 (JEP 289) and removed from the JDK in Java 11 (JEP 320). Applications "
+            "importing these packages will fail to compile or run on Java 11+ unless the "
+            "'org.glassfish.corba:glassfish-corba-omgapi' artifact is added explicitly."
+        ),
+        fix_hint=(
+            "Remove CORBA usage where possible — CORBA is effectively dead technology. "
+            "If CORBA interop is unavoidable, add 'org.glassfish.corba:glassfish-corba-omgapi' "
+            "as an explicit Maven/Gradle dependency."
+        ),
+        migration_target="java_11",
+        openrewrite_recipe=None,
+        import_pattern=re.compile(
+            r"^[ \t]*import\s+(org\.omg\.[^;]+|javax\.rmi\.CORBA\.[^;]+|javax\.rmi\.ssl\.[^;]+);",
+            re.MULTILINE,
+        ),
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -280,7 +307,7 @@ _JAVA_15_RULES: list[_Rule] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Java 17 — SecurityManager removed (JEP 411)
+# Java 17 — SecurityManager removed (JEP 411), Thread deprecated methods
 # ---------------------------------------------------------------------------
 
 _JAVA_17_RULES: list[_Rule] = [
@@ -304,10 +331,35 @@ _JAVA_17_RULES: list[_Rule] = [
         openrewrite_recipe=None,
         code_pattern=re.compile(
             r"System\.(get|set)SecurityManager\s*\(|"
-            r"\bSecurityManager\s+\w+\s*[=;({]|"   # variable declaration, requires code-context char to avoid Javadoc FPs
+            r"\bSecurityManager\s+\w+\s*[=;({]|"
             r"\bnew\s+SecurityManager\s*\(|"
             r"\bextends\s+SecurityManager\b|"
             r"\bAccessController\.(doPrivileged|checkPermission|getContext)\s*\(",
+        ),
+    ),
+    _Rule(
+        id="MIG-024",
+        severity="medium",
+        title="Thread.stop / Thread.suspend / Thread.resume — deprecated for removal (Java 17+)",
+        explanation=(
+            "Thread.stop(), Thread.suspend(), and Thread.resume() are deprecated since Java 1.2 "
+            "and deprecated-for-removal since Java 17 (JEP 411 scope). Thread.stop() is "
+            "inherently unsafe — it throws ThreadDeath which can corrupt object state. "
+            "Thread.suspend/resume cause deadlocks when the suspended thread holds a monitor. "
+            "Note: detection is best-effort; confirm the variable type is java.lang.Thread."
+        ),
+        fix_hint=(
+            "Use Thread.interrupt() with InterruptedException for cooperative cancellation. "
+            "Replace suspend/resume patterns with wait()/notify(), Semaphore, or a higher-level "
+            "concurrency abstraction (BlockingQueue, CountDownLatch, etc.)."
+        ),
+        migration_target="java_17",
+        openrewrite_recipe=None,
+        code_pattern=re.compile(
+            r"\b(?:thread|[a-zA-Z]\w*[Tt]hread)\.(stop|suspend|resume)\s*\("
+            r"|\bnew\s+Thread\s*\([^)]{0,120}\)\s*\.(stop|suspend|resume)\s*\("
+            r"|\bThread\.currentThread\s*\(\)\s*\.(stop|suspend|resume)\s*\(",
+            re.MULTILINE,
         ),
     ),
 ]
@@ -382,6 +434,32 @@ _JAVA_9_RULES: list[_Rule] = [
         openrewrite_recipe=None,
         code_pattern=re.compile(r"\.setAccessible\s*\(\s*true\s*\)"),
     ),
+    _Rule(
+        id="MIG-025",
+        severity="medium",
+        title="ReflectionFactory / MethodHandles.privateLookupIn — deep-reflection JPMS risk",
+        explanation=(
+            "sun.reflect.ReflectionFactory bypasses module encapsulation and is not part of "
+            "the public API. MethodHandles.privateLookupIn() grants private lookup access that "
+            "requires --add-opens on Java 9+. Both patterns are common in serialization "
+            "frameworks and mocking libraries and may break under strict JPMS modules."
+        ),
+        fix_hint=(
+            "Replace sun.reflect.ReflectionFactory with MethodHandles.lookup() or VarHandle. "
+            "For MethodHandles.privateLookupIn, ensure the calling module has been opened "
+            "via 'opens <package> to <module>' in module-info.java."
+        ),
+        migration_target="java_9_plus",
+        openrewrite_recipe=None,
+        import_pattern=re.compile(
+            r"^[ \t]*import\s+(sun\.reflect\.ReflectionFactory[^;]*);",
+            re.MULTILINE,
+        ),
+        code_pattern=re.compile(
+            r"\bReflectionFactory\s*\.\s*getReflectionFactory\s*\("
+            r"|\bMethodHandles\s*\.\s*privateLookupIn\s*\(",
+        ),
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -404,7 +482,7 @@ _JAVA_18_RULES: list[_Rule] = [
             "java.lang.ref.Cleaner for resource cleanup."
         ),
         migration_target="java_18_plus",
-        openrewrite_recipe=None,
+        openrewrite_recipe="org.openrewrite.java.migrate.RemoveFinalizeMethod",
         code_pattern=re.compile(
             r"\b(?:protected|public)\s+void\s+finalize\s*\(\s*\)",
         ),
@@ -442,7 +520,7 @@ _LEGACY_API_RULES: list[_Rule] = [
 ]
 
 # ---------------------------------------------------------------------------
-# All rules list
+# All Java source rules
 # ---------------------------------------------------------------------------
 
 _ALL_RULES: list[_Rule] = (
@@ -460,18 +538,381 @@ SEVERITY_ORDER: dict[str, int] = {"critical": 0, "high": 1, "medium": 2, "low": 
 
 
 # ---------------------------------------------------------------------------
+# XML config rules (applied to Spring XML config files)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _XmlRule:
+    id: str
+    severity: str
+    title: str
+    explanation: str
+    fix_hint: str
+    migration_target: str
+    openrewrite_recipe: Optional[str] = None
+    pattern: Optional[re.Pattern] = None
+
+
+_XML_RULES: list[_XmlRule] = [
+    _XmlRule(
+        id="MIG-030",
+        severity="high",
+        title="javax.* class reference in Spring XML config — namespace not migrated",
+        explanation=(
+            "Spring XML bean definitions using class='javax.*' reference the old Java EE "
+            "namespace. When the application migrates to Spring Boot 3 / Jakarta EE 9+, these "
+            "bean class names must be updated to use the jakarta.* namespace equivalents. "
+            "Typical occurrences: persistence providers, validators, transaction managers."
+        ),
+        fix_hint=(
+            "Update class='javax.*' attributes in XML bean definitions to the corresponding "
+            "jakarta.* class names. Run OpenRewrite or grep for 'javax.' in all XML config files."
+        ),
+        migration_target="jakarta",
+        openrewrite_recipe=None,
+        pattern=re.compile(
+            r'(?:class|type|value)\s*=\s*["\'][^"\']*\bjavax\.[a-zA-Z]',
+            re.MULTILINE,
+        ),
+    ),
+    _XmlRule(
+        id="MIG-031",
+        severity="high",
+        title="Spring Security XML — old-style <http auto-config> or versioned schema ≤5",
+        explanation=(
+            "XML-based Spring Security configuration using <http auto-config='true'> or "
+            "pointing to a spring-security-[3-5].x.xsd schema requires significant migration "
+            "for Spring Security 6 (Spring Boot 3). The auto-config shortcut and many XML "
+            "namespace attributes were changed or removed in Spring Security 6."
+        ),
+        fix_hint=(
+            "Migrate XML security config to Java-based @Configuration with SecurityFilterChain "
+            "@Bean. See the Spring Security 6 XML migration guide. "
+            "Update schema references to spring-security.xsd (no version) or use Spring Security 6 schemas."
+        ),
+        migration_target="spring_security_6",
+        openrewrite_recipe="org.openrewrite.java.spring.security6.WebSecurityConfigurerAdapterToSecurityFilterChain",
+        pattern=re.compile(
+            r"<(?:\w+:)?http\s[^>]*auto-config\s*=\s*[\"']true[\"']"
+            r"|spring-security-[2345]\.\d+\.xsd",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    _XmlRule(
+        id="MIG-032",
+        severity="high",
+        title="web.xml with Servlet ≤4 namespace — javax.servlet, must migrate to jakarta",
+        explanation=(
+            "A web.xml using the Java EE namespace (java.sun.com/xml/ns/javaee or "
+            "xmlns.jcp.org/xml/ns/javaee) declares a Servlet 2.x/3.x/4.x deployment descriptor. "
+            "These namespaces map to javax.servlet. Spring Boot 3 requires Jakarta Servlet 5.0+ "
+            "(namespace: jakarta.ee/xml/ns/jakartaee). The deployment descriptor must be updated."
+        ),
+        fix_hint=(
+            "Update web.xml namespace from 'http://xmlns.jcp.org/xml/ns/javaee' to "
+            "'https://jakarta.ee/xml/ns/jakartaee' and set version='5.0' or '6.0'. "
+            "Update all filter-class and servlet-class entries from javax.* to jakarta.* equivalents."
+        ),
+        migration_target="jakarta",
+        openrewrite_recipe=None,
+        pattern=re.compile(
+            r'xmlns\s*=\s*["\']https?://(?:java\.sun\.com|xmlns\.jcp\.org)/xml/ns/javaee["\']',
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+]
+
+# XML files to scan: name-based heuristic (avoids scanning unrelated XML like Maven reports)
+_XML_FILE_GLOBS: tuple[str, ...] = (
+    "web.xml",
+    "applicationContext.xml",
+    "applicationContext-*.xml",
+    "*applicationContext*.xml",
+    "*-context.xml",
+    "*Context.xml",
+    "*-config.xml",
+    "*Config.xml",
+    "*security*.xml",
+    "*Security*.xml",
+    "*servlet*.xml",
+    "*Servlet*.xml",
+    "beans.xml",
+    "*-beans.xml",
+    "*spring*.xml",
+    "*Spring*.xml",
+    "*dispatcher*.xml",
+    "*Dispatcher*.xml",
+)
+
+_SKIP_DIRS: frozenset[str] = frozenset([
+    "target", "build", ".git", ".gradle", ".mvn",
+    "node_modules", "__pycache__", ".idea", ".vscode",
+    "out", "dist", "bin", "generated-sources",
+])
+
+
+def _is_spring_xml_candidate(fname: str) -> bool:
+    return any(fnmatch.fnmatch(fname, g) for g in _XML_FILE_GLOBS)
+
+
+def _find_xml_config_files(root: Path) -> list[tuple[Path, str]]:
+    """Compatibility shim — calls the combined scanner."""
+    xml_files, _ = _find_non_java_files(root)
+    return xml_files
+
+
+def _find_build_files(root: Path) -> list[tuple[Path, str]]:
+    """Compatibility shim — calls the combined scanner."""
+    _, build_files = _find_non_java_files(root)
+    return build_files
+
+
+def _find_non_java_files(
+    root: Path,
+) -> tuple[list[tuple[Path, str]], list[tuple[Path, str]]]:
+    """Single os.walk returning (xml_config_files, build_files), excluding build dirs."""
+    xml_files: list[tuple[Path, str]] = []
+    build_files: list[tuple[Path, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        dp = Path(dirpath)
+        try:
+            rel_dir = dp.relative_to(root)
+        except ValueError:
+            continue
+        rel_prefix = str(rel_dir) if str(rel_dir) != "." else ""
+        for fname in filenames:
+            rel = f"{rel_prefix}/{fname}" if rel_prefix else fname
+            abs_path = dp / fname
+            if fname.endswith(".xml"):
+                if fname == "pom.xml":
+                    build_files.append((abs_path, rel))
+                elif _is_spring_xml_candidate(fname):
+                    xml_files.append((abs_path, rel))
+            elif fname in ("build.gradle", "build.gradle.kts"):
+                build_files.append((abs_path, rel))
+    return xml_files, build_files
+
+
+def _scan_xml_file(text: str, rel_path: str) -> list["MigrationFinding"]:
+    """Apply XML rules to raw XML text. Returns one finding per matched rule."""
+    findings: list[MigrationFinding] = []
+    for rule in _XML_RULES:
+        if rule.pattern is None:
+            continue
+        matches = list(rule.pattern.finditer(text))
+        if not matches:
+            continue
+        first_line = text[: matches[0].start()].count("\n") + 1
+        snippets = [m.group(0)[:120].strip() for m in matches[:5]]
+        findings.append(
+            MigrationFinding(
+                id=MigrationFinding.make_id(rule.id, rel_path),
+                rule_id=rule.id,
+                severity=rule.severity,
+                title=rule.title,
+                source_file=rel_path,
+                first_line=first_line,
+                imports_found=snippets,
+                explanation=rule.explanation,
+                fix_hint=rule.fix_hint,
+                migration_target=rule.migration_target,
+                openrewrite_recipe=rule.openrewrite_recipe,
+            )
+        )
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Dependency rules (applied to pom.xml / build.gradle / build.gradle.kts)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _DepRule:
+    id: str
+    severity: str
+    title: str
+    explanation: str
+    fix_hint: str
+    migration_target: str
+    openrewrite_recipe: Optional[str] = None
+    # Patterns applied to raw build file text.
+    # Each is tried independently; first match wins.
+    maven_pattern: Optional[re.Pattern] = None
+    gradle_pattern: Optional[re.Pattern] = None
+    # Optional fast pre-check: skip expensive regex if this string is absent.
+    quick_filter: Optional[str] = None
+
+
+_DEP_RULES: list[_DepRule] = [
+    _DepRule(
+        id="MIG-040",
+        severity="high",
+        title="SpringFox (io.springfox) — incompatible with Spring Boot 3 / Spring Framework 6",
+        explanation=(
+            "SpringFox relies on Spring MVC internal request mapping infrastructure that was "
+            "removed in Spring Framework 6. Applications declaring io.springfox:springfox-* "
+            "dependencies will fail to start after migration to Spring Boot 3, even if the "
+            "Java source code compiles cleanly."
+        ),
+        fix_hint=(
+            "Replace springfox-swagger2 + springfox-swagger-ui with "
+            "springdoc-openapi-starter-webmvc-ui (OpenAPI 3). "
+            "Also remove @EnableSwagger2 and any SpringFox Docket configuration beans."
+        ),
+        migration_target="spring_boot_3",
+        openrewrite_recipe=None,
+        maven_pattern=re.compile(r"\bio\.springfox\b", re.IGNORECASE),
+        gradle_pattern=re.compile(r"\bio\.springfox\b", re.IGNORECASE),
+    ),
+    _DepRule(
+        id="MIG-041",
+        severity="high",
+        title="Hibernate 5.x explicitly pinned — Spring Boot 3 requires Hibernate 6",
+        explanation=(
+            "Spring Boot 3 ships with Hibernate 6.x as the JPA provider, which implements "
+            "Jakarta Persistence 3.0. An explicit <version>5.*</version> for hibernate-core "
+            "overrides the Spring Boot BOM and will cause runtime incompatibilities: Hibernate 5 "
+            "implements javax.persistence (not jakarta.persistence)."
+        ),
+        fix_hint=(
+            "Remove the explicit Hibernate version override and let the Spring Boot 3 BOM "
+            "manage it (Hibernate 6.x). Review breaking API changes between Hibernate 5 and 6 "
+            "in the Hibernate 6 migration guide."
+        ),
+        migration_target="jakarta",
+        openrewrite_recipe=None,
+        maven_pattern=re.compile(
+            r"<dependency>(?:(?!</dependency>).)*?hibernate-core(?![-\w])(?:(?!</dependency>).)*?"
+            r"<version>\s*5\.",
+            re.DOTALL | re.IGNORECASE,
+        ),
+        gradle_pattern=re.compile(
+            r"""['"](org\.hibernate(?:\.orm)?):hibernate-core:5\.""",
+            re.IGNORECASE,
+        ),
+        quick_filter="hibernate-core",
+    ),
+    _DepRule(
+        id="MIG-042",
+        severity="medium",
+        title="ByteBuddy < 1.12.x — may not support Java 17+ strong encapsulation",
+        explanation=(
+            "ByteBuddy versions before 1.12 lack stable support for Java 17+ strong JPMS "
+            "encapsulation. Spring AOP, Mockito, and Hibernate proxies all depend on ByteBuddy "
+            "internally. If an application pins byte-buddy at 1.0–1.11.x, proxy creation "
+            "may fail with InaccessibleObjectException on Java 17+."
+        ),
+        fix_hint=(
+            "Remove explicit ByteBuddy version overrides and let Spring Boot 3 BOM manage it "
+            "(ships with 1.14.x+). If you must pin it, use >= 1.12.18."
+        ),
+        migration_target="java_17",
+        openrewrite_recipe=None,
+        maven_pattern=re.compile(
+            r"<dependency>(?:(?!</dependency>).)*?byte-buddy(?:(?!</dependency>).)*?"
+            r"<version>\s*1\.(?:[0-9]|1[01])\.",
+            re.DOTALL | re.IGNORECASE,
+        ),
+        gradle_pattern=re.compile(
+            r"""['"](net\.bytebuddy):byte-buddy:1\.(?:[0-9]|1[01])\.""",
+            re.IGNORECASE,
+        ),
+        quick_filter="byte-buddy",
+    ),
+    _DepRule(
+        id="MIG-043",
+        severity="high",
+        title="EhCache 2.x — incompatible with Spring Boot 3 / JCache JSR-107 migration",
+        explanation=(
+            "EhCache 2.x (net.sf.ehcache) uses the old JSR-107 cache API and is not compatible "
+            "with the Spring Boot 3 cache abstraction. Spring Boot 3 requires EhCache 3.x "
+            "(org.ehcache) which implements JCache 1.1 and uses a different configuration format."
+        ),
+        fix_hint=(
+            "Migrate from net.sf.ehcache:ehcache to org.ehcache:ehcache:3.x. "
+            "Update ehcache.xml configuration to the EhCache 3 XML format. "
+            "Add the 'org.ehcache:ehcache::jakarta' classifier for Jakarta EE compatibility."
+        ),
+        migration_target="spring_boot_3",
+        openrewrite_recipe=None,
+        maven_pattern=re.compile(
+            r"<groupId>\s*net\.sf\.ehcache\s*</groupId>",
+            re.IGNORECASE,
+        ),
+        gradle_pattern=re.compile(
+            r"""['"](net\.sf\.ehcache):[^'"]+""",
+            re.IGNORECASE,
+        ),
+    ),
+]
+
+_BUILD_FILE_NAMES: tuple[str, ...] = ("pom.xml", "build.gradle", "build.gradle.kts")
+
+
+def _find_build_files(root: Path) -> list[tuple[Path, str]]:
+    """Return (abs_path, rel_path) for pom.xml / build.gradle files, excluding build dirs."""
+    results: list[tuple[Path, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        dp = Path(dirpath)
+        try:
+            rel_dir = dp.relative_to(root)
+        except ValueError:
+            continue
+        for fname in filenames:
+            if fname in _BUILD_FILE_NAMES:
+                abs_path = dp / fname
+                rel = str(rel_dir / fname) if str(rel_dir) != "." else fname
+                results.append((abs_path, rel))
+    return results
+
+
+def _scan_dep_file(text: str, rel_path: str) -> list["MigrationFinding"]:
+    """Apply dependency rules to a build file. Returns one finding per matched rule."""
+    is_gradle = rel_path.endswith((".gradle", ".gradle.kts"))
+    findings: list[MigrationFinding] = []
+    for rule in _DEP_RULES:
+        if rule.quick_filter is not None and rule.quick_filter not in text:
+            continue
+        pattern = rule.gradle_pattern if is_gradle else rule.maven_pattern
+        if pattern is None:
+            continue
+        m = pattern.search(text)
+        if m is None:
+            continue
+        first_line = text[: m.start()].count("\n") + 1
+        findings.append(
+            MigrationFinding(
+                id=MigrationFinding.make_id(rule.id, rel_path),
+                rule_id=rule.id,
+                severity=rule.severity,
+                title=rule.title,
+                source_file=rel_path,
+                first_line=first_line,
+                imports_found=[m.group(0)[:120].strip()],
+                explanation=rule.explanation,
+                fix_hint=rule.fix_hint,
+                migration_target=rule.migration_target,
+                openrewrite_recipe=rule.openrewrite_recipe,
+            )
+        )
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Finding
 # ---------------------------------------------------------------------------
 
 @dataclass
 class MigrationFinding:
-    id: str               # deterministic: "{rule_id}-{file_hash[:12]}"
-    rule_id: str          # "MIG-001" .. "MIG-022"
-    severity: str         # "critical" | "high" | "medium" | "low"
+    id: str
+    rule_id: str
+    severity: str
     title: str
-    source_file: str      # relative path
-    first_line: int       # 1-based line number of first match
-    imports_found: list[str] = field(default_factory=list)  # matched import stmts or code snippets
+    source_file: str
+    first_line: int
+    imports_found: list[str] = field(default_factory=list)
     explanation: str = ""
     fix_hint: str = ""
     migration_target: str = ""
@@ -493,11 +934,14 @@ class MigrationFinding:
             "explanation": self.explanation,
             "fix_hint": self.fix_hint,
             "migration_target": self.migration_target,
+            "auto_fix_available": bool(self.openrewrite_recipe),
         }
         if self.imports_found:
             d["imports_found"] = self.imports_found
         if self.openrewrite_recipe:
             d["openrewrite_recipe"] = self.openrewrite_recipe
+        else:
+            d["manual_migration"] = True
         return d
 
 
@@ -507,14 +951,13 @@ class MigrationFinding:
 
 @dataclass
 class MigrationReport:
-    schema_version: str = "1.1"
+    schema_version: str = "1.2"
     generated_at: str = ""
     repo_id: str = ""
     git_head: str = ""
 
-    # Core metrics
-    readiness_score: int = 100         # 0–100; 100 = ready to migrate
-    blocking_count: int = 0            # critical + high finding count
+    readiness_score: int = 100
+    blocking_count: int = 0
     estimated_effort_days: float = 0.0
     spring_boot_2_detected: bool = False
 
@@ -540,8 +983,6 @@ class MigrationReport:
 
         self.blocking_count = by_severity["critical"] + by_severity["high"]
 
-        # Score: deduct per affected-file/severity combination (not per finding, to avoid
-        # double-counting a file that imports 10 javax.persistence classes).
         critical_files: set[str] = set()
         high_files: set[str] = set()
         medium_files: set[str] = set()
@@ -564,7 +1005,6 @@ class MigrationReport:
         )
         self.readiness_score = max(0, 100 - deduction)
 
-        # Effort: sum per distinct affected file weighted by severity
         self.estimated_effort_days = round(
             len(critical_files) * 0.5
             + len(high_files) * 0.25
@@ -631,7 +1071,7 @@ class MigrationReport:
 
 
 # ---------------------------------------------------------------------------
-# Scanner
+# Java source scanner
 # ---------------------------------------------------------------------------
 
 def _scan_file(
@@ -642,8 +1082,6 @@ def _scan_file(
     findings: list[MigrationFinding] = []
 
     for rule in rules:
-        # An import_pattern and code_pattern can coexist on the same rule (OR semantics).
-        # A finding is created if EITHER matches; we report the earliest match position.
         matched_imports: list[str] = []
         import_first_line: Optional[int] = None
         code_first_line: Optional[int] = None
@@ -661,14 +1099,12 @@ def _scan_file(
                 code_first_line = source[: m.start()].count("\n") + 1
                 code_snippets = [m.group(0).strip()]
 
-        # extends_pattern is a legacy form of code_pattern
         extends_first_line: Optional[int] = None
         if rule.extends_pattern is not None:
             m = rule.extends_pattern.search(source)
             if m is not None:
                 extends_first_line = source[: m.start()].count("\n") + 1
 
-        # Determine overall match
         candidate_lines = [
             ln for ln in (import_first_line, code_first_line, extends_first_line)
             if ln is not None
@@ -708,13 +1144,17 @@ def run_migrate_check(
     *,
     min_severity: str = "low",
 ) -> MigrationReport:
-    """Scan Java files for migration blockers (Spring Boot 2→3, Java 8→17/21).
+    """Scan a Java repository for migration blockers.
+
+    Scans:
+      - Java source files (.java) against all 24 rules (MIG-001..MIG-025)
+      - Spring XML config files (applicationContext.xml, web.xml, security XML, etc.)
+      - Build descriptors (pom.xml, build.gradle) for incompatible dependencies
 
     Args:
         file_paths:   Relative Java file paths (from find_java_files).
         root:         Absolute repo root.
-        min_severity: Filter threshold — findings below this severity are excluded
-                      from the report. Choices: critical | high | medium | low.
+        min_severity: Filter threshold. Choices: critical | high | medium | low.
 
     Returns:
         MigrationReport with findings, readiness_score, effort estimate, and
@@ -725,6 +1165,7 @@ def run_migrate_check(
     limitations: list[str] = []
     read_errors = 0
 
+    # ── Java source scan ────────────────────────────────────────────────────
     for rel_path in file_paths:
         abs_path = root / rel_path
         try:
@@ -734,16 +1175,44 @@ def run_migrate_check(
             continue
 
         file_findings = _scan_file(source, rel_path, _ALL_RULES)
-        # Apply min_severity filter
         filtered = [f for f in file_findings if SEVERITY_ORDER.get(f.severity, 3) <= min_order]
         all_findings.extend(filtered)
 
     if read_errors:
         limitations.append(f"{read_errors} file(s) could not be read and were skipped.")
 
+    # ── XML + dependency scan (single tree walk) ─────────────────────────────
+    xml_files, build_files = _find_non_java_files(root)
+    xml_read_errors = 0
+    for abs_path, rel_path in xml_files:
+        try:
+            text = abs_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            xml_read_errors += 1
+            continue
+        xml_findings = _scan_xml_file(text, rel_path)
+        filtered = [f for f in xml_findings if SEVERITY_ORDER.get(f.severity, 3) <= min_order]
+        all_findings.extend(filtered)
+
+    if xml_read_errors:
+        limitations.append(f"{xml_read_errors} XML file(s) could not be read and were skipped.")
+
+    dep_read_errors = 0
+    for abs_path, rel_path in build_files:
+        try:
+            text = abs_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            dep_read_errors += 1
+            continue
+        dep_findings = _scan_dep_file(text, rel_path)
+        filtered = [f for f in dep_findings if SEVERITY_ORDER.get(f.severity, 3) <= min_order]
+        all_findings.extend(filtered)
+
+    if dep_read_errors:
+        limitations.append(f"{dep_read_errors} build file(s) could not be read and were skipped.")
+
     limitations.extend(_STATIC_LIMITATIONS)
 
-    # Detect Spring Boot 2 pom.xml heuristic (best-effort, non-fatal)
     spring_boot_2 = _detect_spring_boot_2(root)
 
     report = MigrationReport(
@@ -752,12 +1221,15 @@ def run_migrate_check(
         limitations=limitations,
         metadata={
             "java_files_scanned": len(file_paths),
+            "xml_files_scanned": len(xml_files),
+            "build_files_scanned": len(build_files),
             "min_severity": min_severity,
             "rules_applied": [r.id for r in _ALL_RULES],
+            "xml_rules_applied": [r.id for r in _XML_RULES],
+            "dep_rules_applied": [r.id for r in _DEP_RULES],
         },
     )
 
-    # Populate git_head — non-fatal
     try:
         import subprocess as _sub
         _r = _sub.run(
@@ -772,19 +1244,18 @@ def run_migrate_check(
     return report.finalize()
 
 
-# Items that static analysis cannot determine, always emitted as limitations
+# Remaining static limitations — things that truly require runtime analysis
 _STATIC_LIMITATIONS: list[str] = [
-    "Thread.stop/suspend/resume deprecation: cannot reliably detect without type resolution "
-    "(requires knowing that a variable is typed as java.lang.Thread).",
-    "CORBA removal (Java 11): org.omg.* usage not scanned; add manually if project uses CORBA.",
-    "Module compatibility (JPMS): --add-opens requirements cannot be determined without "
+    "Thread.stop/suspend/resume detection is best-effort: variable type cannot be confirmed "
+    "without compilation. Verify that flagged variables are typed as java.lang.Thread.",
+    "JPMS --add-opens requirements: exact set of required flags cannot be determined without "
     "running the application against the target JDK.",
-    "Transitive dependency compatibility: library versions (Hibernate, Jackson, etc.) must be "
-    "verified separately against Spring Boot 3 BOM.",
-    "XML-based Spring config (applicationContext.xml, web.xml): not scanned — bean class names "
-    "and servlet filter chains in XML may reference javax.* classes.",
-    "Runtime proxy behaviour (CGLIB/ByteBuddy subclass proxies): compatibility with Java 17+ "
-    "strong encapsulation depends on framework version, not detectable via import scanning.",
+    "Transitive dependency compatibility: library versions resolved transitively (not declared "
+    "directly) require 'mvn dependency:tree' or Gradle dependency insight for full analysis.",
+    "Runtime proxy behaviour (CGLIB subclass proxies): compatibility with Java 17+ strong "
+    "encapsulation depends on framework version at runtime, not import-level analysis.",
+    "XML bean definitions referencing class names via property placeholders (${bean.class}) "
+    "cannot be resolved statically.",
 ]
 
 
