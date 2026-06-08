@@ -240,6 +240,8 @@ _SUBCOMMANDS: frozenset[str] = frozenset(
         "pr-impact",
         # Class architectural summary
         "explain",
+        # Spring Boot 2→3 migration readiness
+        "migrate-check",
     }
 )
 
@@ -3889,6 +3891,116 @@ def spring_audit_cmd(
         output_path.write_text(output, encoding="utf-8")
         total = combined.summary.get("total_findings", 0)
         typer.echo(f"Spring audit written to {output_path} ({total} findings)", err=True)
+    else:
+        sys.stdout.buffer.write(output.encode("utf-8"))
+        sys.stdout.buffer.write(b"\n")
+        sys.stdout.buffer.flush()
+        if copy:
+            if _copy_to_clipboard(output):
+                typer.echo("✓ copied to clipboard", err=True)
+
+
+# ── Spring Boot Migration Check ───────────────────────────────────────────────
+
+
+@app.command("migrate-check")
+def migrate_check_cmd(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository path to scan (default: current directory)",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    format: str = typer.Option(
+        "json",
+        "--format",
+        "-f",
+        help="Output format: json (default) or text.",
+        show_default=True,
+    ),
+    copy: bool = typer.Option(
+        False,
+        "--copy",
+        "-c",
+        help="Copy output to system clipboard after a successful run.",
+    ),
+    min_severity: str = typer.Option(
+        "low",
+        "--min-severity",
+        help="Minimum severity to include: critical, high, medium, or low (default).",
+        show_default=True,
+    ),
+) -> None:
+    """Spring Boot 2→3 migration readiness: detect javax→jakarta namespace blockers.
+
+    \b
+    Detects:
+      MIG-001  javax.persistence import (CRITICAL — JPA will not compile)
+      MIG-002  javax.servlet import (HIGH — Servlet API changed)
+      MIG-003  javax.validation import (HIGH — Bean Validation changed)
+      MIG-004  javax.transaction import (HIGH — TX API changed)
+      MIG-005  extends WebSecurityConfigurerAdapter (HIGH — removed in Spring 6)
+      MIG-006  javax.annotation import (MEDIUM)
+      MIG-007  javax.inject import (MEDIUM)
+      MIG-008  javax.ws.rs import (MEDIUM — JAX-RS changed)
+
+    \b
+    Examples:
+      sourcecode migrate-check .
+      sourcecode migrate-check /path/to/repo --format text
+      sourcecode migrate-check . --min-severity high
+      sourcecode migrate-check . --output migration.json
+    """
+    from sourcecode.repository_ir import find_java_files
+    from sourcecode.migrate_check import run_migrate_check
+
+    target = path.resolve()
+    if not target.exists() or not target.is_dir():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"'{target}' is not a valid directory.",
+            path=str(target),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
+        )
+        raise typer.Exit(code=1)
+
+    if format not in ("json", "text"):
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid format '{format}'.",
+            hint="format must be one of: json, text.",
+            expected="json | text",
+        )
+        raise typer.Exit(code=1)
+
+    if min_severity not in ("critical", "high", "medium", "low"):
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid min-severity '{min_severity}'.",
+            hint="min-severity must be one of: critical, high, medium, low.",
+            expected="critical | high | medium | low",
+        )
+        raise typer.Exit(code=1)
+
+    file_list = find_java_files(target)
+    report = run_migrate_check(file_list, target, min_severity=min_severity)
+
+    if format == "text":
+        output = report.to_text(min_severity=min_severity)
+    else:
+        output = _serialize_dict(report.to_dict(), "json")
+
+    if output_path is not None:
+        output_path.write_text(output, encoding="utf-8")
+        total = report.summary.get("total_findings", 0)
+        typer.echo(
+            f"Migration check written to {output_path} "
+            f"(score: {report.readiness_score}/100, {total} findings)",
+            err=True,
+        )
     else:
         sys.stdout.buffer.write(output.encode("utf-8"))
         sys.stdout.buffer.write(b"\n")

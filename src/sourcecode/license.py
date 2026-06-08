@@ -42,7 +42,13 @@ if _SUPABASE_URL != _DEFAULT_SUPABASE_URL:
 _LICENSE_DIR: Path = Path.home() / ".sourcecode"
 _LICENSE_FILE: Path = _LICENSE_DIR / "license.json"
 _DELTA_RUNS_FILE: Path = _LICENSE_DIR / "delta_runs.json"
-_CACHE_TTL_SECONDS: int = 1800  # 30 minutes — Supabase is source of truth; cache is perf only
+_CACHE_TTL_SECONDS: int = 1800  # 30 minutes default; CI env overrides to 24h (see _get_cache_ttl)
+_CACHE_TTL_CI_SECONDS: int = 86400  # 24 hours — CI containers must not re-validate mid-run
+
+
+def _get_cache_ttl() -> int:
+    """Return TTL in seconds. CI containers get 24h to avoid mid-run network calls."""
+    return _CACHE_TTL_CI_SECONDS if os.environ.get("SOURCECODE_CI") else _CACHE_TTL_SECONDS
 _DELTA_FREE_LIMIT: int = 30
 _DEVICE_POLL_INTERVAL_S: float = 2.5
 _DEVICE_POLL_TIMEOUT_S: float = 300.0  # 5-minute window for user to complete browser auth
@@ -306,7 +312,7 @@ def _maybe_revalidate() -> None:
             if validated_at.tzinfo is None:
                 validated_at = validated_at.replace(tzinfo=timezone.utc)
             age = (datetime.now(timezone.utc) - validated_at).total_seconds()
-            if age < _CACHE_TTL_SECONDS:
+            if age < _get_cache_ttl():
                 return
         except Exception:
             pass

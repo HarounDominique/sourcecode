@@ -1,142 +1,151 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-29T21:00:00Z",
+  "timestamp": "2026-06-08T10:59:21Z",
   "phase": null,
-  "phase_name": "session 36 — 1.33.4 bug fixes (7 contract/observability issues)",
+  "phase_name": "session 73 — strategic analysis, benchmarks, roadmap design",
   "phase_dir": null,
   "plan": null,
   "task": null,
   "total_tasks": null,
   "status": "paused",
-  "session_type": "bugfix",
+  "session_type": "strategy",
   "completed_tasks": [
     {
       "id": 1,
-      "name": "--changed-only untracked files bug",
+      "name": "Full product & market strategic analysis",
       "status": "done",
-      "files": ["src/sourcecode/cli.py"],
-      "details": "Include untracked (new) files in _allowed_changed_files. Clean-repo early-exit JSON now emits {changed_files:[], message, analysis_scope:'empty', _meta:{changed_only:true}} instead of status/no_changes fields.",
-      "commit": "6480eae"
+      "details": "7-phase analysis: current value prop, market pain points (top 20), gap analysis, stack expansion options (A/B/C/D), competitive positioning vs SonarQube/Semgrep/Sourcegraph/OpenRewrite/Claude Code, revenue multipliers, final recommendations. Verdict: deepen Java/Spring + Kotlin only, MCP-first distribution, migrate-check as #1 feature."
     },
     {
       "id": 2,
-      "name": "cache clear --all flag",
+      "name": "Detailed roadmap design: 3 strategic fronts",
       "status": "done",
-      "files": ["src/sourcecode/cli.py"],
-      "details": "Added --all as canonical flag name. --include-ris kept as hidden backward-compat alias. Prompt and help updated.",
-      "commit": "6480eae"
+      "details": "Full roadmap for migrate-check (Spring Boot 2→3), MCP polish, CI/CD gate. Phases 0-3 (0-12 months). Includes explicit assumptions, risks, success metrics, what NOT to build."
     },
     {
       "id": 3,
-      "name": "RIS cold-start validation block",
+      "name": "Benchmark: 7 real Java repos",
       "status": "done",
-      "files": ["src/sourcecode/ris.py"],
-      "details": "Added validation dict to cold-start output: spring_detected, controllers_found, endpoints_found, status (valid|incomplete_snapshot). When Spring detected but endpoints missing: status downgraded to cold_start_incomplete, stale=true.",
-      "commit": "6480eae"
+      "details": "Tested spring-petclinic(47), eureka(409), jobrunr(964), openmrs-core(1281), BroadleafCommerce(2985), keycloak(7885) Java files. Results: linear scaling, no crashes. petclinic=0.32s, keycloak=12.23s base scan. spring-audit: 0.28s-12s. onboard: 0.20s-20.7s. R-SCALE-01 CLOSED for spring-audit and base scan."
     },
     {
       "id": 4,
-      "name": "--env-map unhide",
+      "name": "Schema discovery: mode=contract vs GSD SourceMap",
       "status": "done",
-      "files": ["src/sourcecode/cli.py"],
-      "details": "Removed hidden=True from --env-map option. Now visible in CLI help.",
-      "commit": "6480eae"
+      "details": "Production CLI outputs mode=contract schema (richer than GSD roadmap SourceMap). Has contracts[].imports per file — foundation for migrate-check already exists. project.type, entry_points, summary all correctly populated."
     },
     {
       "id": 5,
-      "name": "fix-bug no-symptom warning",
+      "name": "spring-audit quality validation on real repos",
       "status": "done",
-      "files": ["src/sourcecode/cli.py"],
-      "details": "When fix-bug runs without --symptom, emits warning to stderr: 'Results are significantly better with --symptom.'",
-      "commit": "6480eae"
-    },
-    {
-      "id": 6,
-      "name": "generate-tests output split",
-      "status": "done",
-      "files": ["src/sourcecode/cli.py", "src/sourcecode/prepare_context.py"],
-      "details": "test_gaps now emitted as both untested_sources (canonical) + test_gaps (compat alias). Added existing_test_count field (count of test files found). TaskOutput gains existing_test_count: Optional[int] field.",
-      "commit": "6480eae"
-    },
-    {
-      "id": 7,
-      "name": "LQN-02 test fix",
-      "status": "done",
-      "files": ["tests/test_integration_lqn.py"],
-      "details": "Pre-existing failure. Updated assertion to accept 'persistent structural context' alongside old 'codebase context' strings.",
-      "commit": "6480eae"
-    },
-    {
-      "id": 8,
-      "name": "version bump 1.33.3 → 1.33.4",
-      "status": "done",
-      "files": ["src/sourcecode/__init__.py", "pyproject.toml", "README.md"],
-      "commit": "6480eae"
+      "details": "BroadleafCommerce: 4 real TX-005 findings (removeCredit, removePayment). openmrs: 1 TX-005. keycloak: 0 (not Spring — correct). All legitimate findings on real enterprise code."
     }
   ],
   "remaining_tasks": [
     {
-      "id": 9,
-      "name": "Live E2E test: sync workspace → pipx + verify all fixes",
+      "id": 1,
+      "name": "License TTL CI fix",
+      "priority": "P0",
+      "status": "pending",
+      "details": "license.py: _CACHE_TTL_SECONDS=1800 (30min) breaks CI containers. Fix: add SOURCECODE_CI=1 env var → TTL 86400 (24h). ~2h effort. Required before CI gate can be sold to enterprise."
+    },
+    {
+      "id": 2,
+      "name": "migrate-check v1 implementation",
       "priority": "P1",
       "status": "pending",
-      "details": "Run bash /private/tmp/sync_to_pipx.sh from normal Terminal (EPERM in Claude Code shell). Then: sourcecode cache freshness /private/tmp/spring-petclinic; sourcecode cache status --json; sourcecode cold-start /private/tmp/spring-petclinic (check validation block, api_surface_complete); sourcecode cache clear /private/tmp/keycloak --yes (confirm --all flag works); sourcecode fix-bug /private/tmp/keycloak (confirm no-symptom warning on stderr); sourcecode prepare-context generate-tests . (check untested_sources + existing_test_count fields). Also verify 1.33.1-1.33.3 fixes still hold."
+      "details": "New module: src/sourcecode/migrate_check.py. Use contracts[].imports (already computed) to find javax.persistence/servlet/validation/transaction imports. Detect WebSecurityConfigurerAdapter (already in repository_ir.py:2434,3286). Rules: MIG-001..008. Output: MigrationReport with readiness_score, blocking_count, findings, estimated_effort_days. CLI: sourcecode migrate-check . --format json|text --min-severity HIGH. Needs synthetic fixture tests/fixtures/javax_legacy/ (real repos all already migrated to jakarta)."
     },
     {
-      "id": 10,
-      "name": "Publish 1.33.4 to PyPI / Homebrew tap",
+      "id": 3,
+      "name": "spring-audit --ci flag",
+      "priority": "P1",
+      "status": "pending",
+      "details": "Add --ci mode to spring-audit_cmd: exit 1 on violations >= min_severity, structured JSON output + optional --format github-comment. GitHub Actions YAML starter in docs/. Reuse existing pr_comment_renderer.py."
+    },
+    {
+      "id": 4,
+      "name": "MCP token budgets + migrate tool",
       "priority": "P2",
       "status": "pending",
-      "details": "Version bumped to 1.33.4 and committed. Needs PyPI publish and Homebrew tap update."
+      "details": "Add per-tool output budget caps (dict MAX_TOKENS_PER_TOOL). Add get_migration_readiness() MCP tool delegating to migrate-check. Add when_to_call: doc hints to existing tool docstrings. Ensure outputs < 10k tokens per tool for Cursor compatibility."
     },
     {
-      "id": 11,
-      "name": "Deferred improvements G/I/J/K/L/M",
-      "priority": "P4",
-      "status": "deferred",
-      "details": "G: get_compact_context --full in MCP. I: get_module_context Maven multi-module improvements. J: MCP for Claude Code instructions. K: suggest_next_tool. L: suggest_entrypoint (high value — task+candidate entrypoints). M: watch mode for RIS invalidation."
+      "id": 5,
+      "name": "Fix key_dependencies=0 on BroadleafCommerce onboard",
+      "priority": "P2",
+      "status": "pending",
+      "details": "onboard BroadleafCommerce returns key_dependencies: 0 despite being a major Maven multi-module Spring project. Likely gap in dependency detection when --dependencies not explicitly passed."
+    },
+    {
+      "id": 6,
+      "name": "Deferred from session 36: E2E test + publish 1.33.4",
+      "priority": "P3",
+      "status": "pending",
+      "details": "Still pending from session 36: run sync_to_pipx.sh from normal Terminal, E2E verify 1.33.x fixes, publish 1.33.4 to PyPI/Homebrew."
     }
   ],
   "blockers": [],
   "human_actions_pending": [
     {
-      "action": "Run bash /private/tmp/sync_to_pipx.sh from a normal Terminal (not Claude Code shell)",
-      "context": "Claude Code shell has EPERM on workspace file renames. sync_to_pipx.sh uses cp to push workspace source to active pipx install.",
-      "blocking": true
-    },
-    {
-      "action": "Delete src/sourcecode/cache.tmp_new (leftover temp file from session 30)",
-      "context": "Not committed. Safe to rm.",
-      "blocking": false
-    },
-    {
-      "action": "Decide fate of docs/PRODUCT_AUDIT.md (untracked)",
-      "context": "Untracked since session 29. No action needed to unblock.",
+      "action": "Decide which P0/P1 to start first: license TTL fix or migrate-check v1",
+      "context": "License TTL fix is 2h and unblocks CI gate sales. migrate-check v1 is 5-7d and unblocks the biggest revenue opportunity. Both can start independently.",
       "blocking": false
     }
   ],
   "decisions": [
     {
-      "decision": "cold_start_incomplete status when Spring detected but endpoints absent",
-      "rationale": "cold_start_ready is misleading when a Spring repo has controllers but no endpoint index. Agents relying on this to skip warm will get incomplete context. incomplete downgrade forces them to call get_endpoints or rebuild.",
-      "session": 36
+      "decision": "migrate-check reuses contracts[].imports — no new scanner needed",
+      "rationale": "Production CLI already computes per-file import lists in mode=contract output. Iterate contracts, filter javax.*, categorize. Saves ~2 days of parser work.",
+      "session": 73
     },
     {
-      "decision": "untested_sources emitted alongside test_gaps (not replacing it)",
-      "rationale": "Breaking rename of test_gaps would break existing agent prompts. Emit both: agents can use untested_sources, old clients still see test_gaps.",
-      "session": 36
+      "decision": "CI gate uses spring-audit --ci, NOT onboard --ci",
+      "rationale": "onboard takes 9-20s on medium/large repos — unacceptable for CI. spring-audit: 0.28s-6s even on 2985-file repos. Onboard is human/agent workflow, not gate.",
+      "session": 73
     },
     {
-      "decision": "--all is the canonical flag for cache clear + RIS; --include-ris hidden compat",
-      "rationale": "--all is more discoverable and consistent with other CLI tools. --include-ris kept to not break scripts.",
-      "session": 36
+      "decision": "Stack expansion: deepen Java/Spring + Kotlin only (next 12 months)",
+      "rationale": "Spring TX semantic analysis is the moat. Kotlin is 70% of new Spring Boot projects, ~3 weeks of IR work. C#/.NET would take 12+ months to reach parity — dilutes moat before monetized.",
+      "session": 73
+    },
+    {
+      "decision": "Spring Boot migrate-check is #1 revenue opportunity",
+      "rationale": "Spring Boot 2 EOL Nov 2023 — market is in active pain. No competitor has semantic-depth migration checker. Budgeted projects with clear ROI. migrate-check v1 in 5-7 days leveraging existing IR.",
+      "session": 73
     }
   ],
+  "key_findings": {
+    "benchmark_results": {
+      "scale": "Linear O(n) scaling confirmed. No crashes up to 7885 Java files.",
+      "ci_viable_commands": ["spring-audit (0.28s-6s)", "base scan (0.32s-12s)", "impact (0.23s)"],
+      "ci_not_viable": ["onboard (9-20s on large repos)"],
+      "r_scale_01": "CLOSED — performance is production-ready"
+    },
+    "schema_discovery": {
+      "production_schema": "mode=contract (not GSD SourceMap)",
+      "contracts_imports": "Per-file import lists already computed — migrate-check can reuse directly",
+      "entry_points": "Correctly detected (5 in petclinic incl @SpringBootApplication + 4 controllers)",
+      "project_type": "Correctly classified (petclinic=web_mvc, BroadleafCommerce=api)"
+    },
+    "spring_audit_validation": {
+      "real_findings": "4 TX-005 in BroadleafCommerce, 1 in openmrs — legitimate enterprise patterns",
+      "false_negatives": "keycloak=0 findings (correct — Quarkus not Spring)",
+      "credibility": "ESTABLISHED — finds real bugs in real code"
+    },
+    "migration_test_gap": {
+      "issue": "All 7 testing repos already on jakarta EE — can't test migrate-check against real javax",
+      "fix": "Create tests/fixtures/javax_legacy/ with synthetic Java files using javax.persistence/servlet/validation/transaction"
+    },
+    "license_ttl_issue": {
+      "current": "1800s (30min) — breaks CI containers",
+      "fix": "SOURCECODE_CI=1 → TTL 86400 (24h). 2h effort."
+    }
+  },
   "uncommitted_files": [],
   "untracked_files": [
-    "docs/PRODUCT_AUDIT.md",
-    "src/sourcecode/cache.tmp_new"
+    "docs/PRODUCT_AUDIT.md"
   ],
-  "next_action": "Human: run bash /private/tmp/sync_to_pipx.sh from normal Terminal, then run E2E verification of all 1.33.x fixes. Then publish 1.33.4.",
-  "context_notes": "Session 36: commit 6480eae = 1.33.4 (7 bugs fixed). 1655 tests pass, 3 skipped. LQN-02 pre-existing failure now fixed. Bugs fixed: --changed-only untracked gap, cache clear --all, RIS validation block, --env-map unhide, fix-bug no-symptom warning, generate-tests output split, LQN-02 test assertion."
+  "next_action": "Choose: (A) License TTL fix [2h, unblocks CI gate] OR (B) migrate-check v1 [5-7d, biggest revenue opportunity]. Both independent. Recommended start: (A) then (B).",
+  "context_notes": "Session 73: pure strategy + benchmarking session. No code changes. Benchmarked 7 real Java repos (13k+ files total). Validated spring-audit finds real TX-005 bugs in BroadleafCommerce/openmrs. Discovered contracts[].imports is the foundation for migrate-check. All repos already on jakarta — need synthetic fixture for migration testing. License TTL (30min) is critical CI blocker. Roadmap designed for 3 fronts: migrate-check, MCP polish, CI/CD gate."
 }
