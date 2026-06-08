@@ -1,84 +1,63 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-08T10:59:21Z",
+  "timestamp": "2026-06-08T18:00:00Z",
   "phase": null,
-  "phase_name": "session 73 — strategic analysis, benchmarks, roadmap design",
+  "phase_name": "session 74 — migrate-check real-repo testing, spring-audit CI gate, MCP migrate tool",
   "phase_dir": null,
   "plan": null,
   "task": null,
   "total_tasks": null,
   "status": "paused",
-  "session_type": "strategy",
+  "session_type": "implementation",
   "completed_tasks": [
     {
       "id": 1,
-      "name": "Full product & market strategic analysis",
+      "name": "License TTL CI fix (P0)",
       "status": "done",
-      "details": "7-phase analysis: current value prop, market pain points (top 20), gap analysis, stack expansion options (A/B/C/D), competitive positioning vs SonarQube/Semgrep/Sourcegraph/OpenRewrite/Claude Code, revenue multipliers, final recommendations. Verdict: deepen Java/Spring + Kotlin only, MCP-first distribution, migrate-check as #1 feature."
+      "details": "Committed in previous session (v1.35.18). SOURCECODE_CI=1 → TTL 86400s (24h). 7 tests. CLOSED."
     },
     {
       "id": 2,
-      "name": "Detailed roadmap design: 3 strategic fronts",
+      "name": "migrate-check v1 implementation (P1)",
       "status": "done",
-      "details": "Full roadmap for migrate-check (Spring Boot 2→3), MCP polish, CI/CD gate. Phases 0-3 (0-12 months). Includes explicit assumptions, risks, success metrics, what NOT to build."
+      "details": "Committed as 96395b6 (v1.35.19). Module: src/sourcecode/migrate_check.py. Rules MIG-001..008. CLI: sourcecode migrate-check . --format json|text --min-severity. 36 tests. Fixtures: tests/fixtures/javax_legacy/. CLOSED."
     },
     {
       "id": 3,
-      "name": "Benchmark: 7 real Java repos",
+      "name": "spring-audit --ci flag (P1)",
       "status": "done",
-      "details": "Tested spring-petclinic(47), eureka(409), jobrunr(964), openmrs-core(1281), BroadleafCommerce(2985), keycloak(7885) Java files. Results: linear scaling, no crashes. petclinic=0.32s, keycloak=12.23s base scan. spring-audit: 0.28s-12s. onboard: 0.20s-20.7s. R-SCALE-01 CLOSED for spring-audit and base scan."
+      "details": "Committed as dd878e7 (v1.35.20). --ci/--no-ci flag: exit 1 on violations. --format github-comment: Markdown table + emoji severity icons + <details> collapsible. docs/spring-audit-ci.yml: GitHub Actions starter. 13 new tests in TestSpringAuditCIFlag. CLOSED."
     },
     {
       "id": 4,
-      "name": "Schema discovery: mode=contract vs GSD SourceMap",
+      "name": "get_migration_readiness() MCP tool (P2, partial)",
       "status": "done",
-      "details": "Production CLI outputs mode=contract schema (richer than GSD roadmap SourceMap). Has contracts[].imports per file — foundation for migrate-check already exists. project.type, entry_points, summary all correctly populated."
+      "details": "Committed as dd878e7 (v1.35.20). server.py: get_migration_readiness() @mcp.tool() with when_to_call guidance. registry.py: migrate_check curated alias in _java_spring_aliases(), added to _MCP_HIDDEN_CANONICAL_TOOLS. 8 new tests in TestGetMigrationReadinessMCP. CLOSED."
     },
     {
       "id": 5,
-      "name": "spring-audit quality validation on real repos",
+      "name": "Real-repo migrate-check benchmarking",
       "status": "done",
-      "details": "BroadleafCommerce: 4 real TX-005 findings (removeCredit, removePayment). openmrs: 1 TX-005. keycloak: 0 (not Spring — correct). All legitimate findings on real enterprise code."
+      "details": "Tested 7 repos: BroadleafCommerce(100/2762), eureka(0/299), jobrunr(100/669), keycloak(91/5603), openmrs-core(100/849), spring-petclinic(100/30), spaghetti-api(100/5). All results confirmed correct. eureka sb2=False is correct (pre-Spring project). BroadleafCommerce 100 confirmed correct (already on jakarta.*)."
     }
   ],
   "remaining_tasks": [
     {
       "id": 1,
-      "name": "License TTL CI fix",
-      "priority": "P0",
-      "status": "pending",
-      "details": "license.py: _CACHE_TTL_SECONDS=1800 (30min) breaks CI containers. Fix: add SOURCECODE_CI=1 env var → TTL 86400 (24h). ~2h effort. Required before CI gate can be sold to enterprise."
-    },
-    {
-      "id": 2,
-      "name": "migrate-check v1 implementation",
-      "priority": "P1",
-      "status": "pending",
-      "details": "New module: src/sourcecode/migrate_check.py. Use contracts[].imports (already computed) to find javax.persistence/servlet/validation/transaction imports. Detect WebSecurityConfigurerAdapter (already in repository_ir.py:2434,3286). Rules: MIG-001..008. Output: MigrationReport with readiness_score, blocking_count, findings, estimated_effort_days. CLI: sourcecode migrate-check . --format json|text --min-severity HIGH. Needs synthetic fixture tests/fixtures/javax_legacy/ (real repos all already migrated to jakarta)."
-    },
-    {
-      "id": 3,
-      "name": "spring-audit --ci flag",
-      "priority": "P1",
-      "status": "pending",
-      "details": "Add --ci mode to spring-audit_cmd: exit 1 on violations >= min_severity, structured JSON output + optional --format github-comment. GitHub Actions YAML starter in docs/. Reuse existing pr_comment_renderer.py."
-    },
-    {
-      "id": 4,
-      "name": "MCP token budgets + migrate tool",
-      "priority": "P2",
-      "status": "pending",
-      "details": "Add per-tool output budget caps (dict MAX_TOKENS_PER_TOOL). Add get_migration_readiness() MCP tool delegating to migrate-check. Add when_to_call: doc hints to existing tool docstrings. Ensure outputs < 10k tokens per tool for Cursor compatibility."
-    },
-    {
-      "id": 5,
       "name": "Fix key_dependencies=0 on BroadleafCommerce onboard",
       "priority": "P2",
       "status": "pending",
-      "details": "onboard BroadleafCommerce returns key_dependencies: 0 despite being a major Maven multi-module Spring project. Likely gap in dependency detection when --dependencies not explicitly passed."
+      "details": "sourcecode onboard BroadleafCommerce returns key_dependencies: 0 despite being a major Maven multi-module Spring project. Investigate repository_ir.py dependency detection path — likely gap when --dependencies flag not explicitly passed."
     },
     {
-      "id": 6,
+      "id": 2,
+      "name": "MCP token budget caps",
+      "priority": "P2",
+      "status": "pending",
+      "details": "Add MAX_TOKENS_PER_TOOL dict to MCP server. Enforce truncation so Cursor stays under 10k tokens/tool limit. Affects get_agent_context, get_spring_audit, get_migration_readiness on large repos (keycloak: 5603 files). get_migration_readiness MCP tool is done; this is about output size safety."
+    },
+    {
+      "id": 3,
       "name": "Deferred from session 36: E2E test + publish 1.33.4",
       "priority": "P3",
       "status": "pending",
@@ -86,66 +65,45 @@
     }
   ],
   "blockers": [],
-  "human_actions_pending": [
-    {
-      "action": "Decide which P0/P1 to start first: license TTL fix or migrate-check v1",
-      "context": "License TTL fix is 2h and unblocks CI gate sales. migrate-check v1 is 5-7d and unblocks the biggest revenue opportunity. Both can start independently.",
-      "blocking": false
-    }
-  ],
+  "human_actions_pending": [],
   "decisions": [
     {
-      "decision": "migrate-check reuses contracts[].imports — no new scanner needed",
-      "rationale": "Production CLI already computes per-file import lists in mode=contract output. Iterate contracts, filter javax.*, categorize. Saves ~2 days of parser work.",
-      "session": 73
+      "decision": "migrate-check reuses direct file regex scan (not contracts[].imports)",
+      "rationale": "CIR skips wildcard imports (import javax.persistence.*;) at repository_ir.py:1016. Direct file regex catches both specific and wildcard imports. Used [ \\t]* not \\s* in regex to avoid newline consumption corrupting line number calculation.",
+      "session": 74
     },
     {
-      "decision": "CI gate uses spring-audit --ci, NOT onboard --ci",
-      "rationale": "onboard takes 9-20s on medium/large repos — unacceptable for CI. spring-audit: 0.28s-6s even on 2985-file repos. Onboard is human/agent workflow, not gate.",
-      "session": 73
+      "decision": "--ci/--no-ci flag form (not is_flag=True)",
+      "rationale": "Typer 0.24+ deprecates is_flag=True parameter. --ci/--no-ci bool flag pattern avoids deprecation warning.",
+      "session": 74
     },
     {
-      "decision": "Stack expansion: deepen Java/Spring + Kotlin only (next 12 months)",
-      "rationale": "Spring TX semantic analysis is the moat. Kotlin is 70% of new Spring Boot projects, ~3 weeks of IR work. C#/.NET would take 12+ months to reach parity — dilutes moat before monetized.",
-      "session": 73
+      "decision": "github-comment renderer in cli.py (not spring_findings.py)",
+      "rationale": "Presentation/formatting logic belongs in the CLI layer. spring_findings.py stays a pure data model.",
+      "session": 74
     },
     {
-      "decision": "Spring Boot migrate-check is #1 revenue opportunity",
-      "rationale": "Spring Boot 2 EOL Nov 2023 — market is in active pain. No competitor has semantic-depth migration checker. Budgeted projects with clear ROI. migrate-check v1 in 5-7 days leveraging existing IR.",
-      "session": 73
+      "decision": "MCP tool delegates to CLI via _execute() (not direct module import)",
+      "rationale": "Consistent with all other MCP tools (get_spring_audit, get_endpoints, etc.). Avoids duplicating logic and keeps the single execution path.",
+      "session": 74
+    },
+    {
+      "decision": "eureka 0/100 score is correct",
+      "rationale": "Pre-Spring Boot project (raw Jersey + javax.servlet:servlet-api:2.5). 95 affected files. spring_boot_2_detected=False is technically correct — it never was Spring Boot 2.",
+      "session": 74
     }
   ],
   "key_findings": {
-    "benchmark_results": {
-      "scale": "Linear O(n) scaling confirmed. No crashes up to 7885 Java files.",
-      "ci_viable_commands": ["spring-audit (0.28s-6s)", "base scan (0.32s-12s)", "impact (0.23s)"],
-      "ci_not_viable": ["onboard (9-20s on large repos)"],
-      "r_scale_01": "CLOSED — performance is production-ready"
+    "migrate_check_real_repo_results": {
+      "repos_fully_migrated": ["BroadleafCommerce (Spring Boot 3.5.14)", "jobrunr", "openmrs-core", "spring-petclinic", "spaghetti-api"],
+      "repos_need_work": ["eureka (95 affected files, score 0)", "keycloak (3 residual javax.annotation in federation module, score 91)"],
+      "no_javax_persistence_in_test_set": "All Spring Boot repos already on jakarta.* — MIG-001 (critical) only testable via synthetic fixtures"
     },
-    "schema_discovery": {
-      "production_schema": "mode=contract (not GSD SourceMap)",
-      "contracts_imports": "Per-file import lists already computed — migrate-check can reuse directly",
-      "entry_points": "Correctly detected (5 in petclinic incl @SpringBootApplication + 4 controllers)",
-      "project_type": "Correctly classified (petclinic=web_mvc, BroadleafCommerce=api)"
-    },
-    "spring_audit_validation": {
-      "real_findings": "4 TX-005 in BroadleafCommerce, 1 in openmrs — legitimate enterprise patterns",
-      "false_negatives": "keycloak=0 findings (correct — Quarkus not Spring)",
-      "credibility": "ESTABLISHED — finds real bugs in real code"
-    },
-    "migration_test_gap": {
-      "issue": "All 7 testing repos already on jakarta EE — can't test migrate-check against real javax",
-      "fix": "Create tests/fixtures/javax_legacy/ with synthetic Java files using javax.persistence/servlet/validation/transaction"
-    },
-    "license_ttl_issue": {
-      "current": "1800s (30min) — breaks CI containers",
-      "fix": "SOURCECODE_CI=1 → TTL 86400 (24h). 2h effort."
-    }
+    "ci_gate_output_example": "sourcecode spring-audit . --ci --format github-comment → exit 1 + Markdown table on TX-001 violations",
+    "mcp_tool_registered": "get_migration_readiness() live in FastMCP server, curated alias in registry with when_to_call: guidance"
   },
   "uncommitted_files": [],
-  "untracked_files": [
-    "docs/PRODUCT_AUDIT.md"
-  ],
-  "next_action": "Choose: (A) License TTL fix [2h, unblocks CI gate] OR (B) migrate-check v1 [5-7d, biggest revenue opportunity]. Both independent. Recommended start: (A) then (B).",
-  "context_notes": "Session 73: pure strategy + benchmarking session. No code changes. Benchmarked 7 real Java repos (13k+ files total). Validated spring-audit finds real TX-005 bugs in BroadleafCommerce/openmrs. Discovered contracts[].imports is the foundation for migrate-check. All repos already on jakarta — need synthetic fixture for migration testing. License TTL (30min) is critical CI blocker. Roadmap designed for 3 fronts: migrate-check, MCP polish, CI/CD gate."
+  "untracked_files": [],
+  "next_action": "Recommended: P2 key_dependencies=0 bug on BroadleafCommerce onboard — investigate repository_ir.py dependency detection when --dependencies flag not passed.",
+  "context_notes": "Session 74: implementation session. Shipped: migrate-check real-repo validation, spring-audit --ci gate, --format github-comment, GitHub Actions YAML starter, get_migration_readiness() MCP tool. Tests: 2240 passed (from 2194 at session start). Versions: 1.35.19 (migrate-check) and 1.35.20 (CI+MCP). Pre-existing flaky test: test_output_ux.py::TestReasoningBlockRemoved::test_delta_no_reasoning_key — confirmed pre-existing on clean master, ignore."
 }
