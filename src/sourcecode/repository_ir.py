@@ -105,7 +105,12 @@ class EvidenceBundle:
 _PKG_RE = re.compile(r'^package\s+([\w.]+)\s*;', re.MULTILINE)
 _IMPORT_RE = re.compile(r'^import\s+(?:static\s+)?([\w.]+(?:\.\*)?)\s*;', re.MULTILINE)
 _ANN_RE = re.compile(r'^(@[\w.]+)')
-_ANN_WITH_ARGS_RE = re.compile(r'^(@[\w.]+)\s*(?:\(([^)]*)\))?')
+_ANN_WITH_ARGS_RE = re.compile(
+    r'^(@[\w.]+)\s*'
+    r'(?:\('
+    r'((?:[^()"\']*|"[^"]*"|\'[^\']*\'|\((?:[^()"\']*|"[^"]*"|\'[^\']*\')*\))*)'
+    r'\))?'
+)
 
 _CLASS_DECL_RE = re.compile(
     r'(?:^|(?<=\s))'
@@ -3302,6 +3307,52 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
         security_model = "annotation_based"
     else:
         security_model = "unknown"
+
+    # Detect XML-based Spring Security config. When present, per-endpoint
+    # none_detected is expected and does NOT mean the endpoint is unsecured —
+    # security is declared in XML (HttpSecurity rules, filter chains, web.xml
+    # security constraints). Update security_model and re-tag affected endpoints
+    # so the output cannot be misread as "unprotected".
+    _XML_SECURITY_RE = re.compile(
+        r'(?:xmlns(?::[a-z]+)?="http://www\.springframework\.org/schema/security"'
+        r'|<security:http\b'
+        r'|<http\s[^>]*use-expressions'
+        r'|spring-security-[2345]'
+        r'|xmlns:security="http://www\.springframework\.org/schema/security")',
+        re.IGNORECASE,
+    )
+    _xml_security_detected = False
+    _XML_GLOBS = (
+        "*security*.xml", "*Security*.xml",
+        "*applicationContext*.xml", "*-context.xml", "*Context.xml",
+        "*spring*.xml", "*Spring*.xml",
+    )
+    for _glob in _XML_GLOBS:
+        for _xf in root.rglob(_glob):
+            if "target/" in str(_xf).replace("\\", "/"):
+                continue
+            try:
+                _xt = _xf.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if _XML_SECURITY_RE.search(_xt):
+                _xml_security_detected = True
+                break
+        if _xml_security_detected:
+            break
+
+    if _xml_security_detected and security_model == "unknown":
+        security_model = "xml_or_filter_chain"
+        # Re-tag per-endpoint none_detected → xml_or_filter_chain so the output
+        # cannot be misread as "endpoint is unprotected".
+        for ep in endpoints:
+            if ep.get("security", {}).get("policy") == "none_detected":
+                ep["security"] = {"policy": "xml_or_filter_chain"}
+        # Recompute no_security_signal (now counts only truly unknown endpoints)
+        no_security_signal = sum(
+            1 for e in endpoints
+            if e.get("security", {}).get("policy") == "none_detected"
+        )
 
     return {
         "endpoints": endpoints,

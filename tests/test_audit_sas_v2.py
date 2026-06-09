@@ -504,3 +504,119 @@ class TestMcpStatusVersion:
             or (args and args[:2] == ["mcp", "serve"])
         )
         assert not is_builtin, "custom Python+script entry must NOT be recognized as built-in"
+
+
+class TestXmlSecurityOpacity:
+    """Regression tests for F-008: XML Spring Security opacity.
+
+    When endpoint security is configured via XML (spring-security.xml,
+    applicationContext-security.xml, etc.), endpoints must NOT show
+    policy=none_detected. The security_model must be xml_or_filter_chain.
+    """
+
+    _CONTROLLER = '''\
+package com.example;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class UserController {
+    @GetMapping("/users") public String list() { return "[]"; }
+    @PostMapping("/users") public String create() { return "ok"; }
+}
+'''
+
+    _SPRING_SECURITY_XML = '''\
+<?xml version="1.0"?>
+<beans xmlns:security="http://www.springframework.org/schema/security">
+    <security:http auto-config="true">
+        <security:intercept-url pattern="/users" access="ROLE_USER"/>
+    </security:http>
+</beans>'''
+
+    def test_xml_security_sets_security_model(self, tmp_path) -> None:
+        root = _java_repo(tmp_path, self._CONTROLLER)
+        (tmp_path / "src/main/resources").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src/main/resources/spring-security.xml").write_text(self._SPRING_SECURITY_XML)
+
+        result = extract_java_endpoints(root)
+        assert result["security_model"] == "xml_or_filter_chain", (
+            f"F-008 regression: expected xml_or_filter_chain, got {result['security_model']}"
+        )
+
+    def test_xml_security_no_none_detected_endpoints(self, tmp_path) -> None:
+        root = _java_repo(tmp_path, self._CONTROLLER)
+        (tmp_path / "src/main/resources").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src/main/resources/spring-security.xml").write_text(self._SPRING_SECURITY_XML)
+
+        result = extract_java_endpoints(root)
+        none_detected = [
+            e for e in result["endpoints"]
+            if e.get("security", {}).get("policy") == "none_detected"
+        ]
+        assert len(none_detected) == 0, (
+            f"F-008 regression: {len(none_detected)} endpoint(s) still show none_detected "
+            f"when XML security is present: {none_detected}"
+        )
+
+    def test_xml_security_endpoints_show_xml_or_filter_chain(self, tmp_path) -> None:
+        root = _java_repo(tmp_path, self._CONTROLLER)
+        (tmp_path / "src/main/resources").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src/main/resources/applicationContext-security.xml").write_text(
+            self._SPRING_SECURITY_XML
+        )
+
+        result = extract_java_endpoints(root)
+        for ep in result["endpoints"]:
+            policy = ep.get("security", {}).get("policy", "")
+            assert policy == "xml_or_filter_chain", (
+                f"F-008 regression: endpoint {ep.get('path')} has policy={policy!r}, "
+                f"expected xml_or_filter_chain"
+            )
+
+    def test_no_xml_security_keeps_none_detected(self, tmp_path) -> None:
+        """Without XML security, none_detected must be preserved (no false positive)."""
+        root = _java_repo(tmp_path, self._CONTROLLER)
+
+        result = extract_java_endpoints(root)
+        assert result["security_model"] != "xml_or_filter_chain", (
+            "F-008 regression: xml_or_filter_chain falsely set when no XML security present"
+        )
+        none_detected = [
+            e for e in result["endpoints"]
+            if e.get("security", {}).get("policy") == "none_detected"
+        ]
+        assert len(none_detected) == len(result["endpoints"]), (
+            "F-008 regression: endpoints changed policy without XML security"
+        )
+
+    def test_java_filter_based_not_overridden_by_xml(self, tmp_path) -> None:
+        """When @EnableWebSecurity is present, filter_based must not be overridden."""
+        java = '''\
+package com.example;
+import org.springframework.security.config.annotation.web.configuration.*;
+import org.springframework.web.bind.annotation.*;
+@EnableWebSecurity
+public class SecConfig {}
+@RestController
+class Ctrl {
+    @GetMapping("/x") public String x() { return "ok"; }
+}
+'''
+        root = _java_repo(tmp_path, java)
+        (tmp_path / "src/main/resources").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src/main/resources/security.xml").write_text(self._SPRING_SECURITY_XML)
+
+        result = extract_java_endpoints(root)
+        assert result["security_model"] == "filter_based", (
+            f"F-008 regression: filter_based overridden by XML. got={result['security_model']}"
+        )
+
+    def test_no_security_signal_zero_when_xml(self, tmp_path) -> None:
+        """no_security_signal must be 0 when all endpoints get xml_or_filter_chain."""
+        root = _java_repo(tmp_path, self._CONTROLLER)
+        (tmp_path / "src/main/resources").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src/main/resources/spring-security.xml").write_text(self._SPRING_SECURITY_XML)
+
+        result = extract_java_endpoints(root)
+        assert result["no_security_signal"] == 0, (
+            f"F-008 regression: no_security_signal={result['no_security_signal']}, expected 0"
+        )

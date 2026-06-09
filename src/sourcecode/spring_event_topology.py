@@ -197,14 +197,17 @@ def _compute_event_risk(
     consumer_count: int,
     before_commit_count: int,
     cross_module: bool,
+    sync_in_tx_count: int = 0,
 ) -> str:
     """Deterministic risk scoring per spec.
 
     high: fanout > 5 OR cross-module propagation OR BEFORE_COMMIT consumers
+          OR sync @EventListener inside @Transactional publisher
     medium: 2–5 consumers
     low: ≤1 consumer
     """
-    if consumer_count > _RISK_FANOUT_HIGH or cross_module or before_commit_count > 0:
+    if (consumer_count > _RISK_FANOUT_HIGH or cross_module
+            or before_commit_count > 0 or sync_in_tx_count > 0):
         return "high"
     if consumer_count >= _RISK_FANOUT_MEDIUM:
         return "medium"
@@ -327,9 +330,23 @@ class EventTopologyOrchestrator:
         # ── 7. TX context ──────────────────────────────────────────────────
         after_commit = [c.fqn for c in consumers if c.transactional_phase == "AFTER_COMMIT"]
         before_commit_risks = [c.fqn for c in consumers if c.transactional_phase == "BEFORE_COMMIT"]
+
+        # Detect sync @EventListener inside @Transactional publisher.
+        # Plain @EventListener fires synchronously; if the publisher method is
+        # @Transactional the listener runs inside that TX — listener exception
+        # rolls back the outer TX, and DB state may be partially committed.
+        tx_publishers = [
+            p for p in publishers
+            if "@Transactional" in ((fqn_index.get(p) or {}).get("annotations") or [])
+        ]
+        sync_in_tx_risks = [
+            c.fqn for c in consumers
+            if c.type == "spring_event" and tx_publishers
+        ]
         tx_context = {
             "after_commit_consumers": after_commit,
             "before_commit_risks": before_commit_risks,
+            "sync_in_tx_risks": sync_in_tx_risks,
         }
 
         # ── 8. Cross-module detection ──────────────────────────────────────
@@ -352,6 +369,7 @@ class EventTopologyOrchestrator:
             consumer_count=len(consumers),
             before_commit_count=len(before_commit_risks),
             cross_module=cross_module,
+            sync_in_tx_count=len(sync_in_tx_risks),
         )
 
         # ── 10. Confidence ─────────────────────────────────────────────────
@@ -385,6 +403,7 @@ class EventTopologyOrchestrator:
                 "kafka_listeners_in_repo": kafka_count,
                 "rabbit_listeners_in_repo": rabbit_count,
                 "before_commit_risk_count": len(before_commit_risks),
+                "sync_in_tx_risk_count": len(sync_in_tx_risks),
                 "level2_events": list(level2_events.keys()),
                 "cross_module": cross_module,
                 "model_build_time_ms": model.build_time_ms,

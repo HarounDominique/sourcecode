@@ -868,9 +868,34 @@ def _find_build_files(root: Path) -> list[tuple[Path, str]]:
     return results
 
 
+def _resolve_maven_properties(text: str) -> str:
+    """Substitute ${prop} references with values from the <properties> block.
+
+    Handles single-level property references that appear in the same pom.xml.
+    Multi-level references (${a} where a=${b}) are resolved up to 3 passes.
+    """
+    props: dict[str, str] = {}
+    for m in re.finditer(r'<([A-Za-z][\w.\-]*)>\s*([^<${}]+?)\s*</\1>', text):
+        props[m.group(1)] = m.group(2).strip()
+    if not props:
+        return text
+
+    resolved = text
+    for _ in range(3):
+        def _sub(m: re.Match) -> str:  # noqa: E306
+            return props.get(m.group(1), m.group(0))
+        resolved_new = re.sub(r'\$\{([\w.\-]+)\}', _sub, resolved)
+        if resolved_new == resolved:
+            break
+        resolved = resolved_new
+    return resolved
+
+
 def _scan_dep_file(text: str, rel_path: str) -> list["MigrationFinding"]:
     """Apply dependency rules to a build file. Returns one finding per matched rule."""
     is_gradle = rel_path.endswith((".gradle", ".gradle.kts"))
+    if not is_gradle and rel_path.endswith(".xml"):
+        text = _resolve_maven_properties(text)
     findings: list[MigrationFinding] = []
     for rule in _DEP_RULES:
         if rule.quick_filter is not None and rule.quick_filter not in text:
@@ -1198,6 +1223,7 @@ def run_migrate_check(
         limitations.append(f"{xml_read_errors} XML file(s) could not be read and were skipped.")
 
     dep_read_errors = 0
+    raw_dep_findings: list[MigrationFinding] = []
     for abs_path, rel_path in build_files:
         try:
             text = abs_path.read_text(encoding="utf-8", errors="replace")
@@ -1206,7 +1232,20 @@ def run_migrate_check(
             continue
         dep_findings = _scan_dep_file(text, rel_path)
         filtered = [f for f in dep_findings if SEVERITY_ORDER.get(f.severity, 3) <= min_order]
-        all_findings.extend(filtered)
+        raw_dep_findings.extend(filtered)
+
+    # Deduplicate dep findings by rule_id: same dependency in parent + child poms
+    # is one logical finding. Keep the first occurrence (root pom sorts first).
+    _seen_dep_rules: dict[str, int] = {}  # rule_id → count
+    for f in raw_dep_findings:
+        _seen_dep_rules[f.rule_id] = _seen_dep_rules.get(f.rule_id, 0) + 1
+    _dedup_dep: list[MigrationFinding] = []
+    _emitted: set[str] = set()
+    for f in raw_dep_findings:
+        if f.rule_id not in _emitted:
+            _dedup_dep.append(f)
+            _emitted.add(f.rule_id)
+    all_findings.extend(_dedup_dep)
 
     if dep_read_errors:
         limitations.append(f"{dep_read_errors} build file(s) could not be read and were skipped.")

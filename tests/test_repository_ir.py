@@ -2786,3 +2786,136 @@ public class SimpleService {
         assert any("SimpleService" in f for f in fqns), (
             f"Single-line class broken by PARSER-001 fix. got={fqns}"
         )
+
+
+class TestAnnotationArgsCapture:
+    """Regression tests for F-001: @PreAuthorize expression truncation.
+
+    _ANN_WITH_ARGS_RE used [^)]* which stopped at the first ) inside the annotation
+    arg string, truncating SpEL expressions like hasRole('USER') → hasRole('USER'.
+    """
+
+    def _ann_values(self, src: str) -> dict:
+        from sourcecode.repository_ir import _extract_symbols
+        _, syms, _ = _extract_symbols(src, "Test.java")
+        for s in syms:
+            if s.annotation_values:
+                return s.annotation_values
+        return {}
+
+    def _method_ann_values(self, src: str, method_name: str) -> dict:
+        from sourcecode.repository_ir import _extract_symbols
+        _, syms, _ = _extract_symbols(src, "Test.java")
+        for s in syms:
+            if method_name in s.symbol and s.annotation_values:
+                return s.annotation_values
+        return {}
+
+    def test_pre_authorize_has_role_full_expression(self):
+        src = """\
+package com.example;
+@RestController
+public class C {
+    @PreAuthorize("hasRole('USER')")
+    public void m() {}
+}
+"""
+        vals = self._method_ann_values(src, "#m")
+        expr = vals.get("@PreAuthorize", "")
+        assert expr.strip('"') == "hasRole('USER')", (
+            f"F-001 regression: expression truncated. got={expr!r}"
+        )
+
+    def test_pre_authorize_is_authenticated_full_expression(self):
+        src = """\
+package com.example;
+@RestController
+public class C {
+    @PreAuthorize("isAuthenticated()")
+    public void m() {}
+}
+"""
+        vals = self._method_ann_values(src, "#m")
+        expr = vals.get("@PreAuthorize", "")
+        assert expr.strip('"') == "isAuthenticated()", (
+            f"F-001 regression: isAuthenticated() truncated. got={expr!r}"
+        )
+
+    def test_pre_authorize_has_any_role_full_expression(self):
+        src = """\
+package com.example;
+@RestController
+public class C {
+    @PreAuthorize("hasAnyRole('ADMIN', 'USER')")
+    public void m() {}
+}
+"""
+        vals = self._method_ann_values(src, "#m")
+        expr = vals.get("@PreAuthorize", "")
+        assert expr.strip('"') == "hasAnyRole('ADMIN', 'USER')", (
+            f"F-001 regression: hasAnyRole truncated. got={expr!r}"
+        )
+
+    def test_pre_authorize_compound_and_expression(self):
+        src = """\
+package com.example;
+@RestController
+public class C {
+    @PreAuthorize("isAuthenticated() and hasRole('ADMIN')")
+    public void m() {}
+}
+"""
+        vals = self._method_ann_values(src, "#m")
+        expr = vals.get("@PreAuthorize", "")
+        assert expr.strip('"') == "isAuthenticated() and hasRole('ADMIN')", (
+            f"F-001 regression: compound AND expression truncated. got={expr!r}"
+        )
+
+    def test_pre_authorize_complex_spel(self):
+        src = """\
+package com.example;
+@RestController
+public class C {
+    @PreAuthorize("hasRole('USER') or hasAuthority('READ_PRIVILEGE')")
+    public void m() {}
+}
+"""
+        vals = self._method_ann_values(src, "#m")
+        expr = vals.get("@PreAuthorize", "")
+        assert "hasRole('USER')" in expr, (
+            f"F-001 regression: complex SpEL truncated. got={expr!r}"
+        )
+        assert "hasAuthority('READ_PRIVILEGE')" in expr, (
+            f"F-001 regression: hasAuthority part missing. got={expr!r}"
+        )
+
+    def test_secured_annotation_roles_intact(self):
+        src = """\
+package com.example;
+@RestController
+public class C {
+    @Secured({"ROLE_USER", "ROLE_ADMIN"})
+    public void m() {}
+}
+"""
+        vals = self._method_ann_values(src, "#m")
+        raw = vals.get("@Secured", "")
+        assert "ROLE_USER" in raw and "ROLE_ADMIN" in raw, (
+            f"F-001 regression: @Secured roles truncated. got={raw!r}"
+        )
+
+    def test_request_mapping_path_intact(self):
+        """Non-security annotation with parens must still parse correctly."""
+        src = """\
+package com.example;
+@RestController
+public class C {
+    @RequestMapping("/api/v1/users")
+    public void m() {}
+}
+"""
+        vals = self._method_ann_values(src, "#m")
+        raw = vals.get("@RequestMapping", "")
+        assert "/api/v1/users" in raw, (
+            f"@RequestMapping path intact. got={raw!r}"
+        )

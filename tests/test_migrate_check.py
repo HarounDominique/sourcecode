@@ -1139,3 +1139,218 @@ class TestAutoFixAvailable:
         r = next(f for f in findings if f.rule_id == "MIG-015")
         assert r.openrewrite_recipe == "org.openrewrite.java.migrate.RemoveFinalizeMethod"
         assert r.to_dict()["auto_fix_available"] is True
+
+
+class TestMavenPropertyResolution:
+    """Regression tests for F-002: Maven property substitution not resolved.
+
+    _scan_dep_file applied patterns to raw pom text, missing version references
+    like ${hibernate.version} even when the property value was defined in the
+    same <properties> block.
+    """
+
+    def test_mig041_detects_via_property_substitution(self) -> None:
+        pom = """\
+<?xml version="1.0"?>
+<project>
+  <properties>
+    <hibernate.version>5.6.15.Final</hibernate.version>
+  </properties>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.hibernate</groupId>
+        <artifactId>hibernate-core</artifactId>
+        <version>${hibernate.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>"""
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert any(f.rule_id == "MIG-041" for f in findings), (
+            "F-002 regression: MIG-041 not detected when version is a property reference"
+        )
+
+    def test_mig041_property_with_dotted_name(self) -> None:
+        pom = """\
+<project>
+  <properties>
+    <hibernate.core.version>5.4.0.Final</hibernate.core.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.hibernate</groupId>
+      <artifactId>hibernate-core</artifactId>
+      <version>${hibernate.core.version}</version>
+    </dependency>
+  </dependencies>
+</project>"""
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert any(f.rule_id == "MIG-041" for f in findings), (
+            "F-002 regression: dotted property name not resolved"
+        )
+
+    def test_no_false_positive_hibernate6_via_property(self) -> None:
+        pom = """\
+<project>
+  <properties>
+    <hibernate.version>6.4.4.Final</hibernate.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.hibernate</groupId>
+      <artifactId>hibernate-core</artifactId>
+      <version>${hibernate.version}</version>
+    </dependency>
+  </dependencies>
+</project>"""
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert not any(f.rule_id == "MIG-041" for f in findings), (
+            "F-002 regression: false positive on Hibernate 6 via property"
+        )
+
+    def test_springfox_detected_via_property(self) -> None:
+        pom = """\
+<project>
+  <properties>
+    <springfox.version>3.0.0</springfox.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>io.springfox</groupId>
+      <artifactId>springfox-boot-starter</artifactId>
+      <version>${springfox.version}</version>
+    </dependency>
+  </dependencies>
+</project>"""
+        findings = _scan_dep_file(pom, "pom.xml")
+        springfox_found = any("springfox" in f.rule_id.lower() or "SpringFox" in f.title for f in findings)
+        assert springfox_found, (
+            "F-002 regression: SpringFox not detected when version is property reference"
+        )
+
+    def test_property_resolution_does_not_affect_gradle(self) -> None:
+        """Gradle files must not be processed through Maven property resolution."""
+        gradle = "implementation 'org.hibernate:hibernate-core:5.6.15.Final'"
+        findings = _scan_dep_file(gradle, "build.gradle")
+        assert any(f.rule_id == "MIG-041" for f in findings), (
+            "Gradle detection broken after property resolution change"
+        )
+
+    def test_literal_version_still_detected(self) -> None:
+        """Existing literal version detection must not regress."""
+        pom = """\
+<dependency>
+  <groupId>org.hibernate</groupId>
+  <artifactId>hibernate-core</artifactId>
+  <version>5.6.15.Final</version>
+</dependency>"""
+        findings = _scan_dep_file(pom, "pom.xml")
+        assert any(f.rule_id == "MIG-041" for f in findings), (
+            "F-002 regression: literal version detection broke after property resolution"
+        )
+
+
+class TestMultiModuleDepDeduplication:
+    """Regression tests for F-003: multi-module pom inflates dep finding counts.
+
+    Same dependency (e.g. EhCache, SpringFox) declared in root pom + N child
+    poms must produce exactly one finding, not N+1.
+    """
+
+    def _make_pom(self, tmp_path, modules):
+        """Create multi-module Maven layout. modules is list of (subdir, pom_content)."""
+        import tempfile
+        root = tmp_path
+        for subdir, content in modules:
+            if subdir:
+                (root / subdir).mkdir(parents=True, exist_ok=True)
+                (root / subdir / "pom.xml").write_text(content)
+            else:
+                (root / "pom.xml").write_text(content)
+        return root
+
+    def test_ehcache_deduplicated_across_three_poms(self, tmp_path) -> None:
+        ehcache_dep = """\
+<dependency>
+  <groupId>net.sf.ehcache</groupId>
+  <artifactId>ehcache</artifactId>
+  <version>2.10.9</version>
+</dependency>"""
+        pom = f"<project><dependencies>{ehcache_dep}</dependencies></project>"
+        modules = [("", pom), ("api", pom), ("data", pom)]
+        root = self._make_pom(tmp_path, modules)
+
+        from sourcecode.migrate_check import run_migrate_check
+        report = run_migrate_check([], root)
+        ehcache = [f for f in report.findings if f.rule_id == "MIG-043"]
+        assert len(ehcache) == 1, (
+            f"F-003 regression: EhCache reported {len(ehcache)}x across 3 poms, expected 1"
+        )
+
+    def test_springfox_deduplicated_across_two_poms(self, tmp_path) -> None:
+        springfox_dep = """\
+<dependency>
+  <groupId>io.springfox</groupId>
+  <artifactId>springfox-boot-starter</artifactId>
+  <version>3.0.0</version>
+</dependency>"""
+        pom = f"<project><dependencies>{springfox_dep}</dependencies></project>"
+        modules = [("", pom), ("web", pom)]
+        root = self._make_pom(tmp_path, modules)
+
+        from sourcecode.migrate_check import run_migrate_check
+        report = run_migrate_check([], root)
+        springfox = [f for f in report.findings if f.rule_id == "MIG-040"]
+        assert len(springfox) == 1, (
+            f"F-003 regression: SpringFox reported {len(springfox)}x, expected 1"
+        )
+
+    def test_single_pom_still_detected(self, tmp_path) -> None:
+        """Single pom with dependency must still produce one finding."""
+        pom = """\
+<project>
+  <dependencies>
+    <dependency>
+      <groupId>net.sf.ehcache</groupId>
+      <artifactId>ehcache</artifactId>
+      <version>2.10.9</version>
+    </dependency>
+  </dependencies>
+</project>"""
+        (tmp_path / "pom.xml").write_text(pom)
+
+        from sourcecode.migrate_check import run_migrate_check
+        report = run_migrate_check([], tmp_path)
+        ehcache = [f for f in report.findings if f.rule_id == "MIG-043"]
+        assert len(ehcache) == 1, (
+            f"F-003 regression: single pom now produces {len(ehcache)} findings"
+        )
+
+    def test_different_deps_each_appear_once(self, tmp_path) -> None:
+        """Two different deps in the same pom must both appear exactly once."""
+        pom = """\
+<project>
+  <dependencies>
+    <dependency>
+      <groupId>net.sf.ehcache</groupId>
+      <artifactId>ehcache</artifactId>
+      <version>2.10.9</version>
+    </dependency>
+    <dependency>
+      <groupId>io.springfox</groupId>
+      <artifactId>springfox-boot-starter</artifactId>
+      <version>3.0.0</version>
+    </dependency>
+  </dependencies>
+</project>"""
+        (tmp_path / "pom.xml").write_text(pom)
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "pom.xml").write_text(pom)
+
+        from sourcecode.migrate_check import run_migrate_check
+        report = run_migrate_check([], tmp_path)
+        ehcache = [f for f in report.findings if f.rule_id == "MIG-043"]
+        springfox = [f for f in report.findings if f.rule_id == "MIG-040"]
+        assert len(ehcache) == 1, f"EhCache: expected 1, got {len(ehcache)}"
+        assert len(springfox) == 1, f"SpringFox: expected 1, got {len(springfox)}"

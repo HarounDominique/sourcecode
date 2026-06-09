@@ -721,3 +721,111 @@ public class TransactionLifecycleMonitor
             "BUG-EVT-001: BroadleafApplicationListener<T> must produce listens_to_event edge. "
             f"listen_edges={[(e.from_symbol, e.to_symbol) for e in listen_edges]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# F-009  Sync @EventListener inside @Transactional publisher → risk=high
+# ---------------------------------------------------------------------------
+
+class TestSyncEventListenerInTxRisk:
+    """Regression tests for F-009: sync @EventListener not flagged as TX risk.
+
+    When a @Transactional publisher fires an event and the consumer is a plain
+    @EventListener (not @TransactionalEventListener), the listener runs
+    synchronously inside the TX. A listener exception rolls back the outer TX.
+    """
+
+    def _run(self, pub_fqn, listener_fqn, pub_annotations, listener_annotations,
+             listener_ann_values=None):
+        cg = [
+            _pub_edge(pub_fqn, _EVT_CLS),
+            _listen_edge(listener_fqn, _EVT_CLS),
+        ]
+        raw_nodes = [
+            _node(pub_fqn, pub_annotations),
+            _node(listener_fqn, listener_annotations, listener_ann_values or {}),
+            _node(_EVT_CLS, []),
+        ]
+        cir = _FakeCIR(
+            symbols=[_EVT_CLS, pub_fqn, listener_fqn],
+            call_graph=cg,
+            raw_nodes=raw_nodes,
+        )
+        model = _make_model(cg)
+        return EventTopologyOrchestrator().query(cir, model, _EVT_CLS)
+
+    def test_sync_event_listener_in_tx_is_high_risk(self):
+        """@Transactional publisher + plain @EventListener → risk=high, sync_in_tx_risks populated."""
+        result = self._run(
+            pub_fqn=_PUBLISHER,
+            listener_fqn=_LISTENER_A,
+            pub_annotations=["@Transactional"],
+            listener_annotations=["@EventListener"],
+        )
+        assert result.risk_level == "high", (
+            f"F-009 regression: sync @EventListener in TX must be high risk, got {result.risk_level}"
+        )
+        sync_risks = result.transaction_context.get("sync_in_tx_risks", [])
+        assert _LISTENER_A in sync_risks, (
+            f"F-009 regression: listener not in sync_in_tx_risks. got={sync_risks}"
+        )
+
+    def test_sync_in_tx_count_in_metadata(self):
+        """sync_in_tx_risk_count must appear in metadata."""
+        result = self._run(
+            pub_fqn=_PUBLISHER,
+            listener_fqn=_LISTENER_A,
+            pub_annotations=["@Transactional"],
+            listener_annotations=["@EventListener"],
+        )
+        assert "sync_in_tx_risk_count" in result.metadata, (
+            "F-009 regression: sync_in_tx_risk_count missing from metadata"
+        )
+        assert result.metadata["sync_in_tx_risk_count"] == 1
+
+    def test_transactional_after_commit_not_flagged_as_sync_risk(self):
+        """@TransactionalEventListener(AFTER_COMMIT) must NOT appear in sync_in_tx_risks."""
+        result = self._run(
+            pub_fqn=_PUBLISHER,
+            listener_fqn=_LISTENER_A,
+            pub_annotations=["@Transactional"],
+            listener_annotations=["@TransactionalEventListener"],
+            listener_ann_values={"@TransactionalEventListener": "phase=TransactionPhase.AFTER_COMMIT"},
+        )
+        sync_risks = result.transaction_context.get("sync_in_tx_risks", [])
+        assert _LISTENER_A not in sync_risks, (
+            f"F-009 regression: AFTER_COMMIT listener falsely flagged as sync risk. got={sync_risks}"
+        )
+
+    def test_no_transactional_publisher_no_sync_risk(self):
+        """Plain (non-TX) publisher + @EventListener → no sync_in_tx_risk."""
+        result = self._run(
+            pub_fqn=_PUBLISHER,
+            listener_fqn=_LISTENER_A,
+            pub_annotations=["@Service"],    # no @Transactional
+            listener_annotations=["@EventListener"],
+        )
+        sync_risks = result.transaction_context.get("sync_in_tx_risks", [])
+        assert len(sync_risks) == 0, (
+            f"F-009 regression: non-TX publisher produced sync_in_tx_risks. got={sync_risks}"
+        )
+
+    def test_compute_event_risk_sync_in_tx(self):
+        """_compute_event_risk must return high when sync_in_tx_count > 0."""
+        from sourcecode.spring_event_topology import _compute_event_risk
+        assert _compute_event_risk(1, 1, 0, False, sync_in_tx_count=1) == "high"
+        assert _compute_event_risk(1, 1, 0, False, sync_in_tx_count=0) == "low"
+
+    def test_transactional_event_listener_before_commit_still_flagged(self):
+        """BEFORE_COMMIT phase must still be flagged (existing behavior preserved)."""
+        result = self._run(
+            pub_fqn=_PUBLISHER,
+            listener_fqn=_LISTENER_A,
+            pub_annotations=["@Service"],
+            listener_annotations=["@TransactionalEventListener"],
+            listener_ann_values={"@TransactionalEventListener": "phase=TransactionPhase.BEFORE_COMMIT"},
+        )
+        assert result.risk_level == "high", (
+            f"F-009 regression: BEFORE_COMMIT no longer flagged as high risk"
+        )
+        assert _LISTENER_A in result.transaction_context.get("before_commit_risks", [])
