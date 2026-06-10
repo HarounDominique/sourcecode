@@ -94,6 +94,7 @@ _CLASS_RE = re.compile(
 )
 _METHOD_RE = re.compile(
     r'^\s*(?:(?:public|protected|private|static|final|synchronized|abstract|native|default|override)\s+)*'
+    r'(?:@\w+(?:\([^)]*\))?\s+)*'      # optional return-type annotations (e.g. @ResponseBody)
     r'(?:<[^>]+>\s+)?'                  # optional generic return type
     r'(?:[\w<>\[\],?\s]+\s+)?'         # return type (optional for constructors)
     r'(\w+)\s*\('                        # method/constructor name + opening paren
@@ -288,6 +289,8 @@ def chunk_java_file(
     current_method_name = ""
     current_method_type = ""
     method_brace_start_depth = -1
+    # State for multi-line method signatures (name detected, waiting for opening '{')
+    _pending_method: Optional[tuple[str, str]] = None  # (name, type)
 
     for line_no_0, raw_line in enumerate(all_lines):
         line_no = line_no_0 + 1  # 1-based
@@ -315,38 +318,65 @@ def chunk_java_file(
 
         # Check if this line starts a method/constructor AT class_depth+1
         if class_depth >= 0 and depth == class_depth + 1 and not current_method_name:
-            is_method, mname, mtype = _is_method_or_constructor_start(
-                stripped, class_name, depth, class_depth
-            )
-            if is_method and "{" in raw_line:
-                # Flush anything accumulated as field_block / class_header
-                # Include annotation lines in the new method chunk
-                if pending_lines:
-                    # Check if last N pending lines are annotations for this method
-                    # Flush everything up to ann_buffer start
-                    if ann_buffer:
-                        ann_start_line = ann_buffer[0][0]
-                        pre_ann_lines = pending_lines[:ann_start_line - pending_start]
-                        if pre_ann_lines:
-                            _flush_chunk(ann_start_line - 1)
-                        # Move ann_buffer lines into the new method chunk
-                        pending_start = ann_start_line
-                        pending_lines = [al for _, al in ann_buffer]
-                        ann_buffer = []
-                    else:
-                        _flush_chunk(line_no - 1)
-                        pending_start = line_no
-                        pending_lines = []
-
+            # Multi-line signature: we already detected the method name; this line
+            # should contain the opening brace that starts the method body.
+            # Guard: opens > closes ensures a net depth increase (not a balanced
+            # annotation arg like @RequestMapping({"v1","v2"})).
+            if _pending_method and opens > closes:
+                mname, mtype = _pending_method
+                _pending_method = None
                 current_method_name = mname
                 current_method_type = mtype
-                method_brace_start_depth = depth + opens - 1  # depth entering method body
+                method_brace_start_depth = depth + opens - 1
                 pending_type = mtype
                 pending_symbol = f"{class_name}#{mname}" if class_name else mname
                 pending_lines.append(raw_line)
                 depth += opens - closes
                 ann_buffer = []
                 continue
+
+            if not _pending_method:
+                is_method, mname, mtype = _is_method_or_constructor_start(
+                    stripped, class_name, depth, class_depth
+                )
+                if is_method:
+                    # Flush anything accumulated as field_block / class_header
+                    # Include annotation lines in the new method chunk
+                    if pending_lines:
+                        if ann_buffer:
+                            ann_start_line = ann_buffer[0][0]
+                            pre_ann_lines = pending_lines[:ann_start_line - pending_start]
+                            if pre_ann_lines:
+                                _flush_chunk(ann_start_line - 1)
+                            # Move ann_buffer lines into the new method chunk
+                            pending_start = ann_start_line
+                            pending_lines = [al for _, al in ann_buffer]
+                            ann_buffer = []
+                        else:
+                            _flush_chunk(line_no - 1)
+                            pending_start = line_no
+                            pending_lines = []
+
+                    if "{" in raw_line:
+                        # Single-line signature: method body opens on same line
+                        current_method_name = mname
+                        current_method_type = mtype
+                        method_brace_start_depth = depth + opens - 1
+                        pending_type = mtype
+                        pending_symbol = f"{class_name}#{mname}" if class_name else mname
+                        pending_lines.append(raw_line)
+                        depth += opens - closes
+                        ann_buffer = []
+                        continue
+                    else:
+                        # Multi-line signature: record name, wait for '{' on later line
+                        _pending_method = (mname, mtype)
+                        pending_type = mtype
+                        pending_symbol = f"{class_name}#{mname}" if class_name else mname
+                        pending_lines.append(raw_line)
+                        depth += opens - closes
+                        ann_buffer = []
+                        continue
 
         # Update depth
         depth += opens - closes
