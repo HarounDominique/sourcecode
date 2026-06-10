@@ -211,6 +211,59 @@ class TestBeanGraph:
         bg = BeanGraph.build(cir)
         assert bg.beans == {}
 
+    def test_meta_service_annotation_detected(self):
+        # @DomainService is annotated with @Service — class using it should be a bean
+        nodes = [
+            {
+                "fqn": "com.example.DomainService",
+                "symbol_kind": "annotation",
+                "annotations": ["@Service", "@Transactional"],
+                "source_file": "DomainService.java",
+            },
+            {
+                "fqn": "com.example.PatientServiceImpl",
+                "symbol_kind": "class",
+                "annotations": ["@DomainService"],
+                "source_file": "PatientServiceImpl.java",
+            },
+        ]
+        bg = BeanGraph.build(_FakeCIR(nodes=nodes))
+        assert bg.is_bean("com.example.PatientServiceImpl")
+        assert bg.get_stereotype("com.example.PatientServiceImpl") == "service"
+
+    def test_meta_repository_annotation_detected(self):
+        # @InfrastructureRepository is annotated with @Repository
+        nodes = [
+            {
+                "fqn": "com.example.InfrastructureRepository",
+                "symbol_kind": "annotation",
+                "annotations": ["@Repository"],
+                "source_file": "InfrastructureRepository.java",
+            },
+            {
+                "fqn": "com.example.PatientDaoImpl",
+                "symbol_kind": "class",
+                "annotations": ["@InfrastructureRepository"],
+                "source_file": "PatientDaoImpl.java",
+            },
+        ]
+        bg = BeanGraph.build(_FakeCIR(nodes=nodes))
+        assert bg.is_bean("com.example.PatientDaoImpl")
+        assert bg.get_stereotype("com.example.PatientDaoImpl") == "repository"
+
+    def test_annotation_type_node_not_added_as_bean(self):
+        # The annotation-type definition itself must not appear as a bean
+        nodes = [
+            {
+                "fqn": "com.example.DomainService",
+                "symbol_kind": "annotation",
+                "annotations": ["@Service"],
+                "source_file": "DomainService.java",
+            },
+        ]
+        bg = BeanGraph.build(_FakeCIR(nodes=nodes))
+        assert not bg.is_bean("com.example.DomainService")
+
 
 # ---------------------------------------------------------------------------
 # EI — EndpointIndex

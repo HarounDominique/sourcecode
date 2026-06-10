@@ -327,6 +327,73 @@ class TestBuildTxIndex:
         idx = build_tx_index(cir)
         assert idx.build_time_ms >= 0
 
+    def test_meta_annotation_class_boundary_detected(self):
+        # @DomainService is annotated with @Transactional — class using it should be indexed
+        nodes = [
+            {
+                "fqn": "com.example.DomainService",
+                "symbol_kind": "annotation",
+                "annotations": ["@Service", "@Transactional"],
+                "annotation_values": {},
+                "modifiers": [],
+                "source_file": "DomainService.java",
+            },
+            {
+                "fqn": "com.example.PatientServiceImpl",
+                "symbol_kind": "class",
+                "annotations": ["@DomainService"],
+                "annotation_values": {},
+                "modifiers": [],
+                "source_file": "PatientServiceImpl.java",
+            },
+        ]
+        idx = build_tx_index(_FakeCIR(nodes))
+        assert "com.example.PatientServiceImpl" in idx.by_symbol
+        b = idx.by_symbol["com.example.PatientServiceImpl"]
+        assert b.scope == "class"
+        assert b.propagation == PROPAGATION_DEFAULT
+
+    def test_meta_annotation_method_boundary_with_readonly(self):
+        # @ReadOnlyTransaction is annotated with @Transactional(readOnly=true)
+        nodes = [
+            {
+                "fqn": "com.example.ReadOnlyTransaction",
+                "symbol_kind": "annotation",
+                "annotations": ["@Transactional"],
+                "annotation_values": {"@Transactional": "readOnly = true"},
+                "modifiers": [],
+                "source_file": "ReadOnlyTransaction.java",
+            },
+            {
+                "fqn": "com.example.UserRepo#findAll",
+                "symbol_kind": "method",
+                "annotations": ["@ReadOnlyTransaction"],
+                "annotation_values": {},
+                "modifiers": ["public"],
+                "source_file": "UserRepo.java",
+            },
+        ]
+        idx = build_tx_index(_FakeCIR(nodes))
+        assert "com.example.UserRepo#findAll" in idx.by_symbol
+        b = idx.by_symbol["com.example.UserRepo#findAll"]
+        assert b.read_only is True
+
+    def test_annotation_type_node_itself_not_added_as_boundary(self):
+        # The annotation-type definition itself must not appear as a TX boundary
+        nodes = [
+            {
+                "fqn": "com.example.DomainService",
+                "symbol_kind": "annotation",
+                "annotations": ["@Service", "@Transactional"],
+                "annotation_values": {},
+                "modifiers": [],
+                "source_file": "DomainService.java",
+            },
+        ]
+        idx = build_tx_index(_FakeCIR(nodes))
+        assert "com.example.DomainService" not in idx.by_symbol
+        assert "com.example.DomainService" not in idx.class_level
+
 
 # ---------------------------------------------------------------------------
 # E — effective_boundary resolution

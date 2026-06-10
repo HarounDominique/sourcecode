@@ -293,25 +293,52 @@ def build_tx_index(cir: "CanonicalRepositoryIR") -> TransactionBoundaryIndex:
         graph = raw_ir.get("graph") or {}
         nodes = graph.get("nodes") or []
 
+        # Pass 1: build meta-@Transactional map from annotation-type nodes.
+        # e.g. @ReadOnlyTransaction (annotated with @Transactional(readOnly=true))
+        # maps "@ReadOnlyTransaction" → "readOnly = true"
+        _meta_tx_args: dict[str, str] = {}
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            if (node.get("symbol_kind") or node.get("type") or "") != "annotation":
+                continue
+            ann_set = set(node.get("annotations") or [])
+            if "@Transactional" not in ann_set:
+                continue
+            _fqn = node.get("fqn") or node.get("symbol") or ""
+            if not _fqn:
+                continue
+            _simple = "@" + _fqn.split(".")[-1]
+            _av = node.get("annotation_values") or {}
+            _meta_tx_args[_simple] = _av.get("@Transactional", "")
+
+        # Pass 2: index all @Transactional boundaries (direct or via meta-annotation).
         for node in nodes:
             if not isinstance(node, dict):
                 continue
 
+            symbol_kind = node.get("symbol_kind") or node.get("type") or ""
+            if symbol_kind == "annotation":
+                continue  # annotation-type nodes are not TX boundaries
+
             annotations = node.get("annotations") or []
-            if "@Transactional" not in annotations:
-                continue
+            ann_values = node.get("annotation_values") or {}
+
+            if "@Transactional" in annotations:
+                raw_args = ann_values.get("@Transactional", "")
+            else:
+                # Check meta-annotations (composed @Transactional)
+                meta_key = next((a for a in annotations if a in _meta_tx_args), None)
+                if meta_key is None:
+                    continue
+                raw_args = _meta_tx_args[meta_key]
 
             fqn = node.get("fqn") or node.get("symbol") or ""
             if not fqn:
                 continue
 
-            symbol_kind = node.get("symbol_kind") or node.get("type") or ""
             source_file = node.get("source_file") or node.get("declaring_file") or ""
             modifiers = node.get("modifiers") or []
-
-            # annotation_values is stored per-symbol in the graph node
-            ann_values = node.get("annotation_values") or {}
-            raw_args = ann_values.get("@Transactional", "")
 
             # Determine scope: class-level or method-level
             if symbol_kind in ("class", "interface", "enum"):

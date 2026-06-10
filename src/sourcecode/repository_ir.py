@@ -2909,6 +2909,24 @@ def build_repo_ir(
         # Spring Data
         '@Query', '@NamedQuery',
     )
+    # Pre-pass: collect custom meta-annotation names from @interface definitions
+    # that compose known Spring stereotypes (e.g. @DomainService = @Service + @Transactional).
+    # These names must be added to the marker set so classes using them aren't
+    # filtered out by the fast pre-scan below.
+    _custom_meta_markers: set[str] = set()
+    for _rp in sorted(file_paths):
+        try:
+            _src = (root / _rp).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "@interface" not in _src:
+            continue
+        if not any(m in _src for m in _ANNOTATION_MARKERS):
+            continue
+        for _m in re.finditer(r'@interface\s+(\w+)', _src):
+            _custom_meta_markers.add(f"@{_m.group(1)}")
+    _effective_markers = _ANNOTATION_MARKERS + tuple(_custom_meta_markers)
+
     _per_file: list[tuple[str, str, str, list[str], list[SymbolRecord]]] = []
     for rel_path in sorted(file_paths):
         abs_path = root / rel_path
@@ -2921,7 +2939,7 @@ def build_repo_ir(
         _meta_chars_read += len(source)
         # Fast pre-scan: if file has no relevant annotations skip full extraction.
         # Still register package/class name for same-package resolution.
-        if not any(marker in source for marker in _ANNOTATION_MARKERS):
+        if not any(marker in source for marker in _effective_markers):
             pkg_m = _PKG_RE.search(source)
             _pkg = pkg_m.group(1) if pkg_m else ""
             # Minimal class-name symbols for same-package map (no methods/fields)

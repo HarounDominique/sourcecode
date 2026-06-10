@@ -153,18 +153,45 @@ class BeanGraph:
         raw_ir = getattr(cir, "_raw_ir", {}) or {}
         nodes = (raw_ir.get("graph") or {}).get("nodes") or []
 
+        # Pass 1: build meta-bean-annotation map from annotation-type nodes.
+        # e.g. @DomainService (annotated with @Service) maps "@DomainService" → "service"
+        _meta_bean_stereotype: dict[str, str] = {}
         for node in nodes:
             if not isinstance(node, dict):
                 continue
+            if (node.get("symbol_kind") or node.get("type") or "") != "annotation":
+                continue
+            _ann_set = set(node.get("annotations") or [])
+            _match = _ann_set & _BEAN_ANNOTATIONS
+            if not _match:
+                continue
+            _fqn = node.get("fqn") or ""
+            if not _fqn:
+                continue
+            _simple = "@" + _fqn.split(".")[-1]
+            _bean_ann = next(iter(_match))
+            _meta_bean_stereotype[_simple] = _bean_ann.lstrip("@").lower()
+
+        # Pass 2: collect all bean nodes (direct or via meta-annotation).
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            if (node.get("symbol_kind") or node.get("type") or "") == "annotation":
+                continue  # annotation-type nodes are not beans
             ann_set = set(node.get("annotations") or [])
             match = ann_set & _BEAN_ANNOTATIONS
             if not match:
-                continue
+                meta_match = ann_set & set(_meta_bean_stereotype)
+                if not meta_match:
+                    continue
+                ann = next(iter(meta_match))
+                stereotype = _meta_bean_stereotype[ann]
+            else:
+                ann = next(iter(match))
+                stereotype = ann.lstrip("@").lower()
             fqn = node.get("fqn") or ""
             if not fqn:
                 continue
-            ann = next(iter(match))
-            stereotype = ann.lstrip("@").lower()
             beans[fqn] = BeanNode(
                 fqn=fqn,
                 stereotype=stereotype,
