@@ -361,6 +361,50 @@ def _strip_java_comments(source: str) -> str:
     source = _LINE_COMMENT_RE.sub(' ', source)
     return source
 
+
+def _parse_annotation_line(line: str) -> tuple[str, str]:
+    """Parse annotation name and args from a line starting with '@'.
+
+    Returns (ann_name, ann_args) where ann_args is content inside the outermost ().
+    Uses O(n) character scanning instead of regex to avoid catastrophic backtracking
+    on lines with deeply nested annotation arguments (e.g. @APIResponse with @Content
+    containing @Schema — 3-level nesting that breaks _ANN_WITH_ARGS_RE).
+    """
+    if not line.startswith('@'):
+        return "", ""
+    i = 1
+    while i < len(line) and (line[i].isalnum() or line[i] in ('_', '.')):
+        i += 1
+    ann_name = line[:i]
+    while i < len(line) and line[i] in (' ', '\t'):
+        i += 1
+    if i >= len(line) or line[i] != '(':
+        return ann_name, ""
+    depth = 0
+    in_string = False
+    string_char = ''
+    start = i + 1
+    i += 1
+    while i < len(line):
+        c = line[i]
+        if in_string:
+            if c == '\\':
+                i += 2
+                continue
+            if c == string_char:
+                in_string = False
+        elif c in ('"', "'"):
+            in_string = True
+            string_char = c
+        elif c == '(':
+            depth += 1
+        elif c == ')':
+            if depth == 0:
+                return ann_name, line[start:i]
+            depth -= 1
+        i += 1
+    return ann_name, line[start:]
+
 # Edge types used for subsystem grouping — semantic hierarchy only, not imports
 _SUBSYSTEM_STRUCTURAL_EDGES: frozenset[str] = frozenset({
     "extends", "implements", "injects", "contained_in",
@@ -410,22 +454,27 @@ _BFS_MAX_DEPTH: int = 3
 # Regex to strip leading annotations from a single parameter (e.g. @NotNull @Valid String name)
 _ANN_PREFIX_RE = re.compile(r'^(?:@\w+\s*(?:\([^)]*\))?\s*)+')
 
+# Used by _count_net_braces fast path: strip string/char literals before counting braces.
+# Handles escape sequences (\\) so escaped quotes don't close the literal prematurely.
+_STRING_LITERAL_RE = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'')
+
+# Module-level cache for class-keyword detection (avoids recompilation per _extract_symbols call)
+_CLASS_KW_RE = re.compile(r'\b(?:class|interface|enum)\s+[A-Z]')
+
 
 # ---------------------------------------------------------------------------
 # Stable ID helpers
 # ---------------------------------------------------------------------------
 
-def _normalize_type_name(raw: str) -> str:
-    """Strip annotations, final modifier, and param name; return only type.
+_FINAL_STRIP_RE = re.compile(r'\bfinal\s+')
+_TYPE_PARAM_RE = re.compile(r'^([\w<>\[\].,? ]+?)\s+\w+$')
 
-    "(Long id)"    -> strip after parsing → "Long"
-    "@NotNull User user" → "User"
-    "List<String>" → "List<String>"
-    """
+
+def _normalize_type_name(raw: str) -> str:
+    """Strip annotations, final modifier, and param name; return only type."""
     raw = _ANN_PREFIX_RE.sub("", raw).strip()
-    raw = re.sub(r'\bfinal\s+', "", raw).strip()
-    # "Type name" → extract Type (rightmost word is the param name)
-    m = re.match(r'^([\w<>\[\].,? ]+?)\s+\w+$', raw)
+    raw = _FINAL_STRIP_RE.sub("", raw).strip()
+    m = _TYPE_PARAM_RE.match(raw)
     if m:
         return m.group(1).strip()
     return raw.strip()
@@ -503,26 +552,15 @@ def _compute_stable_id(
 # ---------------------------------------------------------------------------
 
 def _count_net_braces(line: str) -> int:
-    depth = 0
-    in_str = False
-    in_char = False
-    i = 0
-    while i < len(line):
-        ch = line[i]
-        if ch == '\\' and (in_str or in_char):
-            i += 2
-            continue
-        if ch == '"' and not in_char:
-            in_str = not in_str
-        elif ch == "'" and not in_str:
-            in_char = not in_char
-        elif not in_str and not in_char:
-            if ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-        i += 1
-    return depth
+    # Fast exit: no braces on this line at all
+    if '{' not in line and '}' not in line:
+        return 0
+    # Fast path: no string/char literals — count directly (C-speed)
+    if '"' not in line and "'" not in line:
+        return line.count('{') - line.count('}')
+    # Slow path: strip string/char literals first so quoted braces don't count
+    clean = _STRING_LITERAL_RE.sub('', line)
+    return clean.count('{') - clean.count('}')
 
 
 def _extract_modifiers(text: str) -> list[str]:
@@ -591,7 +629,6 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
     _raw_lines = source.splitlines()
     _joined: list[str] = []
     _i = 0
-    _CLASS_KW_RE = re.compile(r'\b(?:class|interface|enum)\s+[A-Z]')
     while _i < len(_raw_lines):
         _line = _raw_lines[_i]
         _stripped = _line.strip()
@@ -633,10 +670,8 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
         net = _count_net_braces(stripped)
 
         if stripped.startswith("@"):
-            ann_m = _ANN_WITH_ARGS_RE.match(stripped)
-            if ann_m:
-                ann = ann_m.group(1)
-                ann_args = ann_m.group(2) or ""
+            ann, ann_args = _parse_annotation_line(stripped)
+            if ann:
                 if ann not in pending_anns:
                     pending_anns.append(ann)
                 if ann_args and ann in _CAPTURE_ANN_ARGS:
@@ -1141,17 +1176,26 @@ def _build_relations(
                     evidence={"type": "signature", "value": f"implements {iface}"},
                 ))
 
-    for m_path, class_fqn in _extract_mapped_paths(source, "").items():
-        for sym in symbols:
-            if sym.type in ("class", "interface") and (
-                "@RestController" in sym.annotations or "@Controller" in sym.annotations
-            ):
+    # mapped_to edges: controller class → class-level @RequestMapping path prefix.
+    # O(N) scan of symbols — do NOT call _extract_mapped_paths(source) here because
+    # _REQUEST_MAPPING_RE also matches method-level @GetMapping/@PostMapping, producing
+    # O(N_methods) paths × O(N_syms) inner loop = O(N²) on files with many endpoints.
+    for sym in symbols:
+        if sym.type not in ("class", "interface"):
+            continue
+        if "@RestController" not in sym.annotations and "@Controller" not in sym.annotations:
+            continue
+        if "@RequestMapping" not in sym.annotations:
+            continue
+        _rm_args = sym.annotation_values.get("@RequestMapping", "")
+        for _m_path in _parse_route_paths(_rm_args):
+            if _m_path:
                 edges.append(RelationEdge(
                     from_symbol=sym.symbol,
-                    to_symbol=m_path,
+                    to_symbol=_m_path,
                     type="mapped_to",
                     confidence="high",
-                    evidence={"type": "annotation", "value": f"@RequestMapping(\"{m_path}\")"},
+                    evidence={"type": "annotation", "value": f"@RequestMapping(\"{_m_path}\")"},
                 ))
 
     # contained_in edges: method/field → enclosing class (structural membership)
@@ -1419,9 +1463,18 @@ def _collect_file_constants(source: str) -> dict[str, str]:
     Returns {simple_name: value} covering all classes in the file.
     Used by _resolve_ann_path_expr to fold constant references in @RequestMapping args.
     """
+    # Fast path: skip entirely when no declarations present (C-speed string scan)
+    if 'static final String' not in source:
+        return {}
+    # Scan only candidate lines (skips full-source regex over 100KB files).
+    # Running _STATIC_FINAL_STR_RE over the whole source is O(source_size) due to
+    # optional modifier group backtracking; per-line match is far cheaper.
     constants: dict[str, str] = {}
-    for m in _STATIC_FINAL_STR_RE.finditer(source):
-        constants[m.group(1)] = m.group(2)
+    for line in source.splitlines():
+        if 'static' in line and 'final' in line and 'String' in line and '=' in line and '"' in line:
+            m = _STATIC_FINAL_STR_RE.search(line)
+            if m:
+                constants[m.group(1)] = m.group(2)
     return constants
 
 
@@ -2205,11 +2258,19 @@ def _assemble(
 
     all_fqns_set = {s.symbol for s in sorted_syms}
 
-    # Bounded BFS reachability per node (graph-only)
-    bfs_reach: dict[str, int] = {
-        s.symbol: _bfs_reachability(s.symbol, adjacency)
-        for s in sorted_syms
-    }
+    # Bounded BFS reachability per node (graph-only).
+    # Skipped when symbol count exceeds threshold: O(N*(V+E)) BFS for every symbol
+    # hangs on large repos (keycloak: 80K+ symbols → 180s+ with no output).
+    # bfs_reach contributes only 0.1× weight vs in_deg+out_deg; skipping it on large
+    # repos causes no accuracy loss for spring-audit/endpoints/security analysis.
+    _BFS_SYMBOL_THRESHOLD: int = 5000
+    if len(sorted_syms) <= _BFS_SYMBOL_THRESHOLD:
+        bfs_reach: dict[str, int] = {
+            s.symbol: _bfs_reachability(s.symbol, adjacency)
+            for s in sorted_syms
+        }
+    else:
+        bfs_reach = {}
 
     # Normalize centrality across all nodes
     max_raw = max(
@@ -2829,6 +2890,29 @@ def build_repo_ir(
     # type map before building relations.  Java classes in the same package
     # reference each other without import statements, so import_map alone cannot
     # resolve them — _build_same_package_map provides the cross-file fallback.
+    #
+    # Pre-scan filter: skip full symbol extraction for files that have no
+    # Spring/JAX-RS/CDI annotations. These files (utility classes, model beans,
+    # SPI interfaces) contribute no endpoints, transactions, or security findings
+    # to spring-audit. The text scan is C-speed vs O(lines) Python parse loop.
+    # Non-annotated files still register their package+class via a lightweight
+    # regex scan so same-package type resolution remains correct.
+    _ANNOTATION_MARKERS: tuple[str, ...] = (
+        '@Controller', '@RestController', '@Service', '@Repository',
+        '@Component', '@Configuration', '@Bean', '@Transactional',
+        '@Path', '@GET', '@POST', '@PUT', '@DELETE', '@PATCH',
+        '@PreAuthorize', '@RolesAllowed', '@Secured', '@EnableWebSecurity',
+        '@SpringBootApplication', '@EventListener', '@TransactionalEventListener',
+        '@RequiredArgsConstructor', '@AllArgsConstructor',
+        '@Inject', '@ApplicationScoped', '@RequestScoped', '@Singleton',
+        '@EnableMethodSecurity', '@EnableGlobalMethodSecurity',
+        # JPA / persistence (needed for stereotype detection in all commands)
+        '@Entity', '@MappedSuperclass', '@Embeddable',
+        # AOP / messaging / event sourcing
+        '@Aspect', '@Aggregate', '@Document',
+        # Spring Data
+        '@Query', '@NamedQuery',
+    )
     _per_file: list[tuple[str, str, str, list[str], list[SymbolRecord]]] = []
     for rel_path in sorted(file_paths):
         abs_path = root / rel_path
@@ -2839,6 +2923,23 @@ def build_repo_ir(
         _meta_files_read += 1
         _meta_lines_read += source.count("\n") + (1 if source and not source.endswith("\n") else 0)
         _meta_chars_read += len(source)
+        # Fast pre-scan: if file has no relevant annotations skip full extraction.
+        # Still register package/class name for same-package resolution.
+        if not any(marker in source for marker in _ANNOTATION_MARKERS):
+            pkg_m = _PKG_RE.search(source)
+            _pkg = pkg_m.group(1) if pkg_m else ""
+            # Minimal class-name symbols for same-package map (no methods/fields)
+            _min_syms: list[SymbolRecord] = []
+            for _cm in re.finditer(r'(?:class|interface|enum)\s+(\w+)', source):
+                _cls_name = _cm.group(1)
+                _fqn = f"{_pkg}.{_cls_name}" if _pkg else _cls_name
+                _min_syms.append(SymbolRecord(
+                    symbol=_fqn, type="class", confidence="medium",
+                    declaring_file=rel_path,
+                ))
+            all_symbols.extend(_min_syms)
+            # No relations needed for non-annotated files
+            continue
         package, symbols, raw_imports = _extract_symbols(source, rel_path)
         all_symbols.extend(symbols)
         _per_file.append((rel_path, source, package, raw_imports, symbols))
