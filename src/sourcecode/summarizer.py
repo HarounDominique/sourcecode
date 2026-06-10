@@ -223,6 +223,20 @@ class ProjectSummarizer:
         __import__("re").IGNORECASE,
     )
 
+    # Patterns that indicate security scanner / tool output, not project description.
+    # Trivy, OWASP, Snyk, etc. produce structured vulnerability reports.
+    _TOOL_OUTPUT_RE = __import__("re").compile(
+        r"CVE-\d{4}-\d{4,}"                       # CVE identifiers
+        r"|UNKNOWN:\s*\d+.*LOW:\s*\d+"            # Trivy severity summary line
+        r"|(CRITICAL|HIGH|MEDIUM|LOW):\s*\d+"     # severity: count pattern
+        r"|\bTotal:\s*\d+\s*\("                   # "Total: 45 (UNKNOWN: 0, ..." Trivy header
+        r"|\bvulnerabilit(?:y|ies)\s+found\b"     # "N vulnerabilities found"
+        r"|\bscan(?:ned|ning)\s+\d+\s+(?:file|package|image)\b"  # scanner progress
+        r"|\bpkg:(?:npm|pypi|maven|cargo|golang)/" # PURL package identifiers
+        r"|\b(?:trivy|snyk|grype|syft|cosign)\b", # well-known scanner names
+        __import__("re").IGNORECASE,
+    )
+
     def _extract_first_useful_paragraph(self, content: str) -> str | None:
         """Extract the first paragraph that describes the project architecture, not its license or marketing."""
         import re as _re
@@ -267,6 +281,9 @@ class ProjectSummarizer:
                 continue
             # Reject license notices and user-facing marketing text
             if self._LICENSE_MARKETING_RE.search(paragraph):
+                continue
+            # Reject security scanner / tool output (Trivy, Snyk, OWASP, CVE lists)
+            if self._TOOL_OUTPUT_RE.search(paragraph):
                 continue
             # Reject link-list paragraphs (docs/navigation sections):
             # if more than 2 markdown links dominate the paragraph, it's a nav section

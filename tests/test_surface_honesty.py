@@ -178,7 +178,7 @@ class TestCompactJavaOutputAPI:
         assert "transactional_boundaries" in data, \
             "compact must surface @Transactional classes"
         txn = data["transactional_boundaries"]
-        assert txn["count"] == 1
+        assert txn["class_count"] == 1
         assert "HealthService" in txn["classes"]
 
     def test_compact_suppresses_empty_env_summary(self):
@@ -295,7 +295,7 @@ class TestTransactionalPipeline:
         sm = SourceMap(metadata=AnalysisMetadata(), stacks=[stack])
         result = _transactional_summary(sm)
         assert result is not None
-        assert result["count"] == 2
+        assert result["class_count"] == 2
         assert "Svc1" in result["classes"]
 
 

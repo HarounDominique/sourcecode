@@ -779,7 +779,7 @@ class TestRunTxAudit:
     def test_result_has_metadata(self):
         cir = _FakeCIR([_private_tx_node("com.example.S#m")])
         result = run_tx_audit(cir)
-        assert "tx_boundaries_found" in result.metadata
+        assert "tx_annotation_count" in result.metadata
         assert "analysis_time_ms" in result.metadata
 
     def test_min_severity_filters(self):

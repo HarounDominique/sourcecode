@@ -504,7 +504,9 @@ def _transactional_summary(sm: "SourceMap", *, full: bool = False) -> "Optional[
         classes = getattr(s, "transactional_classes", [])
         if classes:
             total = len(classes)
-            result: dict[str, Any] = {"count": total, "classes": classes}
+            # class_count = unique classes with @Transactional anywhere (file-level scan).
+            # spring-audit metadata.tx_stats has method-level annotation breakdown.
+            result: dict[str, Any] = {"class_count": total, "classes": classes}
             if total > 10 and not full:
                 result["classes"] = classes[:10]
                 result["truncated"] = True

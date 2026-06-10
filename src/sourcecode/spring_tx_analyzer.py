@@ -739,7 +739,9 @@ def run_tx_audit(
         limitations=_tx_limitations,
         metadata={
             "symbols_analyzed": len(getattr(cir, "symbols", [])),
-            "tx_boundaries_found": tx_index.stats()["total"],
+            # tx_annotation_count = total @Transactional symbols (class-level + method-level).
+            # tx_stats.class_level matches compact transactional_boundaries.class_count.
+            "tx_annotation_count": tx_index.stats()["total"],
             "tx_stats": tx_index.stats(),
             "analysis_time_ms": elapsed_ms,
         },
