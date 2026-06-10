@@ -49,38 +49,29 @@ class TestMaybeRevalidateCISkip:
     def test_ci_suppresses_revalidation_at_2h(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """With SOURCECODE_CI=1, a 2h-old cache (>30min but <24h) must NOT trigger network call."""
         monkeypatch.setenv("SOURCECODE_CI", "1")
-        lic._license_data = self._make_license_data(7200)  # 2 hours old
-        lic.is_pro = True
+        monkeypatch.setattr(lic, "_license_data", self._make_license_data(7200))
+        monkeypatch.setattr(lic, "is_pro", True)
 
         with patch.object(lic, "_call_get_user_plan") as mock_net:
             lic._maybe_revalidate()
             mock_net.assert_not_called()
 
-        lic._license_data = None
-        lic.is_pro = False
-
     def test_no_ci_triggers_revalidation_at_2h(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without SOURCECODE_CI, a 2h-old cache (>30min) MUST trigger revalidation."""
         monkeypatch.delenv("SOURCECODE_CI", raising=False)
-        lic._license_data = self._make_license_data(7200)  # 2 hours old
-        lic.is_pro = True
+        monkeypatch.setattr(lic, "_license_data", self._make_license_data(7200))
+        monkeypatch.setattr(lic, "is_pro", True)
 
         with patch.object(lic, "_call_get_user_plan", return_value=None) as mock_net:
             lic._maybe_revalidate()
             mock_net.assert_called_once()
-
-        lic._license_data = None
-        lic.is_pro = False
 
     def test_ci_still_revalidates_after_24h(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Even in CI, a >24h-old cache must trigger revalidation."""
         monkeypatch.setenv("SOURCECODE_CI", "1")
-        lic._license_data = self._make_license_data(90000)  # 25 hours old
-        lic.is_pro = True
+        monkeypatch.setattr(lic, "_license_data", self._make_license_data(90000))
+        monkeypatch.setattr(lic, "is_pro", True)
 
         with patch.object(lic, "_call_get_user_plan", return_value=None) as mock_net:
             lic._maybe_revalidate()
             mock_net.assert_called_once()
-
-        lic._license_data = None
-        lic.is_pro = False

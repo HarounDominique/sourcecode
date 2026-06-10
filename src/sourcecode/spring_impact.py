@@ -570,6 +570,9 @@ class ImpactOrchestrator:
         # When the queried class is an interface, BFS should also start from
         # implementation symbols so TX boundaries and callers on the impl are found.
         impl_graph = getattr(cir, "implementation_graph", None)
+        # Track original seed classes BEFORE CH-001a expansion so CH-001b does not
+        # cascade through interfaces shared by impl classes added here (false positives).
+        original_seed_classes: set[str] = {_class_of(s) for s in seed_fqns}
         if impl_graph is not None:
             seed_classes_ch001 = {_class_of(s) for s in seed_fqns}
             impl_seeds: list[str] = []
@@ -598,11 +601,14 @@ class ImpactOrchestrator:
         # Callers typically inject the interface type, so reverse-graph edges live on
         # the interface node, not on the implementation node.  Without this expansion,
         # querying 'OrderServiceImpl' finds 0 callers even though 36 classes inject it.
+        # IMPORTANT: only expand ORIGINAL user-query seeds, not classes added by CH-001a.
+        # Expanding CH-001a-added impls cascades through shared utility interfaces
+        # (e.g. RefByUuid) and produces false-positive callers from sibling implementors.
         if impl_graph is not None:
             current_seed_classes = {_class_of(s) for s in seed_fqns}
             iface_seeds: list[str] = []
             iface_classes_added: set[str] = set()
-            for seed_class in sorted(current_seed_classes):
+            for seed_class in sorted(original_seed_classes):
                 ifaces = impl_graph.interfaces_of(seed_class)
                 for iface_class in ifaces:
                     if iface_class in iface_classes_added or iface_class in current_seed_classes:

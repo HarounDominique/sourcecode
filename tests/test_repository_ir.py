@@ -1913,10 +1913,12 @@ public class HubClass {
             caller_src = f"""\
 package com.example.callers;
 import com.example.HubClass;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 @Service
 public class Caller{i} {{
+    @Autowired
     private HubClass hub;
     public void run() {{ hub.doWork(); }}
 }}
@@ -2155,10 +2157,12 @@ public class HubClass {
             caller_src = f"""\
 package com.example.callers;
 import com.example.HubClass;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 @Service
 public class Caller{i} {{
+    @Autowired
     private HubClass hub;
     public void run() {{ hub.doWork(); }}
 }}
@@ -2168,7 +2172,9 @@ public class Caller{i} {{
                 sub_src = f"""\
 package com.example.sub;
 import com.example.callers.Caller{i};
+import org.springframework.beans.factory.annotation.Autowired;
 public class SubCaller{i}_{j} {{
+    @Autowired
     private Caller{i} caller;
     public void act() {{ caller.run(); }}
 }}

@@ -4232,6 +4232,16 @@ def _resolve_target(
     return "not_found", set()
 
 
+_BLAST_SKIP_EDGE_TYPES: frozenset[str] = frozenset({"contained_in", "imports"})
+# 'contained_in': structural membership (method→enclosing class), not a caller.
+# 'imports':      Java import statements — any class that references the type in
+#                 an import declaration, including those that only use it as a
+#                 method-return type or catch-block type.  Import presence does NOT
+#                 imply a runtime dependency; including it produces false-positive
+#                 callers (e.g. sibling service classes that share a utility interface).
+#                 Consistent with spring_impact._SKIP_EDGE_TYPES.
+
+
 def _all_callers_from_rg(fqn: str, reverse_graph: dict[str, dict[str, list[str]]]) -> list[str]:
     """Return all callers of fqn from the reverse graph (all edge types).
 
@@ -4242,13 +4252,17 @@ def _all_callers_from_rg(fqn: str, reverse_graph: dict[str, dict[str, list[str]]
     CH-002 fix: for 'injects' edges, normalize field/constructor FQNs to their
     enclosing class.  e.g. pkg.ConsolidacionService.calcularField → pkg.ConsolidacionService
     so BFS can continue through DI injection chains and find controllers.
+
+    FP-001 fix: skip 'imports' edges — import declarations are not runtime
+    dependencies and produce false-positive callers (e.g. sibling classes that share
+    a utility interface but don't call the target).
     """
     entry = reverse_graph.get(fqn) or {}
     callers: list[str] = []
     seen: set[str] = set()
     for edge_type, fqn_list in entry.items():
-        if edge_type == "contained_in":
-            continue  # structural membership, not a caller
+        if edge_type in _BLAST_SKIP_EDGE_TYPES:
+            continue
         for c in fqn_list:
             normalized = _normalize_owner_fqn(c) if edge_type == "injects" else c
             if normalized not in seen:
