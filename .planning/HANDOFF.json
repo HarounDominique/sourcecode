@@ -1,8 +1,8 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-10T16:40:11Z",
+  "timestamp": "2026-06-10T17:30:00Z",
   "phase": null,
-  "phase_name": "session 85 — P1-P5+P8 quality fixes v1.35.30",
+  "phase_name": "session 85 — quality fixes v1.35.30 (complete)",
   "phase_dir": null,
   "plan": null,
   "task": null,
@@ -10,28 +10,29 @@
   "status": "paused",
   "session_type": "continuous-quality-fixes",
   "completed_tasks": [
-    {"id": 1, "name": "P1 — impact field injection callers", "status": "done", "commit": "a17dcac", "detail": "_all_callers_from_rg in repository_ir.py now normalizes injects-edge FQNs (pkg.Class.field → pkg.Class) via _normalize_owner_fqn. Fixes @Autowired/@Inject/@Resource in compute_blast_radius BFS. spring_impact.py was already correct."},
-    {"id": 2, "name": "P2 — M3FiltroSeguridad/saint-server contamination removal", "status": "done", "commit": "a17dcac", "detail": "Purged from 8 source files: detectors/java.py, repository_ir.py, semantic_analyzer.py, serializer.py, canonical_ir.py, prepare_context.py, mcp/server.py, cli.py. Registries now empty extension points. serializer uses generic resource= pattern."},
-    {"id": 4, "name": "P4 — cache status CWD-dependent", "status": "done", "commit": "a17dcac", "detail": "_resolve_repo_root helper walks .git ancestry; all cache status/clear/warm commands now auto-resolve to git root from any subdirectory."},
-    {"id": 5, "name": "P5 — cold-start --output flag missing", "status": "done", "commit": "a17dcac", "detail": "Added --output/-o option to cold-start command, matching other commands pattern."},
-    {"id": 8, "name": "P8 — UX errors pr-impact and fix-bug", "status": "done", "commit": "a17dcac", "detail": "pr-impact --files error now explains expected file format with git diff example. fix-bug detects symptom-as-path misuse and emits structured error with --symptom suggestion."}
+    {"id": 1, "name": "P1 — impact field injection callers", "status": "done", "commit": "a17dcac", "detail": "_all_callers_from_rg normalizes injects-edge FQNs via _normalize_owner_fqn. @Autowired/@Inject/@Resource/same-pkg all work."},
+    {"id": 2, "name": "P2 — M3FiltroSeguridad/saint-server contamination removal", "status": "done", "commit": "a17dcac", "detail": "Purged from 8 source files. _CUSTOM_SECURITY_ANNOTATIONS and _CUSTOM_AOP_ANNOTATIONS are now empty extension-point dicts."},
+    {"id": 4, "name": "P4 — cache status CWD-dependent", "status": "done", "commit": "a17dcac", "detail": "_resolve_repo_root walks .git ancestry; all cache status/clear/warm auto-resolve from any subdirectory."},
+    {"id": 5, "name": "P5 — cold-start --output flag missing", "status": "done", "commit": "a17dcac", "detail": "Added --output/-o option to cold-start command."},
+    {"id": 8, "name": "P8 — UX errors pr-impact and fix-bug", "status": "done", "commit": "a17dcac", "detail": "pr-impact --files error explains expected format. fix-bug detects symptom-as-path misuse."},
+    {"id": 6, "name": "P6 — transactional count inconsistency (compact=33 vs spring-audit=178)", "status": "done", "commit": "2f0513f", "detail": "compact transactional_boundaries: count renamed to class_count (unique classes). spring-audit metadata: tx_boundaries_found renamed to tx_annotation_count (class+method annotations). tx_stats.class_level cross-references class_count. 3 tests updated."},
+    {"id": 7, "name": "P7 — project_summary contaminated by doc text (e.g. Trivy output)", "status": "done", "commit": "2f0513f", "detail": "Added _TOOL_OUTPUT_RE to summarizer._extract_first_useful_paragraph. Rejects CVE ids, Trivy severity lines, scanner names (trivy/snyk/grype/syft), PURL identifiers, vulnerability-count patterns."},
+    {"id": 9, "name": "P9 — repo-ir 71MB without warning", "status": "done", "commit": "29a6c7d", "detail": "Added --gzip flag (requires --output, auto-appends .gz, shows compressed+uncompressed sizes). Added 10MB size warning for file output without --gzip. Added error when --gzip used without --output."}
   ],
   "remaining_tasks": [
-    {"id": 3, "name": "P3 — cache Windows slow (cold ~8s, warm ~4s)", "status": "not_started", "note": "Not reproducible on macOS (0.18s warm). Windows-specific: Path.replace() on locked files may fail silently → CAS blobs: 0 → no deduplication → slower. Investigate _atomic_write with try/except fallback for Windows PermissionError."},
-    {"id": 6, "name": "P6 — transactional count inconsistency (compact=33 vs spring-audit=178)", "status": "not_started", "note": "compact counts classes; spring-audit counts annotations. Investigate and unify semantics or add clear labels."},
-    {"id": 7, "name": "P7 — project_summary contaminated by doc text (e.g. Trivy output)", "status": "not_started", "note": "summarizer.py likely scores doc files too highly. Prioritize structure/code/deps/config over free-text docs."},
-    {"id": 9, "name": "P9 — repo-ir 71MB without warning", "status": "not_started", "note": "Add size warning + --gzip / streaming option for large repo-ir outputs."}
+    {"id": 3, "name": "P3 — cache Windows slow (cold ~8s, warm ~4s)", "status": "not_started", "note": "Not reproducible on macOS (0.18s warm). Windows-specific: Path.replace() on locked files may fail silently -> CAS blobs: 0 -> no deduplication -> slower. Fix: _atomic_write in cache.py:810, add try/except PermissionError fallback for Windows."}
   ],
   "blockers": [
-    {"description": "P3 Windows cache requires Windows environment to reproduce and validate", "type": "external", "workaround": "Can inspect _atomic_write statically for Windows PermissionError patterns"}
+    {"description": "P3 Windows cache requires Windows environment to reproduce and validate", "type": "external", "workaround": "Can inspect _atomic_write statically for Windows PermissionError patterns, but cannot validate fix without Windows"}
   ],
   "human_actions_pending": [],
   "decisions": [
-    {"decision": "Fixed _all_callers_from_rg at read-time (not build-time)", "rationale": "Avoids changing serialized IR format; spring_impact.py already normalizes at its own BFS layer — two-layer approach is correct"},
-    {"decision": "Emptied _CUSTOM_SECURITY_ANNOTATIONS and _CUSTOM_AOP_ANNOTATIONS dicts", "rationale": "Remove M3FiltroSeguridad; leave extensible registries for future project-specific annotations"},
-    {"decision": "Added _resolve_repo_root helper to all 3 cache subcommands", "rationale": "DRY; consistent behaviour across status/clear/warm; walks .git not just checks for it"}
+    {"decision": "count -> class_count in transactional_boundaries (non-breaking rename)", "rationale": "Agents comparing compact vs spring-audit saw contradictory numbers (33 vs 178). Labels now unambiguous without changing semantics."},
+    {"decision": "_TOOL_OUTPUT_RE added as separate class var (not folded into _LICENSE_MARKETING_RE)", "rationale": "Different category of noise; easier to extend independently."},
+    {"decision": "--gzip auto-appends .gz if output path doesn't end in .gz", "rationale": "Prevents silent binary corruption of .json files; user still controls filename."},
+    {"decision": "--gzip + stdout = error (not silent gzip to stdout)", "rationale": "Compressed binary on stdout breaks pipelines silently; explicit error is safer."}
   ],
   "uncommitted_files": [],
-  "next_action": "Start P3: inspect _atomic_write for Windows Path.replace() failure mode, then P6: run compact and spring-audit on same Spring project to compare transaction counts",
-  "context_notes": "Session 85. All changes committed at a17dcac as v1.35.30. Tests: 8 pre-existing Pro-license failures (delta/generate_tests), 0 new failures. Validated: P1 on @Autowired/@Inject/@Resource/same-pkg; P2 on keycloak @Inject callers; P4 from petclinic/src subdirectory; P5 --help shows --output; P8 pr-impact and fix-bug manual check."
+  "next_action": "P3 only remaining — needs Windows env. Inspect cache.py:810 _atomic_write for PermissionError on Path.replace(), add fallback to shutil.copy2+unlink pattern.",
+  "context_notes": "Session 85 complete. All 8 of 9 tasks done. P3 blocked on Windows. Tests: 2436 passed, 3 skipped, 0 new failures. Version still v1.35.30 (a17dcac base); P6/P7 at 2f0513f, P9 at 29a6c7d."
 }
