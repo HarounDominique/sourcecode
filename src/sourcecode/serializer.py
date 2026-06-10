@@ -549,9 +549,13 @@ def _security_surface_from_eps(
     root: "Optional[Path]" = None,
     file_paths: "Optional[list[str]]" = None,
 ) -> "Optional[dict[str, Any]]":
-    """Extract @M3FiltroSeguridad resource names from entry point evidence strings."""
+    """Extract permission resource names from entry point evidence strings.
+
+    Looks for resource=VALUE or nombreRecurso=VALUE patterns in evidence
+    produced by custom security annotations on REST controller methods.
+    """
     import re as _re
-    _NOMBRE_RE = _re.compile(r"nombreRecurso=[\"']([^\"']+)[\"']")
+    _RESOURCE_RE = _re.compile(r"(?:resource|nombreRecurso)=[\"']([^\"']+)[\"']")
     _CONST_SYMBOL_RE = _re.compile(r'^[\w]+\.[\w]+$')
     resource_names: list[str] = []
     unresolved: list[str] = []
@@ -560,7 +564,7 @@ def _security_surface_from_eps(
         evidence = getattr(ep, "evidence", None)
         if not evidence:
             continue
-        for m in _NOMBRE_RE.finditer(evidence):
+        for m in _RESOURCE_RE.finditer(evidence):
             nm = m.group(1)
             if not nm or nm in seen:
                 continue
@@ -578,8 +582,8 @@ def _security_surface_from_eps(
         return None
     result: dict[str, Any] = {
         "schema": (
-            "Values used in @M3FiltroSeguridad(nombreRecurso=VALUE) on REST controller "
-            "methods. Each value names a permission resource checked at runtime."
+            "Permission resource identifiers found on REST controller methods. "
+            "Each value names a resource checked at runtime by a security annotation."
         ),
         "resource_names": resource_names,
     }

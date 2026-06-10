@@ -178,10 +178,10 @@ Cold scan: 2–10s depending on repo size. Warm cache: 0.3–0.6s.
   cache clear                  [dim]# clear all cached results for this repo[/dim]
 
 [bold]Examples:[/bold]
-  sourcecode saint-server --compact
+  sourcecode my-project --compact
   sourcecode . --compact --git-context --copy
   sourcecode . --changed-only --git-context
-  sourcecode prepare-context onboard saint-server
+  sourcecode prepare-context onboard my-project
   sourcecode prepare-context delta . --since main
 
 [bold]Subcommands:[/bold]
@@ -629,7 +629,7 @@ def main(
         help=(
             "High-signal summary (typically 1000–3000 tokens depending on repo size): "
             "stacks, entry points, dependency summary, confidence, and gaps. "
-            "Includes security_surface (when @M3FiltroSeguridad detected), mybatis (when MyBatis framework detected), and transactional_boundaries for Java projects. "
+            "Includes security_surface (when custom security annotations detected), mybatis (when MyBatis framework detected), and transactional_boundaries for Java projects. "
             "Use --agent for maximum signal."
         ),
     ),
@@ -4376,10 +4376,13 @@ def pr_impact_cmd(
     if not files.exists():
         _emit_error_json(
             INVALID_INPUT_CODE,
-            f"--files path '{files}' does not exist.",
+            f"--files '{files}' does not exist. Expected a text file listing changed file paths (one per line), not a directory or class name.",
             path=str(files),
-            hint="Pass a file containing one Java file path per line.",
-            expected="An existing file path.",
+            hint=(
+                "Create a file with one changed Java file path per line, then pass it with --files. "
+                "Example: git diff --name-only HEAD~1 > changed.txt && sourcecode pr-impact . --files changed.txt"
+            ),
+            expected="A text file containing one Java file path per line.",
         )
         raise typer.Exit(code=1)
 
@@ -4749,6 +4752,21 @@ def fix_bug_cmd(
       sourcecode impact <target>   — Propagate impact from a specific class
       sourcecode onboard .         — Full architecture context first
     """
+    # Detect misuse: `fix-bug "symptom text" /path` — path arg looks like a symptom.
+    _path_str = str(path)
+    _path_looks_like_symptom = (
+        not Path(_path_str).exists()
+        and (" " in _path_str or any(c.isupper() for c in _path_str))
+    )
+    if _path_looks_like_symptom and not symptom:
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"'{_path_str}' is not a valid directory. Did you mean to use --symptom?",
+            hint=f"Use: sourcecode fix-bug . --symptom {_path_str!r}",
+            expected="A repository directory path as first argument.",
+        )
+        raise typer.Exit(code=1)
+
     if not symptom:
         # Only emit advisory to interactive terminals — non-TTY (MCP, pipes, scripts)
         # must never receive informational text mixed into JSON stdout.
@@ -5380,6 +5398,12 @@ def cold_start_cmd(
         "--compact",
         help="Emit a compact subset (~10K tokens): status, git_head, stacks, entry_points, and key_dependencies only.",
     ),
+    output_path: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Write output to file instead of stdout.",
+    ),
 ) -> None:
     """Output Repository Intelligence Snapshot bootstrap context as JSON.
 
@@ -5419,7 +5443,12 @@ def cold_start_cmd(
             "Use --compact for a ~10K token subset, or --output FILE to save.\n"
         )
         sys.stderr.flush()
-    typer.echo(_out)
+    if output_path:
+        output_path.write_text(_out, encoding="utf-8")
+        sys.stderr.write(f"Saved {len(_out.encode('utf-8'))} bytes to {output_path}\n")
+        sys.stderr.flush()
+    else:
+        typer.echo(_out)
 
 
 # ── MCP server ────────────────────────────────────────────────────────────────
@@ -5872,6 +5901,24 @@ def mcp_list_tools(
 # ── Cache subcommands ─────────────────────────────────────────────────────────
 
 
+def _resolve_repo_root(path: Path) -> Path:
+    """Resolve *path* to a repo root by walking up to find a .git directory.
+
+    If *path* is already a git root (has .git), returns it directly.
+    If *path* is a subdirectory of a git repo, returns the git root.
+    Falls back to *path* itself if no git repo found.
+    """
+    candidate = path.resolve()
+    while True:
+        if (candidate / ".git").exists():
+            return candidate
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    return path.resolve()
+
+
 @cache_app.command("status")
 def cache_status_cmd(
     path: Path = typer.Argument(Path("."), help="Repository path (default: current directory)"),
@@ -5879,7 +5926,7 @@ def cache_status_cmd(
 ) -> None:
     """Show cache statistics for a repository."""
     from sourcecode import cache as _cm
-    target = Path(path).resolve()
+    target = _resolve_repo_root(Path(path))
     stats = _cm.status(target)
     if json_output:
         import json as _j
@@ -5913,7 +5960,7 @@ def cache_clear_cmd(
     index used for cold-start bootstrapping.  Use --all to also clear it.
     """
     from sourcecode import cache as _cm
-    target = Path(path).resolve()
+    target = _resolve_repo_root(Path(path))
     _clear_ris = include_ris or all_
     if not yes:
         _ris_note = " (including RIS)" if _clear_ris else " (RIS preserved — use --all to also clear it)"
@@ -5935,7 +5982,7 @@ def cache_warm_cmd(
     """
     import shutil as _shutil
     import subprocess as _sub
-    target = Path(path).resolve()
+    target = _resolve_repo_root(Path(path))
     typer.echo(f"Warming cache for {target} …", err=True)
     _sc_bin = _shutil.which("sourcecode") or sys.argv[0]
     cmd = [_sc_bin, str(target)]

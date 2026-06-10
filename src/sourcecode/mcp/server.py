@@ -639,7 +639,7 @@ def get_endpoints(repo_path: str = ".") -> dict:
              "unknown" (no security signals detected).
     Supports Spring MVC (@GetMapping etc.) and JAX-RS (@GET/@POST etc.).
     Security annotations detected: @RolesAllowed, @PermitAll, @DenyAll,
-    @Authenticated, @PreAuthorize, @Secured, @SecurityRequirement, @M3FiltroSeguridad.
+    @Authenticated, @PreAuthorize, @Secured, @SecurityRequirement.
     repo_path: absolute path to the Java repository (default: current working directory).
     """
     _raw = repo_path

@@ -57,15 +57,7 @@ _EXTENDS_RE = re.compile(
 # Custom AOP annotation registry — extend here for project-specific security/AOP annotations.
 # Each entry: (method_regex, impl_symbol_name).
 # method_regex must capture the annotated method name in group 1.
-_CUSTOM_AOP_ANNOTATIONS: list[tuple[re.Pattern, str]] = [
-    (
-        re.compile(
-            r'@M3FiltroSeguridad(?:\([^)]*\))?\s+(?:@[^\s]+\s+)*'
-            r'(?:public|private|protected)\s+\w[\w<>\[\]]*\s+([a-z][A-Za-z0-9_]*)\s*\('
-        ),
-        "M3FiltroSeguridadImpl",
-    ),
-]
+_CUSTOM_AOP_ANNOTATIONS: list[tuple[re.Pattern, str]] = []
 _LOMBOK_CLASS_RE = re.compile(
     r'(@(?:Data|Slf4j|Builder|AllArgsConstructor|NoArgsConstructor)(?:\([^)]*\))?\s+)*'
     r'(?:public\s+)?(?:class|interface)\s+([A-Z][A-Za-z0-9_]*)',
@@ -925,7 +917,7 @@ class SemanticAnalyzer:
 
         method="heuristic", confidence="low" para todos los edges Java.
         Includes: Lombok synthetic symbols, @Autowired field edges,
-        @Mapper interface detection, inheritance chains, @M3FiltroSeguridad AOP edges.
+        @Mapper interface detection, inheritance chains, custom AOP annotation edges.
         """
         _JAVA_KEYWORDS: frozenset[str] = frozenset({
             "if", "for", "while", "switch", "catch", "super", "this", "new",

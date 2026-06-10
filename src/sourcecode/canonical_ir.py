@@ -58,7 +58,7 @@ class CanonicalSecurity:
     source_scope: str                        # method|class|inherited
     effective_roles: list[str] = field(default_factory=list)
     expression: str = ""                     # SpEL for @PreAuthorize/@PostAuthorize
-    required_permission: str = ""            # for @M3FiltroSeguridad
+    required_permission: str = ""            # for custom permission annotations
     raw: dict = field(default_factory=dict)  # full original policy dict
 
     def to_dict(self) -> dict:

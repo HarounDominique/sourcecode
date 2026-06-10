@@ -38,13 +38,7 @@ _REQUEST_METHOD_VERB_RE = re.compile(
 # Custom security annotation registry — extend here for project-specific annotations.
 # Each entry: annotation_simple_name → compiled params regex.
 # Groups: (1) resource string literal, (2) resource constant ref, (3) level integer.
-_CUSTOM_SECURITY_ANNOTATIONS: dict[str, re.Pattern] = {
-    "M3FiltroSeguridad": re.compile(
-        r'@M3FiltroSeguridad\s*\(\s*'
-        r'(?:nombreRecurso\s*=\s*(?:"([^"]*)"|([\w.]+)))?'
-        r'(?:[^)]*nivelRequerido\s*=\s*(\d+))?'
-    ),
-}
+_CUSTOM_SECURITY_ANNOTATIONS: dict[str, re.Pattern] = {}
 
 # Security config detection
 _WEB_SECURITY_CONFIGURER_RE = re.compile(r'WebSecurityConfigurerAdapter\b')

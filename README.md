@@ -2,7 +2,7 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.35.29-blue)
+![Version](https://img.shields.io/badge/version-1.35.30-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
@@ -76,7 +76,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.35.29
+# sourcecode 1.35.30
 
 **v1.35.28** — 7 bug fixes: `rename-class` cross-package disambiguation (BUG-4), `rename-class` collision detection (BUG-2), `find_java_files` false positive on `com/test/` package paths (BUG-1), `cold-start --compact` correct key names (BUG-6), `@EnableMethodSecurity` no longer suppresses SEC-001 (BUG-3), `explain` @Entity stereotype detection (BUG-5), XML+annotation mixed security retagging (BUG-7).
 ```

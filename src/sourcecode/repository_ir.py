@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from sourcecode.fqn_utils import normalize_owner_fqn as _normalize_owner_fqn
+
 # ---------------------------------------------------------------------------
 # Data classes — Phases 1–4
 # ---------------------------------------------------------------------------
@@ -171,8 +173,6 @@ _PATH_ANNOTATIONS: frozenset[str] = frozenset({"@Path"})
 # Security / authorization annotations whose args must be captured.
 # Includes standard Jakarta EE, JAX-RS, Quarkus/MicroProfile, and custom patterns.
 _PERMISSION_ANNOTATIONS: frozenset[str] = frozenset({
-    # Custom (kept for backward compat)
-    "@M3FiltroSeguridad",
     # Jakarta EE / JAX-RS standard
     "@RolesAllowed",
     "@PermitAll",
@@ -2556,7 +2556,6 @@ def _route_security_from_sym(
       @RequiresRoles          → {policy: requiresroles, roles: [...]}
       @RequiresPermissions    → {policy: requirespermissions, roles: [...]}
       @SecurityRequirement    → {policy: openapi_security, spec: ...}
-      @M3FiltroSeguridad      → {policy: custom_permission, required_permission: ...}
 
     Falls back to class-level annotations if no method-level security found.
     Returns None if no security signal detected at either level.
@@ -2595,15 +2594,6 @@ def _route_security_from_sym(
         if "@SecurityRequirement" in anns:
             raw = vals.get("@SecurityRequirement", "")
             return {"policy": "openapi_security", "spec": raw.strip()}
-        # Custom legacy annotation
-        if "@M3FiltroSeguridad" in anns:
-            import re as _re2
-            raw = vals.get("@M3FiltroSeguridad", "")
-            m = _re2.search(r'(?:nombreRecurso\s*=\s*)?["\']([^"\']+)["\']', raw)
-            if m:
-                return {"policy": "custom_permission", "required_permission": m.group(1)}
-            # Value is a constant reference or empty — still flag the annotation
-            return {"policy": "custom_annotation", "annotation": "@M3FiltroSeguridad", "resource": raw.strip() or None}
         return None
 
     # Method-level first, then class-level fallback
@@ -4248,13 +4238,22 @@ def _all_callers_from_rg(fqn: str, reverse_graph: dict[str, dict[str, list[str]]
     BUG-01 fix: skip 'contained_in' edges — those represent structural membership
     (method→enclosing class), not actual callers.  Without this, an Impl class
     with 91 own methods would show 91 "direct callers" and inflate risk to HIGH.
+
+    CH-002 fix: for 'injects' edges, normalize field/constructor FQNs to their
+    enclosing class.  e.g. pkg.ConsolidacionService.calcularField → pkg.ConsolidacionService
+    so BFS can continue through DI injection chains and find controllers.
     """
     entry = reverse_graph.get(fqn) or {}
     callers: list[str] = []
+    seen: set[str] = set()
     for edge_type, fqn_list in entry.items():
         if edge_type == "contained_in":
             continue  # structural membership, not a caller
-        callers.extend(fqn_list)
+        for c in fqn_list:
+            normalized = _normalize_owner_fqn(c) if edge_type == "injects" else c
+            if normalized not in seen:
+                seen.add(normalized)
+                callers.append(normalized)
     return callers
 
 

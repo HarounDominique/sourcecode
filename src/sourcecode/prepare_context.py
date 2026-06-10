@@ -2003,7 +2003,7 @@ class TaskContextBuilder:
                         for _cf in (_cr.files_changed or []):
                             _cf_norm = _cf.replace("\\", "/")
                             # Git reports paths relative to the git root, which may be
-                            # a parent of the analyzed directory (e.g. MSAS/saint-server/).
+                            # a parent of the analyzed directory (e.g. a monorepo root).
                             # Strip the analyzed-dir prefix so paths match all_paths.
                             if _cf_norm.startswith(_rn_prefix):
                                 _cf_norm = _cf_norm[len(_rn_prefix):]
