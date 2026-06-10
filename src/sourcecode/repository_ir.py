@@ -2756,8 +2756,8 @@ def _build_route_surface(
                 _route_entry["security_annotations"] = _sec
                 routes.append(_route_entry)
 
-    # Phase 3: inheritance projection — subclasses with zero own endpoints
-    # but with a class-level @RequestMapping prefix inherit parent methods.
+    # Phase 3: inheritance projection — subclasses with a class-level @RequestMapping
+    # prefix inherit parent methods that they do not override (same HTTP verb + path suffix).
     if extends_map:
         fqn_to_simple: dict[str, str] = {d["fqn"]: s for s, d in class_info.items()}
         simple_extends: dict[str, str] = {
@@ -2771,10 +2771,13 @@ def _build_route_surface(
         }
 
         for cls_simple, data in class_info.items():
-            if data["own_endpoints"]:
-                continue
             if not any(data["prefixes"]):
                 continue
+
+            # (verb, suffix) pairs declared on this subclass — these shadow parent methods.
+            own_override_set: set[tuple[str, str]] = {
+                (verb, suffix) for verb, suffix, _, _ in data["own_endpoints"]
+            }
 
             chain = simple_extends.get(cls_simple)
             visited: set[str] = {cls_simple}
@@ -2786,6 +2789,9 @@ def _build_route_surface(
                     break
                 if parent["own_endpoints"]:
                     for verb, suffix, declaring_sym, stable_id in parent["own_endpoints"]:
+                        # Skip methods the subclass overrides (same verb + path suffix).
+                        if (verb, suffix) in own_override_set:
+                            continue
                         for prefix in data["prefixes"]:
                             # P1 fix: collapse any number of consecutive slashes
                             full_path = re.sub(r"/+", "/", prefix + "/" + suffix).rstrip("/") or "/"

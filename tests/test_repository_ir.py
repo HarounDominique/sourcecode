@@ -1556,6 +1556,137 @@ public interface UserClient {
 
 
 # ===========================================================================
+# BUG-3 — Inheritance projection for subclasses with partial overrides
+# ===========================================================================
+
+class TestInheritanceProjectionPartialOverride:
+    """BUG-3: subclass with own endpoints must still inherit non-overridden parent methods.
+
+    Before fix: Phase 3 skipped projection entirely when subclass had any own endpoints.
+    After fix:  Only the (verb, suffix) pairs declared on the subclass are shadowed;
+                all other parent endpoints are projected under the subclass's prefix.
+    """
+
+    def _routes_from_srcs(self, *src_rel_pairs) -> list:
+        all_syms = []
+        all_edges = []
+        for src, rel in src_rel_pairs:
+            pkg, syms, raw_imports = _extract_symbols(src, rel)
+            edges = _build_relations(syms, raw_imports, src, pkg, rel)
+            all_syms.extend(syms)
+            all_edges.extend(edges)
+        extends_map = {
+            e.from_symbol: e.to_symbol.split(".")[-1]
+            for e in all_edges if e.type == "extends"
+        }
+        return _build_route_surface(all_syms, route_diffs=None, extends_map=extends_map)
+
+    _BASE_SRC = """\
+package com.example;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+
+@RequestMapping("/{sectionKey:.+}")
+@Controller
+public class BaseEntityController {
+    @RequestMapping(value = "", method = RequestMethod.GET)
+    public String list() { return "list"; }
+
+    @RequestMapping(value = "/add", method = RequestMethod.GET)
+    public String showAdd() { return "add"; }
+
+    @RequestMapping(value = "/add", method = RequestMethod.POST)
+    public String saveAdd() { return "saved"; }
+
+    @RequestMapping(value = "/{id}", method = RequestMethod.GET)
+    public String view() { return "view"; }
+
+    @RequestMapping(value = "/{id}", method = RequestMethod.POST)
+    public String update() { return "updated"; }
+}
+"""
+
+    _CHILD_SRC = """\
+package com.example;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+
+@RequestMapping("/product")
+@Controller
+public class ProductController extends BaseEntityController {
+    @RequestMapping(value = "/{id}", method = RequestMethod.GET)
+    public String view() { return "product-view"; }
+
+    @RequestMapping(value = "/selectize", method = RequestMethod.GET)
+    public String selectize() { return "selectize"; }
+}
+"""
+
+    def test_non_overridden_parent_methods_projected(self):
+        routes = self._routes_from_srcs(
+            (self._BASE_SRC, "BaseEntityController.java"),
+            (self._CHILD_SRC, "ProductController.java"),
+        )
+        child_routes = [(r["method"], r["path"]) for r in routes
+                        if "ProductController" in r.get("effective_class", "")]
+        paths = set(child_routes)
+        # Inherited from base — NOT overridden by child
+        assert ("GET", "/product") in paths, f"Missing GET /product (list). got={paths}"
+        assert ("GET", "/product/add") in paths, f"Missing GET /product/add. got={paths}"
+        assert ("POST", "/product/add") in paths, f"Missing POST /product/add. got={paths}"
+        assert ("POST", "/product/{id}") in paths, f"Missing POST /product/{{id}}. got={paths}"
+
+    def test_overridden_parent_method_not_duplicated(self):
+        routes = self._routes_from_srcs(
+            (self._BASE_SRC, "BaseEntityController.java"),
+            (self._CHILD_SRC, "ProductController.java"),
+        )
+        child_get_id = [r for r in routes
+                        if r["method"] == "GET"
+                        and r["path"] == "/product/{id}"
+                        and "ProductController" in r.get("effective_class", "")]
+        assert len(child_get_id) == 1, (
+            f"GET /product/{{id}} should appear exactly once (subclass override). got={child_get_id}"
+        )
+
+    def test_own_endpoint_present(self):
+        routes = self._routes_from_srcs(
+            (self._BASE_SRC, "BaseEntityController.java"),
+            (self._CHILD_SRC, "ProductController.java"),
+        )
+        child_routes = [(r["method"], r["path"]) for r in routes
+                        if "ProductController" in r.get("effective_class", "")]
+        assert ("GET", "/product/selectize") in set(child_routes), (
+            f"Missing own GET /product/selectize. got={child_routes}"
+        )
+
+    def test_zero_own_endpoints_still_projects_all_parent(self):
+        bare_child = """\
+package com.example;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.RequestMapping;
+
+@RequestMapping("/order")
+@Controller
+public class OrderController extends BaseEntityController {}
+"""
+        routes = self._routes_from_srcs(
+            (self._BASE_SRC, "BaseEntityController.java"),
+            (bare_child, "OrderController.java"),
+        )
+        child_routes = [(r["method"], r["path"]) for r in routes
+                        if "OrderController" in r.get("effective_class", "")]
+        paths = set(child_routes)
+        assert ("GET", "/order") in paths
+        assert ("GET", "/order/add") in paths
+        assert ("POST", "/order/add") in paths
+        assert ("GET", "/order/{id}") in paths
+        assert ("POST", "/order/{id}") in paths
+
+
+# ===========================================================================
 # P1 — Security annotations in route surface + blast radius field fix
 # ===========================================================================
 
