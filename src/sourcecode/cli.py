@@ -3311,6 +3311,11 @@ def repo_ir_cmd(
         "--force",
         help="Bypass the token-size guard and emit output even when estimated tokens exceed 50K.",
     ),
+    gzip_output: bool = typer.Option(
+        False,
+        "--gzip",
+        help="Compress output with gzip. Requires --output. Reduces large IR files by ~70-80%.",
+    ),
 ) -> None:
     """Deterministic symbol-level IR for Java repositories.
 
@@ -3323,6 +3328,7 @@ def repo_ir_cmd(
       --summary-only          Omit full graph; keep analysis + impact (smallest output)
       --max-nodes N           Keep top N nodes by score
       --max-edges N           Keep top N edges (priority: both endpoints kept)
+      --gzip                  Compress output file (~70-80% smaller; requires --output)
 
     \b
     Examples:
@@ -3332,6 +3338,7 @@ def repo_ir_cmd(
       sourcecode repo-ir --since main --output ir.json
       sourcecode repo-ir --since HEAD~3 --summary-only --output ir-small.json
       sourcecode repo-ir --max-nodes 200 --max-edges 500
+      sourcecode repo-ir --output ir.json.gz --gzip
     """
     import json as _json
 
@@ -3392,22 +3399,52 @@ def repo_ir_cmd(
     output = _serialize_dict(ir, format)
 
     if output_path:
-        output_path.write_text(output, encoding="utf-8")
-        size_kb = len(output.encode("utf-8")) // 1024
-        if summary_only:
+        if gzip_output and not str(output_path).endswith(".gz"):
+            output_path = output_path.with_suffix(output_path.suffix + ".gz")
+        raw_bytes = output.encode("utf-8")
+        size_bytes = len(raw_bytes)
+        _SIZE_WARN_BYTES = 10 * 1024 * 1024  # 10MB
+        if size_bytes > _SIZE_WARN_BYTES and not gzip_output:
             typer.echo(
-                f"IR written to {output_path} ({size_kb}KB, graph omitted by --summary-only)",
+                f"[repo-ir] Output is {size_bytes // (1024 * 1024)}MB — "
+                "consider --summary-only, --max-nodes N --max-edges N, or --gzip to compress.",
+                err=True,
+            )
+        if gzip_output:
+            import gzip as _gzip
+            with _gzip.open(output_path, "wb") as _gz:
+                _gz.write(raw_bytes)
+            compressed_kb = output_path.stat().st_size // 1024
+            size_kb = size_bytes // 1024
+            typer.echo(
+                f"IR written to {output_path} ({compressed_kb}KB gzip, {size_kb}KB uncompressed)",
                 err=True,
             )
         else:
-            n_nodes = len((ir.get("graph") or {}).get("nodes") or [])
-            n_edges = len((ir.get("graph") or {}).get("edges") or [])
-            typer.echo(
-                f"IR written to {output_path} "
-                f"({size_kb}KB, {n_nodes} nodes, {n_edges} edges)",
-                err=True,
-            )
+            output_path.write_bytes(raw_bytes)
+            size_kb = size_bytes // 1024
+            if summary_only:
+                typer.echo(
+                    f"IR written to {output_path} ({size_kb}KB, graph omitted by --summary-only)",
+                    err=True,
+                )
+            else:
+                n_nodes = len((ir.get("graph") or {}).get("nodes") or [])
+                n_edges = len((ir.get("graph") or {}).get("edges") or [])
+                typer.echo(
+                    f"IR written to {output_path} "
+                    f"({size_kb}KB, {n_nodes} nodes, {n_edges} edges)",
+                    err=True,
+                )
     else:
+        if gzip_output:
+            _emit_error_json(
+                INVALID_INPUT_CODE,
+                "--gzip requires --output FILE.",
+                hint="Add --output ir.json.gz to write compressed output to a file.",
+                expected="--output path when --gzip is used.",
+            )
+            raise typer.Exit(1)
         _ir_size = len(output.encode("utf-8"))
         _ir_tokens_est = _ir_size // 4
         # P1-C: abort when estimated tokens > 50K unless --force or --output is given.
