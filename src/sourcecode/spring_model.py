@@ -41,6 +41,8 @@ _CALL_SKIP: frozenset[str] = frozenset({"annotated_with", "mapped_to", "containe
 _BEAN_ANNOTATIONS: frozenset[str] = frozenset({
     "@Component", "@Service", "@Repository",
     "@Controller", "@RestController", "@Configuration", "@Bean",
+    # JPA persistence annotations — not Spring beans but need stereotype recognition in explain
+    "@Entity", "@MappedSuperclass", "@Embeddable",
 })
 
 _GENERIC_PARAM_RE = re.compile(r"<[A-Z][\w,\s<>?]*>")

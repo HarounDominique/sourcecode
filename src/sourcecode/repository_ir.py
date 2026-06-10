@@ -202,8 +202,9 @@ _SECURITY_MARKER_ANNOTATIONS: frozenset[str] = frozenset({
 # is expected and does NOT mean endpoints are unprotected.
 _FILTER_SECURITY_ANNOTATIONS: frozenset[str] = frozenset({
     "@EnableWebSecurity",
-    "@EnableMethodSecurity",
-    "@EnableGlobalMethodSecurity",
+    # @EnableMethodSecurity / @EnableGlobalMethodSecurity enable per-method annotation
+    # security (@PreAuthorize/@Secured), NOT a filter chain — must NOT be treated as
+    # filter_based or SEC-001 is suppressed for every unannotated endpoint.
 })
 
 # Programmatic security: method-call patterns that indicate runtime auth enforcement.
@@ -2893,6 +2894,48 @@ def build_repo_ir(
     )
     ir = _assemble(all_symbols, unique_relations, all_changed, spring_summary, route_diffs_arg)
 
+    # BUG-7: XML Spring Security detection for the canonical CIR pipeline.
+    # _assemble only sees Java symbols — XML config is invisible to it.
+    # Scan here (where root is available) and retag route_surface entries so
+    # build_canonical_ir produces correct CanonicalEndpoint.security values.
+    _xml_sec_re = re.compile(
+        r'(?:xmlns(?::[a-z]+)?="http://www\.springframework\.org/schema/security"'
+        r'|<security:http\b'
+        r'|<http\s[^>]*use-expressions'
+        r'|spring-security-[2345]'
+        r'|xmlns:security="http://www\.springframework\.org/schema/security")',
+        re.IGNORECASE,
+    )
+    _xml_sec_detected = False
+    for _xml_glob in (
+        "*security*.xml", "*Security*.xml",
+        "*applicationContext*.xml", "*-context.xml", "*Context.xml",
+        "*spring*.xml", "*Spring*.xml",
+    ):
+        for _xf in root.rglob(_xml_glob):
+            if "target/" in str(_xf).replace("\\", "/"):
+                continue
+            try:
+                _xt = _xf.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if _xml_sec_re.search(_xt):
+                _xml_sec_detected = True
+                break
+        if _xml_sec_detected:
+            break
+    if _xml_sec_detected:
+        _sec_model = ir.get("security_model", "unknown")
+        if _sec_model == "unknown":
+            ir["security_model"] = "xml_or_filter_chain"
+        elif _sec_model in ("annotation_based", "mixed"):
+            ir["security_model"] = "mixed"
+        # Retag route_surface entries that have no security (would become none_detected in CIR)
+        for _r in ir.get("route_surface") or []:
+            _r_sec = _r.get("security_annotations")
+            if _r_sec is None or (isinstance(_r_sec, dict) and _r_sec.get("policy") == "none_detected"):
+                _r["security_annotations"] = {"policy": "xml_or_filter_chain"}
+
     # L-6: inject analysis_meta — files_read, lines_read, symbols_analyzed, token_estimate
     ir["analysis_meta"] = {
         "files_read": _meta_files_read,
@@ -3358,13 +3401,18 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
         if _xml_security_detected:
             break
 
-    if _xml_security_detected and security_model == "unknown":
-        security_model = "xml_or_filter_chain"
-        # Re-tag per-endpoint none_detected → xml_or_filter_chain so the output
-        # cannot be misread as "endpoint is unprotected".
+    if _xml_security_detected:
+        # Re-tag per-endpoint none_detected → xml_or_filter_chain regardless of security_model.
+        # BUG-7 fix: previously only ran when model == "unknown", causing false-positive SEC-001
+        # when annotation security (@PreAuthorize) coexisted with XML security config.
         for ep in endpoints:
             if ep.get("security", {}).get("policy") == "none_detected":
                 ep["security"] = {"policy": "xml_or_filter_chain"}
+        if security_model == "unknown":
+            security_model = "xml_or_filter_chain"
+        elif security_model in ("annotation_based", "mixed"):
+            security_model = "mixed"
+        # filter_based stays filter_based — XML + filter chain is still filter_based
         # Recompute no_security_signal (now counts only truly unknown endpoints)
         no_security_signal = sum(
             1 for e in endpoints
@@ -3395,7 +3443,11 @@ def find_java_files(root: Path, *, max_files: int = 8000, limitations: list[str]
             continue
         parts = rel.split("/")
         # Skip test dirs
-        if "/test/" in rel or "/tests/" in rel or rel.startswith("test/"):
+        if (
+            "/src/test/" in rel or rel.startswith("src/test/")
+            or "/src/tests/" in rel or rel.startswith("src/tests/")
+            or rel.startswith("test/") or rel.startswith("tests/")
+        ):
             continue
         # Skip vendor/generated/build dirs
         if any(part in _VENDOR_DIRS for part in parts[:-1]):

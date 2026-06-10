@@ -28,6 +28,9 @@ _STEREOTYPE_DESC: dict[str, str] = {
     "component": "Spring @Component — general-purpose bean",
     "configuration": "Spring @Configuration — bean factory / config",
     "bean": "Spring @Bean — managed component",
+    "entity": "JPA @Entity — persistent domain object mapped to a database table",
+    "mappedsuperclass": "JPA @MappedSuperclass — base class sharing persistent state with subclasses",
+    "embeddable": "JPA @Embeddable — value object embedded in owning entity table",
 }
 
 _SECURITY_ANNOTATION_PREFIXES = (

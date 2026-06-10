@@ -5397,10 +5397,13 @@ def cold_start_cmd(
     result = _gcs(target)
     if compact:
         # P1-C: cap at ~10K tokens — keep only fields essential for orientation.
-        _cs_keys = {"status", "git_head", "stacks", "entry_points",
-                    "key_dependencies", "project_type", "project_summary",
-                    "validation", "_meta"}
+        # BUG-6 fix: use actual RIS key names (summary/entrypoints, not stacks/entry_points)
+        _cs_keys = {"status", "git_head", "summary", "entrypoints", "endpoints",
+                    "project_type", "validation", "_meta"}
         result = {k: v for k, v in result.items() if k in _cs_keys}
+        # Truncate endpoints to first 30 to stay within ~10K token budget
+        if isinstance(result.get("endpoints"), list):
+            result["endpoints"] = result["endpoints"][:30]
         result["_meta"] = {**(result.get("_meta") or {}), "compact_mode": True,
                            "full_available": "sourcecode cold-start (without --compact)"}
     _out = _json.dumps(result, indent=2, ensure_ascii=False)

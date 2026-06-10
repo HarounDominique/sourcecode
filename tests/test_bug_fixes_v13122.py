@@ -114,8 +114,10 @@ class TestExitCodes:
         )
 
     def test_modernize_exits_0(self):
-        """BUG-1: sourcecode modernize . must exit 0."""
-        r = self._run("modernize", ".")
+        """BUG-1: sourcecode modernize <java-fixture> must exit 0."""
+        # Use javax_legacy fixture dir (has real Java files); running on atlas-cli root
+        # would yield 0 Java files after BUG-1 test-dir exclusion fix excludes tests/fixtures/.
+        r = self._run("modernize", "tests/fixtures/javax_legacy")
         assert r.returncode == 0, (
             f"modernize exited {r.returncode} — BUG-1 regression\n{r.stderr}"
         )

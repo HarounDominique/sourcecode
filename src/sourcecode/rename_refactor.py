@@ -106,7 +106,11 @@ def _collect_java_files(root: Path, *, include_tests: bool = True) -> list[Path]
         if any(part in _VENDOR_DIRS for part in parts[:-1]):
             continue
         if not include_tests:
-            if "/test/" in rel or "/tests/" in rel or rel.startswith("test/"):
+            if (
+                "/src/test/" in rel or rel.startswith("src/test/")
+                or "/src/tests/" in rel or rel.startswith("src/tests/")
+                or rel.startswith("test/") or rel.startswith("tests/")
+            ):
                 continue
         results.append(p)
     return results
@@ -150,10 +154,42 @@ def _find_class_file(
 
 def _apply_rename(source: str, old_name: str, new_name: str) -> str:
     """Apply word-boundary replacement for class name (PascalCase and camelCase forms)."""
-    # PascalCase replacement: all type references, declarations, imports
     result = re.sub(r'\b' + re.escape(old_name) + r'\b', new_name, source)
 
-    # camelCase instance names: serviceA → serviceB (only when different from PascalCase)
+    old_camel = _to_camel(old_name)
+    new_camel = _to_camel(new_name)
+    if old_camel != old_name and old_camel in result:
+        result = re.sub(r'\b' + re.escape(old_camel) + r'\b', new_camel, result)
+
+    return result
+
+
+# Matches a class/interface/enum/record declaration of a given name
+_CLASS_DECL_RE_TMPL = r'\b(?:class|interface|enum|record)\s+{name}\b'
+# Matches a constructor declaration: optional access modifier + ClassName + (
+_CTOR_DECL_RE_TMPL = r'^\s*(?:(?:public|protected|private)\s+)?' + r'{name}\s*\('
+
+
+def _apply_rename_refs_only(source: str, old_name: str, new_name: str) -> str:
+    """Rename old_name→new_name in a non-source file (import/type references only).
+
+    Skips lines containing a class/interface/enum/record declaration or constructor
+    declaration of old_name, so that a class sharing the simple name in another
+    package is not corrupted.
+    """
+    class_decl_re = re.compile(_CLASS_DECL_RE_TMPL.format(name=re.escape(old_name)))
+    ctor_decl_re = re.compile(_CTOR_DECL_RE_TMPL.format(name=re.escape(old_name)))
+    ref_re = re.compile(r'\b' + re.escape(old_name) + r'\b')
+
+    lines = source.splitlines(keepends=True)
+    result_lines = []
+    for line in lines:
+        if class_decl_re.search(line) or ctor_decl_re.search(line):
+            result_lines.append(line)
+        else:
+            result_lines.append(ref_re.sub(new_name, line))
+    result = ''.join(result_lines)
+
     old_camel = _to_camel(old_name)
     new_camel = _to_camel(new_name)
     if old_camel != old_name and old_camel in result:
@@ -245,6 +281,19 @@ def rename_class(
     result.old_file = str(source_file.relative_to(root)).replace("\\", "/")
     result.new_file = str(new_file_path.relative_to(root)).replace("\\", "/")
 
+    # BUG-2: check for collision anywhere in the repo, not just same directory
+    collision = next(
+        (f for f in java_files if f.stem == new_name and f.resolve() != new_file_path.resolve()),
+        None,
+    )
+    if collision is not None:
+        collision_rel = str(collision.relative_to(root)).replace("\\", "/")
+        result.errors.append(
+            f"'{new_name}' already exists at '{collision_rel}' — "
+            f"rename would create a duplicate class name. Pass --force to override."
+        )
+        return result
+
     if new_file_path.exists() and new_file_path != source_file:
         result.errors.append(
             f"Target file '{result.new_file}' already exists — aborting to avoid overwrite."
@@ -260,15 +309,18 @@ def rename_class(
             result.errors.append(f"Could not read '{java_file}': {e}")
             continue
 
-        new_text = _apply_rename(old_text, old_name, new_name)
+        is_source = java_file == source_file
+        if is_source:
+            new_text = _apply_rename(old_text, old_name, new_name)
+        else:
+            # BUG-4: use refs-only variant to avoid clobbering same-named class in other package
+            new_text = _apply_rename_refs_only(old_text, old_name, new_name)
         if new_text == old_text:
             continue
 
         rel_path = str(java_file.relative_to(root)).replace("\\", "/")
         diff = _make_diff(old_text, new_text, rel_path)
 
-        # Determine intent
-        is_source = java_file == source_file
         if is_source:
             intent = f"Renamed class declaration: {old_name} → {new_name}"
         else:
