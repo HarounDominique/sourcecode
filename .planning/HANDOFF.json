@@ -1,109 +1,37 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-08T18:00:00Z",
+  "timestamp": "2026-06-10T16:40:11Z",
   "phase": null,
-  "phase_name": "session 74 — migrate-check real-repo testing, spring-audit CI gate, MCP migrate tool",
+  "phase_name": "session 85 — P1-P5+P8 quality fixes v1.35.30",
   "phase_dir": null,
   "plan": null,
   "task": null,
-  "total_tasks": null,
+  "total_tasks": 9,
   "status": "paused",
-  "session_type": "implementation",
+  "session_type": "continuous-quality-fixes",
   "completed_tasks": [
-    {
-      "id": 1,
-      "name": "License TTL CI fix (P0)",
-      "status": "done",
-      "details": "Committed in previous session (v1.35.18). SOURCECODE_CI=1 → TTL 86400s (24h). 7 tests. CLOSED."
-    },
-    {
-      "id": 2,
-      "name": "migrate-check v1 implementation (P1)",
-      "status": "done",
-      "details": "Committed as 96395b6 (v1.35.19). Module: src/sourcecode/migrate_check.py. Rules MIG-001..008. CLI: sourcecode migrate-check . --format json|text --min-severity. 36 tests. Fixtures: tests/fixtures/javax_legacy/. CLOSED."
-    },
-    {
-      "id": 3,
-      "name": "spring-audit --ci flag (P1)",
-      "status": "done",
-      "details": "Committed as dd878e7 (v1.35.20). --ci/--no-ci flag: exit 1 on violations. --format github-comment: Markdown table + emoji severity icons + <details> collapsible. docs/spring-audit-ci.yml: GitHub Actions starter. 13 new tests in TestSpringAuditCIFlag. CLOSED."
-    },
-    {
-      "id": 4,
-      "name": "get_migration_readiness() MCP tool (P2, partial)",
-      "status": "done",
-      "details": "Committed as dd878e7 (v1.35.20). server.py: get_migration_readiness() @mcp.tool() with when_to_call guidance. registry.py: migrate_check curated alias in _java_spring_aliases(), added to _MCP_HIDDEN_CANONICAL_TOOLS. 8 new tests in TestGetMigrationReadinessMCP. CLOSED."
-    },
-    {
-      "id": 5,
-      "name": "Real-repo migrate-check benchmarking",
-      "status": "done",
-      "details": "Tested 7 repos: BroadleafCommerce(100/2762), eureka(0/299), jobrunr(100/669), keycloak(91/5603), openmrs-core(100/849), spring-petclinic(100/30), spaghetti-api(100/5). All results confirmed correct. eureka sb2=False is correct (pre-Spring project). BroadleafCommerce 100 confirmed correct (already on jakarta.*)."
-    }
+    {"id": 1, "name": "P1 — impact field injection callers", "status": "done", "commit": "a17dcac", "detail": "_all_callers_from_rg in repository_ir.py now normalizes injects-edge FQNs (pkg.Class.field → pkg.Class) via _normalize_owner_fqn. Fixes @Autowired/@Inject/@Resource in compute_blast_radius BFS. spring_impact.py was already correct."},
+    {"id": 2, "name": "P2 — M3FiltroSeguridad/saint-server contamination removal", "status": "done", "commit": "a17dcac", "detail": "Purged from 8 source files: detectors/java.py, repository_ir.py, semantic_analyzer.py, serializer.py, canonical_ir.py, prepare_context.py, mcp/server.py, cli.py. Registries now empty extension points. serializer uses generic resource= pattern."},
+    {"id": 4, "name": "P4 — cache status CWD-dependent", "status": "done", "commit": "a17dcac", "detail": "_resolve_repo_root helper walks .git ancestry; all cache status/clear/warm commands now auto-resolve to git root from any subdirectory."},
+    {"id": 5, "name": "P5 — cold-start --output flag missing", "status": "done", "commit": "a17dcac", "detail": "Added --output/-o option to cold-start command, matching other commands pattern."},
+    {"id": 8, "name": "P8 — UX errors pr-impact and fix-bug", "status": "done", "commit": "a17dcac", "detail": "pr-impact --files error now explains expected file format with git diff example. fix-bug detects symptom-as-path misuse and emits structured error with --symptom suggestion."}
   ],
   "remaining_tasks": [
-    {
-      "id": 1,
-      "name": "Fix key_dependencies=0 on BroadleafCommerce onboard",
-      "priority": "P2",
-      "status": "pending",
-      "details": "sourcecode onboard BroadleafCommerce returns key_dependencies: 0 despite being a major Maven multi-module Spring project. Investigate repository_ir.py dependency detection path — likely gap when --dependencies flag not explicitly passed."
-    },
-    {
-      "id": 2,
-      "name": "MCP token budget caps",
-      "priority": "P2",
-      "status": "pending",
-      "details": "Add MAX_TOKENS_PER_TOOL dict to MCP server. Enforce truncation so Cursor stays under 10k tokens/tool limit. Affects get_agent_context, get_spring_audit, get_migration_readiness on large repos (keycloak: 5603 files). get_migration_readiness MCP tool is done; this is about output size safety."
-    },
-    {
-      "id": 3,
-      "name": "Deferred from session 36: E2E test + publish 1.33.4",
-      "priority": "P3",
-      "status": "pending",
-      "details": "Still pending from session 36: run sync_to_pipx.sh from normal Terminal, E2E verify 1.33.x fixes, publish 1.33.4 to PyPI/Homebrew."
-    }
+    {"id": 3, "name": "P3 — cache Windows slow (cold ~8s, warm ~4s)", "status": "not_started", "note": "Not reproducible on macOS (0.18s warm). Windows-specific: Path.replace() on locked files may fail silently → CAS blobs: 0 → no deduplication → slower. Investigate _atomic_write with try/except fallback for Windows PermissionError."},
+    {"id": 6, "name": "P6 — transactional count inconsistency (compact=33 vs spring-audit=178)", "status": "not_started", "note": "compact counts classes; spring-audit counts annotations. Investigate and unify semantics or add clear labels."},
+    {"id": 7, "name": "P7 — project_summary contaminated by doc text (e.g. Trivy output)", "status": "not_started", "note": "summarizer.py likely scores doc files too highly. Prioritize structure/code/deps/config over free-text docs."},
+    {"id": 9, "name": "P9 — repo-ir 71MB without warning", "status": "not_started", "note": "Add size warning + --gzip / streaming option for large repo-ir outputs."}
   ],
-  "blockers": [],
+  "blockers": [
+    {"description": "P3 Windows cache requires Windows environment to reproduce and validate", "type": "external", "workaround": "Can inspect _atomic_write statically for Windows PermissionError patterns"}
+  ],
   "human_actions_pending": [],
   "decisions": [
-    {
-      "decision": "migrate-check reuses direct file regex scan (not contracts[].imports)",
-      "rationale": "CIR skips wildcard imports (import javax.persistence.*;) at repository_ir.py:1016. Direct file regex catches both specific and wildcard imports. Used [ \\t]* not \\s* in regex to avoid newline consumption corrupting line number calculation.",
-      "session": 74
-    },
-    {
-      "decision": "--ci/--no-ci flag form (not is_flag=True)",
-      "rationale": "Typer 0.24+ deprecates is_flag=True parameter. --ci/--no-ci bool flag pattern avoids deprecation warning.",
-      "session": 74
-    },
-    {
-      "decision": "github-comment renderer in cli.py (not spring_findings.py)",
-      "rationale": "Presentation/formatting logic belongs in the CLI layer. spring_findings.py stays a pure data model.",
-      "session": 74
-    },
-    {
-      "decision": "MCP tool delegates to CLI via _execute() (not direct module import)",
-      "rationale": "Consistent with all other MCP tools (get_spring_audit, get_endpoints, etc.). Avoids duplicating logic and keeps the single execution path.",
-      "session": 74
-    },
-    {
-      "decision": "eureka 0/100 score is correct",
-      "rationale": "Pre-Spring Boot project (raw Jersey + javax.servlet:servlet-api:2.5). 95 affected files. spring_boot_2_detected=False is technically correct — it never was Spring Boot 2.",
-      "session": 74
-    }
+    {"decision": "Fixed _all_callers_from_rg at read-time (not build-time)", "rationale": "Avoids changing serialized IR format; spring_impact.py already normalizes at its own BFS layer — two-layer approach is correct"},
+    {"decision": "Emptied _CUSTOM_SECURITY_ANNOTATIONS and _CUSTOM_AOP_ANNOTATIONS dicts", "rationale": "Remove M3FiltroSeguridad; leave extensible registries for future project-specific annotations"},
+    {"decision": "Added _resolve_repo_root helper to all 3 cache subcommands", "rationale": "DRY; consistent behaviour across status/clear/warm; walks .git not just checks for it"}
   ],
-  "key_findings": {
-    "migrate_check_real_repo_results": {
-      "repos_fully_migrated": ["BroadleafCommerce (Spring Boot 3.5.14)", "jobrunr", "openmrs-core", "spring-petclinic", "spaghetti-api"],
-      "repos_need_work": ["eureka (95 affected files, score 0)", "keycloak (3 residual javax.annotation in federation module, score 91)"],
-      "no_javax_persistence_in_test_set": "All Spring Boot repos already on jakarta.* — MIG-001 (critical) only testable via synthetic fixtures"
-    },
-    "ci_gate_output_example": "sourcecode spring-audit . --ci --format github-comment → exit 1 + Markdown table on TX-001 violations",
-    "mcp_tool_registered": "get_migration_readiness() live in FastMCP server, curated alias in registry with when_to_call: guidance"
-  },
   "uncommitted_files": [],
-  "untracked_files": [],
-  "next_action": "Recommended: P2 key_dependencies=0 bug on BroadleafCommerce onboard — investigate repository_ir.py dependency detection when --dependencies flag not passed.",
-  "context_notes": "Session 74: implementation session. Shipped: migrate-check real-repo validation, spring-audit --ci gate, --format github-comment, GitHub Actions YAML starter, get_migration_readiness() MCP tool. Tests: 2240 passed (from 2194 at session start). Versions: 1.35.19 (migrate-check) and 1.35.20 (CI+MCP). Pre-existing flaky test: test_output_ux.py::TestReasoningBlockRemoved::test_delta_no_reasoning_key — confirmed pre-existing on clean master, ignore."
+  "next_action": "Start P3: inspect _atomic_write for Windows Path.replace() failure mode, then P6: run compact and spring-audit on same Spring project to compare transaction counts",
+  "context_notes": "Session 85. All changes committed at a17dcac as v1.35.30. Tests: 8 pre-existing Pro-license failures (delta/generate_tests), 0 new failures. Validated: P1 on @Autowired/@Inject/@Resource/same-pkg; P2 on keycloak @Inject callers; P4 from petclinic/src subdirectory; P5 --help shows --output; P8 pr-impact and fix-bug manual check."
 }
