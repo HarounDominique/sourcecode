@@ -2819,6 +2819,11 @@ def build_repo_ir(
     if since:
         _since_changed = _get_git_changed_files(root, since)
 
+    # L-6: analysis_meta tracking (files_read, lines_read, symbols_analyzed, token_estimate)
+    _meta_files_read = 0
+    _meta_lines_read = 0
+    _meta_chars_read = 0
+
     # Pass 1: extract symbols from all files so we can build the same-package
     # type map before building relations.  Java classes in the same package
     # reference each other without import statements, so import_map alone cannot
@@ -2830,6 +2835,9 @@ def build_repo_ir(
             source = abs_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        _meta_files_read += 1
+        _meta_lines_read += source.count("\n") + (1 if source and not source.endswith("\n") else 0)
+        _meta_chars_read += len(source)
         package, symbols, raw_imports = _extract_symbols(source, rel_path)
         all_symbols.extend(symbols)
         _per_file.append((rel_path, source, package, raw_imports, symbols))
@@ -2883,7 +2891,16 @@ def build_repo_ir(
     route_diffs_arg: Optional[list[dict]] = (
         sorted(all_route_diffs, key=lambda d: d["symbol"]) if since else None
     )
-    return _assemble(all_symbols, unique_relations, all_changed, spring_summary, route_diffs_arg)
+    ir = _assemble(all_symbols, unique_relations, all_changed, spring_summary, route_diffs_arg)
+
+    # L-6: inject analysis_meta — files_read, lines_read, symbols_analyzed, token_estimate
+    ir["analysis_meta"] = {
+        "files_read": _meta_files_read,
+        "lines_read": _meta_lines_read,
+        "symbols_analyzed": len(all_symbols),
+        "token_estimate": _meta_chars_read // 4,  # 4 chars ≈ 1 token (rough approximation)
+    }
+    return ir
 
 
 # ---------------------------------------------------------------------------

@@ -2919,3 +2919,79 @@ public class C {
         assert "/api/v1/users" in raw, (
             f"@RequestMapping path intact. got={raw!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# L-6: analysis_meta — file-read visibility
+# ---------------------------------------------------------------------------
+
+class TestAnalysisMeta:
+    """L-6: build_repo_ir output includes files_read, lines_read,
+    symbols_analyzed, token_estimate for AI agent observability."""
+
+    def _make_ir(self, tmp_path, sources: dict) -> dict:
+        from pathlib import Path
+        root = Path(tmp_path)
+        for rel, content in sources.items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+        file_list = list(sources.keys())
+        return build_repo_ir(file_list, root)
+
+    def test_analysis_meta_present(self, tmp_path):
+        ir = self._make_ir(tmp_path, {
+            "Service.java": "package com.ex;\npublic class Service { public void run() {} }\n"
+        })
+        assert "analysis_meta" in ir, "analysis_meta missing from build_repo_ir output"
+
+    def test_files_read_count(self, tmp_path):
+        sources = {
+            "A.java": "package com.ex;\npublic class A {}\n",
+            "B.java": "package com.ex;\npublic class B {}\n",
+            "C.java": "package com.ex;\npublic class C {}\n",
+        }
+        ir = self._make_ir(tmp_path, sources)
+        assert ir["analysis_meta"]["files_read"] == 3
+
+    def test_lines_read_positive(self, tmp_path):
+        ir = self._make_ir(tmp_path, {
+            "Service.java": "package com.ex;\npublic class Service { public void run() {} }\n"
+        })
+        assert ir["analysis_meta"]["lines_read"] > 0
+
+    def test_symbols_analyzed_positive(self, tmp_path):
+        ir = self._make_ir(tmp_path, {
+            "Service.java": "package com.ex;\npublic class Service { public void run() {} }\n"
+        })
+        assert ir["analysis_meta"]["symbols_analyzed"] > 0
+
+    def test_token_estimate_positive(self, tmp_path):
+        ir = self._make_ir(tmp_path, {
+            "Service.java": "package com.ex;\npublic class Service { public void run() {} }\n"
+        })
+        assert ir["analysis_meta"]["token_estimate"] > 0
+
+    def test_token_estimate_proportional_to_file_size(self, tmp_path):
+        small = "package com.ex;\npublic class Small {}\n"
+        large = "package com.ex;\n" + "\n".join(
+            f"// line {i}\npublic class C{i} {{}}" for i in range(100)
+        )
+        ir_small = self._make_ir(tmp_path / "small", {"Small.java": small})
+        ir_large = self._make_ir(tmp_path / "large", {"Large.java": large})
+        assert ir_large["analysis_meta"]["token_estimate"] > ir_small["analysis_meta"]["token_estimate"]
+
+    def test_symbols_analyzed_matches_graph_nodes(self, tmp_path):
+        ir = self._make_ir(tmp_path, {
+            "Service.java": (
+                "package com.ex;\npublic class Service {\n"
+                "    public void run() {}\n"
+                "    public void stop() {}\n"
+                "}\n"
+            )
+        })
+        meta = ir["analysis_meta"]
+        nodes = ir.get("graph", {}).get("nodes", [])
+        # symbols_analyzed counts ALL symbols (class + methods + fields),
+        # graph.nodes are only classes/interfaces with edges — so symbols >= nodes
+        assert meta["symbols_analyzed"] >= len(nodes)

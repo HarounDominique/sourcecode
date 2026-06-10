@@ -242,6 +242,10 @@ _SUBCOMMANDS: frozenset[str] = frozenset(
         "explain",
         # Spring Boot 2→3 migration readiness
         "migrate-check",
+        # Native file rename (BLOCKER-A)
+        "rename-class",
+        # Large file semantic chunking (BLOCKER-B)
+        "chunk-file",
     }
 )
 
@@ -4997,6 +5001,240 @@ def modernize_cmd(
     if output_path:
         output_path.write_text(output, encoding="utf-8")
         typer.echo(f"Modernization analysis written to {output_path}", err=True)
+    else:
+        try:
+            sys.stdout.buffer.write(output.encode("utf-8"))
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
+        except AttributeError:
+            sys.stdout.write(output + "\n")
+
+    if copy:
+        _copy_to_clipboard(output)
+
+
+# ── rename-class ──────────────────────────────────────────────────────────────
+
+@app.command("rename-class")
+def rename_class_cmd(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository root to operate on (default: current directory)",
+    ),
+    old_name: str = typer.Option(
+        ..., "--from", "-f",
+        help="Current class name (PascalCase, e.g. ServiceA)",
+    ),
+    new_name: str = typer.Option(
+        ..., "--to", "-t",
+        help="New class name (PascalCase, e.g. ServiceB)",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Compute changes but do not write any files or rename on disk.",
+    ),
+    no_tests: bool = typer.Option(
+        False, "--no-tests",
+        help="Exclude test files from the rename (src/main only).",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write change audit JSON to a file instead of stdout.",
+    ),
+    copy: bool = typer.Option(
+        False, "--copy", "-c",
+        help="Copy output to clipboard after a successful run.",
+    ),
+    format: str = typer.Option(
+        "json", "--format",
+        help="Output format: json (default) or yaml.",
+    ),
+) -> None:
+    """Rename a Java class throughout the repository (BLOCKER-A fix).
+
+    \b
+    Renames a Java class safely:
+      - Updates class/interface/enum declaration
+      - Updates constructor name
+      - Updates all import statements
+      - Updates all type references (fields, params, return types)
+      - Updates extends / implements
+      - Updates generics, casts, Spring @Qualifier names
+      - Renames the physical .java file
+      - Emits a structured change audit trail (BLOCKER-C)
+
+    \b
+    Examples:
+      sourcecode rename-class . --from ServiceA --to ServiceB
+      sourcecode rename-class /path/to/repo --from OrderManager --to OrderService
+      sourcecode rename-class . --from OldName --to NewName --dry-run
+      sourcecode rename-class . --from OldName --to NewName --output rename-audit.json
+    """
+    import json as _json
+    from sourcecode.rename_refactor import rename_class
+
+    root = path.resolve()
+    if not root.is_dir():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"'{root}' is not a valid directory.",
+            path=str(root),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
+        )
+        raise typer.Exit(1)
+
+    result = rename_class(
+        root,
+        old_name,
+        new_name,
+        dry_run=dry_run,
+        include_tests=not no_tests,
+    )
+
+    if result.errors:
+        _emit_error_json(
+            "RENAME_ERROR",
+            result.errors[0],
+            errors=result.errors,
+            old_name=old_name,
+            new_name=new_name,
+        )
+        raise typer.Exit(1)
+
+    result_dict = result.to_dict()
+
+    if format == "yaml":
+        from sourcecode.serializer import to_yaml as _to_yaml
+        output = _to_yaml(result_dict)
+    else:
+        output = _json.dumps(result_dict, indent=2, ensure_ascii=False)
+
+    if output_path:
+        output_path.write_text(output, encoding="utf-8")
+        action = "dry-run simulated" if dry_run else "applied"
+        typer.echo(
+            f"[rename-class] {action}: {old_name} → {new_name} "
+            f"({result.files_modified} file(s) changed). "
+            f"Audit written to {output_path}",
+            err=True,
+        )
+    else:
+        try:
+            sys.stdout.buffer.write(output.encode("utf-8"))
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
+        except AttributeError:
+            sys.stdout.write(output + "\n")
+
+    if copy:
+        _copy_to_clipboard(output)
+
+    if not dry_run and not output_path:
+        action = "Renamed"
+        typer.echo(
+            f"[rename-class] {action}: {old_name} → {new_name} "
+            f"({result.files_modified} file(s) updated, file renamed to {result.new_file})",
+            err=True,
+        )
+
+
+# ── chunk-file ────────────────────────────────────────────────────────────────
+
+@app.command("chunk-file")
+def chunk_file_cmd(
+    file: Path = typer.Argument(
+        ...,
+        help="Java file to chunk (absolute or relative path)",
+    ),
+    max_lines: int = typer.Option(
+        500, "--max-lines", "-n",
+        help="Target max lines per chunk (default: 500). Methods > max_lines emit size_warning.",
+    ),
+    chunk_id: Optional[int] = typer.Option(
+        None, "--chunk", "-c",
+        help="Return only this chunk by ID (1-based). Omit to return all chunks.",
+    ),
+    metadata_only: bool = typer.Option(
+        False, "--metadata-only",
+        help="Return chunk boundaries and metadata without file content.",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    format: str = typer.Option(
+        "json", "--format",
+        help="Output format: json (default) or yaml.",
+    ),
+    copy: bool = typer.Option(
+        False, "--copy",
+        help="Copy output to clipboard after a successful run.",
+    ),
+) -> None:
+    """Split a large Java file into semantic chunks for AI agent consumption (BLOCKER-B fix).
+
+    \b
+    Splits a Java file at method/class boundaries so AI agents can read
+    large files (10K–25K+ lines) in context-sized pieces without timeout
+    or fragmented analysis.
+
+    Each chunk includes:
+      - chunk_id, start_line, end_line, chunk_type, symbol name
+      - context_header: package + class + imports summary
+      - content: source lines for that chunk
+      - size_warning: True if chunk > max_lines (cannot split mid-method)
+
+    \b
+    Examples:
+      sourcecode chunk-file NominasCalculoService.java
+      sourcecode chunk-file BigService.java --max-lines 300
+      sourcecode chunk-file BigService.java --chunk 5        # read chunk 5 only
+      sourcecode chunk-file BigService.java --metadata-only  # sizes/boundaries only
+    """
+    import json as _json
+    from sourcecode.file_chunker import chunk_java_file
+
+    abs_file = file.resolve()
+    if not abs_file.is_file():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"'{abs_file}' is not a valid file.",
+            path=str(abs_file),
+            hint="Pass an existing Java source file.",
+            expected="A .java file path.",
+        )
+        raise typer.Exit(1)
+
+    result = chunk_java_file(abs_file, max_lines=max_lines, include_content=not metadata_only)
+
+    if chunk_id is not None:
+        # Return single chunk
+        matching = [c for c in result.chunks if c.chunk_id == chunk_id]
+        if not matching:
+            _emit_error_json(
+                INVALID_INPUT_CODE,
+                f"Chunk {chunk_id} not found. File has {result.total_chunks} chunks.",
+                chunk_id=chunk_id,
+                total_chunks=result.total_chunks,
+            )
+            raise typer.Exit(1)
+        result_dict = matching[0].to_dict()
+    else:
+        result_dict = result.to_dict()
+
+    if format == "yaml":
+        from sourcecode.serializer import to_yaml as _to_yaml
+        output = _to_yaml(result_dict)
+    else:
+        output = _json.dumps(result_dict, indent=2, ensure_ascii=False)
+
+    if output_path:
+        output_path.write_text(output, encoding="utf-8")
+        typer.echo(
+            f"[chunk-file] {result.total_chunks} chunks written to {output_path}",
+            err=True,
+        )
     else:
         try:
             sys.stdout.buffer.write(output.encode("utf-8"))
