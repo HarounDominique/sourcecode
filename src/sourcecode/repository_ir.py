@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from sourcecode.fqn_utils import normalize_owner_fqn as _normalize_owner_fqn
+from sourcecode.path_filters import is_test_path as _is_test_path
 
 # ---------------------------------------------------------------------------
 # Data classes — Phases 1–4
@@ -3582,13 +3583,31 @@ def find_java_files(root: Path, *, max_files: int = 8000, limitations: list[str]
         except ValueError:
             continue
         parts = rel.split("/")
-        # Skip test dirs
-        if (
-            "/src/test/" in rel or rel.startswith("src/test/")
-            or "/src/tests/" in rel or rel.startswith("src/tests/")
-            or rel.startswith("test/") or rel.startswith("tests/")
-        ):
-            continue
+        # Skip test dirs — use centralised is_test_path (consistent with
+        # extract_java_endpoints), guarded against false positives where a Java
+        # *package* is named "test" inside a production src/main/ source root.
+        if _is_test_path(rel):
+            _skip = True
+            # Prepend "/" so the check works whether or not rel has a leading slash.
+            _rel_sl = "/" + rel
+            if "/src/main/" in _rel_sl:
+                # is_test_path may fire on a package segment (e.g. com.example.test)
+                # rather than a true test module directory.  Only skip when the path
+                # prefix BEFORE src/main/ is itself a test path (meaning the whole
+                # module is a test module, not just a package named "test").
+                _prefix = _rel_sl.split("/src/main/")[0]
+                _prefix_parts = [p for p in _prefix.split("/") if p]
+                # A module is a test module if is_test_path says so OR if any
+                # module directory component starts with "test" (e.g. "test-framework",
+                # "test-providers", "testsuite" — common module naming convention).
+                _prefix_is_test = (
+                    _is_test_path(_prefix + "/x.java")
+                    or any(p.lower().startswith("test") for p in _prefix_parts)
+                )
+                if not _prefix_is_test:
+                    _skip = False
+            if _skip:
+                continue
         # Skip vendor/generated/build dirs
         if any(part in _VENDOR_DIRS for part in parts[:-1]):
             continue
