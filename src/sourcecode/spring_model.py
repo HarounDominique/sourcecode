@@ -45,6 +45,9 @@ _BEAN_ANNOTATIONS: frozenset[str] = frozenset({
     "@Entity", "@MappedSuperclass", "@Embeddable",
 })
 
+# JPA stereotypes that are NOT Spring IoC beans — present in any JPA project (Quarkus, JEE, etc.)
+_JPA_ONLY_STEREOTYPES: frozenset[str] = frozenset({"entity", "mappedsuperclass", "embeddable"})
+
 _GENERIC_PARAM_RE = re.compile(r"<[A-Z][\w,\s<>?]*>")
 
 
@@ -212,6 +215,10 @@ class BeanGraph:
 
     def is_bean(self, fqn: str) -> bool:
         return fqn in self.beans
+
+    def has_spring_beans(self) -> bool:
+        """True only if Spring IoC beans exist — JPA entities do not count."""
+        return any(b.stereotype not in _JPA_ONLY_STEREOTYPES for b in self.beans.values())
 
     def get_stereotype(self, fqn: str) -> str:
         node = self.beans.get(fqn)

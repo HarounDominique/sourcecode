@@ -619,7 +619,16 @@ class TestRunSecurityAudit:
         assert result.scope == "security"
 
     def test_spring_detected_true(self):
-        cir = _FakeCIR()
+        # spring_detected requires actual Spring IoC beans, not just security_model
+        spring_node = {
+            "fqn": "com.example.UserService",
+            "symbol_kind": "class",
+            "annotations": ["@Service"],
+            "annotation_values": {},
+            "modifiers": [],
+            "source_file": "UserService.java",
+        }
+        cir = _FakeCIR(nodes=[spring_node])
         result = run_security_audit(cir)
         assert result.spring_detected is True
 

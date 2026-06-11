@@ -797,3 +797,32 @@ class TestRunTxAudit:
         d = result.to_dict()
         raw = json.dumps(d)
         assert '"TX-001"' in raw
+
+    def test_jpa_entity_beans_do_not_trigger_spring_detected(self):
+        # JPA @Entity classes show up in BeanGraph but are NOT Spring IoC beans.
+        # Quarkus/JEE repos with JPA entities must not be labelled spring_detected=True.
+        entity_node = {
+            "fqn": "com.example.RealmEntity",
+            "symbol_kind": "class",
+            "annotations": ["@Entity"],
+            "annotation_values": {},
+            "modifiers": [],
+            "source_file": "RealmEntity.java",
+        }
+        cir = _FakeCIR([entity_node])
+        result = run_tx_audit(cir)
+        assert result.spring_detected is False
+
+    def test_spring_service_bean_triggers_spring_detected(self):
+        # Actual Spring IoC bean (@Service) must still produce spring_detected=True.
+        service_node = {
+            "fqn": "com.example.OrderService",
+            "symbol_kind": "class",
+            "annotations": ["@Service"],
+            "annotation_values": {},
+            "modifiers": [],
+            "source_file": "OrderService.java",
+        }
+        cir = _FakeCIR([service_node])
+        result = run_tx_audit(cir)
+        assert result.spring_detected is True

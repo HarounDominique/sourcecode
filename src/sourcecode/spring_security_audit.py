@@ -21,7 +21,7 @@ from sourcecode.spring_findings import (
     SEVERITY_ORDER,
     deduplicate_findings,
 )
-from sourcecode.spring_model import InheritanceGraph, SpringSemanticModel
+from sourcecode.spring_model import BeanGraph, InheritanceGraph, SpringSemanticModel
 from sourcecode.spring_semantic import TransactionBoundaryIndex, build_tx_index
 
 if TYPE_CHECKING:
@@ -472,11 +472,8 @@ def run_security_audit(
 
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
-    _spring_detected = (
-        (model is not None and bool(model.bean_graph.beans))
-        or tx_index.stats()["total"] > 0
-        or cir.metadata.get("security_model", "unknown") != "unknown"
-    )
+    _bean_graph = model.bean_graph if model is not None else BeanGraph.build(cir)
+    _spring_detected = _bean_graph.has_spring_beans() or tx_index.stats()["total"] > 0
 
     _sec_limitations = [
         "SEC-001: only emitted for annotation_based security model",

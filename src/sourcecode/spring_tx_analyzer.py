@@ -722,7 +722,7 @@ def run_tx_audit(
 
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
-    _spring_detected = tx_index.stats()["total"] > 0 or bool(model.bean_graph.beans)
+    _spring_detected = tx_index.stats()["total"] > 0 or model.bean_graph.has_spring_beans()
 
     _tx_limitations = [
         "Self-invocation via this.method() not detected — requires AST-level analysis",
