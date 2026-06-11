@@ -1277,6 +1277,11 @@ class DependencyAnalyzer:
 
         return records, limitations
 
+    def _strip_gradle_comments(self, content: str) -> str:
+        content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
+        content = re.sub(r"//[^\n]*", "", content)
+        return content
+
     def _analyze_gradle(self, root: Path) -> tuple[list[DependencyRecord], list[str]]:
         for filename in ("build.gradle", "build.gradle.kts"):
             gradle_file = root / filename
@@ -1287,7 +1292,22 @@ class DependencyAnalyzer:
                     return [], [f"gradle: error reading {filename}"]
                 props = self._parse_gradle_properties(root, content)
                 records = self._parse_gradle_dependencies(content, props, filename)
-                return records, ["gradle: no compatible lockfile found; transitive dependencies unavailable"]
+
+                # Follow apply from: 'other.gradle' directives (simple string literals only)
+                apply_pat = re.compile(
+                    r"""apply\s+from\s*:\s*["']([^"'${}\s]+\.gradle(?:\.kts)?)["']"""
+                )
+                for m in apply_pat.finditer(self._strip_gradle_comments(content)):
+                    applied_path = root / m.group(1)
+                    if applied_path.exists() and applied_path.resolve() != gradle_file.resolve():
+                        try:
+                            applied_content = applied_path.read_text(encoding="utf-8", errors="replace")
+                            more = self._parse_gradle_dependencies(applied_content, props, m.group(1))
+                            records.extend(more)
+                        except OSError:
+                            pass
+
+                return self._dedupe(records), ["gradle: no compatible lockfile found; transitive dependencies unavailable"]
         return [], []
 
     def _parse_gradle_properties(self, root: Path, content: str) -> dict[str, str]:
@@ -1326,6 +1346,7 @@ class DependencyAnalyzer:
     def _parse_gradle_dependencies(
         self, content: str, props: dict[str, str], manifest_path: str
     ) -> list[DependencyRecord]:
+        content = self._strip_gradle_comments(content)
         _DIRECT = frozenset({
             "implementation", "api", "compileOnly", "runtimeOnly", "compile", "provided",
             "compileClasspath", "runtimeClasspath",

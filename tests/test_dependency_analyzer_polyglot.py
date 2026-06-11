@@ -190,6 +190,44 @@ def test_java_pom_dependencies_listed_in_summary(tmp_path: Path) -> None:
     assert test_dep.scope == "dev"
 
 
+def test_gradle_comment_placeholders_not_emitted_and_apply_from_followed(tmp_path: Path) -> None:
+    # build.gradle with a comment containing the literal placeholder "group:module:version"
+    # (as found in Apache OFBiz) plus an apply from: pointing to the real deps file
+    (tmp_path / "build.gradle").write_text(
+        """
+/*
+ * Example comment: compileOnly "group:module:version"
+ * or compileOnly("group:module:version")
+ */
+// apply from: 'ignored-because-commented-out.gradle'
+apply from: 'dependencies.gradle'
+
+dependencies {
+    junitReport 'junit:junit:4.13.2'
+}
+        """.strip()
+    )
+    (tmp_path / "dependencies.gradle").write_text(
+        """
+dependencies {
+    implementation 'org.springframework:spring-core:6.1.0'
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.10.0'
+}
+        """.strip()
+    )
+
+    records, _summary = DependencyAnalyzer().analyze(tmp_path)
+
+    names = {r.name for r in records}
+    assert "group:module" not in names, "placeholder from comment must not appear"
+    assert "org.springframework:spring-core" in names, "real dep from apply-from file must be found"
+    spring = next(r for r in records if r.name == "org.springframework:spring-core")
+    assert spring.declared_version == "6.1.0"
+    assert spring.scope == "direct"
+    junit = next(r for r in records if r.name == "org.junit.jupiter:junit-jupiter-api")
+    assert junit.scope == "dev"
+
+
 def test_java_dependency_summary_excluded_from_compact_view(tmp_path: Path) -> None:
     import json
     from typer.testing import CliRunner
