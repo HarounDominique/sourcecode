@@ -506,7 +506,7 @@ _LEGACY_API_RULES: list[_Rule] = [
         ),
         fix_hint=(
             "Replace Date with LocalDate/LocalDateTime/ZonedDateTime, "
-            "Calendar with java.time.Calendar, "
+            "Calendar with LocalDate or ZonedDateTime (java.time — no Calendar equivalent), "
             "SimpleDateFormat with DateTimeFormatter (thread-safe)."
         ),
         migration_target="java_8_best_practice",
@@ -1299,16 +1299,31 @@ _STATIC_LIMITATIONS: list[str] = [
 
 
 def _detect_spring_boot_2(root: Path) -> bool:
-    """Return True if any pom.xml or build.gradle declares spring-boot 2.x."""
+    """Return True if any build file in the repo declares spring-boot 2.x.
+
+    Checks root build files plus one level of child modules to handle monorepos
+    where the Spring Boot parent version lives in a submodule pom.xml.
+    """
     _SB2 = re.compile(
-        r"(?:spring[.\-]boot[.\-]?(?:version|starter|parent)[^=\n]*[=:\s>\"']?\s*)"
-        r"2\.\d+[\.\d]*|"
-        r"<version>\s*2\.\d+[\.\d]*\s*</version>.*spring.boot|"
-        r"spring.boot.*<version>\s*2\.\d+",
+        # Maven: <parent>...<artifactId>spring-boot-*</artifactId>...<version>2.x
+        r"spring[.\-]?boot.*?<version>\s*2\.\d+|"
+        r"<version>\s*2\.\d+[\.\d]*\s*</version>.*?spring[.\-]?boot|"
+        # Maven properties: <spring.boot.version>2.x or spring-boot.version=2.x
+        r"spring[.\-_]?boot[.\-_]?version\s*[=>\"'\s]+2\.\d+|"
+        # Gradle plugin: id 'org.springframework.boot' version '2.x'
+        r"org\.springframework\.boot[^\n]*?['\"']2\.\d+",
         re.IGNORECASE | re.DOTALL,
     )
-    for name in ("pom.xml", "build.gradle", "build.gradle.kts"):
-        candidate = root / name
+    # Candidate build files: root + one level deep (child modules in monorepos)
+    root_files = [
+        root / name
+        for name in ("pom.xml", "build.gradle", "build.gradle.kts", "gradle.properties")
+    ]
+    child_poms = list(root.glob("*/pom.xml"))
+    child_gradle = list(root.glob("*/build.gradle")) + list(root.glob("*/build.gradle.kts"))
+    # Limit child scan to 30 files to stay fast on large monorepos
+    candidates = root_files + (child_poms + child_gradle)[:30]
+    for candidate in candidates:
         try:
             text = candidate.read_text(encoding="utf-8", errors="replace")
             if _SB2.search(text):
