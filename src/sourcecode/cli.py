@@ -3466,21 +3466,34 @@ def repo_ir_cmd(
         _ir_tokens_est = _ir_size // 4
         # P1-C: abort when estimated tokens > 50K unless --force or --output is given.
         if _ir_tokens_est > 50_000 and not force:
+            if summary_only:
+                _hint = (
+                    "Use --max-nodes N --max-edges N to cap graph size, "
+                    "--output FILE to save to disk, or --force to bypass this guard."
+                )
+            else:
+                _hint = (
+                    "Use --summary-only (~5K tokens), --max-nodes N --max-edges N, "
+                    "--output FILE to save to disk, or --force to bypass this guard."
+                )
             _emit_error_json(
                 "OUTPUT_TOO_LARGE",
                 f"Estimated output is ~{_ir_tokens_est // 1000}K tokens — too large for most LLM context windows.",
-                hint=(
-                    "Use --summary-only (~5K tokens), --max-nodes N --max-edges N, "
-                    "--output FILE to save to disk, or --force to bypass this guard."
-                ),
+                hint=_hint,
                 expected="Output under 50K estimated tokens.",
             )
             raise typer.Exit(1)
         if _ir_tokens_est > 10_000:
-            sys.stderr.write(
-                f"[repo-ir] ~{_ir_tokens_est // 1000}K tokens — "
-                "use --summary-only or --output FILE for smaller output.\n"
-            )
+            if summary_only:
+                sys.stderr.write(
+                    f"[repo-ir] ~{_ir_tokens_est // 1000}K tokens — "
+                    "use --max-nodes N --max-edges N or --output FILE for smaller output.\n"
+                )
+            else:
+                sys.stderr.write(
+                    f"[repo-ir] ~{_ir_tokens_est // 1000}K tokens — "
+                    "use --summary-only or --output FILE for smaller output.\n"
+                )
             sys.stderr.flush()
         try:
             sys.stdout.buffer.write(output.encode("utf-8"))
@@ -5122,7 +5135,7 @@ def rename_class_cmd(
         help="Output format: json (default) or yaml.",
     ),
 ) -> None:
-    """Rename a Java class throughout the repository (BLOCKER-A fix).
+    """Rename a Java class throughout the repository.
 
     \b
     Renames a Java class safely:
@@ -5133,7 +5146,7 @@ def rename_class_cmd(
       - Updates extends / implements
       - Updates generics, casts, Spring @Qualifier names
       - Renames the physical .java file
-      - Emits a structured change audit trail (BLOCKER-C)
+      - Emits a structured change audit trail
 
     \b
     Examples:
@@ -5244,7 +5257,7 @@ def chunk_file_cmd(
         help="Copy output to clipboard after a successful run.",
     ),
 ) -> None:
-    """Split a large Java file into semantic chunks for AI agent consumption (BLOCKER-B fix).
+    """Split a large Java file into semantic chunks for AI agent consumption.
 
     \b
     Splits a Java file at method/class boundaries so AI agents can read
