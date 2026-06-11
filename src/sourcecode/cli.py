@@ -1227,159 +1227,164 @@ def main(
                 except Exception:
                     pass
 
+            _excl_key = (
+                ",".join(sorted(e.strip() for e in exclude.split(",") if e.strip()))
+                if exclude else ""
+            )
+
+            # ── Core (analysis) flags: affect which analyzers run + scan config ──
+            # Use effective_depth (not raw depth) so Java auto-adjustment is captured.
+            # acv = ANALYZER_CACHE_VERSION — bumped only when analysis logic/schema
+            # changes, NOT on every package release.  Prevents patch-bump cache wipes.
+            _core_flags_str = (
+                f"acv={_cache_mod.ANALYZER_CACHE_VERSION},"
+                f"dep={dependencies},gm={graph_modules},"
+                f"docs={docs},fm={full_metrics},sem={semantics},"
+                f"arch={architecture},gc={git_context},em={env_map},"
+                f"cn={code_notes},"
+                f"ex={_excl_key},depth={effective_depth}"
+            )
+            _core_h = _hashlib.sha256(_core_flags_str.encode()).hexdigest()[:8]
             if _git_sha and _git_root_str:
-                _excl_key = (
-                    ",".join(sorted(e.strip() for e in exclude.split(",") if e.strip()))
-                    if exclude else ""
-                )
-
-                # ── Core (analysis) flags: affect which analyzers run + scan config ──
-                # Use effective_depth (not raw depth) so Java auto-adjustment is captured.
-                # acv = ANALYZER_CACHE_VERSION — bumped only when analysis logic/schema
-                # changes, NOT on every package release.  Prevents patch-bump cache wipes.
-                _core_flags_str = (
-                    f"acv={_cache_mod.ANALYZER_CACHE_VERSION},"
-                    f"dep={dependencies},gm={graph_modules},"
-                    f"docs={docs},fm={full_metrics},sem={semantics},"
-                    f"arch={architecture},gc={git_context},em={env_map},"
-                    f"cn={code_notes},"
-                    f"ex={_excl_key},depth={effective_depth}"
-                )
-                _core_h = _hashlib.sha256(_core_flags_str.encode()).hexdigest()[:8]
                 _core_key = f"{_git_sha}-{_core_h}"
+            else:
+                # No git history (untracked/no-commit repo) — stable synthetic key
+                # scoped per repo path via cache_dir(); invalidated by --no-cache or cache clear.
+                _core_key = f"nogit-{_core_h}"
 
-                # ── View flags: output presentation only (no re-analysis needed) ──
-                _view_flags_str = (
-                    f"c={compact},ag={agent},mode={mode},fmt={format},full={full},"
-                    f"co={changed_only},tree={tree},nt={no_tree},"
-                    f"rb={rank_by},sym={symbol},ep={entrypoints_only},"
-                    f"nr={no_redact},gd={graph_detail},dd={docs_depth},"
-                    f"mn={max_nodes},ge={graph_edges},mi={max_importers},"
-                    f"eg={emit_graph}"
-                )
-                _view_h = _hashlib.sha256(_view_flags_str.encode()).hexdigest()[:8]
+            # ── View flags: output presentation only (no re-analysis needed) ──
+            _view_flags_str = (
+                f"c={compact},ag={agent},mode={mode},fmt={format},full={full},"
+                f"co={changed_only},tree={tree},nt={no_tree},"
+                f"rb={rank_by},sym={symbol},ep={entrypoints_only},"
+                f"nr={no_redact},gd={graph_detail},dd={docs_depth},"
+                f"mn={max_nodes},ge={graph_edges},mi={max_importers},"
+                f"eg={emit_graph}"
+            )
+            _view_h = _hashlib.sha256(_view_flags_str.encode()).hexdigest()[:8]
 
-                # ── Lookup ──────────────────────────────────────────────────────
-                # Step 1: try L1 to obtain the core_hash needed for L2 key
-                _l1_result = _cache_mod.read_core(target, _core_key)
+            # ── Lookup ──────────────────────────────────────────────────────
+            # Step 1: try L1 to obtain the core_hash needed for L2 key
+            _l1_result = _cache_mod.read_core(target, _core_key)
 
-                # P1-A: --env-map misses L1 when base (em=False) exists.
-                # Try the base key so env analysis can be injected lazily (<1 s)
-                # instead of triggering a 17 s full rescan.
-                _l1_needs_env_inject = False
-                if _l1_result is None and env_map:
-                    _base_flags = _core_flags_str.replace(",em=True,", ",em=False,")
-                    _base_h8 = _hashlib.sha256(_base_flags.encode()).hexdigest()[:8]
-                    _base_key = f"{_git_sha}-{_base_h8}"
-                    _base_result = _cache_mod.read_core(target, _base_key)
-                    if _base_result is not None:
-                        _l1_result = _base_result
-                        _l1_needs_env_inject = True
+            # P1-A: --env-map misses L1 when base (em=False) exists.
+            # Try the base key so env analysis can be injected lazily (<1 s)
+            # instead of triggering a 17 s full rescan.
+            _l1_needs_env_inject = False
+            if _l1_result is None and env_map:
+                _base_flags = _core_flags_str.replace(",em=True,", ",em=False,")
+                _base_h8 = _hashlib.sha256(_base_flags.encode()).hexdigest()[:8]
+                _sha_prefix = _git_sha if _git_sha else "nogit"
+                _base_key = f"{_sha_prefix}-{_base_h8}"
+                _base_result = _cache_mod.read_core(target, _base_key)
+                if _base_result is not None:
+                    _l1_result = _base_result
+                    _l1_needs_env_inject = True
 
-                if _l1_result is not None:
-                    _core_dict_l1, _core_hash = _l1_result
-                    _view_key = f"{_core_hash}-{_view_h}"
+            if _l1_result is not None:
+                _core_dict_l1, _core_hash = _l1_result
+                _view_key = f"{_core_hash}-{_view_h}"
 
-                    # Step 2: try L2 (exact view match).
-                    # Skip L2 for --changed-only: the stored view is a previous
-                    # diff snapshot that is stale for the current diff.
-                    if not changed_only:
-                        _cache_hit_content = _cache_mod.read_view(target, _view_key)
+                # Step 2: try L2 (exact view match).
+                # Skip L2 for --changed-only: the stored view is a previous
+                # diff snapshot that is stale for the current diff.
+                if not changed_only:
+                    _cache_hit_content = _cache_mod.read_view(target, _view_key)
 
-                    # Step 3: L1 hit but L2 miss → rebuild view from core dict
-                    if _cache_hit_content is None:
-                        try:
-                            from sourcecode.serializer import build_view_from_core as _bvfc
-                            _rebuilt = _bvfc(
-                                _core_dict_l1,
-                                compact=compact,
-                                agent=agent,
-                                full=full,
-                                no_tree=no_tree,
-                                tree=tree,
-                            )
-                            # P1-A: inject env analysis when base L1 (em=False) was used.
-                            # EnvAnalyzer walks only env/config files — typically <1 s.
-                            if _rebuilt is not None and _l1_needs_env_inject and compact:
-                                try:
-                                    from sourcecode.env_analyzer import EnvAnalyzer as _EnvA_p1a
-                                    _env_r_p1a, _env_s_p1a = _EnvA_p1a().analyze(target, {})
-                                    if _env_s_p1a and (getattr(_env_s_p1a, "total", 0) or _env_r_p1a):
-                                        _es_p1a: dict = {
-                                            "total": getattr(_env_s_p1a, "total", 0),
-                                            "required": getattr(_env_s_p1a, "required_count", 0),
-                                        }
-                                        _cats = getattr(_env_s_p1a, "categories", None)
-                                        if _cats:
-                                            _es_p1a["categories"] = _cats
-                                        _rebuilt = dict(_rebuilt)
-                                        _rebuilt["env_summary"] = _es_p1a
-                                        if _env_r_p1a:
-                                            _sorted_er = sorted(
-                                                _env_r_p1a,
-                                                key=lambda e: (
-                                                    not getattr(e, "required", False),
-                                                    getattr(e, "key", ""),
-                                                ),
-                                            )
-                                            _rebuilt["env_map"] = [
-                                                {
-                                                    "key": getattr(e, "key", ""),
-                                                    **({"required": True} if getattr(e, "required", False) else {}),
-                                                    **({"category": getattr(e, "category", None)} if getattr(e, "category", None) else {}),
-                                                }
-                                                for e in _sorted_er[:15]
-                                            ]
-                                except Exception:
-                                    pass  # env inject failed — continue without env data
-                            if _rebuilt is not None:
-                                # Apply redaction
-                                if not no_redact:
-                                    from sourcecode.redactor import redact_dict as _red_l1
-                                    _rebuilt = _red_l1(_rebuilt)
-                                # Apply output budget
-                                if agent:
-                                    from sourcecode.output_budget import (
-                                        trim_to_budget as _trim_l1,
-                                        BUDGET_AGENT,
-                                    )
-                                    _rebuilt = _trim_l1(_rebuilt, BUDGET_AGENT, label="agent")
-                                elif compact:
-                                    from sourcecode.output_budget import (
-                                        trim_to_budget as _trim_l1c,
-                                        BUDGET_COMPACT,
-                                    )
-                                    _rebuilt = _trim_l1c(_rebuilt, BUDGET_COMPACT, label="compact")
-                                # Serialize
-                                if format == "yaml":
-                                    from io import StringIO as _SIO_L1
-                                    from ruamel.yaml import YAML as _YAML_L1
-                                    _yl1 = _YAML_L1()
-                                    _yl1.default_flow_style = False
-                                    _yl1.representer.add_representer(
-                                        type(None),
-                                        lambda d, v: d.represent_scalar(
-                                            "tag:yaml.org,2002:null", "null"
-                                        ),
-                                    )
-                                    _sl1 = _SIO_L1()
-                                    _yl1.dump(_rebuilt, _sl1)
-                                    _cache_hit_content = _sl1.getvalue()
-                                else:
-                                    import json as _json_l1
-                                    _cache_hit_content = _json_l1.dumps(
-                                        _rebuilt, indent=2, ensure_ascii=False
-                                    )
-                                # Cache rebuilt view in L2 (skip for --changed-only: stale diff)
-                                if _cache_hit_content and not changed_only:
-                                    _cache_mod.write_view(
-                                        target,
-                                        _view_key,
-                                        _cache_hit_content,
-                                        fmt=format,
-                                    )
-                        except Exception:
-                            _cache_hit_content = None  # rebuild failed → full analysis
+                # Step 3: L1 hit but L2 miss → rebuild view from core dict
+                if _cache_hit_content is None:
+                    try:
+                        from sourcecode.serializer import build_view_from_core as _bvfc
+                        _rebuilt = _bvfc(
+                            _core_dict_l1,
+                            compact=compact,
+                            agent=agent,
+                            full=full,
+                            no_tree=no_tree,
+                            tree=tree,
+                        )
+                        # P1-A: inject env analysis when base L1 (em=False) was used.
+                        # EnvAnalyzer walks only env/config files — typically <1 s.
+                        if _rebuilt is not None and _l1_needs_env_inject and compact:
+                            try:
+                                from sourcecode.env_analyzer import EnvAnalyzer as _EnvA_p1a
+                                _env_r_p1a, _env_s_p1a = _EnvA_p1a().analyze(target, {})
+                                if _env_s_p1a and (getattr(_env_s_p1a, "total", 0) or _env_r_p1a):
+                                    _es_p1a: dict = {
+                                        "total": getattr(_env_s_p1a, "total", 0),
+                                        "required": getattr(_env_s_p1a, "required_count", 0),
+                                    }
+                                    _cats = getattr(_env_s_p1a, "categories", None)
+                                    if _cats:
+                                        _es_p1a["categories"] = _cats
+                                    _rebuilt = dict(_rebuilt)
+                                    _rebuilt["env_summary"] = _es_p1a
+                                    if _env_r_p1a:
+                                        _sorted_er = sorted(
+                                            _env_r_p1a,
+                                            key=lambda e: (
+                                                not getattr(e, "required", False),
+                                                getattr(e, "key", ""),
+                                            ),
+                                        )
+                                        _rebuilt["env_map"] = [
+                                            {
+                                                "key": getattr(e, "key", ""),
+                                                **({"required": True} if getattr(e, "required", False) else {}),
+                                                **({"category": getattr(e, "category", None)} if getattr(e, "category", None) else {}),
+                                            }
+                                            for e in _sorted_er[:15]
+                                        ]
+                            except Exception:
+                                pass  # env inject failed — continue without env data
+                        if _rebuilt is not None:
+                            # Apply redaction
+                            if not no_redact:
+                                from sourcecode.redactor import redact_dict as _red_l1
+                                _rebuilt = _red_l1(_rebuilt)
+                            # Apply output budget
+                            if agent:
+                                from sourcecode.output_budget import (
+                                    trim_to_budget as _trim_l1,
+                                    BUDGET_AGENT,
+                                )
+                                _rebuilt = _trim_l1(_rebuilt, BUDGET_AGENT, label="agent")
+                            elif compact:
+                                from sourcecode.output_budget import (
+                                    trim_to_budget as _trim_l1c,
+                                    BUDGET_COMPACT,
+                                )
+                                _rebuilt = _trim_l1c(_rebuilt, BUDGET_COMPACT, label="compact")
+                            # Serialize
+                            if format == "yaml":
+                                from io import StringIO as _SIO_L1
+                                from ruamel.yaml import YAML as _YAML_L1
+                                _yl1 = _YAML_L1()
+                                _yl1.default_flow_style = False
+                                _yl1.representer.add_representer(
+                                    type(None),
+                                    lambda d, v: d.represent_scalar(
+                                        "tag:yaml.org,2002:null", "null"
+                                    ),
+                                )
+                                _sl1 = _SIO_L1()
+                                _yl1.dump(_rebuilt, _sl1)
+                                _cache_hit_content = _sl1.getvalue()
+                            else:
+                                import json as _json_l1
+                                _cache_hit_content = _json_l1.dumps(
+                                    _rebuilt, indent=2, ensure_ascii=False
+                                )
+                            # Cache rebuilt view in L2 (skip for --changed-only: stale diff)
+                            if _cache_hit_content and not changed_only:
+                                _cache_mod.write_view(
+                                    target,
+                                    _view_key,
+                                    _cache_hit_content,
+                                    fmt=format,
+                                )
+                    except Exception:
+                        _cache_hit_content = None  # rebuild failed → full analysis
 
         except Exception:
             _core_key = ""
@@ -2335,44 +2340,51 @@ def main(
         import atexit as _atexit
         import threading as _threading
 
-        # Capture all closure state before handing off to thread
-        _bg_sm = sm
-        _bg_target = target
-        _bg_core_key = _core_key
-        _bg_view_key = _view_key
-        _bg_view_flags_str = _view_flags_str
-        _bg_content = content
-        _bg_format = format
-        _bg_hashlib = _hashlib
-        _bg_cache_mod = _cache_mod
+        # Pre-compute core dict in the main thread — avoids the 5-second atexit
+        # join race on large repos where core_view(sm) itself takes seconds.
+        # Background thread only does gzip + disk I/O (fast, bounded latency).
+        _bg_core_dict: dict | None = None
+        try:
+            from sourcecode.serializer import core_view as _core_view_fn
+            _bg_core_dict = _core_view_fn(sm)
+        except Exception:
+            pass
 
-        def _write_cache_async() -> None:
-            try:
-                from sourcecode.serializer import core_view as _core_view_fn
-                _core_dict_write = _core_view_fn(_bg_sm)
-                _written_core_hash = _bg_cache_mod.write_core(
-                    _bg_target, _bg_core_key, _core_dict_write
-                )
-                if _written_core_hash:
-                    _vk = _bg_view_key
-                    if not _vk:
-                        _wvh = _bg_hashlib.sha256(_bg_view_flags_str.encode()).hexdigest()[:8]
-                        _vk = f"{_written_core_hash}-{_wvh}"
-                    _bg_cache_mod.write_view(
-                        _bg_target,
-                        _vk,
-                        _bg_content,
-                        fmt=_bg_format,
-                        layers=_compute_analyzer_fingerprints(),
+        if _bg_core_dict is not None:
+            _bg_target = target
+            _bg_core_key = _core_key
+            _bg_view_key = _view_key
+            _bg_view_flags_str = _view_flags_str
+            _bg_content = content
+            _bg_format = format
+            _bg_hashlib = _hashlib
+            _bg_cache_mod = _cache_mod
+
+            def _write_cache_async() -> None:
+                try:
+                    _written_core_hash = _bg_cache_mod.write_core(
+                        _bg_target, _bg_core_key, _bg_core_dict
                     )
-                    from sourcecode.cache import cache_dir as _cdir, _gc as _run_gc
-                    _run_gc(_cdir(_bg_target))
-            except Exception:
-                pass
+                    if _written_core_hash:
+                        _vk = _bg_view_key
+                        if not _vk:
+                            _wvh = _bg_hashlib.sha256(_bg_view_flags_str.encode()).hexdigest()[:8]
+                            _vk = f"{_written_core_hash}-{_wvh}"
+                        _bg_cache_mod.write_view(
+                            _bg_target,
+                            _vk,
+                            _bg_content,
+                            fmt=_bg_format,
+                            layers=_compute_analyzer_fingerprints(),
+                        )
+                        from sourcecode.cache import cache_dir as _cdir, _gc as _run_gc
+                        _run_gc(_cdir(_bg_target))
+                except Exception:
+                    pass
 
-        _cache_write_thread = _threading.Thread(target=_write_cache_async, daemon=True)
-        _cache_write_thread.start()
-        _atexit.register(_cache_write_thread.join, 5.0)
+            _cache_write_thread = _threading.Thread(target=_write_cache_async, daemon=True)
+            _cache_write_thread.start()
+            _atexit.register(_cache_write_thread.join, 30.0)
 
     # Update RIS with aggregated snapshot data (non-fatal side-effect).
     # Update RIS whenever git is available, even when L1/L2 cache is skipped
