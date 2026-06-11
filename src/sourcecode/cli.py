@@ -2295,6 +2295,11 @@ def main(
         try:
             from sourcecode.ris import _has_uncommitted_changes as _huc_fresh
             _uncommitted_fresh = _huc_fresh(target)
+            # _huc_fresh uses --untracked-files=no — it misses repos where all
+            # files are untracked (no staged/unstaged changes to tracked files).
+            # Promote to True when _allowed_changed_files contains untracked files.
+            if not _uncommitted_fresh and _allowed_changed_files:
+                _uncommitted_fresh = True
         except Exception:
             _uncommitted_fresh = False
         import datetime as _dt
