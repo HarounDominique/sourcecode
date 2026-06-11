@@ -19,6 +19,10 @@ _API_FRAMEWORKS = {
     "Actix Web",
     "Rocket",
     "Spring Boot",
+    "Spring MVC",
+    "Spring WebFlux",
+    "Micronaut",
+    "Vert.x",
     "Quarkus",
     "Jakarta EE",   # JAX-RS / Jakarta REST — pure JAX-RS projects must not fall to "unknown"
     "Laravel",
