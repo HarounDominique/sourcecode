@@ -3599,10 +3599,16 @@ def find_java_files(root: Path, *, max_files: int = 8000, limitations: list[str]
                 _prefix_parts = [p for p in _prefix.split("/") if p]
                 # A module is a test module if is_test_path says so OR if any
                 # module directory component starts with "test" (e.g. "test-framework",
-                # "test-providers", "testsuite" — common module naming convention).
+                # "test-providers", "testsuite") OR contains "test"/"tests" as a
+                # hyphen/underscore-separated word (e.g. "jobrunr-micronaut-tests").
                 _prefix_is_test = (
                     _is_test_path(_prefix + "/x.java")
                     or any(p.lower().startswith("test") for p in _prefix_parts)
+                    or any(
+                        w in {"test", "tests", "spec", "specs"}
+                        for p in _prefix_parts
+                        for w in p.lower().replace("-", " ").replace("_", " ").split()
+                    )
                 )
                 if not _prefix_is_test:
                     _skip = False
