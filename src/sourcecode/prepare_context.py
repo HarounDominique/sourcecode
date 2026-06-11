@@ -2464,7 +2464,7 @@ class TaskContextBuilder:
                 # Java-aware algorithm (Fix #2): find Service/RestController/Repository/Mapper
                 # files with no matching test pair in src/test/**
                 _JAVA_TARGET_SUFFIXES = (
-                    "Service.java", "RestController.java",
+                    "Service.java", "Controller.java", "RestController.java",
                     "Repository.java", "Mapper.java",
                 )
                 # Build set of test stems (FooTest → Foo, FooIT → Foo, etc.)
