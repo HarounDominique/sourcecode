@@ -152,6 +152,9 @@ def _find_class_file(
     return None
 
 
+_PKG_IMPORT_RE = re.compile(r'^\s*(?:package|import)\s')
+
+
 def _apply_rename(source: str, old_name: str, new_name: str) -> str:
     """Apply word-boundary replacement for class name (PascalCase and camelCase forms)."""
     result = re.sub(r'\b' + re.escape(old_name) + r'\b', new_name, source)
@@ -159,7 +162,12 @@ def _apply_rename(source: str, old_name: str, new_name: str) -> str:
     old_camel = _to_camel(old_name)
     new_camel = _to_camel(new_name)
     if old_camel != old_name and old_camel in result:
-        result = re.sub(r'\b' + re.escape(old_camel) + r'\b', new_camel, result)
+        camel_re = re.compile(r'\b' + re.escape(old_camel) + r'\b')
+        lines = result.splitlines(keepends=True)
+        result = ''.join(
+            line if _PKG_IMPORT_RE.match(line) else camel_re.sub(new_camel, line)
+            for line in lines
+        )
 
     return result
 
@@ -193,7 +201,12 @@ def _apply_rename_refs_only(source: str, old_name: str, new_name: str) -> str:
     old_camel = _to_camel(old_name)
     new_camel = _to_camel(new_name)
     if old_camel != old_name and old_camel in result:
-        result = re.sub(r'\b' + re.escape(old_camel) + r'\b', new_camel, result)
+        camel_re = re.compile(r'\b' + re.escape(old_camel) + r'\b')
+        lines = result.splitlines(keepends=True)
+        result = ''.join(
+            line if _PKG_IMPORT_RE.match(line) else camel_re.sub(new_camel, line)
+            for line in lines
+        )
 
     return result
 

@@ -305,3 +305,45 @@ class TestErrorCases:
     def test_nonexistent_root_returns_error(self, tmp_path):
         result = rename_class(tmp_path / "does_not_exist", "ServiceA", "ServiceB")
         assert result.errors
+
+
+# ---------------------------------------------------------------------------
+# Regression: camelCase substitution must not corrupt package/import paths
+# ---------------------------------------------------------------------------
+
+class TestPackageImportPreservation:
+    def test_package_declaration_not_renamed(self, tmp_path):
+        # Renaming Owner→Customer must not corrupt "package ...owner;"
+        _repo(tmp_path, {
+            "owner/Owner.java": (
+                "package com.example.owner;\n"
+                "public class Owner {}\n"
+            ),
+        })
+        result = rename_class(tmp_path, "Owner", "Customer", dry_run=True)
+        src = next((c for c in result.changes if "Owner.java" in c.file), None)
+        assert src is not None
+        after = "\n".join(src.after_lines)
+        assert "package com.example.owner;" in after, "package declaration must not change"
+        assert "package com.example.customer;" not in after, "package must NOT be renamed"
+
+    def test_import_path_not_renamed_in_other_files(self, tmp_path):
+        # Other files importing Owner must keep the owner package path intact
+        _repo(tmp_path, {
+            "owner/Owner.java": (
+                "package com.example.owner;\n"
+                "public class Owner {}\n"
+            ),
+            "service/Service.java": (
+                "package com.example.service;\n"
+                "import com.example.owner.Owner;\n"
+                "public class Service { Owner owner; }\n"
+            ),
+        })
+        result = rename_class(tmp_path, "Owner", "Customer", dry_run=True)
+        svc = next((c for c in result.changes if "Service.java" in c.file), None)
+        assert svc is not None
+        after = "\n".join(svc.after_lines)
+        # import path must preserve the owner package, only class name changes
+        assert "import com.example.owner.Customer;" in after, "class name in import must update"
+        assert "import com.example.customer." not in after, "package path must NOT change"
