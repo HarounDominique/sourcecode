@@ -1,38 +1,97 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-10T17:30:00Z",
+  "timestamp": "2026-06-11T09:51:11Z",
   "phase": null,
-  "phase_name": "session 85 — quality fixes v1.35.30 (complete)",
+  "phase_name": "session 88 — informe de situacion real (evaluacion completa v1.35.32)",
   "phase_dir": null,
   "plan": null,
   "task": null,
-  "total_tasks": 9,
+  "total_tasks": 0,
   "status": "paused",
-  "session_type": "continuous-quality-fixes",
+  "session_type": "evaluation-and-reporting",
   "completed_tasks": [
-    {"id": 1, "name": "P1 — impact field injection callers", "status": "done", "commit": "a17dcac", "detail": "_all_callers_from_rg normalizes injects-edge FQNs via _normalize_owner_fqn. @Autowired/@Inject/@Resource/same-pkg all work."},
-    {"id": 2, "name": "P2 — M3FiltroSeguridad/saint-server contamination removal", "status": "done", "commit": "a17dcac", "detail": "Purged from 8 source files. _CUSTOM_SECURITY_ANNOTATIONS and _CUSTOM_AOP_ANNOTATIONS are now empty extension-point dicts."},
-    {"id": 4, "name": "P4 — cache status CWD-dependent", "status": "done", "commit": "a17dcac", "detail": "_resolve_repo_root walks .git ancestry; all cache status/clear/warm auto-resolve from any subdirectory."},
-    {"id": 5, "name": "P5 — cold-start --output flag missing", "status": "done", "commit": "a17dcac", "detail": "Added --output/-o option to cold-start command."},
-    {"id": 8, "name": "P8 — UX errors pr-impact and fix-bug", "status": "done", "commit": "a17dcac", "detail": "pr-impact --files error explains expected format. fix-bug detects symptom-as-path misuse."},
-    {"id": 6, "name": "P6 — transactional count inconsistency (compact=33 vs spring-audit=178)", "status": "done", "commit": "2f0513f", "detail": "compact transactional_boundaries: count renamed to class_count (unique classes). spring-audit metadata: tx_boundaries_found renamed to tx_annotation_count (class+method annotations). tx_stats.class_level cross-references class_count. 3 tests updated."},
-    {"id": 7, "name": "P7 — project_summary contaminated by doc text (e.g. Trivy output)", "status": "done", "commit": "2f0513f", "detail": "Added _TOOL_OUTPUT_RE to summarizer._extract_first_useful_paragraph. Rejects CVE ids, Trivy severity lines, scanner names (trivy/snyk/grype/syft), PURL identifiers, vulnerability-count patterns."},
-    {"id": 9, "name": "P9 — repo-ir 71MB without warning", "status": "done", "commit": "29a6c7d", "detail": "Added --gzip flag (requires --output, auto-appends .gz, shows compressed+uncompressed sizes). Added 10MB size warning for file output without --gzip. Added error when --gzip used without --output."}
+    {
+      "id": 1,
+      "name": "Evaluacion completa CLI v1.35.32 sobre 9 repos de testing",
+      "status": "done",
+      "commit": "6dd6d86",
+      "detail": "~35 comandos ejecutados sobre spring-petclinic (47 Java), spaghetti-api (5), eureka (409), examples (Confluent no-Java), jobrunr (964), keycloak (7885), openmrs-core (1281), BroadleafCommerce (2985), ofbiz-framework (1152). Todos los comandos del CLI probados."
+    },
+    {
+      "id": 2,
+      "name": "Informe de situacion real con 10 secciones",
+      "status": "done",
+      "commit": "6dd6d86",
+      "detail": "Informe producido en conversacion (no en disco). Puntuaciones: madurez 5/10, valor comercial 6/10, potencial 8/10, riesgo tecnico 7/10, adopcion enterprise 4/10."
+    }
   ],
   "remaining_tasks": [
-    {"id": 3, "name": "P3 — cache Windows slow (cold ~8s, warm ~4s)", "status": "not_started", "note": "Not reproducible on macOS (0.18s warm). Windows-specific: Path.replace() on locked files may fail silently -> CAS blobs: 0 -> no deduplication -> slower. Fix: _atomic_write in cache.py:810, add try/except PermissionError fallback for Windows."}
+    {
+      "id": 3,
+      "name": "P3 (session 85) — cache Windows slow (cold ~8s, warm ~4s)",
+      "status": "not_started",
+      "note": "Requiere entorno Windows. cache.py:810 _atomic_write — PermissionError en Path.replace() silencioso."
+    }
   ],
   "blockers": [
-    {"description": "P3 Windows cache requires Windows environment to reproduce and validate", "type": "external", "workaround": "Can inspect _atomic_write statically for Windows PermissionError patterns, but cannot validate fix without Windows"}
+    {
+      "description": "P3 Windows cache: no reproducible en macOS, requiere Windows",
+      "type": "external",
+      "workaround": "Inspeccion estatica de cache.py:810 posible pero sin validacion"
+    }
   ],
   "human_actions_pending": [],
   "decisions": [
-    {"decision": "count -> class_count in transactional_boundaries (non-breaking rename)", "rationale": "Agents comparing compact vs spring-audit saw contradictory numbers (33 vs 178). Labels now unambiguous without changing semantics."},
-    {"decision": "_TOOL_OUTPUT_RE added as separate class var (not folded into _LICENSE_MARKETING_RE)", "rationale": "Different category of noise; easier to extend independently."},
-    {"decision": "--gzip auto-appends .gz if output path doesn't end in .gz", "rationale": "Prevents silent binary corruption of .json files; user still controls filename."},
-    {"decision": "--gzip + stdout = error (not silent gzip to stdout)", "rationale": "Compressed binary on stdout breaks pipelines silently; explicit error is safer."}
+    {
+      "decision": "Informe basado 100% en ejecucion real, no inferencias",
+      "rationale": "Usuario explicitamente requirio evidencias observadas directamente"
+    }
+  ],
+  "bugs_discovered_this_session": [
+    {
+      "id": "BUG-SESSION88-01",
+      "severity": "medium",
+      "description": "Texto espanol en output --agent: 'Arquitectura no inferida: proyecto sin archivos de codigo suficientes' en campo limitations[]",
+      "confirmed": true
+    },
+    {
+      "id": "BUG-SESSION88-02",
+      "severity": "high",
+      "description": "Risk scoring inconsistente: impact OwnerController score=25->HIGH, impact-chain OwnerController score=21->CRITICAL. Escala menor produce nivel superior.",
+      "confirmed": true
+    },
+    {
+      "id": "BUG-SESSION88-03",
+      "severity": "high",
+      "description": "endpoints devuelve 0 en openmrs-core (Spring MVC + XML config). Falso negativo confirmado.",
+      "confirmed": true
+    },
+    {
+      "id": "BUG-SESSION88-04",
+      "severity": "medium",
+      "description": "OFBiz Gradle parse falla silenciosamente: devuelve 'group:module'/'version' placeholder.",
+      "confirmed": true
+    },
+    {
+      "id": "BUG-SESSION88-05",
+      "severity": "medium",
+      "description": "spring_detected: True para Keycloak (Quarkus/JAX-RS, no Spring).",
+      "confirmed": true
+    },
+    {
+      "id": "BUG-SESSION88-06",
+      "severity": "low",
+      "description": "project_type: unknown para openmrs-core pese a ser Spring MVC con 30 transactional boundaries.",
+      "confirmed": true
+    },
+    {
+      "id": "BUG-SESSION88-07",
+      "severity": "low",
+      "description": "Eureka framework identificado como Jakarta EE. Usa Guice/Jersey.",
+      "confirmed": true
+    }
   ],
   "uncommitted_files": [],
-  "next_action": "P3 only remaining — needs Windows env. Inspect cache.py:810 _atomic_write for PermissionError on Path.replace(), add fallback to shutil.copy2+unlink pattern.",
-  "context_notes": "Session 85 complete. All 8 of 9 tasks done. P3 blocked on Windows. Tests: 2436 passed, 3 skipped, 0 new failures. Version still v1.35.30 (a17dcac base); P6/P7 at 2f0513f, P9 at 29a6c7d."
+  "next_action": "Priorizar bugs SESSION88: BUG-02 (scoring inconsistente) y BUG-03 (0 endpoints XML config) son los mas urgentes. Decidir si entran en session 89 o backlog.",
+  "context_notes": "Session 88 fue evaluacion pura — ningun codigo modificado. Arbol limpio en 6dd6d86. El informe completo vive en la conversacion del usuario. Session 85 P3 (Windows cache) sigue pendiente pero no bloqueante."
 }

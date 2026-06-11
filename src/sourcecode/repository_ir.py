@@ -3408,6 +3408,31 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
     # No independent re-extraction here — _route_security_from_sym is the single
     # source of truth for security policy extraction.
 
+    # Detect interface-based Spring MVC controllers (implements Controller).
+    # These predate annotation-style and have URL mapping in XML, not annotations.
+    # We emit a synthetic "(xml-mapped)" entry so they appear in the endpoint surface.
+    _SPRING_CONTROLLER_IFACE = "org.springframework.web.servlet.mvc.Controller"
+    _annotated_classes = {
+        route.get("effective_class", "").split(".")[-1]
+        for route in routes
+    }
+    for sym in all_symbols:
+        if sym.type != "class":
+            continue
+        if _SPRING_CONTROLLER_IFACE not in sym.imports_used:
+            continue
+        cls_simple = sym.symbol.split(".")[-1]
+        if cls_simple in _annotated_classes:
+            continue
+        routes.append({
+            "symbol": f"{sym.symbol}#handleRequest",
+            "effective_class": sym.symbol,
+            "method": "ANY",
+            "path": "(xml-mapped)",
+            "security_annotations": None,
+            "note": "interface-based Spring MVC controller — URL mapped via XML",
+        })
+
     endpoints: list[dict] = []
     for route in routes:
         handler = (
@@ -3994,7 +4019,9 @@ def compute_blast_radius(
     )
     risk_score = round(min(raw_score, 100.0), 2)
 
-    if risk_score >= 20 or n_ep >= 3 or n_txn >= 2:
+    if risk_score >= 30 or (n_ep >= 5 and n_txn >= 2):
+        risk_level = "critical"
+    elif risk_score >= 20 or n_ep >= 3 or n_txn >= 2:
         risk_level = "high"
     elif risk_score >= 5 or n_ep >= 1 or n_txn >= 1:
         risk_level = "medium"

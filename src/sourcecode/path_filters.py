@@ -78,7 +78,8 @@ def is_test_path(path: str) -> bool:
         or name.endswith(".spec.js")
         or (name.endswith("test.java") and name != "test.java")
         or name.endswith("tests.java")
-        or (name.startswith("test") and name.endswith(".java") and len(name) > 9)
+        or (name.startswith("test") and name.endswith(".java") and len(name) > 9
+            and "/src/main/" not in norm)
     ):
         return True
 

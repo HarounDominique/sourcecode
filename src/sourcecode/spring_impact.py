@@ -465,9 +465,9 @@ def _compute_risk(
     caller_score = min(direct_callers * 2.0 + indirect_callers * 0.5, 20.0)
     total = finding_score + endpoint_score + caller_score
 
-    if total >= 20.0:
+    if total >= 25.0:
         level = "critical"
-    elif total >= 10.0:
+    elif total >= 12.0:
         level = "high"
     elif total >= 4.0:
         level = "medium"
