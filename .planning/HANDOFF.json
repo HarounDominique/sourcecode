@@ -1,8 +1,8 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-11T12:35:00Z",
+  "timestamp": "2026-06-11T13:00:00Z",
   "phase": null,
-  "phase_name": "session 89 — bug fixes BUG-01 through BUG-05",
+  "phase_name": "session 89 — bug fixes BUG-01 through BUG-06",
   "phase_dir": null,
   "plan": null,
   "task": null,
@@ -37,16 +37,16 @@
       "status": "done",
       "commit": "cf3d699",
       "detail": "spring_model.py: added _JPA_ONLY_STEREOTYPES and BeanGraph.has_spring_beans() — JPA @Entity classes excluded from Spring detection. spring_tx_analyzer.py and spring_security_audit.py updated to use has_spring_beans(). Removed security_model != 'unknown' false proxy from security auditor."
-    }
-  ],
-  "remaining_tasks": [
+    },
     {
       "id": 5,
       "name": "BUG-06 — project_type: unknown on openmrs-core",
-      "status": "not_started",
-      "severity": "low",
-      "detail": "openmrs-core has pom.xml + Spring MVC + 30 @Transactional boundaries but reports project_type: unknown. Investigate repo_classifier.py or compact output assembly."
-    },
+      "status": "done",
+      "commit": "5495ab6",
+      "detail": "classifier.py: added Spring MVC, Spring WebFlux, Micronaut, Vert.x to _API_FRAMEWORKS. openmrs-core now returns project_type: api."
+    }
+  ],
+  "remaining_tasks": [
     {
       "id": 6,
       "name": "BUG-07 — Eureka misidentified as Jakarta EE",
@@ -85,10 +85,10 @@
     {"id": "BUG-03", "severity": "high",   "status": "fixed", "commit": "76d4beb"},
     {"id": "BUG-04", "severity": "medium", "status": "fixed", "commit": "15e3af7"},
     {"id": "BUG-05", "severity": "medium", "status": "fixed", "commit": "cf3d699"},
-    {"id": "BUG-06", "severity": "low",    "status": "pending"},
+    {"id": "BUG-06", "severity": "low",    "status": "fixed", "commit": "5495ab6"},
     {"id": "BUG-07", "severity": "low",    "status": "pending"}
   ],
   "uncommitted_files": [],
-  "next_action": "BUG-06: project_type: unknown on openmrs-core. Run sourcecode --compact on repo, locate project_type classification code, fix to detect Spring when @Transactional + Spring MVC annotations present.",
-  "context_notes": "Session 89 fixed 5 bugs (BUG-01 through BUG-05). 2499 tests pass. Tree clean at cf3d699. Testing repos at /Users/user/Documents/workspace/testing/."
+  "next_action": "BUG-07: Eureka misidentified as Jakarta EE. Run sourcecode on eureka repo, trace jakarta.ee detection in java.py, tighten condition to exclude Guice/Jersey-only projects.",
+  "context_notes": "Session 89 fixed 6 bugs (BUG-01 through BUG-06). 2499 tests pass. Tree clean at 5495ab6. Testing repos at /Users/user/Documents/workspace/testing/."
 }
