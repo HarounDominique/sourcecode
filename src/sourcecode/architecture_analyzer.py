@@ -237,7 +237,7 @@ class ArchitectureAnalyzer:
             return ArchitectureAnalysis(
                 requested=True,
                 pattern="unknown",
-                limitations=["Arquitectura no inferida: proyecto sin archivos de codigo suficientes"],
+                limitations=["Architecture not inferred: insufficient source files in project"],
                 evidence=[{"type": "none", "paths": [], "reason": "insufficient source files", "confidence": "high"}],
                 tentative=False,
             )
