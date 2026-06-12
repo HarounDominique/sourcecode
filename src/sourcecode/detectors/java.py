@@ -311,7 +311,14 @@ class JavaDetector(AbstractDetector):
             frameworks.append(FrameworkDetection(name="Micronaut", source=source))
         if "io.vertx" in text or "vertx" in text:
             frameworks.append(FrameworkDetection(name="Vert.x", source=source))
-        if "jakarta.ee" in text or "javax.ws.rs" in text:
+        if (
+            "jakarta.ee" in text
+            or "javax.ws.rs-api" in text   # JAX-RS 2.x spec; excludes jsr311-api (1.x API-only jar)
+            or "jakarta.ws.rs" in text      # Jakarta namespace (EE 9+)
+            or "javaee-api" in text         # full Java EE platform
+            or "jakartaee-api" in text      # full Jakarta EE platform
+            or "resteasy" in text           # RESTEasy (JBoss JAX-RS impl)
+        ):
             frameworks.append(FrameworkDetection(name="Jakarta EE", source=source))
         if "mybatis" in text:
             frameworks.append(FrameworkDetection(name="MyBatis", source=source))

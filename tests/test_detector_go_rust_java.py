@@ -88,6 +88,54 @@ def test_java_detector_detects_spring_boot_application(tmp_path: Path) -> None:
     assert project_type == "api"
 
 
+def test_java_detector_does_not_classify_jsr311_api_as_jakarta_ee(tmp_path: Path) -> None:
+    # jsr311-api is the old JAX-RS 1.x API spec jar — just interfaces, not a Jakarta EE server.
+    # Eureka uses it as transport glue. Should not produce "Jakarta EE".
+    # Regression test for BUG-07.
+    (tmp_path / "build.gradle").write_text(
+        "dependencies {\n    api 'javax.ws.rs:jsr311-api:1.1.1'\n}\n"
+    )
+
+    detector = ProjectDetector([JavaDetector()])
+    stacks, _entry_points, _project_type = detector.detect(
+        root=tmp_path,
+        file_tree={"build.gradle": None},
+        manifests=["build.gradle"],
+    )
+
+    if stacks:
+        framework_names = [f.name for f in stacks[0].frameworks]
+        assert "Jakarta EE" not in framework_names
+
+
+def test_java_detector_detects_jakarta_ee_from_jaxrs2_api(tmp_path: Path) -> None:
+    # javax.ws.rs:javax.ws.rs-api is the JAX-RS 2.x spec — projects that pull this
+    # are actively using JAX-RS as their REST layer and should classify as Jakarta EE.
+    (tmp_path / "pom.xml").write_text(
+        """
+<project>
+  <dependencies>
+    <dependency>
+      <groupId>javax.ws.rs</groupId>
+      <artifactId>javax.ws.rs-api</artifactId>
+    </dependency>
+  </dependencies>
+</project>
+        """.strip()
+    )
+
+    detector = ProjectDetector([JavaDetector()])
+    stacks, _entry_points, project_type = detector.detect(
+        root=tmp_path,
+        file_tree={"pom.xml": None},
+        manifests=["pom.xml"],
+    )
+
+    framework_names = [f.name for f in stacks[0].frameworks]
+    assert "Jakarta EE" in framework_names
+    assert project_type == "api"
+
+
 def test_java_detector_detects_spring_mvc_in_child_module(tmp_path: Path) -> None:
     # Root pom has <modules> but no Spring deps — Spring MVC is in a child pom.
     # Regression test for BUG-06: multi-module Maven projects classified as "unknown".
