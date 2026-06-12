@@ -78,6 +78,7 @@ class ClassExplanation:
     security_constraints: list[str] = field(default_factory=list)
     rest_endpoints: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    found: bool = True
 
     def render_text(self) -> str:
         lines: list[str] = [f"## {self.class_name}", ""]
@@ -122,6 +123,7 @@ class ClassExplanation:
             "security_constraints": self.security_constraints,
             "rest_endpoints": self.rest_endpoints,
             "warnings": self.warnings,
+            "found": self.found,
         }
 
 
@@ -411,6 +413,7 @@ def explain_class(
             stereotype="unknown",
             purpose="Class not found in repository symbols.",
             warnings=[f"'{class_name}' not found in CIR symbols. Is this a Java/Kotlin repo?"],
+            found=False,
         )
 
     if len(all_matches) > 1:

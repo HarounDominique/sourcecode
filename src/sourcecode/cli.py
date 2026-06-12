@@ -3700,11 +3700,8 @@ def impact_cmd(
             if _copy_to_clipboard(output):
                 typer.echo("✓ copied to clipboard", err=True)
 
-    # H-03: resolution=not_found is a valid structured answer, not an infra failure.
-    # Exit 0 so pipelines can parse the JSON without treating it as an error.
-    # Exit 1 is reserved for path-not-found, I/O failures, and real infra errors.
     if result.get("resolution") == "not_found":
-        raise typer.Exit(code=0)
+        raise typer.Exit(code=1)
 
     from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
     _nudge()
@@ -4430,6 +4427,9 @@ def impact_chain_cmd(
             if _copy_to_clipboard(output):
                 typer.echo("✓ copied to clipboard", err=True)
 
+    if result.resolution == "not_found":
+        raise typer.Exit(code=1)
+
 
 # ── PR Impact Report ──────────────────────────────────────────────────────────
 
@@ -4705,6 +4705,9 @@ def explain_cmd(
 
     if copy and _copy_to_clipboard(output):
         typer.echo("✓ copied to clipboard", err=True)
+
+    if not explanation.found:
+        raise typer.Exit(code=1)
 
 
 # ── Enterprise Workflow Commands ──────────────────────────────────────────────

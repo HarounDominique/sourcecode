@@ -781,12 +781,11 @@ class TestBlastRadius:
             assert isinstance(result["risk_score"], float)
             assert result["risk_score"] >= 0.0
 
-    def test_impact_command_not_found_exits_0(self, keycloak_like_repo: Path) -> None:
-        # H-03: resolution=not_found is structured answer → exit 0, not 1
+    def test_impact_command_not_found_exits_1(self, keycloak_like_repo: Path) -> None:
         result = runner.invoke(
             app, ["impact", "CompletelyFakeClass99999", str(keycloak_like_repo)]
         )
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         data = json.loads(result.output)
         assert data["resolution"] == "not_found"
 
@@ -1703,8 +1702,7 @@ class TestMultiRepoComparisonMatrix:
     ) -> None:
         repo = request.getfixturevalue(repo_fixture)
         result = runner.invoke(app, ["impact", "NonExistentXYZ", str(repo)])
-        # H-03: not_found is structured answer → exit 0; output must be valid JSON
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         data = json.loads(result.output)
         assert data["resolution"] == "not_found"
         assert data["risk_level"] == "unknown"
