@@ -2980,12 +2980,7 @@ def _contract_view_standard(
 
 
 def write_output(content: str, output: Optional[Path]) -> None:
-    """Write content to stdout or a file.
-
-    Args:
-        content: Serialized string (JSON or YAML).
-        output: Destination file path. None = stdout.
-    """
+    """Deprecated: use cli._emit_command_output instead."""
     if output is None:
         sys.stdout.buffer.write(content.encode("utf-8"))
         if not content.endswith("\n"):

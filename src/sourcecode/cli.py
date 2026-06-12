@@ -419,6 +419,42 @@ def _safe_write_file(path: "Path", content: str) -> None:
         raise typer.Exit(code=1) from None
 
 
+def _emit_command_output(
+    content: str,
+    output_path: "Optional[Path]",
+    copy: bool,
+    *,
+    success_msg: "Optional[str]" = None,
+) -> None:
+    """Unified output pipeline: stdout | file | clipboard.
+
+    Single call site for every command's final output step.
+    File write failures emit JSON to stderr via _safe_write_file.
+    Clipboard fires only when no --output path is given.
+    """
+    if output_path is not None:
+        _safe_write_file(output_path, content)
+        if success_msg:
+            typer.echo(success_msg, err=True)
+    else:
+        try:
+            sys.stdout.buffer.write(content.encode("utf-8"))
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
+        except UnicodeEncodeError as _ue:
+            sys.stderr.write(
+                f"[sourcecode] UnicodeEncodeError on stdout ({_ue.encoding}): "
+                "your console codec cannot encode this output.\n"
+                "Workaround: use --output FILE\n"
+            )
+            sys.stderr.flush()
+            raise
+        except AttributeError:
+            sys.stdout.write(content + "\n")
+        if copy and _copy_to_clipboard(content):
+            typer.echo("✓ copied to clipboard", err=True)
+
+
 # H-06: Intercept Click-level UsageError (unknown options, bad args) and emit JSON.
 # Click's default show() writes "Error: No such option: --foo" as plain text.
 # Automation consumers need JSON on stderr regardless of how the error originated.
@@ -1131,7 +1167,7 @@ def main(
         SourceMap,
         StackDetection,
     )
-    from sourcecode.serializer import agent_view, compact_view, normalize_source_map, standard_view, validate_cross_analyzer_consistency, validate_source_map, write_output
+    from sourcecode.serializer import agent_view, compact_view, normalize_source_map, standard_view, validate_cross_analyzer_consistency, validate_source_map
     from sourcecode.workspace import WorkspaceAnalyzer
 
     # 1. Scan directory (SCAN-01 to SCAN-05)
@@ -1370,25 +1406,7 @@ def main(
                                 )
                                 _rebuilt = _trim_l1c(_rebuilt, BUDGET_COMPACT, label="compact")
                             # Serialize
-                            if format == "yaml":
-                                from io import StringIO as _SIO_L1
-                                from ruamel.yaml import YAML as _YAML_L1
-                                _yl1 = _YAML_L1()
-                                _yl1.default_flow_style = False
-                                _yl1.representer.add_representer(
-                                    type(None),
-                                    lambda d, v: d.represent_scalar(
-                                        "tag:yaml.org,2002:null", "null"
-                                    ),
-                                )
-                                _sl1 = _SIO_L1()
-                                _yl1.dump(_rebuilt, _sl1)
-                                _cache_hit_content = _sl1.getvalue()
-                            else:
-                                import json as _json_l1
-                                _cache_hit_content = _json_l1.dumps(
-                                    _rebuilt, indent=2, ensure_ascii=False
-                                )
+                            _cache_hit_content = _serialize_dict(_rebuilt, format)
                             # Cache rebuilt view in L2 (skip for --changed-only: stale diff)
                             if _cache_hit_content and not changed_only:
                                 _cache_mod.write_view(
@@ -1406,7 +1424,6 @@ def main(
             _core_hash = ""
 
     if _cache_hit_content is not None:
-        from sourcecode.serializer import write_output
         _hit_source = "L2_view" if (_view_key and _core_hash) else "L1_core"
 
         # P0-A/B/C: --changed-only fast path via warm cache.
@@ -1440,9 +1457,7 @@ def main(
                     "context": None,
                     "_meta": {"changed_only": True, "cache_source": _hit_source},
                 }, ensure_ascii=False)
-                write_output(_co_clean, output=output)
-                if copy and not output:
-                    _copy_to_clipboard(_co_clean)
+                _emit_command_output(_co_clean, output, copy)
                 return
             else:
                 # Dirty repo — filter file_paths in cached compact, unified schema.
@@ -1462,9 +1477,7 @@ def main(
                         "context": _co_base,
                         "_meta": {"changed_only": True, "cache_source": _hit_source},
                     }, indent=2, ensure_ascii=False)
-                    write_output(_co_dirty, output=output)
-                    if copy and not output:
-                        _copy_to_clipboard(_co_dirty)
+                    _emit_command_output(_co_dirty, output, copy)
                     return
                 except Exception:
                     # Parse failed — fall through to full scan.
@@ -1523,9 +1536,7 @@ def main(
                             )
                     except Exception:
                         pass  # stale value better than crash
-            write_output(_cache_hit_content, output=output)
-            if copy and not output:
-                _copy_to_clipboard(_cache_hit_content)
+            _emit_command_output(_cache_hit_content, output, copy)
             return
 
     _extra_excludes: Optional[frozenset[str]] = None
@@ -2170,7 +2181,7 @@ def main(
                 "context": None,
                 "_meta": {"changed_only": True, "cache_source": "none"},
             }, ensure_ascii=False)
-            write_output(_nc_payload, output=output)
+            _emit_command_output(_nc_payload, output, False)
             raise typer.Exit()
 
     # Contract pipeline — runs for mode=contract|standard|deep|hybrid (skip for raw)
@@ -2341,7 +2352,7 @@ def main(
                 }, indent=2, ensure_ascii=False)
             except Exception:
                 pass
-    write_output(content, output=output)
+    _emit_command_output(content, output, copy if not _pipeline_error else False)
 
     # Persist to two-layer cache (git SHA unchanged → re-use on next run).
     #
@@ -2419,14 +2430,7 @@ def main(
     if _pipeline_error:
         raise typer.Exit(code=2)
 
-    # 7. Clipboard copy (--copy / -c)
-    if copy and output is None:
-        _trimmed = content.strip()
-        if _trimmed and _trimmed not in ("{}", "[]", "null"):
-            if _copy_to_clipboard(content):
-                typer.echo("✓ copied to clipboard", err=True)
-
-    # 8. One-time MCP setup nudge (stderr only — does not affect exit code or stdout)
+    # 7. One-time MCP setup nudge (stderr only — does not affect exit code or stdout)
     from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
     _nudge()
 
@@ -2802,17 +2806,7 @@ def prepare_context_cmd(
             _pctx_cache_key = f"pctx-{task}-{_pctx_git_sha}-{_sym_h}-{format or 'json'}"
             _cached_pctx = _pctx_cache.read(target, _pctx_cache_key)
             if _cached_pctx is not None:
-                if output_path is not None:
-                    _safe_write_file(output_path, _cached_pctx)
-                else:
-                    sys.stdout.buffer.write(_cached_pctx.encode("utf-8"))
-                    if not _cached_pctx.endswith("\n"):
-                        sys.stdout.buffer.write(b"\n")
-                    sys.stdout.buffer.flush()
-                if copy:
-                    _c = _cached_pctx.strip()
-                    if _c not in ("{}", "[]", "null"):
-                        _copy_to_clipboard(_cached_pctx)
+                _emit_command_output(_cached_pctx, output_path, copy)
                 return
 
     builder = TaskContextBuilder(target)
@@ -3205,20 +3199,7 @@ def prepare_context_cmd(
         except Exception:
             pass
 
-    if output_path is not None:
-        _safe_write_file(output_path, _pc_content)
-    else:
-        _pc_bytes = _pc_content.encode("utf-8")
-        sys.stdout.buffer.write(_pc_bytes)
-        if not _pc_content.endswith("\n"):
-            sys.stdout.buffer.write(b"\n")
-        sys.stdout.buffer.flush()
-
-    if copy:
-        _trimmed = _pc_content.strip()
-        if _trimmed and _trimmed not in ("{}", "[]", "null"):
-            if _copy_to_clipboard(_pc_content):
-                typer.echo("✓ copied to clipboard", err=True)
+    _emit_command_output(_pc_content, output_path, copy)
 
     from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
     _nudge()
@@ -3534,26 +3515,7 @@ def repo_ir_cmd(
                     "use --summary-only or --output FILE for smaller output.\n"
                 )
             sys.stderr.flush()
-        try:
-            sys.stdout.buffer.write(output.encode("utf-8"))
-            sys.stdout.buffer.write(b"\n")
-            sys.stdout.buffer.flush()
-        except UnicodeEncodeError as _ue:
-            # IMP-2: emit workaround before re-raising so the user knows what to do.
-            sys.stderr.write(
-                f"[sourcecode] UnicodeEncodeError on stdout ({_ue.encoding}): "
-                "your console codec cannot encode this output.\n"
-                "Workaround: sourcecode repo-ir --output ir.json\n"
-            )
-            sys.stderr.flush()
-            raise
-        except AttributeError:
-            # Fallback for wrapped stdout without buffer (e.g. some test harnesses)
-            sys.stdout.write(output)
-            sys.stdout.write("\n")
-        if copy:
-            if _copy_to_clipboard(output):
-                typer.echo("✓ copied to clipboard", err=True)
+        _emit_command_output(output, None, copy)
 
 
 # ── impact (blast-radius / change-impact analysis) ────────────────────────────
@@ -3589,6 +3551,13 @@ def impact_cmd(
         "--include-tests",
         help="Include test files in analysis (excluded by default).",
     ),
+    format: str = typer.Option(
+        "json",
+        "--format",
+        "-f",
+        help="Output format: json (default) or yaml.",
+        show_default=True,
+    ),
     copy: bool = typer.Option(
         False,
         "--copy",
@@ -3620,7 +3589,14 @@ def impact_cmd(
     from sourcecode.license import require_pro as _require_pro
     _require_pro("impact")
 
-    import json as _json
+    if format not in ("json", "yaml"):
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid format '{format}'.",
+            hint="format must be: json or yaml.",
+            expected="json | yaml",
+        )
+        raise typer.Exit(code=1)
 
     from sourcecode.repository_ir import (
         build_repo_ir, find_java_files, compute_blast_radius,
@@ -3671,17 +3647,16 @@ def impact_cmd(
         file_list = [f for f in file_list if "/test/" not in f and "/tests/" not in f]
 
     if not file_list:
-        typer.echo(
-            _json.dumps(
-                {
-                    "target": target,
-                    "resolution": "not_found",
-                    "message": "No Java files found in repository.",
-                    "risk_level": "unknown",
-                },
-                indent=2,
-            )
+        _nf_output = _serialize_dict(
+            {
+                "target": target,
+                "resolution": "not_found",
+                "message": "No Java files found in repository.",
+                "risk_level": "unknown",
+            },
+            format,
         )
+        _emit_command_output(_nf_output, output_path, copy)
         return
 
     _prog = Progress()
@@ -3694,20 +3669,9 @@ def impact_cmd(
     result = compute_blast_radius(ir, target, max_depth=depth)
     result = _trim(result, BUDGET_IMPACT, label="impact")
 
-    output = _json.dumps(result, indent=2, ensure_ascii=False)
-    if output_path:
-        _safe_write_file(output_path, output)
-        typer.echo(f"Impact analysis written to {output_path}", err=True)
-    else:
-        try:
-            sys.stdout.buffer.write(output.encode("utf-8"))
-            sys.stdout.buffer.write(b"\n")
-            sys.stdout.buffer.flush()
-        except AttributeError:
-            sys.stdout.write(output + "\n")
-        if copy:
-            if _copy_to_clipboard(output):
-                typer.echo("✓ copied to clipboard", err=True)
+    output = _serialize_dict(result, format)
+    _emit_command_output(output, output_path, copy,
+                         success_msg=f"Impact analysis written to {output_path}")
 
     if result.get("resolution") == "not_found":
         raise typer.Exit(code=1)
@@ -3827,19 +3791,8 @@ def endpoints_cmd(
 
     output = _serialize_dict(data, format)
 
-    if output_path is not None:
-        _safe_write_file(output_path, output)
-        typer.echo(
-            f"Endpoints written to {output_path} ({data['total']} endpoints)",
-            err=True,
-        )
-    else:
-        sys.stdout.buffer.write(output.encode("utf-8"))
-        sys.stdout.buffer.write(b"\n")
-        sys.stdout.buffer.flush()
-        if copy:
-            if _copy_to_clipboard(output):
-                typer.echo("✓ copied to clipboard", err=True)
+    _emit_command_output(output, output_path, copy,
+                         success_msg=f"Endpoints written to {output_path} ({data['total']} endpoints)")
 
     from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
     _nudge()
@@ -4050,13 +4003,8 @@ def spring_audit_cmd(
             output = _render_spring_audit_github_comment(empty_result, min_severity)
         else:
             output = _serialize_dict(empty_result.to_dict(), format)
-        if output_path is not None:
-            _safe_write_file(output_path, output)
-            typer.echo("Spring audit written to " + str(output_path), err=True)
-        else:
-            sys.stdout.buffer.write(output.encode("utf-8"))
-            sys.stdout.buffer.write(b"\n")
-            sys.stdout.buffer.flush()
+        _emit_command_output(output, output_path, False,
+                             success_msg=f"Spring audit written to {output_path}")
         return
 
     cir = build_canonical_ir(file_list, target)
@@ -4116,17 +4064,9 @@ def spring_audit_cmd(
     else:
         output = _serialize_dict(data, format)
 
-    if output_path is not None:
-        _safe_write_file(output_path, output)
-        total = combined.summary.get("total_findings", 0)
-        typer.echo(f"Spring audit written to {output_path} ({total} findings)", err=True)
-    else:
-        sys.stdout.buffer.write(output.encode("utf-8"))
-        sys.stdout.buffer.write(b"\n")
-        sys.stdout.buffer.flush()
-        if copy:
-            if _copy_to_clipboard(output):
-                typer.echo("✓ copied to clipboard", err=True)
+    _total = combined.summary.get("total_findings", 0)
+    _emit_command_output(output, output_path, copy,
+                         success_msg=f"Spring audit written to {output_path} ({_total} findings)")
 
     if ci and combined.findings:
         raise typer.Exit(code=1)
@@ -4228,21 +4168,14 @@ def migrate_check_cmd(
     else:
         output = _serialize_dict(report.to_dict(), "json")
 
-    if output_path is not None:
-        _safe_write_file(output_path, output)
-        total = report.summary.get("total_findings", 0)
-        typer.echo(
+    _total = report.summary.get("total_findings", 0)
+    _emit_command_output(
+        output, output_path, copy,
+        success_msg=(
             f"Migration check written to {output_path} "
-            f"(score: {report.readiness_score}/100, {total} findings)",
-            err=True,
-        )
-    else:
-        sys.stdout.buffer.write(output.encode("utf-8"))
-        sys.stdout.buffer.write(b"\n")
-        sys.stdout.buffer.flush()
-        if copy:
-            if _copy_to_clipboard(output):
-                typer.echo("✓ copied to clipboard", err=True)
+            f"(score: {report.readiness_score}/100, {_total} findings)"
+        ),
+    )
 
 
 # ── Spring Impact Chain ───────────────────────────────────────────────────────
@@ -4379,13 +4312,8 @@ def impact_chain_cmd(
             "metadata": {},
         }
         output = _serialize_dict(data, format)
-        if output_path is not None:
-            _safe_write_file(output_path, output)
-            typer.echo("Impact chain written to " + str(output_path), err=True)
-        else:
-            sys.stdout.buffer.write(output.encode("utf-8"))
-            sys.stdout.buffer.write(b"\n")
-            sys.stdout.buffer.flush()
+        _emit_command_output(output, output_path, False,
+                             success_msg=f"Impact chain written to {output_path}")
         return
 
     cir = build_canonical_ir(file_list, target)
@@ -4396,45 +4324,30 @@ def impact_chain_cmd(
         evt_result = run_event_topology(cir, symbol, model=_model)
         data = evt_result.to_dict()
         output = _serialize_dict(data, format)
-        if output_path is not None:
-            _safe_write_file(output_path, output)
-            typer.echo(
+        _emit_command_output(
+            output, output_path, copy,
+            success_msg=(
                 f"Event topology written to {output_path} "
                 f"(risk: {evt_result.risk_level}, "
                 f"{evt_result.metadata.get('publisher_count', 0)} publishers, "
-                f"{evt_result.metadata.get('consumer_count', 0)} consumers)",
-                err=True,
-            )
-        else:
-            sys.stdout.buffer.write(output.encode("utf-8"))
-            sys.stdout.buffer.write(b"\n")
-            sys.stdout.buffer.flush()
-            if copy:
-                if _copy_to_clipboard(output):
-                    typer.echo("✓ copied to clipboard", err=True)
+                f"{evt_result.metadata.get('consumer_count', 0)} consumers)"
+            ),
+        )
         return
 
     result = run_impact_chain(cir, symbol, depth=depth, root=target, model=_model)
 
     data = result.to_dict()
     output = _serialize_dict(data, format)
-
-    if output_path is not None:
-        _safe_write_file(output_path, output)
-        typer.echo(
+    _emit_command_output(
+        output, output_path, copy,
+        success_msg=(
             f"Impact chain written to {output_path} "
             f"(risk: {result.risk_level}, "
             f"{len(result.direct_callers)} direct callers, "
-            f"{len(result.endpoints_affected)} endpoints)",
-            err=True,
-        )
-    else:
-        sys.stdout.buffer.write(output.encode("utf-8"))
-        sys.stdout.buffer.write(b"\n")
-        sys.stdout.buffer.flush()
-        if copy:
-            if _copy_to_clipboard(output):
-                typer.echo("✓ copied to clipboard", err=True)
+            f"{len(result.endpoints_affected)} endpoints)"
+        ),
+    )
 
     if result.resolution == "not_found":
         raise typer.Exit(code=1)
@@ -4553,43 +4466,27 @@ def pr_impact_cmd(
             "analysis_warnings": ["No Java files found."],
             "metadata": {"changed_files_count": len(changed_files)},
         }
-        output = _json.dumps(data, indent=2, ensure_ascii=False) if format == "json" else (
+        output = _serialize_dict(data, "json") if format == "json" else (
             "No Java files found in repository — Spring analysis requires Java source."
         )
-        if output_path is not None:
-            _safe_write_file(output_path, output)
-            typer.echo("PR impact report written to " + str(output_path), err=True)
-        else:
-            sys.stdout.buffer.write(output.encode("utf-8"))
-            sys.stdout.buffer.write(b"\n")
-            sys.stdout.buffer.flush()
+        _emit_command_output(output, output_path, False,
+                             success_msg=f"PR impact report written to {output_path}")
         return
 
     cir = build_canonical_ir(file_list, target)
     model = SpringSemanticModel.build(cir)
     report = run_pr_impact(cir, changed_files, root=target, model=model)
 
-    if format == "json":
-        output = _json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
-    else:
-        output = report.render_text()
-
-    if output_path is not None:
-        _safe_write_file(output_path, output)
-        typer.echo(
+    output = _serialize_dict(report.to_dict(), "json") if format == "json" else report.render_text()
+    _emit_command_output(
+        output, output_path, copy,
+        success_msg=(
             f"PR impact report written to {output_path} "
             f"(risk: {report.risk_level}, "
             f"{len(report.modified_classes)} classes, "
-            f"{len(report.affected_endpoints)} endpoints)",
-            err=True,
-        )
-    else:
-        sys.stdout.buffer.write(output.encode("utf-8"))
-        sys.stdout.buffer.write(b"\n")
-        sys.stdout.buffer.flush()
-        if copy:
-            if _copy_to_clipboard(output):
-                typer.echo("✓ copied to clipboard", err=True)
+            f"{len(report.affected_endpoints)} endpoints)"
+        ),
+    )
 
 
 # ── Explain Command ───────────────────────────────────────────────────────────
@@ -4695,16 +4592,8 @@ def explain_cmd(
     else:
         output = explanation.render_text()
 
-    if output_path is not None:
-        _safe_write_file(output_path, output)
-        typer.echo(f"Explanation written to {output_path}", err=True)
-    else:
-        sys.stdout.buffer.write(output.encode("utf-8"))
-        sys.stdout.buffer.write(b"\n")
-        sys.stdout.buffer.flush()
-
-    if copy and _copy_to_clipboard(output):
-        typer.echo("✓ copied to clipboard", err=True)
+    _emit_command_output(output, output_path, copy,
+                         success_msg=f"Explanation written to {output_path}")
 
     if not explanation.found:
         raise typer.Exit(code=1)
@@ -5258,36 +5147,20 @@ def rename_class_cmd(
 
     result_dict = result.to_dict()
 
-    if format == "yaml":
-        from sourcecode.serializer import to_yaml as _to_yaml
-        output = _to_yaml(result_dict)
-    else:
-        output = _json.dumps(result_dict, indent=2, ensure_ascii=False)
-
-    if output_path:
-        _safe_write_file(output_path, output)
-        action = "dry-run simulated" if dry_run else "applied"
-        typer.echo(
-            f"[rename-class] {action}: {old_name} → {new_name} "
+    output = _serialize_dict(result_dict, format)
+    _action = "dry-run simulated" if dry_run else "applied"
+    _emit_command_output(
+        output, output_path, copy,
+        success_msg=(
+            f"[rename-class] {_action}: {old_name} → {new_name} "
             f"({result.files_modified} file(s) changed). "
-            f"Audit written to {output_path}",
-            err=True,
-        )
-    else:
-        try:
-            sys.stdout.buffer.write(output.encode("utf-8"))
-            sys.stdout.buffer.write(b"\n")
-            sys.stdout.buffer.flush()
-        except AttributeError:
-            sys.stdout.write(output + "\n")
-
-    if copy:
-        _copy_to_clipboard(output)
+            f"Audit written to {output_path}"
+        ),
+    )
 
     if not dry_run and not output_path:
-        action = "Renamed"
         typer.echo(
-            f"[rename-class] {action}: {old_name} → {new_name} "
+            f"[rename-class] Renamed: {old_name} → {new_name} "
             f"({result.files_modified} file(s) updated, file renamed to {result.new_file})",
             err=True,
         )
@@ -5387,28 +5260,11 @@ def chunk_file_cmd(
     else:
         result_dict = result.to_dict()
 
-    if format == "yaml":
-        from sourcecode.serializer import to_yaml as _to_yaml
-        output = _to_yaml(result_dict)
-    else:
-        output = _json.dumps(result_dict, indent=2, ensure_ascii=False)
-
-    if output_path:
-        _safe_write_file(output_path, output)
-        typer.echo(
-            f"[chunk-file] {result.total_chunks} chunks written to {output_path}",
-            err=True,
-        )
-    else:
-        try:
-            sys.stdout.buffer.write(output.encode("utf-8"))
-            sys.stdout.buffer.write(b"\n")
-            sys.stdout.buffer.flush()
-        except AttributeError:
-            sys.stdout.write(output + "\n")
-
-    if copy:
-        _copy_to_clipboard(output)
+    output = _serialize_dict(result_dict, format)
+    _emit_command_output(
+        output, output_path, copy,
+        success_msg=f"[chunk-file] {result.total_chunks} chunks written to {output_path}",
+    )
 
 
 # ── version ───────────────────────────────────────────────────────────────────
