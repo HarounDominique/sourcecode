@@ -4280,6 +4280,15 @@ def impact_chain_cmd(
     from sourcecode.spring_impact import run_impact_chain
     from sourcecode.spring_findings import SpringAuditResult
 
+    if not symbol.strip():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            "Symbol name must not be empty.",
+            hint="Pass a class name or FQN. Example: sourcecode impact-chain OrderService .",
+            expected="A non-empty class name or FQN.",
+        )
+        raise typer.Exit(code=1)
+
     _VALID_TYPES = ("impact", "events")
     if query_type not in _VALID_TYPES:
         _emit_error_json(
@@ -4589,6 +4598,15 @@ def explain_cmd(
     from sourcecode.canonical_ir import build_canonical_ir
     from sourcecode.spring_model import SpringSemanticModel
     from sourcecode.explain import explain_class
+
+    if not class_name.strip():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            "Class name must not be empty.",
+            hint="Pass a class name. Example: sourcecode explain UserService .",
+            expected="A non-empty class name.",
+        )
+        raise typer.Exit(code=1)
 
     target = path.resolve()
     if not target.exists() or not target.is_dir():
