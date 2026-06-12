@@ -2991,4 +2991,11 @@ def write_output(content: str, output: Optional[Path]) -> None:
         if not content.endswith("\n"):
             sys.stdout.buffer.write(b"\n")
     else:
-        output.write_text(content, encoding="utf-8")
+        try:
+            output.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            import json as _json
+            payload = {"error": {"code": "INVALID_INPUT", "message": f"Cannot write to '{output}': {exc.strerror}.", "hint": "Check that the output directory exists and is writable."}}
+            sys.stderr.write(_json.dumps(payload) + "\n")
+            sys.stderr.flush()
+            raise SystemExit(1) from None

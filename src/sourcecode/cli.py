@@ -405,6 +405,20 @@ def _emit_error_json(error: str, message: str, **context: object) -> None:
     sys.stderr.flush()
 
 
+def _safe_write_file(path: "Path", content: str) -> None:
+    """Write content to path, emitting a clean JSON error on I/O failure."""
+    try:
+        path.write_text(content, encoding="utf-8")
+    except OSError as _exc:
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Cannot write to '{path}': {_exc.strerror}.",
+            hint="Check that the output directory exists and is writable.",
+            expected="A writable file path.",
+        )
+        raise typer.Exit(code=1) from None
+
+
 # H-06: Intercept Click-level UsageError (unknown options, bad args) and emit JSON.
 # Click's default show() writes "Error: No such option: --foo" as plain text.
 # Automation consumers need JSON on stderr regardless of how the error originated.
@@ -2789,7 +2803,7 @@ def prepare_context_cmd(
             _cached_pctx = _pctx_cache.read(target, _pctx_cache_key)
             if _cached_pctx is not None:
                 if output_path is not None:
-                    output_path.write_text(_cached_pctx, encoding="utf-8")
+                    _safe_write_file(output_path, _cached_pctx)
                 else:
                     sys.stdout.buffer.write(_cached_pctx.encode("utf-8"))
                     if not _cached_pctx.endswith("\n"):
@@ -2965,7 +2979,7 @@ def prepare_context_cmd(
                 _err_out["hint"] = output.error_hints
             _err_json = json.dumps(_err_out, indent=2, ensure_ascii=False)
             if output_path is not None:
-                output_path.write_text(_err_json, encoding="utf-8")
+                _safe_write_file(output_path, _err_json)
             else:
                 sys.stdout.buffer.write(_err_json.encode("utf-8"))
                 sys.stdout.buffer.write(b"\n")
@@ -2985,7 +2999,7 @@ def prepare_context_cmd(
                 _nc_out["analysis_scope"] = output.analysis_scope
             _nc_json = json.dumps(_nc_out, indent=2, ensure_ascii=False)
             if output_path is not None:
-                output_path.write_text(_nc_json, encoding="utf-8")
+                _safe_write_file(output_path, _nc_json)
             else:
                 sys.stdout.buffer.write(_nc_json.encode("utf-8"))
                 sys.stdout.buffer.write(b"\n")
@@ -3032,7 +3046,7 @@ def prepare_context_cmd(
                 _err_out["hint"] = output.error_hints
             _err_json = json.dumps(_err_out, indent=2, ensure_ascii=False)
             if output_path is not None:
-                output_path.write_text(_err_json, encoding="utf-8")
+                _safe_write_file(output_path, _err_json)
             else:
                 sys.stdout.buffer.write(_err_json.encode("utf-8"))
                 sys.stdout.buffer.write(b"\n")
@@ -3192,7 +3206,7 @@ def prepare_context_cmd(
             pass
 
     if output_path is not None:
-        output_path.write_text(_pc_content, encoding="utf-8")
+        _safe_write_file(output_path, _pc_content)
     else:
         _pc_bytes = _pc_content.encode("utf-8")
         sys.stdout.buffer.write(_pc_bytes)
@@ -3673,7 +3687,7 @@ def impact_cmd(
 
     output = _json.dumps(result, indent=2, ensure_ascii=False)
     if output_path:
-        output_path.write_text(output, encoding="utf-8")
+        _safe_write_file(output_path, output)
         typer.echo(f"Impact analysis written to {output_path}", err=True)
     else:
         try:
@@ -3808,7 +3822,7 @@ def endpoints_cmd(
     output = _serialize_dict(data, format)
 
     if output_path is not None:
-        output_path.write_text(output, encoding="utf-8")
+        _safe_write_file(output_path, output)
         typer.echo(
             f"Endpoints written to {output_path} ({data['total']} endpoints)",
             err=True,
@@ -4031,7 +4045,7 @@ def spring_audit_cmd(
         else:
             output = _serialize_dict(empty_result.to_dict(), format)
         if output_path is not None:
-            output_path.write_text(output, encoding="utf-8")
+            _safe_write_file(output_path, output)
             typer.echo("Spring audit written to " + str(output_path), err=True)
         else:
             sys.stdout.buffer.write(output.encode("utf-8"))
@@ -4097,7 +4111,7 @@ def spring_audit_cmd(
         output = _serialize_dict(data, format)
 
     if output_path is not None:
-        output_path.write_text(output, encoding="utf-8")
+        _safe_write_file(output_path, output)
         total = combined.summary.get("total_findings", 0)
         typer.echo(f"Spring audit written to {output_path} ({total} findings)", err=True)
     else:
@@ -4209,7 +4223,7 @@ def migrate_check_cmd(
         output = _serialize_dict(report.to_dict(), "json")
 
     if output_path is not None:
-        output_path.write_text(output, encoding="utf-8")
+        _safe_write_file(output_path, output)
         total = report.summary.get("total_findings", 0)
         typer.echo(
             f"Migration check written to {output_path} "
@@ -4360,7 +4374,7 @@ def impact_chain_cmd(
         }
         output = _serialize_dict(data, format)
         if output_path is not None:
-            output_path.write_text(output, encoding="utf-8")
+            _safe_write_file(output_path, output)
             typer.echo("Impact chain written to " + str(output_path), err=True)
         else:
             sys.stdout.buffer.write(output.encode("utf-8"))
@@ -4377,7 +4391,7 @@ def impact_chain_cmd(
         data = evt_result.to_dict()
         output = _serialize_dict(data, format)
         if output_path is not None:
-            output_path.write_text(output, encoding="utf-8")
+            _safe_write_file(output_path, output)
             typer.echo(
                 f"Event topology written to {output_path} "
                 f"(risk: {evt_result.risk_level}, "
@@ -4400,7 +4414,7 @@ def impact_chain_cmd(
     output = _serialize_dict(data, format)
 
     if output_path is not None:
-        output_path.write_text(output, encoding="utf-8")
+        _safe_write_file(output_path, output)
         typer.echo(
             f"Impact chain written to {output_path} "
             f"(risk: {result.risk_level}, "
@@ -4534,7 +4548,7 @@ def pr_impact_cmd(
             "No Java files found in repository — Spring analysis requires Java source."
         )
         if output_path is not None:
-            output_path.write_text(output, encoding="utf-8")
+            _safe_write_file(output_path, output)
             typer.echo("PR impact report written to " + str(output_path), err=True)
         else:
             sys.stdout.buffer.write(output.encode("utf-8"))
@@ -4552,7 +4566,7 @@ def pr_impact_cmd(
         output = report.render_text()
 
     if output_path is not None:
-        output_path.write_text(output, encoding="utf-8")
+        _safe_write_file(output_path, output)
         typer.echo(
             f"PR impact report written to {output_path} "
             f"(risk: {report.risk_level}, "
@@ -4665,7 +4679,7 @@ def explain_cmd(
         else:
             output = msg
         if output_path is not None:
-            output_path.write_text(output, encoding="utf-8")
+            _safe_write_file(output_path, output)
         else:
             sys.stdout.buffer.write(output.encode("utf-8"))
             sys.stdout.buffer.write(b"\n")
@@ -4682,7 +4696,7 @@ def explain_cmd(
         output = explanation.render_text()
 
     if output_path is not None:
-        output_path.write_text(output, encoding="utf-8")
+        _safe_write_file(output_path, output)
         typer.echo(f"Explanation written to {output_path}", err=True)
     else:
         sys.stdout.buffer.write(output.encode("utf-8"))
@@ -5136,7 +5150,7 @@ def modernize_cmd(
     output = _json.dumps(result, indent=2, ensure_ascii=False)
 
     if output_path:
-        output_path.write_text(output, encoding="utf-8")
+        _safe_write_file(output_path, output)
         typer.echo(f"Modernization analysis written to {output_path}", err=True)
     else:
         try:
@@ -5248,7 +5262,7 @@ def rename_class_cmd(
         output = _json.dumps(result_dict, indent=2, ensure_ascii=False)
 
     if output_path:
-        output_path.write_text(output, encoding="utf-8")
+        _safe_write_file(output_path, output)
         action = "dry-run simulated" if dry_run else "applied"
         typer.echo(
             f"[rename-class] {action}: {old_name} → {new_name} "
@@ -5377,7 +5391,7 @@ def chunk_file_cmd(
         output = _json.dumps(result_dict, indent=2, ensure_ascii=False)
 
     if output_path:
-        output_path.write_text(output, encoding="utf-8")
+        _safe_write_file(output_path, output)
         typer.echo(
             f"[chunk-file] {result.total_chunks} chunks written to {output_path}",
             err=True,
@@ -5573,7 +5587,7 @@ def cold_start_cmd(
         )
         sys.stderr.flush()
     if output_path:
-        output_path.write_text(_out, encoding="utf-8")
+        _safe_write_file(output_path, _out)
         sys.stderr.write(f"Saved {len(_out.encode('utf-8'))} bytes to {output_path}\n")
         sys.stderr.flush()
     else:
