@@ -3603,6 +3603,15 @@ def impact_cmd(
             sys.stderr.flush()
         target, path = str(path), _target_as_path
 
+    if not target.strip():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            "Class name must not be empty.",
+            hint="Pass a class name or FQN. Example: sourcecode impact OrderService .",
+            expected="A non-empty class name or FQN.",
+        )
+        raise typer.Exit(1)
+
     root = path.resolve()
     if not root.is_dir():
         _emit_error_json(
