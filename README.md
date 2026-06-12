@@ -76,9 +76,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.35.33
-
-**v1.35.28** — 7 bug fixes: `rename-class` cross-package disambiguation (BUG-4), `rename-class` collision detection (BUG-2), `find_java_files` false positive on `com/test/` package paths (BUG-1), `cold-start --compact` correct key names (BUG-6), `@EnableMethodSecurity` no longer suppresses SEC-001 (BUG-3), `explain` @Entity stereotype detection (BUG-5), XML+annotation mixed security retagging (BUG-7).
+# sourcecode 1.35.34
 ```
 
 ---
@@ -97,6 +95,9 @@ sourcecode --agent
 
 # Blast radius: what breaks if this class changes?
 sourcecode impact OrderService /path/to/repo
+
+# Spring Boot 2→3 migration readiness: javax→jakarta blockers, removed APIs
+sourcecode migrate-check /path/to/repo
 
 # Spring semantic audit: TX anomalies + security surface (free)
 sourcecode spring-audit /path/to/repo
@@ -142,6 +143,9 @@ sourcecode cache warm
 
 # Clear cache
 sourcecode cache clear
+
+# Check RIS freshness relative to current git HEAD
+sourcecode cache freshness
 ```
 
 **`--no-cache`** bypasses both layers and forces a fresh scan. Use in CI or when you need to verify a fresh result.
@@ -299,9 +303,14 @@ Extracts all Spring MVC (`@GetMapping`, `@PostMapping`, `@RequestMapping`, etc.)
 
 ```bash
 sourcecode spring-audit /path/to/repo
-sourcecode spring-audit /path/to/repo --scope tx          # TX anomalies only
+sourcecode spring-audit /path/to/repo --scope tx           # TX anomalies only
 sourcecode spring-audit /path/to/repo --scope security     # security surface only
 sourcecode spring-audit /path/to/repo --min-severity high
+
+# CI/CD gate: exit 1 on any finding
+sourcecode spring-audit . --ci
+sourcecode spring-audit . --ci --min-severity high         # exit 1 only on high/critical
+sourcecode spring-audit . --ci --format github-comment     # Markdown output + exit 1
 ```
 
 Detects structural Spring anomalies that survive code review and tests, but cause production failures:
@@ -368,19 +377,58 @@ sourcecode cold-start /path/to/repo --compact   # ~10K token subset
 
 Returns the Repository Intelligence Snapshot (RIS) instantly — zero re-analysis. The RIS is built by a prior warm cache pass and includes stacks, entry points, endpoint surface, and Spring semantic signals. Status field: `cold_start_ready` | `cold_start_stale` | `no_ris`.
 
-Use `--compact` to get a ~10K token subset safe for direct LLM injection. Full snapshot can exceed 100K tokens on medium repos — use `--output FILE` for local search tooling.
+Use `--compact` to get a ~10K token subset safe for direct LLM injection. Full snapshot ranges from ~100K–200K tokens on medium repos — use `--output FILE` for local search tooling.
 
 ### `repo-ir` — symbol-level IR
 
 ```bash
-sourcecode repo-ir /path/to/repo --summary-only          # ~20K tokens
-sourcecode repo-ir /path/to/repo --since HEAD~1           # symbol-level diff
+sourcecode repo-ir /path/to/repo --summary-only                  # ~20K tokens
+sourcecode repo-ir /path/to/repo --since HEAD~1                   # symbol-level diff
 sourcecode repo-ir /path/to/repo --files src/.../OrderService.java
+sourcecode repo-ir /path/to/repo --max-nodes 200 --max-edges 500  # limit graph size
+sourcecode repo-ir /path/to/repo --output ir.json.gz --gzip       # compressed output (~70-80% smaller)
+sourcecode repo-ir /path/to/repo --include-tests                   # include test files
 ```
 
 Builds a deterministic symbol graph: classes, methods, import/injection edges, Spring roles, subsystems.
 
+**Size control flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--summary-only` | Omit full graph nodes/edges; keep analysis summary, impact, and change_set (<300KB typical) |
+| `--max-nodes N` | Keep top N nodes by impact score |
+| `--max-edges N` | Keep top N edges (priority: edges between kept nodes) |
+| `--gzip` | Compress output with gzip. Requires `--output`. ~70–80% smaller. |
+| `--force` | Bypass the 50K-token size guard and emit output anyway |
+| `--include-tests` | Include test source files (excluded by default) |
+
 **Size warning:** Without `--summary-only`, output can exceed 1MB for mid-size repos. Always use `--summary-only` unless you need the full graph for downstream tooling.
+
+### `explain` — architectural summary for a class
+
+```bash
+sourcecode explain UserService
+sourcecode explain OrderController /path/to/repo
+sourcecode explain UserService --format json
+```
+
+Human-readable architectural summary derived entirely from static analysis: Spring stereotype, public methods, incoming callers, outgoing dependencies, events published/consumed, `@Transactional` boundaries, security constraints, and related REST endpoints. JAVA/SPRING ONLY.
+
+### `pr-impact` — PR blast-radius report
+
+```bash
+sourcecode pr-impact --files changed_files.txt
+sourcecode pr-impact /path/to/repo --files diff.txt --format json
+```
+
+Takes a file listing changed Java files (one path per line) and produces a consolidated report: modified classes, affected REST endpoints reachable through the call chain, direct callers of each changed class, event publishers/consumers triggered, `@Transactional` methods in changed classes, and a consolidated risk level (`CRITICAL` / `HIGH` / `MEDIUM` / `LOW`). JAVA/SPRING ONLY.
+
+```bash
+# Typical CI usage: pipe git diff to a file, then run
+git diff --name-only main | grep '\.java$' > changed.txt
+sourcecode pr-impact . --files changed.txt --format json
+```
 
 ### `onboard` — codebase orientation
 
@@ -414,6 +462,98 @@ sourcecode modernize /path/to/repo
 ```
 
 High-coupling nodes (high fan-in = risky to change), dead zone candidates (isolated symbols), subsystem tangles.
+
+### `migrate-check` — Spring Boot 2→3 migration readiness
+
+```bash
+sourcecode migrate-check /path/to/repo
+sourcecode migrate-check . --min-severity high
+sourcecode migrate-check . --format text
+sourcecode migrate-check . --output migration.json
+```
+
+Detects migration blockers across Java source files, Spring XML config files, and Maven/Gradle build files. 27 rules organized by target:
+
+**Jakarta namespace (MIG-001..009) — javax→jakarta**
+
+| Rule | Severity | Pattern |
+|------|----------|---------|
+| `MIG-001` | critical | `javax.persistence` import — JPA will not compile |
+| `MIG-002` | high | `javax.servlet` import — Servlet API changed |
+| `MIG-003` | high | `javax.validation` import — Bean Validation changed |
+| `MIG-004` | high | `javax.transaction` import — TX API changed |
+| `MIG-006` | medium | `javax.annotation` import — CDI annotations changed |
+| `MIG-007` | medium | `javax.inject` import — DI annotations changed |
+| `MIG-008` | medium | `javax.ws.rs` import — JAX-RS changed |
+| `MIG-009` | medium | `javax.jms` import — JMS API changed |
+
+**Spring Security 6 (MIG-005, MIG-019, MIG-020)**
+
+| Rule | Severity | Pattern |
+|------|----------|---------|
+| `MIG-005` | high | `extends WebSecurityConfigurerAdapter` — removed in Spring Security 6 |
+| `MIG-019` | high | SpringFox / `@EnableSwagger2` — incompatible with Spring Boot 3 |
+| `MIG-020` | high | `antMatchers()` / `authorizeRequests()` — replaced in Spring Security 6 |
+
+**Java version compatibility (MIG-010..025)**
+
+| Rule | Severity | Pattern |
+|------|----------|---------|
+| `MIG-010` | critical | `SecurityManager` / `AccessController` — removed in Java 17 (JEP 411) |
+| `MIG-011` | high | `sun.*` / `com.sun.net.*` internal API imports — strong encapsulation since Java 9 |
+| `MIG-012` | high | Nashorn `ScriptEngine` — removed in Java 15 |
+| `MIG-013` | high | `sun.misc.Unsafe` — requires `--add-opens` on Java 9+ |
+| `MIG-014` | medium | `setAccessible(true)` — may throw `InaccessibleObjectException` on Java 17+ |
+| `MIG-015` | medium | `finalize()` override — deprecated for removal since Java 18 |
+| `MIG-016` | low | `java.util.Date` / `Calendar` / `SimpleDateFormat` — use `java.time` |
+| `MIG-021` | high | `javax.xml.bind` (JAXB) — removed from JDK in Java 11 |
+| `MIG-022` | high | `javax.xml.ws` (JAX-WS) — removed from JDK in Java 11 |
+| `MIG-023` | critical | `org.omg.*` / CORBA APIs — removed from JDK in Java 11 |
+| `MIG-024` | medium | `Thread.stop()` / `Thread.suspend()` / `Thread.resume()` — deprecated for removal |
+| `MIG-025` | medium | `ReflectionFactory` / `MethodHandles.privateLookupIn` — JPMS deep-reflection risk |
+
+**Spring XML config (MIG-030..032)**
+
+| Rule | Severity | Pattern |
+|------|----------|---------|
+| `MIG-030` | high | `javax.*` class reference in Spring XML bean definitions |
+| `MIG-031` | high | `<http auto-config>` or versioned spring-security ≤5 schema in XML |
+| `MIG-032` | high | `web.xml` with Servlet ≤4 namespace — must migrate to `jakarta.ee` |
+
+**Build file dependencies (MIG-040..043)**
+
+| Rule | Severity | Pattern |
+|------|----------|---------|
+| `MIG-040` | high | `io.springfox` dependency — incompatible with Spring Boot 3 |
+| `MIG-041` | high | Hibernate 5.x explicitly pinned — Spring Boot 3 requires Hibernate 6 |
+| `MIG-042` | medium | ByteBuddy < 1.12.x — may not support Java 17+ strong encapsulation |
+| `MIG-043` | high | EhCache 2.x (`net.sf.ehcache`) — incompatible with Spring Boot 3 |
+
+Each finding includes `severity`, `title`, `source_file`, `first_line`, `explanation`, `fix_hint`, `migration_target`, and `openrewrite_recipe` (when an automated recipe exists).
+
+### `rename-class` — Java class rename
+
+```bash
+sourcecode rename-class . --from ServiceA --to ServiceB
+sourcecode rename-class /path/to/repo --from OrderManager --to OrderService
+sourcecode rename-class . --from OldName --to NewName --dry-run
+sourcecode rename-class . --from OldName --to NewName --no-tests   # src/main only
+```
+
+Renames a Java class safely throughout the repository: declaration, constructor, all import statements, type references (fields, params, return types), `extends`/`implements`, generics, casts, and Spring `@Qualifier` names. Renames the physical `.java` file. Emits a structured change audit trail (`file`, `before_lines`, `after_lines`, `intent`, `diff`).
+
+Use `--dry-run` to preview changes without writing to disk.
+
+### `chunk-file` — split large Java files for agent consumption
+
+```bash
+sourcecode chunk-file BigService.java
+sourcecode chunk-file BigService.java --max-lines 300
+sourcecode chunk-file BigService.java --chunk 5          # read chunk 5 only
+sourcecode chunk-file BigService.java --metadata-only    # boundaries only, no content
+```
+
+Splits a large Java file at method/class boundaries so AI agents can read files with 10K–25K+ lines in context-sized pieces. Each chunk includes `chunk_id`, `start_line`, `end_line`, `chunk_type`, symbol name, a `context_header` (package + class + imports summary), and `content`. A `size_warning` flag marks methods that exceed `--max-lines` and cannot be split further.
 
 ### `prepare-context` — task-specific context
 
