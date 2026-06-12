@@ -3740,6 +3740,15 @@ def endpoints_cmd(
       sourcecode endpoints . --controller LiquidacionJornada
       sourcecode endpoints . --limit 10
     """
+    if format not in ("json", "yaml"):
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid format '{format}'.",
+            hint="format must be: json or yaml.",
+            expected="json | yaml",
+        )
+        raise typer.Exit(code=1)
+
     target = path.resolve()
     if not target.exists() or not target.is_dir():
         _emit_error_json(
@@ -4458,10 +4467,10 @@ def pr_impact_cmd(
         )
         raise typer.Exit(code=1)
 
-    if not files.exists():
+    if not files.exists() or files.is_dir():
         _emit_error_json(
             INVALID_INPUT_CODE,
-            f"--files '{files}' does not exist. Expected a text file listing changed file paths (one per line), not a directory or class name.",
+            f"--files '{files}' does not exist or is a directory. Expected a text file listing changed file paths (one per line).",
             path=str(files),
             hint=(
                 "Create a file with one changed Java file path per line, then pass it with --files. "
@@ -5314,6 +5323,16 @@ def chunk_file_cmd(
             f"'{abs_file}' is not a valid file.",
             path=str(abs_file),
             hint="Pass an existing Java source file.",
+            expected="A .java file path.",
+        )
+        raise typer.Exit(1)
+
+    if abs_file.suffix != ".java":
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"'{abs_file.name}' is not a Java file. chunk-file only supports .java files.",
+            path=str(abs_file),
+            hint="Pass a .java source file.",
             expected="A .java file path.",
         )
         raise typer.Exit(1)
