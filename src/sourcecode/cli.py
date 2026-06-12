@@ -6093,9 +6093,10 @@ def cache_clear_cmd(
     _clear_ris = include_ris or all_
     if not yes:
         _ris_note = " (including RIS)" if _clear_ris else " (RIS preserved — use --all to also clear it)"
-        typer.confirm(f"Delete all cache files for {target}{_ris_note}?", abort=True)
+        import click as _click
+        _click.confirm(f"Delete all cache files for {target}{_ris_note}?", abort=True, err=True)
     removed = _cm.clear(target, clear_ris=_clear_ris)
-    typer.echo(f"Removed {removed} file(s).")
+    typer.echo(f"Removed {removed} file(s).", err=True)
 
 
 @cache_app.command("warm")
