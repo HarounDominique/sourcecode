@@ -111,6 +111,8 @@ class JavaDetector(AbstractDetector):
             manifests.append("pom.xml")
             pom_path = context.root / "pom.xml"
             frameworks.extend(self._frameworks_from_pom(pom_path))
+            for child_pom in self._get_child_pom_paths(pom_path):
+                frameworks.extend(self._frameworks_from_pom(child_pom))
             meta = self._parse_pom_metadata(pom_path)
             if meta.get("language_version"):
                 language_version = meta["language_version"]
@@ -231,6 +233,26 @@ class JavaDetector(AbstractDetector):
         # Filter out generic names that aren't profiles
         _SKIP = frozenset({"test", "it", "integration"})
         return [p for p in profiles if p.lower() not in _SKIP]
+
+    def _get_child_pom_paths(self, root_pom: Path) -> list[Path]:
+        """Return pom.xml paths for direct Maven child modules declared in <modules>."""
+        try:
+            tree = ElementTree.parse(root_pom)
+        except (OSError, ElementTree.ParseError):
+            return []
+        root_elem = tree.getroot()
+        ns_match = _NS_TAG_RE.match(root_elem.tag)
+        ns = ns_match.group(0) if ns_match else ""
+        modules_elem = root_elem.find(f"{ns}modules")
+        if modules_elem is None:
+            return []
+        result = []
+        for mod in modules_elem.findall(f"{ns}module"):
+            if mod.text:
+                child_pom = root_pom.parent / mod.text.strip() / "pom.xml"
+                if child_pom.exists():
+                    result.append(child_pom)
+        return result
 
     def _frameworks_from_pom(self, path: Path) -> list[FrameworkDetection]:
         try:
