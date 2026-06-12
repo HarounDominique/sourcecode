@@ -3398,6 +3398,22 @@ def repo_ir_cmd(
         )
         return
 
+    if since:
+        import subprocess as _sp
+        _ref_check = _sp.run(
+            ["git", "rev-parse", "--verify", since],
+            cwd=str(root),
+            capture_output=True,
+        )
+        if _ref_check.returncode != 0:
+            _emit_error_json(
+                INVALID_INPUT_CODE,
+                f"Git ref '{since}' could not be resolved in '{root}'.",
+                hint="Pass a valid git ref (branch, tag, commit hash, HEAD~N).",
+                expected="A resolvable git ref.",
+            )
+            raise typer.Exit(code=1)
+
     _ir_phase = f"extracting IR ({len(file_list)} files)"
     if since:
         _ir_phase += f" since {since}"
