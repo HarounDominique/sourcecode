@@ -4678,21 +4678,12 @@ def explain_cmd(
 
     file_list = find_java_files(target)
     if not file_list:
-        msg = f"No Java files found in '{target}'. sourcecode explain requires a Java/Spring repository."
-        if format == "json":
-            output = _json.dumps({
-                "error": "no_java_files",
-                "message": msg,
-                "class_name": class_name,
-            }, indent=2)
-        else:
-            output = msg
-        if output_path is not None:
-            _safe_write_file(output_path, output)
-        else:
-            sys.stdout.buffer.write(output.encode("utf-8"))
-            sys.stdout.buffer.write(b"\n")
-            sys.stdout.buffer.flush()
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"No Java files found in '{target}'.",
+            hint="sourcecode explain requires a Java/Spring repository.",
+            expected="A directory containing .java source files.",
+        )
         raise typer.Exit(code=1)
 
     cir = build_canonical_ir(file_list, target)
