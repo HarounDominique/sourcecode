@@ -44,6 +44,7 @@ class SpringFinding:
     def to_dict(self) -> dict:
         d: dict = {
             "id": self.id,
+            "rule_id": self.pattern_id,
             "pattern_id": self.pattern_id,
             "category": self.category,
             "severity": self.severity,
