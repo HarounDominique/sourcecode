@@ -3375,6 +3375,15 @@ def repo_ir_cmd(
 
     from sourcecode.repository_ir import apply_ir_size_limits, build_repo_ir, find_java_files
 
+    if format not in ("json", "yaml"):
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"Invalid format '{format}'.",
+            hint="Valid values: json, yaml.",
+            expected="json | yaml",
+        )
+        raise typer.Exit(code=1)
+
     root = path.resolve()
     if not root.is_dir():
         _emit_error_json(
