@@ -123,6 +123,46 @@ class TestFixBugRanking:
             if seen_low and r.tier == "high":
                 pytest.fail(f"High-tier file {r.path} appears after low-tier files")
 
+    def test_ranking_boosts_applied_for_http_client_pattern(self, tmp_path: Path) -> None:
+        """ranking_boosts must be wired — 'client' pattern lifts RequestHeadersHttpClient
+        above unrelated source files even without a --symptom.
+
+        Regression: ranking_boosts was defined in TaskSpec but never applied in
+        _rank_files, so infrastructure classes like RequestHeadersHttpClient
+        (low churn, no annotations) were invisible to fix-bug.
+        """
+        from sourcecode.prepare_context import TaskContextBuilder, TASKS
+
+        files = [
+            "RequestHeadersHttpClient.java",   # boost: "client" in path
+            "AbstractHttpClient.java",          # boost: "client" in path
+            "SomeUnrelatedModel.java",          # no boost
+            "AnotherDomainClass.java",          # no boost
+            "YetAnotherUtil.java",              # no boost
+        ]
+        for f in files:
+            (tmp_path / f).write_text("// placeholder\n")
+
+        builder = TaskContextBuilder(tmp_path)
+        spec = TASKS["fix-bug"]
+        relevant = builder._rank_files("fix-bug", spec, files, set(), set())
+
+        paths = [r.path for r in relevant]
+        assert "RequestHeadersHttpClient.java" in paths, (
+            f"RequestHeadersHttpClient.java must appear in fix-bug results; got: {paths}"
+        )
+        assert "AbstractHttpClient.java" in paths, (
+            f"AbstractHttpClient.java must appear in fix-bug results; got: {paths}"
+        )
+
+        # Both client files must outrank the unrelated plain source files
+        client_idxs = [paths.index(p) for p in paths if "httpclient" in p.lower() or "client" in p.lower()]
+        unrelated_idxs = [i for i, p in enumerate(paths) if p in ("SomeUnrelatedModel.java", "AnotherDomainClass.java", "YetAnotherUtil.java")]
+        if client_idxs and unrelated_idxs:
+            assert min(client_idxs) < max(unrelated_idxs), (
+                "http-client files should rank above unrelated source files"
+            )
+
     def test_no_duplicated_reasons(self, tmp_path: Path) -> None:
         """Each returned file should have a distinct why explanation."""
         from sourcecode.prepare_context import TaskContextBuilder, TASKS

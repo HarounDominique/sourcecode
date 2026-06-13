@@ -233,7 +233,8 @@ TASKS: dict[str, TaskSpec] = {
         goal="Identify the most likely files and areas where a bug may be located.",
         description="Rank files by annotation density, surface TODOs/FIXMEs/BUGs.",
         ranking_boosts=["handler", "service", "middleware", "router", "controller",
-                        "processor", "parser", "validator"],
+                        "processor", "parser", "validator",
+                        "client", "interceptor", "adapter", "delegate", "executor"],
         ranking_penalties=["test_", "spec_", ".min.", "__pycache__", "docs/"],
         enable_code_notes=True,
         enable_dependencies=False,
@@ -2949,6 +2950,12 @@ class TaskContextBuilder:
 
             # Task-specific boosts for differentiated file weighting
             path_lower = path.lower()
+
+            # Apply ranking_boosts from TaskSpec — was defined but never wired
+            if any(boost in path_lower for boost in spec.ranking_boosts):
+                content_boost += 0.5
+                content_reasons.append("task-relevant path pattern")
+
             _fix_bug_why = ""
             if task_name == "fix-bug":
                 _why_parts: list[str] = []
