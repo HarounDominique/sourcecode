@@ -762,6 +762,82 @@ class TestCASAtomicWrite:
 
 
 # ---------------------------------------------------------------------------
+# P3 regression — _atomic_write Windows PermissionError hardening
+# ---------------------------------------------------------------------------
+
+class TestAtomicWriteWindows:
+    def test_unique_temp_name_per_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each write must use a distinct temp file — concurrent writers of the
+        same destination collide on a shared .tmp on Windows (WinError 32)."""
+        from sourcecode.cache import _atomic_write
+
+        dest = tmp_path / "snapshot-x.json.gz"
+        seen: list[str] = []
+        real_replace = os.replace
+
+        def _spy(src: object, dst: object) -> None:
+            seen.append(os.path.basename(str(src)))
+            real_replace(src, dst)
+
+        monkeypatch.setattr("sourcecode.cache.os.replace", _spy)
+        _atomic_write(dest, b"one")
+        _atomic_write(dest, b"two")
+
+        assert len(seen) == 2
+        assert seen[0] != seen[1], "temp names must be unique across writes"
+        assert all(name.endswith(".tmp") for name in seen)
+        assert dest.read_bytes() == b"two"
+
+    def test_retries_then_succeeds_on_permission_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """os.replace raising PermissionError (transient AV/indexer lock) must
+        be retried, not propagated, when a later attempt succeeds."""
+        from sourcecode.cache import _atomic_write
+
+        dest = tmp_path / "snapshot-y.json.gz"
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def _flaky(src: object, dst: object) -> None:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PermissionError(13, "WinError 5 simulated")
+            real_replace(src, dst)
+
+        monkeypatch.setattr("sourcecode.cache.os.replace", _flaky)
+        monkeypatch.setattr("sourcecode.cache.time.sleep", lambda _s: None)
+
+        _atomic_write(dest, b"payload")
+        assert calls["n"] == 3
+        assert dest.read_bytes() == b"payload"
+        # No temp leftovers
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_raises_and_cleans_up_after_exhausting_retries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Persistent PermissionError must surface to the caller and leave no
+        partial destination or temp file behind."""
+        from sourcecode.cache import _atomic_write
+
+        dest = tmp_path / "snapshot-z.json.gz"
+
+        def _always_locked(src: object, dst: object) -> None:
+            raise PermissionError(13, "WinError 5 simulated")
+
+        monkeypatch.setattr("sourcecode.cache.os.replace", _always_locked)
+        monkeypatch.setattr("sourcecode.cache.time.sleep", lambda _s: None)
+
+        with pytest.raises(PermissionError):
+            _atomic_write(dest, b"payload")
+        assert not dest.exists()
+        assert not list(tmp_path.glob("*.tmp"))
+
+
+# ---------------------------------------------------------------------------
 # BUG-D1 regression — observability: status() and clear() work
 # ---------------------------------------------------------------------------
 

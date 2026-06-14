@@ -58,6 +58,8 @@ import json
 import os
 import re
 import subprocess
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -100,6 +102,12 @@ _CAS_THRESHOLD: int = 4096
 _DEFAULT_KEEP_COMMITS: int = 5
 _DEFAULT_MAX_CORES: int = 20
 _DEFAULT_MAX_SIZE_MB: int = 50
+
+#: Windows hardening for _atomic_write: os.replace can raise PermissionError
+#: (WinError 5/32) when an antivirus scanner, search indexer, or concurrent
+#: reader transiently holds the destination open. Retry briefly to ride it out.
+_REPLACE_RETRIES: int = 5
+_REPLACE_BACKOFF_S: float = 0.05
 
 # Matches "snapshot-<hex_commit>-<hex_flags>.json.gz"
 _SNAPSHOT_RE = re.compile(r"^snapshot-([0-9a-f]+)-[0-9a-f]+\.json\.gz$")
@@ -808,20 +816,38 @@ def _gc_cas(cache_d: Path, surviving_snapshots: list[Path]) -> None:
 # ---------------------------------------------------------------------------
 
 def _atomic_write(dest: Path, data: bytes) -> None:
-    """Write *data* to *dest* atomically via a sibling .tmp file + rename.
+    """Write *data* to *dest* atomically via a unique temp file + rename.
 
-    On POSIX, ``Path.replace()`` is a single ``rename(2)`` syscall — the
-    destination either has the old content or the new content, never a partial
-    write.  The .tmp suffix keeps the partial file out of glob patterns used
-    by the cache reader and GC.
+    ``os.replace`` is an atomic overwrite on both POSIX and Windows: the
+    destination ends up with either the old or the new content, never a partial
+    write.  The trailing ``.tmp`` suffix keeps partial files out of the
+    ``*.json.gz`` / ``*.gz`` glob patterns used by the cache reader and GC.
+
+    Windows hardening (no-ops on POSIX):
+      * The temp name is made *unique* (pid + random token) so concurrent
+        writers of the same destination never collide on a shared temp file —
+        on Windows that collision raises ``PermissionError`` (WinError 32,
+        sharing violation), whereas POSIX tolerates it.
+      * ``os.replace`` is retried with a short backoff: on Windows it raises
+        ``PermissionError`` (WinError 5/32) when an antivirus scanner, the
+        search indexer, or a concurrent reader holds a transient handle on the
+        destination. POSIX ``rename(2)`` has no such restriction.
     """
-    tmp = dest.with_suffix(".tmp")
+    tmp = dest.parent / f"{dest.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
     try:
         tmp.write_bytes(data)
-        tmp.replace(dest)
-    except Exception:
-        _safe_unlink(tmp)
-        raise
+        last_exc: Optional[BaseException] = None
+        for attempt in range(_REPLACE_RETRIES):
+            try:
+                os.replace(tmp, dest)
+                return
+            except PermissionError as exc:  # transient lock on Windows — retry
+                last_exc = exc
+                time.sleep(_REPLACE_BACKOFF_S * (attempt + 1))
+        if last_exc is not None:
+            raise last_exc
+    finally:
+        _safe_unlink(tmp)  # remove temp on failure; no-op after a successful replace
 
 
 def _safe_unlink(path: Path) -> None:
