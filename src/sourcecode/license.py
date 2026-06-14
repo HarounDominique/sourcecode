@@ -40,10 +40,15 @@ from typing import Optional
 # Supabase endpoint config — hardcoded for production; override via env for dev
 # ---------------------------------------------------------------------------
 _DEFAULT_SUPABASE_URL: str = "https://qkndlmyekvujjdgthtmz.supabase.co"
+# Public anon/publishable key — safe to ship in client code. RLS plus the
+# service-role key (server-only, in the Edge Function secrets) protect the data.
+# Paste your project's anon key here so `sourcecode activate` works out of the
+# box; env var still overrides for testing against another project.
+_DEFAULT_SUPABASE_ANON_KEY: str = "sb_publishable_qiJFLWjbBbTqjg-fb0mAGA_cl8PBOKH"
 _SUPABASE_URL: str = os.environ.get("SOURCECODE_SUPABASE_URL", _DEFAULT_SUPABASE_URL)
 _SUPABASE_ANON_KEY: str = os.environ.get(
     "SOURCECODE_SUPABASE_ANON_KEY",
-    "",  # Set SOURCECODE_SUPABASE_ANON_KEY to your project anon key
+    _DEFAULT_SUPABASE_ANON_KEY,
 )
 if _SUPABASE_URL != _DEFAULT_SUPABASE_URL:
     sys.stderr.write(
