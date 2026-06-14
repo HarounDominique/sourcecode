@@ -1,94 +1,66 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-11T13:00:00Z",
+  "timestamp": "2026-06-14T11:48:21Z",
   "phase": null,
-  "phase_name": "session 89 — bug fixes BUG-01 through BUG-06",
+  "phase_name": "session 96 — hybrid size-based monetization model",
   "phase_dir": null,
   "plan": null,
   "task": null,
-  "total_tasks": 7,
+  "total_tasks": 3,
   "status": "paused",
-  "session_type": "bug-fixing",
+  "session_type": "monetization-refactor",
   "completed_tasks": [
     {
       "id": 1,
-      "name": "BUG-01 — Spanish limitation string in --agent output",
+      "name": "Hybrid size-based gating (Free/Pro)",
       "status": "done",
-      "commit": "06e9c26",
-      "detail": "architecture_analyzer.py: translated 'Arquitectura no inferida: proyecto sin archivos de codigo suficientes' to English."
+      "commit": "1ade205",
+      "detail": "license.py: is_large_repo/count_java_files/_FREE_REPO_JAVA_FILE_LIMIT=500, require_repo_or_pro(), _emit_upgrade_and_exit(). cli.py: 8 gate sites converted from capability to size gating; delta keeps 30-run quota. Docs PRODUCT_TIERS.md + README pricing. Tests updated. 2516 passed."
     },
     {
       "id": 2,
-      "name": "BUG-02 + BUG-03 — Risk scoring inconsistency impact vs impact-chain",
+      "name": "Landing page pricing update (sourcecode-landing repo)",
       "status": "done",
-      "commit": "76d4beb",
-      "detail": "Unified threshold table in risk_scoring.py. impact and impact-chain now use same scale."
+      "commit": "a0016f6",
+      "detail": "Free/Pro cards reframed, price 29.99->19/mo (+190/yr per dev), MCP marked Free, [Pro] badges->[Free <=500 Java], EN+ES i18n, success.html. Separate repo at ~/Documents/workspace/sourcecode-landing."
     },
     {
       "id": 3,
-      "name": "BUG-04 — OFBiz Gradle phantom deps + missing real deps",
+      "name": "Version bump 1.35.35",
       "status": "done",
-      "commit": "15e3af7",
-      "detail": "dependency_analyzer.py: added _strip_gradle_comments() to prevent regex matching inside /* */ and // comments. Added apply from: traversal so dependencies.gradle is parsed. OFBiz now returns 87 real deps, 0 phantoms."
-    },
-    {
-      "id": 4,
-      "name": "BUG-05 — spring_detected: True on Keycloak (Quarkus/JAX-RS)",
-      "status": "done",
-      "commit": "cf3d699",
-      "detail": "spring_model.py: added _JPA_ONLY_STEREOTYPES and BeanGraph.has_spring_beans() — JPA @Entity classes excluded from Spring detection. spring_tx_analyzer.py and spring_security_audit.py updated to use has_spring_beans(). Removed security_model != 'unknown' false proxy from security auditor."
-    },
-    {
-      "id": 5,
-      "name": "BUG-06 — project_type: unknown on openmrs-core",
-      "status": "done",
-      "commit": "5495ab6",
-      "detail": "classifier.py: added Spring MVC, Spring WebFlux, Micronaut, Vert.x to _API_FRAMEWORKS. openmrs-core now returns project_type: api."
+      "commit": "39d2706",
+      "detail": "pyproject.toml, src/sourcecode/__init__.py, README badge + verify line."
     }
   ],
-  "remaining_tasks": [
-    {
-      "id": 6,
-      "name": "BUG-07 — Eureka misidentified as Jakarta EE",
-      "status": "not_started",
-      "severity": "low",
-      "detail": "Eureka (Netflix) uses Guice/Jersey but is classified as Jakarta EE. Same classifier as BUG-06."
-    },
-    {
-      "id": 7,
-      "name": "P3 (session 85) — Windows cache slow",
-      "status": "blocked",
-      "detail": "cache.py:810 _atomic_write — PermissionError on Path.replace() silently swallowed. Requires Windows to validate."
-    }
-  ],
+  "remaining_tasks": [],
   "blockers": [
     {
-      "description": "P3 Windows cache: not reproducible on macOS",
+      "description": "Lemon Squeezy product still priced at old 29.99 EUR; landing now displays 19 EUR. Checkout charges wrong price until updated.",
       "type": "external",
-      "workaround": "Static analysis of cache.py:810 possible but no validation"
+      "workaround": "none — requires Lemon Squeezy dashboard access"
     }
   ],
-  "human_actions_pending": [],
-  "decisions": [
+  "human_actions_pending": [
     {
-      "decision": "ris.py _spring_detected (REST layer detection) intentionally not changed for BUG-05",
-      "rationale": "Used for incomplete_snapshot validation, not just repo_type. Keycloak structural_map showed 0 controllers anyway — not the active path for this bug."
+      "action": "Update Lemon Squeezy product to 19 EUR/mo and create a 190 EUR/yr annual variant + link",
+      "context": "Landing shows 19/190 but checkout buy/99c8675f points to old 29.99 product. Blocking for go-live; annual has no checkout link yet.",
+      "blocking": true
     },
     {
-      "decision": "@Consumes -> controller mapping in _JAVA_ROLE_MAP left as-is",
-      "rationale": "Not causing observable bugs in Keycloak; separate concern from BUG-05."
+      "action": "Push commits for both repos (atlas-cli + sourcecode-landing)",
+      "context": "All work committed locally to master; nothing pushed.",
+      "blocking": false
     }
   ],
-  "bug_queue": [
-    {"id": "BUG-01", "severity": "medium", "status": "fixed", "commit": "06e9c26"},
-    {"id": "BUG-02", "severity": "high",   "status": "fixed", "commit": "76d4beb"},
-    {"id": "BUG-03", "severity": "high",   "status": "fixed", "commit": "76d4beb"},
-    {"id": "BUG-04", "severity": "medium", "status": "fixed", "commit": "15e3af7"},
-    {"id": "BUG-05", "severity": "medium", "status": "fixed", "commit": "cf3d699"},
-    {"id": "BUG-06", "severity": "low",    "status": "fixed", "commit": "5495ab6"},
-    {"id": "BUG-07", "severity": "low",    "status": "pending"}
+  "decisions": [
+    {"decision": "Gate by repo size (>500 Java files) + automation (delta), not by command", "rationale": "Data: gating core capability churns users; gating scale/collaboration ~doubles conversion. Free hooks solo devs; Pro charges enterprise monoliths."},
+    {"decision": "Java-only monetization (non-Java repos free at any size)", "rationale": "Product targets enterprise Java monoliths; is_large_repo counts only .java by design. Documented in license.py + PRODUCT_TIERS.md."},
+    {"decision": "Keep 500 Java file threshold", "rationale": "User confirmed; generous, maximizes adoption."},
+    {"decision": "Pro price 19 EUR/mo / 190 EUR/yr per-dev (down from 29.99)", "rationale": "CLI is focused tool, not platform; sit at CodeScene floor ($20-30) / Cursor norm ($20), not above. Adoption-oriented. Per-LOC/per-repo reserved for a future org tier."},
+    {"decision": "Only Free + Pro; no Enterprise tier", "rationale": "Nothing org-level built yet (SSO/dashboards/hosted MCP). Honest. Listed as roadmap in PRODUCT_TIERS.md."},
+    {"decision": "MCP local serve Free; hosted MCP = future Enterprise", "rationale": "Local serve already free in code; aligns README/landing."}
   ],
   "uncommitted_files": [],
-  "next_action": "BUG-07: Eureka misidentified as Jakarta EE. Run sourcecode on eureka repo, trace jakarta.ee detection in java.py, tighten condition to exclude Guice/Jersey-only projects.",
-  "context_notes": "Session 89 fixed 6 bugs (BUG-01 through BUG-06). 2499 tests pass. Tree clean at 5495ab6. Testing repos at /Users/user/Documents/workspace/testing/."
+  "next_action": "Either update Lemon Squeezy pricing to 19/190, or push the three commits. Code work is complete and committed.",
+  "context_notes": "Post-milestone ad-hoc work (all 13 GSD phases already 100%). Monetization model change driven by competitor research (CodeScene/SonarQube/Sourcegraph/Cursor) + SaaS gating best-practice data. Gate is client-side (cli.py) + Apache 2.0 — no DRM; moat = convenience, known/accepted for v1. atlas-cli on master, landing on master."
 }
