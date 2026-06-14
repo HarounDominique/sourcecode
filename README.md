@@ -2,7 +2,7 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.35.33-blue)
+![Version](https://img.shields.io/badge/version-1.35.34-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
@@ -252,6 +252,35 @@ Specifically:
 
 ---
 
+## Pricing
+
+Two tiers. **Gating is by repo size and automation — never by command.** Every
+command runs at full power on Free for small and mid-size repos. You upgrade
+when the work gets bigger or automated.
+
+| | **Free** — €0 | **Pro** — €19/mo · €190/yr per dev |
+|---|---|---|
+| Repo size | ≤ 500 Java source files | **> 500 Java files** (enterprise monoliths) |
+| Commands | All of them, full output | Same commands, unlocked at scale |
+| `impact` / `fix-bug` / `review-pr` / `modernize` | ✅ full on small repos | ✅ full on large repos (Free gets a capped preview) |
+| `--full`, git-churn ranking, uncapped graph/semantic | ✅ on small repos | ✅ on large repos |
+| `prepare-context delta` | 30 free runs/repo | unlimited — CI/CD automation |
+| `prepare-context generate-tests` | small repos | large repos |
+| MCP local server (`mcp serve`) | ✅ | ✅ |
+| Offline, no data egress, no account | ✅ | ✅ |
+
+**Non-Java repos are free at any size** — the size limit counts Java source
+files only, by design. sourcecode monetises enterprise Java monoliths.
+
+```bash
+sourcecode auth login          # browser device-code auth
+sourcecode activate <key>      # or activate a license key directly
+```
+
+Full breakdown: [docs/PRODUCT_TIERS.md](docs/PRODUCT_TIERS.md).
+
+---
+
 ## Command reference
 
 ### `--compact` and `--agent`
@@ -263,7 +292,7 @@ Core flags. Feed directly to AI agents as first-message context.
 | `--compact` | High-signal summary: stacks, entry points, dependencies, confidence, gaps | ~2,500–4,000 |
 | `--agent` | Structured JSON: identity, entry points, architecture, event flows | ~4,500–5,500 |
 
-### `impact` — blast-radius analysis
+### `impact` — blast-radius analysis  [free ≤500 Java files · Pro above]
 
 ```bash
 sourcecode impact ClassName /path/to/repo
@@ -438,7 +467,7 @@ sourcecode onboard /path/to/repo
 
 Entry points, architecture summary, key files, confidence level, and gaps. Designed to be injected as agent context at the start of a session.
 
-### `review-pr` — [Pro] PR review context
+### `review-pr` — PR review context  [free ≤500 Java files · Pro above]
 
 ```bash
 sourcecode review-pr /path/to/repo --since main
@@ -447,7 +476,7 @@ sourcecode review-pr /path/to/repo --since HEAD~3
 
 Changed files, risk ranking, test coverage gaps, affected modules, and blast radius of changed classes. Returns a `ci_decision` field for CI/CD integration.
 
-### `fix-bug` — [Pro] Bug triage context
+### `fix-bug` — Bug triage context  [free ≤500 Java files · Pro above]
 
 ```bash
 sourcecode fix-bug /path/to/repo --symptom "NullPointerException in checkout"
@@ -455,7 +484,7 @@ sourcecode fix-bug /path/to/repo --symptom "NullPointerException in checkout"
 
 Risk-ranked file list correlated to the symptom: keyword extraction, path matching, content matching, git commit correlation.
 
-### `modernize` — [Pro] Modernization planning
+### `modernize` — Modernization planning  [free ≤500 Java files · Pro above]
 
 ```bash
 sourcecode modernize /path/to/repo

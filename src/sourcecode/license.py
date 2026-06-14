@@ -1,9 +1,22 @@
 """License activation and enforcement for the sourcecode CLI.
 
+Tier model (hybrid size + collaboration gating — NOT capability gating):
+  * Free covers EVERY command on small / mid-size repos, single-repo, local.
+  * Pro unlocks enterprise-scale monoliths (repos above the size limit) and
+    automation (CI/CD-style repeated delta runs).
+  * Enterprise (sold separately) adds multi-repo, hosted server, dashboards, SSO.
+
+  The engine and all commands are identical across tiers. We gate on WHERE and
+  HOW MUCH the tool is used (repo size, automation, team), never on WHICH
+  command is available. Small repos get the full feature set for free.
+
 Flow:
   1. Module imported → _init() loads ~/.sourcecode/license.json (if present)
   2. is_pro set globally (True when plan == "pro")
-  3. Pro commands call require_feature(feature_name) at entry — exits 1 if not Pro
+  3. Heavy commands call require_repo_or_pro(repo_path, feature) at entry —
+     free below the size limit, gated to Pro above it (exit 2). Pure-automation
+     features (delta) keep a free quota then gate. require_feature() is the
+     low-level hard gate still used where size is irrelevant.
   4. `sourcecode activate <key>` calls activate_license(key) — validates via
      Edge Function, writes ~/.sourcecode/license.json, exits 0 on success
   5. Cached license is re-validated every 24 h (online); network errors keep
@@ -50,6 +63,9 @@ def _get_cache_ttl() -> int:
     """Return TTL in seconds. CI containers get 24h to avoid mid-run network calls."""
     return _CACHE_TTL_CI_SECONDS if os.environ.get("SOURCECODE_CI") else _CACHE_TTL_SECONDS
 _DELTA_FREE_LIMIT: int = 30
+# Hybrid model size limit: repos at/under this many Java source files are fully
+# free (every command, no caps). Above it = enterprise-scale monolith = Pro.
+_FREE_REPO_JAVA_FILE_LIMIT: int = 500
 _DEVICE_POLL_INTERVAL_S: float = 2.5
 _DEVICE_POLL_TIMEOUT_S: float = 300.0  # 5-minute window for user to complete browser auth
 _AUTH_BASE_URL: str = "https://sourcecode.dev"
@@ -404,13 +420,65 @@ def can_use(feature_name: str) -> bool:
     return is_pro
 
 
+def _emit_upgrade_and_exit(headline: str, body_lines: list[str], payload: dict) -> None:
+    """Write human-readable prompt to stderr + JSON error to stdout, then exit 2.
+
+    Shared by require_feature() and require_repo_or_pro() so terminal UX and the
+    machine-readable contract stay identical regardless of which gate fired.
+    """
+    lines = [f"\n  {headline}"]
+    for body in body_lines:
+        if body:
+            lines.append(f"  {body}")
+    lines.append("")
+    lines.append("  Upgrade:  sourcecode activate <license_key>")
+    lines.append("")
+    sys.stderr.write("\n".join(lines) + "\n")
+    sys.stderr.flush()
+
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+    sys.exit(2)  # exit 2 = Pro required (0=ok, 1=runtime error, 2=license required)
+
+
+def count_java_files(repo_path: str, ceiling: Optional[int] = None) -> int:
+    """Count *.java files under repo_path, skipping .git.
+
+    When ceiling is given, counting stops at ceiling+1 (bounded — cheap on huge
+    monorepos where we only need to know "is this over the limit?").
+    """
+    from itertools import islice
+    try:
+        root = Path(repo_path).resolve()
+        gen = (p for p in root.rglob("*.java") if ".git" not in p.parts)
+        if ceiling is not None:
+            return sum(1 for _ in islice(gen, ceiling + 1))
+        return sum(1 for _ in gen)
+    except Exception:
+        return 0
+
+
+def is_large_repo(repo_path: str) -> bool:
+    """True if repo exceeds the free-tier size limit (enterprise-scale monolith).
+
+    Sizing counts ONLY Java source files — by design. sourcecode monetises
+    enterprise Java monoliths; non-Java repos (Python/Go/TS/…) never gate to Pro
+    and are intentionally free at any size. Do not "fix" this to count other
+    languages without a product decision: it would start charging users we've
+    chosen to leave on Free.
+    """
+    return count_java_files(repo_path, ceiling=_FREE_REPO_JAVA_FILE_LIMIT) > _FREE_REPO_JAVA_FILE_LIMIT
+
+
 def require_feature(
     feature_name: str,
     extra_fields: Optional[dict] = None,
 ) -> None:
-    """Exit with a clean upgrade prompt when feature_name requires Pro.
+    """Hard gate: exit with a clean upgrade prompt unless Pro.
 
-    Re-validates stale cached license before gating (once per 24 h, online).
+    Used where repo size is irrelevant (e.g. delta automation quota exhausted).
+    Most heavy commands should use require_repo_or_pro() instead, which keeps
+    small repos free. Re-validates stale cached license before gating.
 
     Writes human-readable context to stderr (terminal UX) and a JSON error
     to stdout (backward-compatible machine-readable format).
@@ -418,10 +486,6 @@ def require_feature(
     Args:
         extra_fields: Optional extra keys merged into the JSON error payload
                       (e.g. ``{"free_tier_alternative": "..."}``)
-
-    Example:
-        from sourcecode.license import require_feature
-        require_feature("impact")
     """
     _maybe_revalidate()
 
@@ -430,22 +494,6 @@ def require_feature(
 
     info = _FEATURE_INFO.get(feature_name, {})
     display = info.get("display", feature_name)
-    description = info.get("description", "")
-    value = info.get("value", "")
-
-    # Human-readable upgrade prompt on stderr
-    lines = [f"\n  '{display}' is a Pro feature."]
-    if description:
-        lines.append(f"  {description}")
-    if value:
-        lines.append(f"  {value}")
-    lines.append("")
-    lines.append("  Upgrade:  sourcecode activate <license_key>")
-    lines.append("")
-    sys.stderr.write("\n".join(lines) + "\n")
-    sys.stderr.flush()
-
-    # JSON on stdout — backward-compatible for CI / MCP consumers
     payload: dict = {
         "error": "pro_required",
         "feature": feature_name,
@@ -457,9 +505,57 @@ def require_feature(
     }
     if extra_fields:
         payload.update(extra_fields)
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
-    sys.exit(2)  # exit 2 = Pro feature required (0=ok, 1=runtime error, 2=license required)
+    _emit_upgrade_and_exit(
+        f"'{display}' is a Pro feature.",
+        [info.get("description", ""), info.get("value", "")],
+        payload,
+    )
+
+
+def require_repo_or_pro(
+    repo_path: str,
+    feature_name: str,
+    extra_fields: Optional[dict] = None,
+) -> None:
+    """Hybrid size gate: free on small/mid repos, Pro on enterprise monoliths.
+
+    The core of the hybrid model. A free user gets the FULL feature on any repo
+    at or under the size limit. Only when the repo exceeds the limit (an
+    enterprise-scale monolith — exactly who Pro is for) does this gate to Pro.
+
+    No-op when already Pro or when the repo is within the free size limit.
+    Exits 2 with size-framed messaging otherwise.
+    """
+    _maybe_revalidate()
+
+    if is_pro:
+        return
+    if not is_large_repo(repo_path):
+        return  # small/mid repo → fully free
+
+    info = _FEATURE_INFO.get(feature_name, {})
+    display = info.get("display", feature_name)
+    headline = f"This repository exceeds the free-tier size limit ({_FREE_REPO_JAVA_FILE_LIMIT}+ Java files)."
+    body = [
+        f"'{display}' is free on repos up to {_FREE_REPO_JAVA_FILE_LIMIT} Java source files.",
+        "Pro unlocks analysis of enterprise-scale monoliths.",
+    ]
+    payload: dict = {
+        "error": "pro_required",
+        "reason": "repo_too_large",
+        "feature": feature_name,
+        "free_repo_java_file_limit": _FREE_REPO_JAVA_FILE_LIMIT,
+        "message": (
+            f"This repository exceeds the free-tier limit of "
+            f"{_FREE_REPO_JAVA_FILE_LIMIT} Java source files. "
+            "Pro unlocks enterprise-scale monoliths. "
+            "Run: sourcecode activate <license_key>"
+        ),
+        "upgrade_hint": "sourcecode activate <license_key>",
+    }
+    if extra_fields:
+        payload.update(extra_fields)
+    _emit_upgrade_and_exit(headline, body, payload)
 
 
 def require_pro(feature_name: str) -> None:

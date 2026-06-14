@@ -197,18 +197,15 @@ Cold scan: 2–10s depending on repo size. Warm cache: 0.3–0.6s.
     if not _is_pro:
         text += """\
 
-[dim bold]Locked (Pro):[/dim bold]
-  [dim]impact                              blast radius before any change[/dim]
-  [dim]modernize (full)                    dead zones, tangles, full coupling[/dim]
-  [dim]fix-bug (full)                      complete risk-ranked file list[/dim]
-  [dim]review-pr (expanded)               CI-grade PR review[/dim]
-  [dim]prepare-context delta               incremental context for CI/CD (30 free runs/repo)[/dim]
-  [dim]prepare-context generate-tests      test gap analysis[/dim]
-  [dim]--full                              removes all truncation limits (free up to 500 files)[/dim]
-  [dim]--rank-by git-churn                 file volatility ranking via git history[/dim]
-  [dim]rich exports (HTML/PDF/CI)          structured reports for CI and stakeholders[/dim]
-  [dim]multi-repo analysis                 cross-repository blast radius[/dim]
-  [dim]team snapshots                      shared org-level cache[/dim]
+[dim bold]Free tier — every command, full power, on repos up to 500 Java files.[/dim bold]
+  [dim]impact, fix-bug, review-pr, modernize, --full, git-churn ranking — all free here.[/dim]
+
+[dim bold]Pro (€19/mo · €190/yr) unlocks:[/dim bold]
+  [dim]Enterprise-scale monoliths       all commands on repos above 500 Java files[/dim]
+  [dim]prepare-context delta            CI/CD automation (30 free runs/repo, then Pro)[/dim]
+  [dim]prepare-context generate-tests   test gap analysis on large repos[/dim]
+
+  [dim]Non-Java repos are free at any size. Local MCP serve is free.[/dim]
 
   [dim cyan]→ sourcecode activate <key>[/dim cyan]
 """
@@ -537,8 +534,8 @@ def _get_command_with_preprocessing(typer_instance: Any) -> Any:
         _PRO_OPTS = {"full"}
         for _param in cmd.params:
             if getattr(_param, "name", None) in _PRO_OPTS and getattr(_param, "help", None):
-                if "[Pro]" not in _param.help:
-                    _param.help = _param.help + "  [dim][Pro][/dim]"
+                if "[Pro" not in _param.help:
+                    _param.help = _param.help + "  [dim][Pro on large repos][/dim]"
 
     _orig_cmd_main = cmd.main
 
@@ -641,8 +638,7 @@ GRAPH_EDGE_CHOICES = {"imports", "calls", "contains", "extends"}
 DOCS_DEPTH_CHOICES = ["module", "symbols", "full"]
 
 # ── Module-level constants ─────────────────────────────────────────────────────
-_FREE_TIER_NODE_CAP: int = 50  # semantic cap for graph nodes and semantic symbols in free tier
-_FREE_FULL_FILE_THRESHOLD: int = 500  # Java source files; above this --full requires Pro
+_FREE_TIER_NODE_CAP: int = 50  # graph/semantic node cap — applies only to large repos on free tier
 _JAVA_MIN_SCAN_DEPTH: int = 12  # Maven src/main/java/<pkg>/<module>/File depth floor
 _JVM_STACKS: frozenset[str] = frozenset({"java", "kotlin", "scala", "groovy"})
 _IMPACT_PRIORITY_THRESHOLDS: list[tuple[float, str]] = [
@@ -947,10 +943,10 @@ def main(
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
-    # Pro gate for --rank-by git-churn: git history analysis is a Pro feature.
+    # Size gate for --rank-by git-churn: free on small/mid repos, Pro on monoliths.
     if rank_by == "git-churn":
-        from sourcecode.license import require_feature as _req_git_history
-        _req_git_history("git-history")
+        from sourcecode.license import require_repo_or_pro as _req_git_history
+        _req_git_history(_get_detected_path(), "git-history")
 
     if symbol is not None and not symbol.strip():
         _emit_error_json(
@@ -985,21 +981,10 @@ def main(
         )
         raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
 
-    # Pro gate for --full: free tier allowed up to _FREE_FULL_FILE_THRESHOLD Java files.
+    # Size gate for --full: free on repos up to the size limit, Pro on monoliths.
     if full:
-        from sourcecode.license import is_pro as _full_is_pro
-        if not _full_is_pro:
-            from itertools import islice as _islice
-            _full_check_path = Path(_get_detected_path()).resolve()
-            _java_count = sum(
-                1 for _ in _islice(
-                    (p for p in _full_check_path.rglob("*.java") if ".git" not in p.parts),
-                    _FREE_FULL_FILE_THRESHOLD + 1,
-                )
-            )
-            if _java_count > _FREE_FULL_FILE_THRESHOLD:
-                from sourcecode.license import require_feature as _req_full
-                _req_full("--full")
+        from sourcecode.license import require_repo_or_pro as _req_full
+        _req_full(_get_detected_path(), "--full")
 
     # P0-2 FIX: --compact and --full are mutually exclusive.
     # compact is designed to be a bounded summary; --full removes truncation limits,
@@ -1768,13 +1753,15 @@ def main(
         if dependency_analyzer is not None
         else None
     )
-    # Free-tier node cap: limit graph size to 10 nodes unless Pro.
+    # Size-gated node cap: free users get the full graph on small/mid repos;
+    # the cap only applies to enterprise-scale monoliths (Pro territory).
     _effective_max_nodes = max_nodes
     try:
-        from sourcecode.license import is_pro as _lp_is_pro_gm
+        from sourcecode.license import is_pro as _lp_is_pro_gm, is_large_repo as _lp_large_gm
+        _gm_capped = (not _lp_is_pro_gm) and _lp_large_gm(str(target))
     except Exception:
-        _lp_is_pro_gm = False
-    if not _lp_is_pro_gm and graph_analyzer is not None:
+        _gm_capped = False
+    if _gm_capped and graph_analyzer is not None:
         if _effective_max_nodes is None or _effective_max_nodes > _FREE_TIER_NODE_CAP:
             _effective_max_nodes = _FREE_TIER_NODE_CAP
 
@@ -1904,13 +1891,15 @@ def main(
                 semantic_summary=sem_sum,
             )
 
-    # Free-tier node cap for --semantics: limit semantic_symbols to 10 unless Pro.
+    # Size-gated semantic cap: free users get all symbols on small/mid repos;
+    # the cap only applies to enterprise-scale monoliths (Pro territory).
     if semantic_analyzer is not None and sm.semantic_symbols:
         try:
-            from sourcecode.license import is_pro as _lp_is_pro_sem
+            from sourcecode.license import is_pro as _lp_is_pro_sem, is_large_repo as _lp_large_sem
+            _sem_capped = (not _lp_is_pro_sem) and _lp_large_sem(str(target))
         except Exception:
-            _lp_is_pro_sem = False
-        if not _lp_is_pro_sem and len(sm.semantic_symbols) > _FREE_TIER_NODE_CAP:
+            _sem_capped = False
+        if _sem_capped and len(sm.semantic_symbols) > _FREE_TIER_NODE_CAP:
             sm = replace(sm, semantic_symbols=sm.semantic_symbols[:_FREE_TIER_NODE_CAP])
 
     # Runtime architecture — classify workspace packages for structural summaries
@@ -2703,10 +2692,11 @@ def prepare_context_cmd(
         )
         raise typer.Exit(code=1)
 
-    # Pro gate: generate-tests requires Pro. delta allows 30 free runs per repo.
+    # Hybrid gate: generate-tests free on small/mid repos, Pro on monoliths.
+    # delta is the automation axis: free quota per repo, then Pro (CI/CD usage).
     if task == "generate-tests":
-        from sourcecode.license import require_feature as _require_feature
-        _require_feature("generate-tests")
+        from sourcecode.license import require_repo_or_pro as _require_gentests
+        _require_gentests(str(path.resolve()), "generate-tests")
     elif task == "delta":
         from sourcecode.license import is_pro as _delta_is_pro
         if not _delta_is_pro:
@@ -3161,11 +3151,12 @@ def prepare_context_cmd(
     _pc_budget = _pc_budgets.get(task, BUDGET_EXPLAIN)
     out = _pc_trim(out, _pc_budget, label=task)
 
-    # Free-tier limits: fix-bug (top-5 files) and review-pr (lightweight).
-    # Pro users get the full analysis; free users get enough to see the value.
+    # Size-gated preview: on enterprise-scale monoliths free users get a capped
+    # preview (top-5 / lightweight) + upgrade note. Small/mid repos get the full
+    # analysis for free — gating is by repo size, never by command.
     if task in ("fix-bug", "review-pr"):
-        from sourcecode.license import can_use as _tier_can_use
-        if not _tier_can_use(task):
+        from sourcecode.license import is_pro as _tier_is_pro, is_large_repo as _tier_large
+        if (not _tier_is_pro) and _tier_large(str(path.resolve())):
             _FREE_FILE_LIMIT = 5
             if task == "fix-bug":
                 _rf = out.get("relevant_files")
@@ -3577,8 +3568,8 @@ def impact_cmd(
       - risk_score / risk_level — quantified change risk
 
     \b
-    NOTE: This feature requires a Pro license. Run 'sourcecode license' for details.
-    Upgrade: sourcecode activate <license_key>
+    NOTE: Free on repos up to the size limit; Pro unlocks enterprise-scale
+    monoliths. Run 'sourcecode license' for details.
 
     \b
     Examples:
@@ -3586,8 +3577,8 @@ def impact_cmd(
       sourcecode impact org.keycloak.services.DefaultKeycloakSession /path/to/keycloak
       sourcecode impact UserService --depth 6 --output impact.json
     """
-    from sourcecode.license import require_pro as _require_pro
-    _require_pro("impact")
+    from sourcecode.license import require_repo_or_pro as _require_repo_or_pro
+    _require_repo_or_pro(str(path.resolve()), "impact")
 
     if format not in ("json", "yaml"):
         _emit_error_json(
@@ -4863,7 +4854,7 @@ def modernize_cmd(
     import json as _json
     from sourcecode.repository_ir import build_repo_ir, find_java_files, apply_ir_size_limits
     from sourcecode.output_budget import trim_to_budget, BUDGET_ONBOARD
-    from sourcecode.license import can_use as _mod_can_use
+    from sourcecode.license import is_pro as _mod_is_pro, is_large_repo as _mod_large
 
     root = path.resolve()
     if not root.is_dir():
@@ -4985,15 +4976,18 @@ def modernize_cmd(
         for s in subsystems[:15]
     ]
 
-    if not _mod_can_use("modernize"):
-        # Free tier: structural discovery only — no dead zones, tangles, or full refactor list.
+    if (not _mod_is_pro) and _mod_large(str(root)):
+        # Large monolith, free tier: structural discovery preview only — no dead
+        # zones, tangles, or full refactor list. Small/mid repos get full analysis.
         result = {
             "workflow": "modernize",
             "path": str(root),
             "tier": "free",
             "tier_note": (
-                "Upgrade to Pro for full analysis: dead zones, dependency tangles, "
-                "refactor candidates ranked by git churn, and complete coupling graphs."
+                "This repository exceeds the free-tier size limit. "
+                "Upgrade to Pro for full analysis on enterprise-scale monoliths: "
+                "dead zones, dependency tangles, refactor candidates ranked by git "
+                "churn, and complete coupling graphs."
             ),
             "summary": _summary,
             "subsystem_summary": _subsystem_summary,

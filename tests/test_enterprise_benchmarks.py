@@ -1839,12 +1839,27 @@ class TestProLockExitCode:
         assert "free_tier_alternative" in data
         assert "review-pr" in data["free_tier_alternative"]
 
-    def test_impact_exits_2_without_pro(self, keycloak_like_repo: Path) -> None:
+    def test_impact_exits_2_on_large_repo_without_pro(self, keycloak_like_repo: Path) -> None:
+        # Hybrid model: impact gates to Pro only on enterprise-scale monoliths.
+        # Simulate a large repo so the size gate fires.
         with patch("sourcecode.license.is_pro", False), \
              patch("sourcecode.license._license_data", None), \
-             patch("sourcecode.license._maybe_revalidate", return_value=None):
+             patch("sourcecode.license._maybe_revalidate", return_value=None), \
+             patch("sourcecode.license.is_large_repo", return_value=True):
             result = runner.invoke(app, ["impact", "SomeService", str(keycloak_like_repo)])
         assert result.exit_code == 2
+
+    def test_impact_free_on_small_repo(self, keycloak_like_repo: Path) -> None:
+        # Hybrid model: impact runs free on small/mid repos (no Pro gate). A
+        # missing symbol resolves to not_found (exit 1), never a license exit (2).
+        with patch("sourcecode.license.is_pro", False), \
+             patch("sourcecode.license._license_data", None), \
+             patch("sourcecode.license._maybe_revalidate", return_value=None), \
+             patch("sourcecode.license.is_large_repo", return_value=False):
+            result = runner.invoke(app, ["impact", "NonExistentXYZ", str(keycloak_like_repo)])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["resolution"] == "not_found"
 
     def test_impact_help_mentions_pro(self) -> None:
         result = runner.invoke(app, ["impact", "--help"])
@@ -1853,10 +1868,12 @@ class TestProLockExitCode:
         assert "pro" in combined.lower() or "license" in combined.lower()
 
     def test_delta_and_impact_exit_codes_consistent(self, keycloak_like_repo: Path) -> None:
-        # Simulate free-tier quota exhausted so delta gates like impact.
+        # Both gates exit 2: delta when its free quota is exhausted, impact when
+        # the repo exceeds the free-tier size limit.
         with patch("sourcecode.license.is_pro", False), \
              patch("sourcecode.license._license_data", None), \
              patch("sourcecode.license._maybe_revalidate", return_value=None), \
+             patch("sourcecode.license.is_large_repo", return_value=True), \
              patch("sourcecode.license.check_delta_free_tier", return_value=(False, 30, 0)):
             r_delta = runner.invoke(
                 app,
