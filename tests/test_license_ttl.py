@@ -37,8 +37,8 @@ class TestMaybeRevalidateCISkip:
     def _make_license_data(self, age_seconds: int) -> dict:
         validated_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
         return {
-            "auth_method": "device_flow",
-            "device_token": "tok_test",
+            "auth_method": "license_key",
+            "license_key": "SC-TEST-KEY",
             "email": "test@example.com",
             "plan": "pro",
             "status": "active",
@@ -52,7 +52,7 @@ class TestMaybeRevalidateCISkip:
         monkeypatch.setattr(lic, "_license_data", self._make_license_data(7200))
         monkeypatch.setattr(lic, "is_pro", True)
 
-        with patch.object(lic, "_call_get_user_plan") as mock_net:
+        with patch.object(lic, "_call_get_license") as mock_net:
             lic._maybe_revalidate()
             mock_net.assert_not_called()
 
@@ -62,7 +62,7 @@ class TestMaybeRevalidateCISkip:
         monkeypatch.setattr(lic, "_license_data", self._make_license_data(7200))
         monkeypatch.setattr(lic, "is_pro", True)
 
-        with patch.object(lic, "_call_get_user_plan", return_value=None) as mock_net:
+        with patch.object(lic, "_call_get_license", return_value=None) as mock_net:
             lic._maybe_revalidate()
             mock_net.assert_called_once()
 
@@ -72,6 +72,6 @@ class TestMaybeRevalidateCISkip:
         monkeypatch.setattr(lic, "_license_data", self._make_license_data(90000))
         monkeypatch.setattr(lic, "is_pro", True)
 
-        with patch.object(lic, "_call_get_user_plan", return_value=None) as mock_net:
+        with patch.object(lic, "_call_get_license", return_value=None) as mock_net:
             lic._maybe_revalidate()
             mock_net.assert_called_once()

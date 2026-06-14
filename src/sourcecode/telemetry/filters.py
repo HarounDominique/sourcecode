@@ -75,7 +75,7 @@ _SAFE_FEATURES: frozenset[str] = frozenset({
     # prepare-context task names not already above
     "explain", "onboard", "refactor",
     # activation outcomes
-    "key", "device_flow",
+    "key",
 })
 _SAFE_SIZES: frozenset[str] = frozenset({"tiny", "small", "medium", "large", "huge", "unknown"})
 _SAFE_DURATIONS: frozenset[str] = frozenset({"<1s", "<5s", "<15s", "<60s", "60s+", "unknown"})

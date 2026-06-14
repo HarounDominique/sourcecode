@@ -168,7 +168,6 @@ Cold scan: 2–10s depending on repo size. Warm cache: 0.3–0.6s.
   sourcecode --agent                    full structured JSON for AI agents
 
 [bold]Auth commands:[/bold]
-  auth login                   [dim]# authenticate via browser (device code)[/dim]
   auth status                  [dim]# show current plan and auth state[/dim]
   auth logout                  [dim]# remove local credentials[/dim]
 
@@ -570,7 +569,7 @@ app.add_typer(mcp_app, name="mcp")
 cache_app = typer.Typer(help="Cache inspection and management.", rich_markup_mode="rich")
 app.add_typer(cache_app, name="cache")
 
-auth_app = typer.Typer(help="Authentication: login, status, logout.", rich_markup_mode="rich")
+auth_app = typer.Typer(help="Authentication: status, logout.", rich_markup_mode="rich")
 app.add_typer(auth_app, name="auth")
 
 
@@ -5415,25 +5414,8 @@ def activate_cmd(
 
 
 # ---------------------------------------------------------------------------
-# Auth commands (device-flow login / status / logout)
+# Auth commands (status / logout)
 # ---------------------------------------------------------------------------
-
-@auth_app.command("login")
-def auth_login_cmd() -> None:
-    """Authenticate via browser (device code flow).
-
-    \b
-    The CLI shows a URL. Open it in your browser, log in with your account,
-    and the CLI completes authentication automatically.
-    Credentials are stored in ~/.sourcecode/license.json (30-min cache; Supabase is source of truth).
-
-    \b
-    Examples:
-      sourcecode auth login
-    """
-    from sourcecode.license import auth_login as _auth_login
-    _auth_login()
-
 
 @auth_app.command("status")
 def auth_status_cmd() -> None:
