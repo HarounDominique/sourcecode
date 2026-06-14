@@ -2,7 +2,7 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.36.0-blue)
+![Version](https://img.shields.io/badge/version-1.36.1-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
@@ -76,7 +76,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.36.0
+# sourcecode 1.36.1
 ```
 
 ---
@@ -273,8 +273,7 @@ when the work gets bigger or automated.
 files only, by design. sourcecode monetises enterprise Java monoliths.
 
 ```bash
-sourcecode auth login          # browser device-code auth
-sourcecode activate <key>      # or activate a license key directly
+sourcecode activate <key>      # activate a license key
 ```
 
 Full breakdown: [docs/PRODUCT_TIERS.md](docs/PRODUCT_TIERS.md).
