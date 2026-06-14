@@ -653,10 +653,23 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-_WELCOME_LOGO = (
-    "┌─┐┌─┐┬ ┬┬─┐┌─┐┌─┐┌─┐┌─┐┌┬┐┌─┐",
-    "└─┐│ ││ │├┬┘│  ├┤ │  │ │ ││├┤ ",
-    "└─┘└─┘└─┘┴└─└─┘└─┘└─┘└─┘─┴┘└─┘",
+# ANSI Shadow block wordmark, stacked "source" / "code" so it fits an 80-col
+# terminal (the single-line "sourcecode" is 83 wide and would wrap).
+_WELCOME_SOURCE = (
+    "███████╗ ██████╗ ██╗   ██╗██████╗  ██████╗███████╗",
+    "██╔════╝██╔═══██╗██║   ██║██╔══██╗██╔════╝██╔════╝",
+    "███████╗██║   ██║██║   ██║██████╔╝██║     █████╗  ",
+    "╚════██║██║   ██║██║   ██║██╔══██╗██║     ██╔══╝  ",
+    "███████║╚██████╔╝╚██████╔╝██║  ██║╚██████╗███████╗",
+    "╚══════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝ ╚═════╝╚══════╝",
+)
+_WELCOME_CODE = (
+    " ██████╗ ██████╗ ██████╗ ███████╗",
+    "██╔════╝██╔═══██╗██╔══██╗██╔════╝",
+    "██║     ██║   ██║██║  ██║█████╗  ",
+    "██║     ██║   ██║██║  ██║██╔══╝  ",
+    "╚██████╗╚██████╔╝██████╔╝███████╗",
+    " ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝",
 )
 
 _WELCOME_CMDS = (
@@ -701,19 +714,24 @@ def _print_welcome() -> None:
         _print_welcome_plain(tier)
         return
 
-    w = max(len(s) for s in _WELCOME_LOGO)
     pad = max(len(c) for c, _ in _WELCOME_CMDS) + 2
     tier_style = "green" if tier != "Pro" else "magenta"
+    code_w = max(len(s) for s in _WELCOME_CODE)
 
     t = Text()
-    t.append(_WELCOME_LOGO[0].ljust(w) + "\n", style="bold cyan")
-    t.append(_WELCOME_LOGO[1].ljust(w), style="bold cyan")
-    t.append(f"   {__version__}\n", style="dim")
-    t.append(_WELCOME_LOGO[2].ljust(w), style="bold cyan")
-    t.append("   ")
-    t.append(tier + "\n\n", style=tier_style)
+    for ln in _WELCOME_SOURCE:
+        t.append(ln + "\n", style="bold cyan")
+    # Append version + tier to the right of the "code" block's middle rows.
+    for i, ln in enumerate(_WELCOME_CODE):
+        t.append(ln.ljust(code_w), style="bold cyan")
+        if i == 2:
+            t.append(f"   {__version__}", style="dim")
+        elif i == 3:
+            t.append("   ")
+            t.append(tier, style=tier_style)
+        t.append("\n")
 
-    t.append("AI coding-agent context, instant.\n\n", style="white")
+    t.append("\nAI coding-agent context, instant.\n\n", style="white")
 
     for cmd, desc in _WELCOME_CMDS:
         t.append("▸ ", style="cyan")
