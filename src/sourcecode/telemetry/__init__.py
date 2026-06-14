@@ -77,6 +77,8 @@ def record(
     duration_s: Optional[float] = None,
     success: bool = True,
     error_kind: Optional[str] = None,
+    feature: Optional[str] = None,
+    repo_size: Optional[str] = None,
 ) -> None:
     """Record a telemetry event. Fire-and-forget — never blocks or raises.
 
@@ -96,10 +98,15 @@ def record(
             cmd=cmd,
             flags=flags or [],
             output_fmt=output_fmt,
-            repo_size=file_count_bucket(file_count) if file_count is not None else "unknown",
+            repo_size=(
+                repo_size if repo_size is not None
+                else file_count_bucket(file_count) if file_count is not None
+                else "unknown"
+            ),
             duration=duration_bucket(duration_s) if duration_s is not None else "unknown",
             success=success,
             error_kind=error_kind,
+            feature=feature,
             session=_SESSION,
         )
         payload = sanitize(ev)

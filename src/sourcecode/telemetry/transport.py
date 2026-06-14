@@ -15,7 +15,7 @@ import os
 import threading
 from typing import Any
 
-_DEFAULT_ENDPOINT = "https://t.sourcecode.dev/v1/event"
+_DEFAULT_ENDPOINT = "https://qkndlmyekvujjdgthtmz.supabase.co/functions/v1/telemetry"
 _TIMEOUT_S = 3
 
 

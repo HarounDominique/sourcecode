@@ -9,9 +9,13 @@ Backend for the Pro license flow. The CLI side lives in
 |----------|---------|-----|
 | `get-license` | Validates a license key for `sourcecode activate` and the 30-min revalidation. Returns `{valid, plan, status, features, email}`. | `--no-verify-jwt` |
 | `lemonsqueezy-webhook` | Lemon Squeezy purchase/subscription webhook. Stores the LS native key, sets plan/status, handles revocation. | `--no-verify-jwt` |
+| `telemetry` | Collects opt-in anonymous usage events (no PII). Inserts into `telemetry_events`. CLI side: `src/sourcecode/telemetry/`. | `--no-verify-jwt` |
 
-Both deploy with JWT verification OFF: the CLI authenticates with the public
-publishable key (not a JWT), and the webhook authenticates via HMAC signature.
+All deploy with JWT verification OFF: the CLI authenticates with the public
+publishable key (not a JWT), the webhook authenticates via HMAC signature, and
+telemetry is unauthenticated public ingest.
+
+The `telemetry` table is created from `supabase/sql/telemetry_events.sql`.
 
 ## Secrets (Supabase dashboard -> Edge Functions -> Secrets)
 

@@ -416,6 +416,15 @@ _init()
 # Entitlement helpers
 # ---------------------------------------------------------------------------
 
+def _emit_telemetry(event: str, **kw: object) -> None:
+    """Best-effort telemetry emit. Respects opt-in; never raises or blocks."""
+    try:
+        from sourcecode import telemetry as _tel
+        _tel.record(event, **kw)  # type: ignore[arg-type]
+    except Exception:
+        pass
+
+
 def can_use(feature_name: str) -> bool:
     """Return True if the current plan has access to feature_name.
 
@@ -510,6 +519,7 @@ def require_feature(
     }
     if extra_fields:
         payload.update(extra_fields)
+    _emit_telemetry("gate_blocked", feature=feature_name, success=False)
     _emit_upgrade_and_exit(
         f"'{display}' is a Pro feature.",
         [info.get("description", ""), info.get("value", "")],
@@ -560,6 +570,7 @@ def require_repo_or_pro(
     }
     if extra_fields:
         payload.update(extra_fields)
+    _emit_telemetry("gate_blocked", feature=feature_name, repo_size="large", success=False)
     _emit_upgrade_and_exit(headline, body, payload)
 
 
@@ -610,6 +621,7 @@ def _finish_device_auth(result: dict) -> None:
     _write_license_file(data)
     _license_data = data
     is_pro = plan == "pro" and plan_status != "inactive"
+    _emit_telemetry("activation", feature="device_flow", success=is_pro)
 
     sys.stderr.write(f"\n  Authenticated as {email}.  Plan: {plan}\n\n")
     sys.stderr.flush()
@@ -693,9 +705,11 @@ def activate_license(license_key: str) -> None:
         _fail("network_error", "Could not reach license server. Check your internet connection.")
 
     if not result.get("valid"):
+        _emit_telemetry("activation", feature="key", success=False, error_kind="InvalidLicense")
         _fail("invalid_license", result.get("error", "License key is not valid or subscription is inactive."))
 
     if result.get("plan") != "pro":
+        _emit_telemetry("activation", feature="key", success=False, error_kind="NotPro")
         _fail("not_pro", "This license is not a Pro license.")
 
     _LICENSE_DIR.mkdir(parents=True, exist_ok=True)
@@ -709,6 +723,7 @@ def activate_license(license_key: str) -> None:
         "validated_at": now,
     }
     _write_license_file(data)
+    _emit_telemetry("activation", feature="key", success=True)
 
     output = {"status": "activated", "plan": "pro", "features": data["features"]}
     sys.stdout.write(json.dumps(output, ensure_ascii=False) + "\n")

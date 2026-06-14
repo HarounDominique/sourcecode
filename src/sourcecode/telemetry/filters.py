@@ -63,6 +63,19 @@ _SAFE_EVENTS: frozenset[str] = frozenset({
     "execution_failed",
     "telemetry_enabled",
     "telemetry_disabled",
+    "gate_blocked",
+    "activation",
+})
+# Closed set of gated features / task names. Used to learn which capability
+# drives Pro demand. All values are fixed product identifiers — no user data.
+_SAFE_FEATURES: frozenset[str] = frozenset({
+    # gated features (license._FEATURE_INFO keys)
+    "impact", "modernize", "fix-bug", "review-pr", "delta", "generate-tests",
+    "--full", "git-history", "multi-repo", "export-rich", "team-snapshots",
+    # prepare-context task names not already above
+    "explain", "onboard", "refactor",
+    # activation outcomes
+    "key", "device_flow",
 })
 _SAFE_SIZES: frozenset[str] = frozenset({"tiny", "small", "medium", "large", "huge", "unknown"})
 _SAFE_DURATIONS: frozenset[str] = frozenset({"<1s", "<5s", "<15s", "<60s", "60s+", "unknown"})
@@ -126,6 +139,9 @@ def sanitize(event: TelemetryEvent) -> dict[str, Any]:
 
     if event.error_kind:
         safe["error_kind"] = _safe_error_kind(event.error_kind)
+
+    if event.feature:
+        safe["feature"] = _safe_str(event.feature, _SAFE_FEATURES, "other")
 
     session = _safe_session(event.session)
     if session:

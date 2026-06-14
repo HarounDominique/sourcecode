@@ -59,6 +59,7 @@ class TelemetryEvent:
         duration    — <1s | <5s | <15s | <60s | 60s+
         success     — True/False
         error_kind  — exception class name only (no message, no traceback)
+        feature     — gated feature / task name (closed categorical set) or None
         session     — 8-char random hex, ephemeral, NOT persisted
     """
 
@@ -75,4 +76,5 @@ class TelemetryEvent:
     duration: str = "unknown"
     success: bool = True
     error_kind: Optional[str] = None
+    feature: Optional[str] = None
     session: str = ""
