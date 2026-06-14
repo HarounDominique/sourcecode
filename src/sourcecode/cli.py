@@ -2797,6 +2797,17 @@ def prepare_context_cmd(
             _cached_pctx = _pctx_cache.read(target, _pctx_cache_key)
             if _cached_pctx is not None:
                 _emit_command_output(_cached_pctx, output_path, copy)
+                try:
+                    from sourcecode import telemetry as _tel
+                    _tel.record(
+                        "execution_completed",
+                        cmd="prepare-context",
+                        feature=task,
+                        output_fmt=format,
+                        duration_s=0.0,
+                    )
+                except Exception:
+                    pass
                 return
 
     builder = TaskContextBuilder(target)
@@ -3191,6 +3202,18 @@ def prepare_context_cmd(
             pass
 
     _emit_command_output(_pc_content, output_path, copy)
+
+    try:
+        from sourcecode import telemetry as _tel
+        _tel.record(
+            "execution_completed",
+            cmd="prepare-context",
+            feature=task,
+            output_fmt=format,
+            duration_s=_time.perf_counter() - _t0,
+        )
+    except Exception:
+        pass
 
     from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
     _nudge()
