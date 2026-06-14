@@ -116,6 +116,14 @@ def _safe_session(value: str) -> str:
     return ""
 
 
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _safe_install(value: str) -> str:
+    """Install id must be a canonical UUID — nothing else can pass."""
+    return value if value and _UUID_RE.match(value) else ""
+
+
 def sanitize(event: TelemetryEvent) -> dict[str, Any]:
     """Apply privacy filter to event and return a safe dict for transmission.
 
@@ -142,6 +150,10 @@ def sanitize(event: TelemetryEvent) -> dict[str, Any]:
 
     if event.feature:
         safe["feature"] = _safe_str(event.feature, _SAFE_FEATURES, "other")
+
+    install = _safe_install(event.install)
+    if install:
+        safe["install"] = install
 
     session = _safe_session(event.session)
     if session:

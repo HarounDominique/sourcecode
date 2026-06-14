@@ -24,6 +24,9 @@ const pick = (v: unknown, allowed: Set<string>, fb: string) =>
   typeof v === "string" && allowed.has(v) ? v : fb;
 const short = (v: unknown, n = 32) =>
   typeof v === "string" && v.length <= n && !/[/\\\s]/.test(v) ? v : null;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const uuid = (v: unknown) =>
+  typeof v === "string" && UUID_RE.test(v) ? v : null;
 
 serve(async (req: Request) => {
   if (req.method !== "POST") return new Response("ok", { status: 405 });
@@ -50,6 +53,7 @@ serve(async (req: Request) => {
     success: typeof p.success === "boolean" ? p.success : null,
     error_kind: short(p.error_kind, 64),
     feature: short(p.feature, 32),
+    install_id: uuid(p.install),
     session: short(p.session, 16),
   };
 

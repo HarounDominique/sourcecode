@@ -17,13 +17,19 @@ create table if not exists public.telemetry_events (
   success     boolean,
   error_kind  text,            -- exception class name only
   feature     text,            -- gated feature / task name (closed set)
+  install_id  uuid,            -- stable anonymous install id (random, no PII)
   session     text             -- ephemeral 8-char hex, NOT a stable user id
 );
 
--- Common query axes: funnel by event, adoption by version, time series.
+-- If the table already exists from an earlier deploy, add the column:
+alter table public.telemetry_events add column if not exists install_id uuid;
+
+-- Common query axes: funnel by event, adoption by version, time series,
+-- and unique-install / conversion / retention by install_id.
 create index if not exists telemetry_events_event_idx      on public.telemetry_events (event);
 create index if not exists telemetry_events_received_at_idx on public.telemetry_events (received_at);
 create index if not exists telemetry_events_feature_idx     on public.telemetry_events (feature);
+create index if not exists telemetry_events_install_idx     on public.telemetry_events (install_id);
 
 -- RLS on, no policies: only the service role (edge function) can write/read.
 -- The public anon/publishable key cannot touch this table.

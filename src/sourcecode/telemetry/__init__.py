@@ -19,7 +19,7 @@ import sys
 import uuid
 from typing import Any, Optional
 
-from sourcecode.telemetry.config import is_enabled
+from sourcecode.telemetry.config import get_install_id, is_enabled
 from sourcecode.telemetry.events import (
     TelemetryEvent,
     duration_bucket,
@@ -107,6 +107,7 @@ def record(
             success=success,
             error_kind=error_kind,
             feature=feature,
+            install=get_install_id(),
             session=_SESSION,
         )
         payload = sanitize(ev)

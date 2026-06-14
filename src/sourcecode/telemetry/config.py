@@ -63,5 +63,28 @@ def mark_asked() -> None:
     _save(data)
 
 
+def get_install_id() -> str:
+    """Stable anonymous install id — a random UUID v4.
+
+    Created lazily on first opted-in event. NOT derived from hardware, email,
+    hostname or any identifier — it only says "the same install across runs",
+    which is what enables unique-user, conversion and retention metrics.
+    Returns "" if it cannot be persisted (telemetry then degrades to events
+    without a stable id, never an error).
+    """
+    data = _load()
+    tel = data.setdefault("telemetry", {})
+    iid = tel.get("install_id")
+    if not iid:
+        import uuid
+        iid = str(uuid.uuid4())
+        tel["install_id"] = iid
+        _save(data)
+        # If the write failed, re-read to avoid handing out a non-persisted id
+        if not _load().get("telemetry", {}).get("install_id"):
+            return ""
+    return str(iid)
+
+
 def config_file_path() -> Path:
     return _CONFIG_FILE

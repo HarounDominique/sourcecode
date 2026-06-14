@@ -60,6 +60,8 @@ class TelemetryEvent:
         success     — True/False
         error_kind  — exception class name only (no message, no traceback)
         feature     — gated feature / task name (closed categorical set) or None
+        install     — stable anonymous install UUID (random, no PII); enables
+                      unique-user / conversion / retention metrics
         session     — 8-char random hex, ephemeral, NOT persisted
     """
 
@@ -77,4 +79,5 @@ class TelemetryEvent:
     success: bool = True
     error_kind: Optional[str] = None
     feature: Optional[str] = None
+    install: str = ""
     session: str = ""
