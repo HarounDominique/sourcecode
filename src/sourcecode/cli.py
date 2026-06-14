@@ -653,6 +653,33 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+_WELCOME_LOGO = (
+    "┌─┐┌─┐┬ ┬┬─┐┌─┐┌─┐┌─┐┌─┐┌┬┐┌─┐",
+    "└─┐│ ││ │├┬┘│  ├┤ │  │ │ ││├┤ ",
+    "└─┘└─┘└─┘┴└─└─┘└─┘└─┘└─┘─┴┘└─┘",
+)
+
+_WELCOME_CMDS = (
+    ("sourcecode --compact", "repo summary"),
+    ("sourcecode prepare-context onboard", "onboarding"),
+    ("sourcecode mcp init", "connect IDE"),
+)
+
+
+def _print_welcome_plain(tier: str) -> None:
+    """Plain-text welcome — fallback when rich is unavailable."""
+    lines = ["", f"  sourcecode {__version__}   ·   {tier}", "",
+             "  AI coding-agent context, instant.", "", "  Get started:"]
+    for cmd, desc in _WELCOME_CMDS:
+        lines.append(f"    {cmd.ljust(34)}{desc}")
+    lines.append("")
+    lines.append("  sourcecode --help   all commands")
+    if tier != "Pro":
+        lines.append("  sourcecode activate <key>   unlock Pro")
+    lines.append("")
+    typer.echo("\n".join(lines))
+
+
 def _print_welcome() -> None:
     """Branded quickstart shown only on a bare invocation at a human terminal.
 
@@ -665,24 +692,50 @@ def _print_welcome() -> None:
     except Exception:
         tier = "Free"
 
-    lines = [
-        "",
-        f"  sourcecode {__version__}   ·   {tier}",
-        "",
-        "  Structural context for AI coding agents — analyze a repo, get",
-        "  LLM-ready JSON in milliseconds.",
-        "",
-        "  Get started:",
-        "    sourcecode --compact                high-signal summary of this repo",
-        "    sourcecode prepare-context onboard  full onboarding context",
-        "    sourcecode mcp init                 connect Claude / Cursor",
-        "",
-        "  sourcecode --help           all commands",
-    ]
+    try:
+        from rich import box
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.text import Text
+    except Exception:
+        _print_welcome_plain(tier)
+        return
+
+    w = max(len(s) for s in _WELCOME_LOGO)
+    pad = max(len(c) for c, _ in _WELCOME_CMDS) + 2
+    tier_style = "green" if tier != "Pro" else "magenta"
+
+    t = Text()
+    t.append(_WELCOME_LOGO[0].ljust(w) + "\n", style="bold cyan")
+    t.append(_WELCOME_LOGO[1].ljust(w), style="bold cyan")
+    t.append(f"   {__version__}\n", style="dim")
+    t.append(_WELCOME_LOGO[2].ljust(w), style="bold cyan")
+    t.append("   ")
+    t.append(tier + "\n\n", style=tier_style)
+
+    t.append("AI coding-agent context, instant.\n\n", style="white")
+
+    for cmd, desc in _WELCOME_CMDS:
+        t.append("▸ ", style="cyan")
+        t.append(cmd.ljust(pad), style="bold")
+        t.append(desc + "\n", style="dim")
+
+    t.append("\n--help", style="bold")
+    t.append("  ·  ", style="dim")
     if tier != "Pro":
-        lines.append("  sourcecode activate <key>   unlock Pro (large repos)")
-    lines.append("")
-    typer.echo("\n".join(lines))
+        t.append("activate <key>", style="bold")
+        t.append(" for Pro", style="dim")
+    else:
+        t.append("you're on Pro ✓", style="green")
+
+    panel = Panel(
+        t,
+        box=box.ROUNDED,
+        border_style="cyan",
+        padding=(1, 3),
+        expand=False,
+    )
+    Console().print(panel)
 
 
 @app.callback(invoke_without_command=True)
