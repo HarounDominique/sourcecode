@@ -653,6 +653,38 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _print_welcome() -> None:
+    """Branded quickstart shown only on a bare invocation at a human terminal.
+
+    Agents and pipes never reach here: they either pass args/flags or stdout is
+    not a TTY, so the JSON machine contract is completely unchanged.
+    """
+    try:
+        from sourcecode import license as _lic
+        tier = "Pro" if _lic.is_pro else "Free"
+    except Exception:
+        tier = "Free"
+
+    lines = [
+        "",
+        f"  sourcecode {__version__}   ·   {tier}",
+        "",
+        "  Structural context for AI coding agents — analyze a repo, get",
+        "  LLM-ready JSON in milliseconds.",
+        "",
+        "  Get started:",
+        "    sourcecode --compact                high-signal summary of this repo",
+        "    sourcecode prepare-context onboard  full onboarding context",
+        "    sourcecode mcp init                 connect Claude / Cursor",
+        "",
+        "  sourcecode --help           all commands",
+    ]
+    if tier != "Pro":
+        lines.append("  sourcecode activate <key>   unlock Pro (large repos)")
+    lines.append("")
+    typer.echo("\n".join(lines))
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -901,6 +933,13 @@ def main(
     # When a subcommand is invoked, skip the main analysis.
     if ctx.invoked_subcommand is not None:
         return
+
+    # Bare invocation at a human terminal → branded quickstart instead of
+    # dumping a large JSON blob. Agents/pipes are untouched: any arg/flag, or a
+    # non-TTY stdout (piped), falls through to the normal analysis + JSON.
+    if len(sys.argv) <= 1 and sys.stdout.isatty():
+        _print_welcome()
+        raise typer.Exit()
 
     _t0 = time.monotonic()
     no_tree: bool = False  # set True by --agent; --no-tree flag removed
