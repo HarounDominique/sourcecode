@@ -27,7 +27,7 @@ pipx install sourcecode   # isolated install, no venv needed
 
 # Verify
 sourcecode version
-# sourcecode 1.38.0
+# sourcecode 1.39.0
 ```
 
 Requires Python 3.9+.
@@ -125,6 +125,33 @@ The result then reports `resolved_from_openapi_spec`, `spec_sourced_endpoints`
 and `openapi_spec` (the spec path). Controllers whose interface has no matching
 spec operation keep an explicit `warnings[]` entry instead of being silently
 blind.
+
+### `sourcecode validation` [free]
+
+Map request-body validation per endpoint, combining the two sources of
+bean-validation truth an agent needs before touching a payload:
+
+```bash
+sourcecode validation /path/to/repo
+sourcecode validation . --gaps-only          # only endpoints/fields lacking validation
+sourcecode validation . --path-prefix /owners
+sourcecode validation . --format yaml
+```
+
+- **Declarative constraints** from the OpenAPI spec DTOs (`@Pattern`/`@Size`/
+  `@NotNull`, `minimum`/`maximum`, `enum`) — recovered even when the DTOs are
+  generated under `target/generated-sources` (not scanned).
+- **Custom validators** written by hand — a `@Constraint` annotation plus its
+  `ConstraintValidator` implementation (e.g. `PetAgeValidator`) — discovered in
+  source and linked to fields through openapi-generator's
+  `x-field-extra-annotation` vendor extension.
+
+Output: `endpoints[]` with `validatedFields` (each field's `rules` +
+`customValidators`), the `custom_validators` catalog (annotation, validator
+class, default message, validated types), `gaps[]` (POST/PUT/PATCH endpoints
+with no declared validation), and a `summary`. An unresolved custom annotation
+(referenced in the spec but with no validator in source) is reported with
+`resolved: false`. JAVA/SPRING ONLY.
 
 ### `sourcecode spring-audit` [free]
 
@@ -400,6 +427,7 @@ Allowed formats per command (the first is the default):
 | `repo-ir` | `json`, `yaml` | `json` |
 | `impact` | `json`, `yaml` | `json` |
 | `endpoints` | `json`, `yaml` | `json` |
+| `validation` | `json`, `yaml` | `json` |
 | `impact-chain` | `json`, `yaml` | `json` |
 | `spring-audit` | `json`, `yaml`, `github-comment` | `json` |
 | `prepare-context` | `json`, `github-comment` | `json` |

@@ -37,6 +37,7 @@ single-repo, offline.**
 | Repo shape + tech-stack detection | `sourcecode .` | Java, Spring, Quarkus, MyBatis, Go, Python, … |
 | Compact / agent LLM output | `--compact` / `--agent` | Bounded summary or structured JSON |
 | Endpoint surface extraction | `sourcecode endpoints .` | Spring MVC + JAX-RS, security annotations |
+| Request-body validation surface | `sourcecode validation .` | OpenAPI constraints + custom validators per endpoint; JAVA/SPRING only |
 | Canonical IR (CIR) | `sourcecode repo-ir .` | Stable, deterministic, fingerprinted |
 | **Full blast-radius intelligence** | `sourcecode impact <target>` | Mappers, security surface, cross-module, confidence, explanation |
 | **PR risk scoring** | `sourcecode review-pr --since <ref>` | Per-symbol change risk, BFS propagation, transactional surface |

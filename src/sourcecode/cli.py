@@ -230,6 +230,8 @@ _SUBCOMMANDS: frozenset[str] = frozenset(
         "cold-start",
         # Spring semantic audit
         "spring-audit",
+        # Request-body validation surface
+        "validation",
         # Spring impact chain
         "impact-chain",
         # PR blast-radius report
@@ -3910,6 +3912,105 @@ def endpoints_cmd(
 
     _emit_command_output(output, output_path, copy,
                          success_msg=f"Endpoints written to {output_path} ({data['total']} endpoints)")
+
+    from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
+    _nudge()
+
+
+@app.command("validation")
+def validation_cmd(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository path to scan for request-body validation (default: current directory)",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    format: str = typer.Option(
+        "json",
+        "--format",
+        "-f",
+        help="Output format: json (default) or yaml.",
+        show_default=True,
+    ),
+    copy: bool = typer.Option(
+        False,
+        "--copy",
+        "-c",
+        help="Copy output to system clipboard after a successful run.",
+    ),
+    path_prefix: Optional[str] = typer.Option(
+        None, "--path-prefix", "-p",
+        help="Filter endpoints whose URL path starts with this prefix.",
+    ),
+    gaps_only: bool = typer.Option(
+        False, "--gaps-only",
+        help="Report only endpoints/fields with no declared validation (the gaps section).",
+    ),
+) -> None:
+    """Map request-body validation per endpoint (constraints + custom validators).
+
+    \b
+    Aggregates two sources of bean-validation truth so an agent knows exactly
+    what a request body must satisfy before touching it:
+      * declarative constraints on the DTOs (@Pattern/@Size/@NotNull, min/max,
+        enum), recovered from the OpenAPI spec even when the DTOs are generated
+        under target/generated-sources (not scanned);
+      * hand-written custom validators (@Constraint + ConstraintValidator, e.g.
+        PetAgeValidator), linked to fields via x-field-extra-annotation.
+
+    \b
+    Output (JSON): per-endpoint validatedFields with their rules + custom
+    validators, the discovered custom-validator catalog, and the set of body
+    endpoints with no declared validation (gaps).
+
+    \b
+    Examples:
+      sourcecode validation .
+      sourcecode validation . --gaps-only
+      sourcecode validation . --path-prefix /owners
+      sourcecode validation . --format yaml
+    """
+    _enforce_format("validation", format)
+
+    target = path.resolve()
+    if not target.exists() or not target.is_dir():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"'{target}' is not a valid directory.",
+            path=str(target),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
+        )
+        raise typer.Exit(code=1)
+
+    from sourcecode.validation_surface import build_validation_surface
+    data = build_validation_surface(target)
+
+    if path_prefix:
+        data["endpoints"] = [
+            e for e in data.get("endpoints", [])
+            if str(e.get("path", "")).startswith(path_prefix)
+        ]
+        data["gaps"] = [
+            g for g in data.get("gaps", [])
+            if str(g.get("path", "")).startswith(path_prefix)
+        ]
+    if gaps_only:
+        data = {
+            "gaps": data.get("gaps", []),
+            "summary": data.get("summary", {}),
+        }
+
+    output = _serialize_dict(data, format)
+    _summary = data.get("summary", {})
+    _emit_command_output(
+        output, output_path, copy,
+        success_msg=f"Validation surface written to {output_path} "
+        f"({_summary.get('endpoints_with_body', 0)} body endpoints, "
+        f"{_summary.get('gaps', 0)} gaps)",
+    )
 
     from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
     _nudge()

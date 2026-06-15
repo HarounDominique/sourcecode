@@ -2,7 +2,7 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.38.0-blue)
+![Version](https://img.shields.io/badge/version-1.39.0-blue)
 ![Python](https://img.shields.io/badge/python-3.9%2B-green)
 
 ---
@@ -76,7 +76,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.38.0
+# sourcecode 1.39.0
 ```
 
 ---
@@ -110,6 +110,9 @@ sourcecode impact-chain OrderPlacedEvent /path/to/repo --type events
 
 # REST endpoint surface
 sourcecode endpoints /path/to/repo
+
+# Request-body validation per endpoint: constraints + custom validators (free)
+sourcecode validation /path/to/repo
 
 # Onboard to an unfamiliar codebase
 sourcecode onboard /path/to/repo

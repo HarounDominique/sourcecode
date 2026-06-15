@@ -866,6 +866,31 @@ Supports Spring MVC (@GetMapping etc.) and JAX-RS (@GET/@POST etc.).
 repo_path: absolute path to the Java repository (default: current working directory).
 """
 
+    _GET_VALIDATION_DOC = """\
+Request-body validation surface per endpoint. JAVA/SPRING ONLY.
+
+Do NOT call this on non-Java repositories — it will return empty results.
+
+Combines two sources of bean-validation truth so you know what a request body
+must satisfy before generating a payload, a test, or reasoning about a 400:
+  * declarative constraints on the DTOs (@Pattern/@Size/@NotNull, minimum/maximum,
+    enum) — recovered from the OpenAPI spec even when DTOs are generated under
+    target/generated-sources (not scanned);
+  * hand-written custom validators (@Constraint + ConstraintValidator, e.g.
+    PetAgeValidator), linked to fields via x-field-extra-annotation.
+
+Maps to: sourcecode validation <repo_path>
+Returns: endpoints[] (method, path, controller, handler, schema, validatedFields[
+  {name, rules[{kind,value}], customValidators[{annotation,validators,message,resolved}]}]),
+  custom_validators[] (catalog: annotation, validators, message, validatedTypes, targets),
+  gaps[] (POST/PUT/PATCH endpoints with no declared validation),
+  summary, openapi_spec.
+An unresolved custom annotation (referenced in the spec, no validator in source)
+is reported with resolved=false.
+repo_path: absolute path to the Java repository (default: current working directory).
+gaps_only: when true, return only the gaps section (endpoints lacking validation).
+"""
+
     _CACHE_STATUS_DOC = """\
 Report cache metadata for a repository.
 
@@ -1083,6 +1108,27 @@ repo_path: absolute path to the repository (default: current working directory).
             docstring_override=_GET_ENDPOINTS_DOC,
         ),
 
+        # --- get_validation: clean alias replacing raw canonical (6 CLI params) ---
+        _alias_spec(
+            "get_validation",
+            "Request-body validation surface per endpoint (constraints + custom validators). JAVA/SPRING ONLY.",
+            ("validation",),
+            (
+                ToolParamSpec("repo_path", "argument", str, required=False, default=".", is_path=True),
+                ToolParamSpec("gaps_only", "option", bool, required=False, default=False,
+                              option_names=("--gaps-only",), is_flag=True,
+                              help="Return only endpoints/fields lacking validation."),
+            ),
+            lambda inputs: (
+                ["validation", str(inputs.get("repo_path", "."))]
+                + (["--gaps-only"] if bool(inputs.get("gaps_only")) else [])
+            ),
+            supported_targets=("repo_path",),
+            unsupported_targets=("file_path",),
+            validator=validate_repo_path,
+            docstring_override=_GET_VALIDATION_DOC,
+        ),
+
         # --- cache management: curated aliases stripping CLI noise params ---
         _alias_spec(
             "cache_status",
@@ -1214,6 +1260,7 @@ _MCP_HIDDEN_CANONICAL_TOOLS: frozenset[str] = frozenset({
     "modernize",          # duplicate of modernize_context
     # Raw CLI tools with output-format/noise params — clean alias with only repo_path exists
     "endpoints",          # 7 CLI params (output_path/format/copy/etc.); use get_endpoints
+    "validation",         # 6 CLI params (output_path/format/copy/path_prefix/gaps_only); use get_validation
     "cache_status",       # path + json_output flag; curated alias strips json_output, renames path→repo_path
     "cache_warm",         # path + compact/agent output flags; curated alias keeps only repo_path
     "cache_clear",        # path + yes/all_ destructive flags; curated alias keeps repo_path + include_ris only

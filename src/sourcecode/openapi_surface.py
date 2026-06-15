@@ -68,6 +68,9 @@ class FieldConstraint:
     fmt: Optional[str] = None
     enum: Optional[list[Any]] = None
     ref: Optional[str] = None  # schema name when the field is an object/array ref
+    # Custom bean-validation annotations injected via openapi-generator's
+    # ``x-field-extra-annotation`` vendor extension (simple class names).
+    extra_annotations: "list[str]" = field(default_factory=list)
 
     def to_dict(self) -> "dict[str, Any]":
         out: "dict[str, Any]" = {"name": self.name, "required": self.required}
@@ -84,6 +87,8 @@ class FieldConstraint:
         ):
             if val is not None:
                 out[key] = val
+        if self.extra_annotations:
+            out["extraAnnotations"] = self.extra_annotations
         return out
 
 
@@ -255,6 +260,32 @@ def _ref_name(ref: Any) -> Optional[str]:
     return None
 
 
+def _extra_annotations(prop: "dict[str, Any]") -> "list[str]":
+    """Extract simple class names from ``x-field-extra-annotation``.
+
+    openapi-generator injects custom bean-validation annotations on generated DTO
+    fields via this vendor extension, e.g.
+    ``x-field-extra-annotation: "@com.x.PetAgeValidation"`` (string) or a list of
+    such entries. We keep the trailing simple name (``PetAgeValidation``).
+    """
+    import re as _re
+
+    raw = prop.get("x-field-extra-annotation")
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    names: "list[str]" = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        # Each entry may carry several annotations; grab every @Name token.
+        for m in _re.finditer(r"@\s*([\w.]+)", item):
+            simple = m.group(1).rsplit(".", 1)[-1]
+            if simple and simple not in names:
+                names.append(simple)
+    return names
+
+
 def _field_from_property(name: str, prop: Any, required: bool) -> FieldConstraint:
     fc = FieldConstraint(name=name, required=required)
     if not isinstance(prop, dict):
@@ -276,6 +307,7 @@ def _field_from_property(name: str, prop: Any, required: bool) -> FieldConstrain
     enum = prop.get("enum")
     if isinstance(enum, list):
         fc.enum = list(enum)
+    fc.extra_annotations = _extra_annotations(prop)
     if fc.type is None and prop.get("type") == "array":
         items = prop.get("items")
         if isinstance(items, dict):

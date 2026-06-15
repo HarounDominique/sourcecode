@@ -27,6 +27,7 @@ FORMAT_REGISTRY: "dict[str, tuple[str, ...]]" = {
     "repo-ir": ("json", "yaml"),
     "impact": ("json", "yaml"),
     "endpoints": ("json", "yaml"),
+    "validation": ("json", "yaml"),
     "impact-chain": ("json", "yaml"),
     "pr-impact": ("text", "json"),
     "migrate-check": ("json", "text"),
