@@ -327,6 +327,23 @@ sourcecode endpoints /path/to/repo --output endpoints.json
 
 Extracts all Spring MVC (`@GetMapping`, `@PostMapping`, `@RequestMapping`, etc.) and JAX-RS (`@GET`, `@POST`, `@Path`) endpoint methods. Returns HTTP method, path, controller class, and handler method.
 
+**Custom security annotations.** Enterprise repos often guard endpoints with a bespoke annotation instead of `@PreAuthorize`/`@Secured`. Drop a `sourcecode.config.json` at the repo root to teach the scanner about it — otherwise those endpoints report `policy: "none_detected"`:
+
+```json
+{
+  "customSecurityAnnotations": [
+    {
+      "fullyQualifiedName": "com.example.security.M3FiltroSeguridad",
+      "shortName": "M3FiltroSeguridad",
+      "resourceParam": "nombreRecurso",
+      "levelParam": "nivelRequerido"
+    }
+  ]
+}
+```
+
+Matching endpoints then report `policy: "custom"` with `annotation`, `resourceName`, and `requiredLevel`, and are no longer counted in `no_security_signal`. Repos without the config behave exactly as before.
+
 ### `spring-audit` — Spring semantic audit [free]
 
 ```bash

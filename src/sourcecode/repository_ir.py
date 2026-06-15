@@ -24,6 +24,11 @@ from typing import Any, Optional
 
 from sourcecode.fqn_utils import normalize_owner_fqn as _normalize_owner_fqn
 from sourcecode.path_filters import is_test_path as _is_test_path
+from sourcecode.security_config import (
+    CustomSecuritySpec,
+    capture_markers as _capture_markers,
+    load_custom_security as _load_custom_security,
+)
 
 # ---------------------------------------------------------------------------
 # Data classes — Phases 1–4
@@ -595,8 +600,17 @@ def _resolve_types_from_text(text: str, import_map: dict[str, str]) -> list[str]
 # Phase 1 — Symbol extraction
 # ---------------------------------------------------------------------------
 
-def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord], list[str]]:
+def _extract_symbols(
+    source: str,
+    rel_path: str,
+    *,
+    extra_capture: "frozenset[str]" = frozenset(),
+) -> tuple[str, list[SymbolRecord], list[str]]:
     """Phase 1: Extract symbols from a Java source file.
+
+    extra_capture: extra annotation tokens (e.g. custom security annotations like
+    "@M3FiltroSeguridad") whose argument lists must be stored in annotation_values
+    even though they are not in the built-in _CAPTURE_ANN_ARGS set.
 
     Returns (package, symbols, raw_imports).
     """
@@ -675,7 +689,7 @@ def _extract_symbols(source: str, rel_path: str) -> tuple[str, list[SymbolRecord
             if ann:
                 if ann not in pending_anns:
                     pending_anns.append(ann)
-                if ann_args and ann in _CAPTURE_ANN_ARGS:
+                if ann_args and (ann in _CAPTURE_ANN_ARGS or ann in extra_capture):
                     # P1 fix: attempt to resolve constant expressions before storing.
                     # Transforms '"/" + SECTION_KEY' → '"/category"' when constant
                     # is defined in this file. Falls back to original if unresolvable.
@@ -2225,6 +2239,7 @@ def _assemble(
     changed_symbols: list[ChangedSymbol],
     spring_summary: dict,  # noqa: ARG001 — used internally via _spring_role on symbols
     route_diffs: list[dict] | None = None,
+    custom_security: "tuple[CustomSecuritySpec, ...]" = (),
 ) -> dict:
     """Phase 5: Final assembly — single deterministic output contract."""
     sorted_syms = sorted(symbols, key=lambda s: s.symbol)
@@ -2485,7 +2500,9 @@ def _assemble(
         e.from_symbol: e.to_symbol.split(".")[-1]
         for e in sorted_rels if e.type == "extends"
     }
-    _route_surface = _build_route_surface(sorted_syms, route_diffs, extends_map=_extends_map)
+    _route_surface = _build_route_surface(
+        sorted_syms, route_diffs, extends_map=_extends_map, custom_security=custom_security
+    )
     _analysis_gaps = _compute_analysis_gaps(sorted_syms, spring_summary, _route_surface, sorted_rels)
 
     # Detect filter-based security model for the assembled IR.
@@ -2536,9 +2553,29 @@ def _assemble(
 # Route surface security extraction
 # ---------------------------------------------------------------------------
 
+def _custom_ann_param(raw: str, key: str) -> str:
+    """Extract `key = value` from a raw annotation argument string.
+
+    Prefers a quoted string literal; falls back to a bare token (constant ref
+    such as ``SeguridadRecursosConst.RRHH_MOVADMINISTRATIVOS``). Returns "" when
+    the key is absent.
+    """
+    import re as _re
+    if not key:
+        return ""
+    m = _re.search(rf'\b{_re.escape(key)}\s*=\s*"([^"]+)"', raw)
+    if m:
+        return m.group(1)
+    m = _re.search(rf'\b{_re.escape(key)}\s*=\s*([A-Za-z_][\w.]*)', raw)
+    if m:
+        return m.group(1)
+    return ""
+
+
 def _route_security_from_sym(
     method_sym: "Optional[SymbolRecord]",
     class_sym: "Optional[SymbolRecord]",
+    custom_security: "tuple[CustomSecuritySpec, ...]" = (),
 ) -> "Optional[dict]":
     """Extract security policy from method and/or class-level annotations.
 
@@ -2557,6 +2594,10 @@ def _route_security_from_sym(
       @RequiresRoles          → {policy: requiresroles, roles: [...]}
       @RequiresPermissions    → {policy: requirespermissions, roles: [...]}
       @SecurityRequirement    → {policy: openapi_security, spec: ...}
+      <custom>                → {policy: custom, annotation, resourceName?, requiredLevel?}
+
+    custom_security: project-defined security annotations from sourcecode.config.json
+    (BUG-3). Checked after the built-in set so standard annotations always win.
 
     Falls back to class-level annotations if no method-level security found.
     Returns None if no security signal detected at either level.
@@ -2595,6 +2636,20 @@ def _route_security_from_sym(
         if "@SecurityRequirement" in anns:
             raw = vals.get("@SecurityRequirement", "")
             return {"policy": "openapi_security", "spec": raw.strip()}
+        # Project-defined custom security annotations (BUG-3).
+        for spec in custom_security:
+            if spec.marker in anns:
+                raw = vals.get(spec.marker, "")
+                out: dict = {"policy": "custom", "annotation": spec.short_name}
+                res = _custom_ann_param(raw, spec.resource_param)
+                lvl = _custom_ann_param(raw, spec.level_param)
+                if res:
+                    out["resourceName"] = res
+                if lvl:
+                    out["requiredLevel"] = lvl
+                if spec.risk_level and spec.risk_level != "custom":
+                    out["riskLevel"] = spec.risk_level
+                return out
         return None
 
     # Method-level first, then class-level fallback
@@ -2614,6 +2669,7 @@ def _build_route_surface(
     symbols: list[SymbolRecord],
     route_diffs: Optional[list[dict]],
     extends_map: Optional[dict[str, str]] = None,
+    custom_security: "tuple[CustomSecuritySpec, ...]" = (),
 ) -> list[dict]:
     """Return route surface with inheritance projection and JAX-RS sub-resource locator resolution.
 
@@ -2719,7 +2775,7 @@ def _build_route_surface(
 
         # P1 FIX: extract security annotations (method-level first, class fallback)
         _cls_sym_for_sec = class_sym_by_simple.get(cls_simple)
-        _sec = _route_security_from_sym(sym, _cls_sym_for_sec)
+        _sec = _route_security_from_sym(sym, _cls_sym_for_sec, custom_security)
 
         # Programmatic security fallback: scan controller file when no annotation found.
         if _sec is None:
@@ -2857,16 +2913,24 @@ def build_repo_ir(
     root: Path,
     *,
     since: Optional[str] = None,
+    custom_security: "Optional[list[CustomSecuritySpec]]" = None,
 ) -> dict:
     """Build IR across multiple Java files in a repo.
 
     Args:
-        file_paths: Relative paths to Java files to analyze.
-        root:       Absolute repo root.
-        since:      Git ref for symbol diff (e.g. "HEAD~1", "main").
+        file_paths:      Relative paths to Java files to analyze.
+        root:            Absolute repo root.
+        since:           Git ref for symbol diff (e.g. "HEAD~1", "main").
+        custom_security: Custom security annotation specs (BUG-3). When None,
+                         loaded from <root>/sourcecode.config.json.
 
     Returns aggregated deterministic IR dict (schema_version=final-v1).
     """
+    if custom_security is None:
+        custom_security = _load_custom_security(root)
+    _custom_sec_tuple = tuple(custom_security)
+    _extra_capture = _capture_markers(custom_security)
+
     all_symbols: list[SymbolRecord] = []
     all_relations: list[RelationEdge] = []
     all_changed: list[ChangedSymbol] = []
@@ -2926,7 +2990,11 @@ def build_repo_ir(
             continue
         for _m in re.finditer(r'@interface\s+(\w+)', _src):
             _custom_meta_markers.add(f"@{_m.group(1)}")
-    _effective_markers = _ANNOTATION_MARKERS + tuple(_custom_meta_markers)
+    # Custom security annotations (BUG-3) are also pre-scan markers so files
+    # whose only relevant annotation is a custom one aren't filtered out.
+    _effective_markers = (
+        _ANNOTATION_MARKERS + tuple(_custom_meta_markers) + tuple(_extra_capture)
+    )
 
     _per_file: list[tuple[str, str, str, list[str], list[SymbolRecord]]] = []
     for rel_path in sorted(file_paths):
@@ -2955,7 +3023,9 @@ def build_repo_ir(
             all_symbols.extend(_min_syms)
             # No relations needed for non-annotated files
             continue
-        package, symbols, raw_imports = _extract_symbols(source, rel_path)
+        package, symbols, raw_imports = _extract_symbols(
+            source, rel_path, extra_capture=_extra_capture
+        )
         all_symbols.extend(symbols)
         _per_file.append((rel_path, source, package, raw_imports, symbols))
 
@@ -2977,7 +3047,9 @@ def build_repo_ir(
                 old_source = _get_git_old_content(root, rel_path, since)
 
         if old_source is not None:
-            _, old_symbols, _ = _extract_symbols(old_source, rel_path)
+            _, old_symbols, _ = _extract_symbols(
+                old_source, rel_path, extra_capture=_extra_capture
+            )
             all_changed.extend(_diff_symbols(old_symbols, symbols))
             all_route_diffs.extend(_diff_routes(old_symbols, symbols))
         elif since and (_since_changed is None or rel_path in _since_changed):
@@ -3008,7 +3080,10 @@ def build_repo_ir(
     route_diffs_arg: Optional[list[dict]] = (
         sorted(all_route_diffs, key=lambda d: d["symbol"]) if since else None
     )
-    ir = _assemble(all_symbols, unique_relations, all_changed, spring_summary, route_diffs_arg)
+    ir = _assemble(
+        all_symbols, unique_relations, all_changed, spring_summary, route_diffs_arg,
+        custom_security=_custom_sec_tuple,
+    )
 
     # BUG-7: XML Spring Security detection for the canonical CIR pipeline.
     # _assemble only sees Java symbols — XML config is invisible to it.
@@ -3370,6 +3445,11 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
 
     _EXTENDS_FROM_SIG = _re.compile(r'\bextends\s+(\w+)')
 
+    # Custom security annotations (BUG-3): recognized via sourcecode.config.json.
+    _custom_security = _load_custom_security(root)
+    _custom_sec_tuple = tuple(_custom_security)
+    _extra_capture = _capture_markers(_custom_security)
+
     # Exclude REST client proxy modules — they use JAX-RS annotations for client-side
     # proxy generation (RESTEasy, MicroProfile REST Client) and are NOT server resources.
     _CLIENT_PATH_FRAGMENTS = (
@@ -3394,7 +3474,7 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             rel = str(jf.relative_to(root)).replace("\\", "/")
         except ValueError:
             rel = str(jf).replace("\\", "/")
-        _, symbols, _ = _extract_symbols(source, rel)
+        _, symbols, _ = _extract_symbols(source, rel, extra_capture=_extra_capture)
         for sym in symbols:
             all_symbols.append(sym)
             if sym.type in ("class", "interface"):
@@ -3402,7 +3482,10 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
                 if m:
                     extends_map[sym.symbol] = m.group(1)
 
-    routes = _build_route_surface(all_symbols, route_diffs=None, extends_map=extends_map)
+    routes = _build_route_surface(
+        all_symbols, route_diffs=None, extends_map=extends_map,
+        custom_security=_custom_sec_tuple,
+    )
 
     # Security extraction: _build_route_surface already calls _route_security_from_sym
     # and stores the result as route["security_annotations"].
