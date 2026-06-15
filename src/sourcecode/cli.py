@@ -401,6 +401,28 @@ def _emit_error_json(error: str, message: str, **context: object) -> None:
     sys.stderr.flush()
 
 
+def _enforce_format(command: str, fmt: str) -> None:
+    """Validate ``--format`` for ``command`` against the central contract.
+
+    Single validation path for every command's ``--format`` option (see
+    ``sourcecode.format_contract``). On an invalid value it emits the
+    homogeneous JSON error envelope to stderr and exits with code 2
+    (argument-validation convention). Valid values are a no-op.
+    """
+    from sourcecode.format_contract import (
+        FORMAT_ERROR_EXIT_CODE,
+        format_error_context,
+        is_valid_format,
+    )
+
+    if is_valid_format(command, fmt):
+        return
+    ctx = format_error_context(command, fmt)
+    message = str(ctx.pop("message"))
+    _emit_error_json(INVALID_INPUT_CODE, message, **ctx)
+    raise typer.Exit(code=FORMAT_ERROR_EXIT_CODE)
+
+
 def _safe_write_file(path: "Path", content: str) -> None:
     """Write content to path, emitting a clean JSON error on I/O failure."""
     try:
@@ -631,7 +653,8 @@ def _active_flags(
     if fmt != "json": flags.append("--format")
     return flags
 
-FORMAT_CHOICES = ["json", "yaml"]
+# Per-command output-format contracts now live in sourcecode.format_contract
+# (validated via _enforce_format). No module-level FORMAT_CHOICES here.
 GRAPH_DETAIL_CHOICES = ["high", "medium", "full"]
 GRAPH_EDGE_CHOICES = {"imports", "calls", "contains", "extends"}
 DOCS_DEPTH_CHOICES = ["module", "symbols", "full"]
@@ -1138,17 +1161,7 @@ def main(
         )
 
     # Validate format choices
-    if format not in FORMAT_CHOICES:
-        _emit_error_json(
-            INVALID_INPUT_CODE,
-            f"Invalid value '{format}' for --format. Valid values: {', '.join(FORMAT_CHOICES)}.",
-            flag="--format",
-            value=format,
-            valid_values=list(FORMAT_CHOICES),
-            hint="Choose one of the supported --format values.",
-            expected=f"One of: {', '.join(FORMAT_CHOICES)}",
-        )
-        raise typer.Exit(code=2)  # FIX-P2-7: arg validation → exit 2
+    _enforce_format("main", format)
     if graph_detail not in GRAPH_DETAIL_CHOICES:
         _emit_error_json(
             INVALID_INPUT_CODE,
@@ -2834,19 +2847,9 @@ def prepare_context_cmd(
     # Validate --format: only "json" and "github-comment" are valid for prepare-context.
     # "yaml" is intentionally NOT supported here (use main command for yaml output).
     # Invalid values must error loudly — silently falling through to JSON is a lie.
-    _PC_FORMAT_CHOICES = ("json", "github-comment")
-    if format is not None and format not in _PC_FORMAT_CHOICES:
-        _emit_error_json(
-            INVALID_INPUT_CODE,
-            f"invalid value '{format}' for --format. "
-            f"Valid options: {', '.join(_PC_FORMAT_CHOICES)}.",
-            flag="--format",
-            value=format,
-            valid_values=list(_PC_FORMAT_CHOICES),
-            hint="Choose one of the supported prepare-context output formats.",
-            expected=f"One of: {', '.join(_PC_FORMAT_CHOICES)}",
-        )
-        raise typer.Exit(code=2)
+    # None means "use default" (json); a concrete value is validated against the contract.
+    if format is not None:
+        _enforce_format("prepare-context", format)
     # github-comment only renders for review-pr; warn and normalize for other tasks.
     if format == "github-comment" and task != "review-pr":
         typer.echo(
@@ -3479,14 +3482,7 @@ def repo_ir_cmd(
 
     from sourcecode.repository_ir import apply_ir_size_limits, build_repo_ir, find_java_files
 
-    if format not in ("json", "yaml"):
-        _emit_error_json(
-            INVALID_INPUT_CODE,
-            f"Invalid format '{format}'.",
-            hint="Valid values: json, yaml.",
-            expected="json | yaml",
-        )
-        raise typer.Exit(code=1)
+    _enforce_format("repo-ir", format)
 
     root = path.resolve()
     if not root.is_dir():
@@ -3712,14 +3708,7 @@ def impact_cmd(
     from sourcecode.license import require_repo_or_pro as _require_repo_or_pro
     _require_repo_or_pro(str(path.resolve()), "impact")
 
-    if format not in ("json", "yaml"):
-        _emit_error_json(
-            INVALID_INPUT_CODE,
-            f"Invalid format '{format}'.",
-            hint="format must be: json or yaml.",
-            expected="json | yaml",
-        )
-        raise typer.Exit(code=1)
+    _enforce_format("impact", format)
 
     from sourcecode.repository_ir import (
         build_repo_ir, find_java_files, compute_blast_radius,
@@ -3875,14 +3864,7 @@ def endpoints_cmd(
       sourcecode endpoints . --controller LiquidacionJornada
       sourcecode endpoints . --limit 10
     """
-    if format not in ("json", "yaml"):
-        _emit_error_json(
-            INVALID_INPUT_CODE,
-            f"Invalid format '{format}'.",
-            hint="format must be: json or yaml.",
-            expected="json | yaml",
-        )
-        raise typer.Exit(code=1)
+    _enforce_format("endpoints", format)
 
     target = path.resolve()
     if not target.exists() or not target.is_dir():
@@ -4116,14 +4098,7 @@ def spring_audit_cmd(
         )
         raise typer.Exit(code=1)
 
-    if format not in ("json", "yaml", "github-comment"):
-        _emit_error_json(
-            INVALID_INPUT_CODE,
-            f"Invalid format '{format}'.",
-            hint="format must be one of: json, yaml, github-comment.",
-            expected="json | yaml | github-comment",
-        )
-        raise typer.Exit(code=1)
+    _enforce_format("spring-audit", format)
 
     _file_limitations: list[str] = []
     file_list = find_java_files(target, limitations=_file_limitations)
@@ -4274,14 +4249,7 @@ def migrate_check_cmd(
         )
         raise typer.Exit(code=1)
 
-    if format not in ("json", "text"):
-        _emit_error_json(
-            INVALID_INPUT_CODE,
-            f"Invalid format '{format}'.",
-            hint="format must be one of: json, text.",
-            expected="json | text",
-        )
-        raise typer.Exit(code=1)
+    _enforce_format("migrate-check", format)
 
     if min_severity not in ("critical", "high", "medium", "low"):
         _emit_error_json(
@@ -4426,14 +4394,7 @@ def impact_chain_cmd(
         )
         raise typer.Exit(code=1)
 
-    if format not in ("json", "yaml"):
-        _emit_error_json(
-            INVALID_INPUT_CODE,
-            f"Invalid format '{format}'.",
-            hint="format must be: json or yaml.",
-            expected="json | yaml",
-        )
-        raise typer.Exit(code=1)
+    _enforce_format("impact-chain", format)
 
     file_list = find_java_files(target)
     if not file_list:
@@ -4567,14 +4528,7 @@ def pr_impact_cmd(
         )
         raise typer.Exit(code=1)
 
-    if format not in ("text", "json"):
-        _emit_error_json(
-            INVALID_INPUT_CODE,
-            f"Invalid format '{format}'.",
-            hint="format must be: text or json.",
-            expected="text | json",
-        )
-        raise typer.Exit(code=1)
+    _enforce_format("pr-impact", format)
 
     # Read changed-files list
     changed_files = [
@@ -4699,14 +4653,7 @@ def explain_cmd(
         )
         raise typer.Exit(code=1)
 
-    if format not in ("text", "json"):
-        _emit_error_json(
-            INVALID_INPUT_CODE,
-            f"Invalid format '{format}'.",
-            hint="format must be: text or json.",
-            expected="text | json",
-        )
-        raise typer.Exit(code=1)
+    _enforce_format("explain", format)
 
     file_list = find_java_files(target)
     if not file_list:

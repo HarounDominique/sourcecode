@@ -427,9 +427,11 @@ class TestSpringAuditCIFlag:
         assert "<details>" in result.output
         assert "Finding details" in result.output
 
-    def test_invalid_format_exits_1(self, java_repo: Path):
+    def test_invalid_format_exits_2(self, java_repo: Path):
+        # Unified format contract (wave 19-02): invalid --format is an
+        # argument-validation error -> exit 2 on every command.
         result = invoke(["spring-audit", str(java_repo), "--format", "xml"])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
 
     def test_github_comment_output_file(self, java_repo: Path, tmp_path: Path):
         out = tmp_path / "comment.md"
