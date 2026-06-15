@@ -27,7 +27,7 @@ pipx install sourcecode   # isolated install, no venv needed
 
 # Verify
 sourcecode version
-# sourcecode 1.36.4
+# sourcecode 1.36.5
 ```
 
 Requires Python 3.9+.

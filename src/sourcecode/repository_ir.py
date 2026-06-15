@@ -486,6 +486,31 @@ def _normalize_type_name(raw: str) -> str:
     return raw.strip()
 
 
+def _split_supertype_list(raw: str) -> list[str]:
+    """Split an ``extends``/``implements`` clause into individual base type names.
+
+    Handles multiple supertypes (interfaces may extend several) and strips generic
+    type arguments *before* splitting so that commas inside ``<...>`` do not corrupt
+    the result.  e.g. ``"VetRepository, Repository<Vet, Integer>"`` → ``["VetRepository",
+    "Repository"]``.
+    """
+    if not raw or not raw.strip():
+        return []
+    # Iteratively remove (possibly nested) generic parameters so any commas they
+    # contain are gone before we split on the top-level commas.
+    prev = None
+    stripped = raw
+    while prev != stripped:
+        prev = stripped
+        stripped = re.sub(r'<[^<>]*>', '', stripped)
+    bases: list[str] = []
+    for piece in stripped.split(","):
+        base = re.sub(r'<.*', '', piece).strip()
+        if base:
+            bases.append(base)
+    return bases
+
+
 def _parse_param_types(params_str: str) -> list[str]:
     """Parse "(Long id, @Valid String name)" → ["Long", "String"].
 
@@ -1166,29 +1191,29 @@ def _build_relations(
         class_fqn = f"{package}.{name}" if package else name
 
         if extends_str:
-            base = re.sub(r'<.*', '', extends_str).strip()
-            to = import_map.get(base, base)
-            edges.append(RelationEdge(
-                from_symbol=class_fqn,
-                to_symbol=to,
-                type="extends",
-                confidence="high",
-                evidence={"type": "signature", "value": f"extends {extends_str}"},
-            ))
+            # An interface may extend multiple interfaces (e.g.
+            # `extends VetRepository, Repository<Vet, Integer>`); split on top-level
+            # commas so each base produces its own edge and the reverse graph sees
+            # every supertype (not a single mangled token).
+            for base in _split_supertype_list(extends_str):
+                to = import_map.get(base, base)
+                edges.append(RelationEdge(
+                    from_symbol=class_fqn,
+                    to_symbol=to,
+                    type="extends",
+                    confidence="high",
+                    evidence={"type": "signature", "value": f"extends {extends_str}"},
+                ))
 
         if implements_str:
-            for iface in implements_str.split(","):
-                iface = iface.strip()
-                base = re.sub(r'<.*', '', iface).strip()
-                if not base:
-                    continue
+            for base in _split_supertype_list(implements_str):
                 to = import_map.get(base, base)
                 edges.append(RelationEdge(
                     from_symbol=class_fqn,
                     to_symbol=to,
                     type="implements",
                     confidence="high",
-                    evidence={"type": "signature", "value": f"implements {iface}"},
+                    evidence={"type": "signature", "value": f"implements {base}"},
                 ))
 
     # mapped_to edges: controller class → class-level @RequestMapping path prefix.
@@ -2973,6 +2998,11 @@ def build_repo_ir(
         '@Aspect', '@Aggregate', '@Document',
         # Spring Data
         '@Query', '@NamedQuery',
+        # Profile-gated beans/interfaces (e.g. Spring Data repository specializations
+        # like `@Profile("spring-data-jpa") interface FooRepo extends FooRepository`).
+        # Without this marker such interfaces are pre-scan-skipped and their
+        # extends/implements edges are lost — making them invisible to impact analysis.
+        '@Profile',
     )
     # Pre-pass: collect custom meta-annotation names from @interface definitions
     # that compose known Spring stereotypes (e.g. @DomainService = @Service + @Transactional).
@@ -3517,6 +3547,40 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             "note": "interface-based Spring MVC controller — URL mapped via XML",
         })
 
+    # Detect controllers whose HTTP mappings live on an IMPLEMENTED interface that is
+    # not part of the scanned source surface. The dominant case is openapi-generator
+    # "interface-only" output (e.g. PetV2Api, VetsApi) emitted under
+    # target/generated-sources, which the scanner excludes. Such a controller carries
+    # @RestController/@Controller and an `implements XxxApi` clause but contributes no
+    # method-level routes, so its endpoints are invisible. Emit an explicit warning so
+    # an empty/partial surface is not silently misread as "no endpoints / no security".
+    _CONTROLLER_ANNS = {"@RestController", "@Controller"}
+    _IMPLEMENTS_RE = _re.compile(r'\bimplements\s+(.+)$')
+    _routed_fqns = {route.get("effective_class") for route in routes}
+    interface_defined_controllers: list[str] = []
+    endpoint_warnings: list[str] = []
+    for sym in all_symbols:
+        if sym.type != "class":
+            continue
+        if not (_CONTROLLER_ANNS & set(sym.annotations)):
+            continue
+        if sym.symbol in _routed_fqns:
+            continue  # already contributes routes — surface is captured
+        m = _IMPLEMENTS_RE.search(sym.signature or "")
+        if not m:
+            continue
+        ifaces = _split_supertype_list(m.group(1))
+        api_ifaces = [i for i in ifaces if i.endswith("Api")]
+        if not api_ifaces:
+            continue
+        interface_defined_controllers.append(sym.symbol)
+        endpoint_warnings.append(
+            f"{sym.symbol.split('.')[-1]} implements {', '.join(api_ifaces)}: HTTP "
+            "mappings are declared on the implemented interface (commonly generated by "
+            "openapi-generator under target/generated-sources, which is not scanned). "
+            "Endpoint surface for this controller is NOT captured."
+        )
+
     endpoints: list[dict] = []
     for route in routes:
         handler = (
@@ -3643,7 +3707,7 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             if e.get("security", {}).get("policy") == "none_detected"
         )
 
-    return {
+    result: dict[str, Any] = {
         "endpoints": endpoints,
         "total": len(endpoints),
         "no_security_signal": no_security_signal,
@@ -3651,6 +3715,12 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
         # Keep legacy field name for backward compat, now means same as no_security_signal
         "undocumented": no_security_signal,
     }
+    # Surface incomplete-endpoint warnings (interface-defined controllers) only when
+    # present, to keep output backward-compatible for the common case.
+    if endpoint_warnings:
+        result["warnings"] = endpoint_warnings
+        result["interface_defined_controllers"] = interface_defined_controllers
+    return result
 
 
 def find_java_files(root: Path, *, max_files: int = 8000, limitations: list[str] | None = None) -> list[str]:
