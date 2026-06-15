@@ -6212,4 +6212,13 @@ def main_entry() -> None:
         except Exception:
             pass
     _preprocess_argv()
-    app()
+    try:
+        app()
+    finally:
+        # Best-effort "new version available" nudge. Only speaks on an
+        # interactive terminal; never blocks, raises, or affects exit status.
+        try:
+            from sourcecode.version_check import maybe_notify_update
+            maybe_notify_update(__version__)
+        except Exception:
+            pass
