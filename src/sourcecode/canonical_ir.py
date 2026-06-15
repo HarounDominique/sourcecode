@@ -59,6 +59,9 @@ class CanonicalSecurity:
     effective_roles: list[str] = field(default_factory=list)
     expression: str = ""                     # SpEL for @PreAuthorize/@PostAuthorize
     required_permission: str = ""            # for custom permission annotations
+    annotation: str = ""                     # custom security annotation short name (BUG-3)
+    resource_name: str = ""                  # resource guarded by custom annotation
+    required_level: str = ""                 # access level required by custom annotation
     raw: dict = field(default_factory=dict)  # full original policy dict
 
     def to_dict(self) -> dict:
@@ -70,6 +73,12 @@ class CanonicalSecurity:
             out["expression"] = self.expression
         if self.required_permission:
             out["required_permission"] = self.required_permission
+        if self.annotation:
+            out["annotation"] = self.annotation
+        if self.resource_name:
+            out["resourceName"] = self.resource_name
+        if self.required_level:
+            out["requiredLevel"] = self.required_level
         return out
 
     def to_full_dict(self) -> dict:
@@ -89,6 +98,9 @@ class CanonicalSecurity:
             effective_roles=list(d.get("roles", [])),
             expression=d.get("expression", ""),
             required_permission=d.get("required_permission", ""),
+            annotation=d.get("annotation", ""),
+            resource_name=d.get("resourceName", ""),
+            required_level=d.get("requiredLevel", ""),
             raw=dict(d),
         )
 

@@ -3854,6 +3854,18 @@ def endpoints_cmd(
     Extracts HTTP method, path, controller class, and handler method.
 
     \b
+    Custom security annotations: add a sourcecode.config.json at the repo root to
+    teach the scanner project-specific authorization annotations (otherwise reported
+    as policy "none_detected"):
+      {
+        "customSecurityAnnotations": [
+          {"shortName": "M3FiltroSeguridad",
+           "resourceParam": "nombreRecurso", "levelParam": "nivelRequerido"}
+        ]
+      }
+    Matching endpoints report policy "custom" with annotation/resourceName/requiredLevel.
+
+    \b
     Examples:
       sourcecode endpoints .
       sourcecode endpoints /path/to/repo
