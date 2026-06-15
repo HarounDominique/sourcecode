@@ -2,8 +2,8 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.36.1-blue)
-![Python](https://img.shields.io/badge/python-3.10%2B-green)
+![Version](https://img.shields.io/badge/version-1.36.4-blue)
+![Python](https://img.shields.io/badge/python-3.9%2B-green)
 
 ---
 
@@ -76,7 +76,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.36.1
+# sourcecode 1.36.4
 ```
 
 ---
@@ -245,7 +245,7 @@ Specifically:
 - Architecture pattern detection best for Spring MVC layered apps; SPI/plugin architectures (e.g. Quarkus extension model) may be misclassified
 - Endpoint recall for JAX-RS subresource locator pattern is ~65%
 - `impact` on implementation classes (e.g. `OrderServiceImpl`) returns 0 callers in Spring Boot — callers inject the interface via `@Autowired`. Always target the interface. When `direct_callers: []` with `confidence_level: high` for a `@Service` class, re-query the interface.
-- `no_security_signal` on endpoints means no method-level annotations found — does **not** mean the endpoint is unsecured. Projects using Spring Security filter chains show 100% `no_security_signal` even when fully secured.
+- `no_security_signal` on endpoints means no recognized method-level annotation found — does **not** mean the endpoint is unsecured. Projects using Spring Security filter chains show 100% `no_security_signal` even when fully secured. Projects using a custom authorization annotation can teach the scanner via [`sourcecode.config.json`](#sourcecodeconfigjson-repo-root).
 - `spring-audit` and `impact-chain` are **Java/Spring only** — non-Java repos return `spring_detected: false`
 - Event topology via `--type events` does not resolve Kafka/RabbitMQ/Redis message routes — only Spring ApplicationEvent and `@EventListener` chains
 - Self-invocation TX bypass (calling `@Transactional` method from the same class without going through the proxy) is not detected
@@ -372,6 +372,8 @@ Detects structural Spring anomalies that survive code review and tests, but caus
 | `SEC-003` | `@Transactional` on `@Controller`/`@RestController` — TX in wrong layer |
 
 Returns structured findings with `severity`, `confidence`, `symbol`, `source_file`, `evidence`, `explanation`, and `fix_hint`. JAVA/SPRING ONLY.
+
+Endpoints guarded by a project-specific authorization annotation are treated as secured (not flagged `SEC-001`) once declared in [`sourcecode.config.json`](#sourcecodeconfigjson-repo-root).
 
 ### `impact-chain` — systemic blast radius with TX/SEC enrichment [free]
 
@@ -678,3 +680,29 @@ Or: `export SOURCECODE_TELEMETRY=0`
 ```bash
 sourcecode config    # show version, config file path, telemetry status
 ```
+
+### `sourcecode.config.json` (repo root)
+
+Optional, per-repo. Loaded from the root of the repo being analyzed. Absent or
+malformed config is ignored — the tool behaves exactly as without it.
+
+**Custom security annotations.** Teach `endpoints`, `spring-audit`, and `explain`
+about project-specific authorization annotations (otherwise reported as
+`policy: "none_detected"`):
+
+```json
+{
+  "customSecurityAnnotations": [
+    {
+      "fullyQualifiedName": "com.example.security.M3FiltroSeguridad",
+      "shortName": "M3FiltroSeguridad",
+      "resourceParam": "nombreRecurso",
+      "levelParam": "nivelRequerido"
+    }
+  ]
+}
+```
+
+`resourceParam` / `levelParam` are optional and name the annotation attributes to
+surface as `resourceName` / `requiredLevel`. Matching endpoints report
+`policy: "custom"` and drop out of the `no_security_signal` count.

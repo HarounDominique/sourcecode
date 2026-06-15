@@ -27,10 +27,10 @@ pipx install sourcecode   # isolated install, no venv needed
 
 # Verify
 sourcecode version
-# sourcecode 1.35.4
+# sourcecode 1.36.4
 ```
 
-Requires Python 3.10+.
+Requires Python 3.9+.
 
 ---
 
@@ -99,6 +99,18 @@ sourcecode endpoints . --format yaml
 ```
 
 Output: list of `{method, path, controller, handler}`. Covers `@GetMapping`, `@PostMapping`, `@PutMapping`, `@DeleteMapping`, `@PatchMapping`, `@RequestMapping`, `@GET`, `@POST`, `@PUT`, `@DELETE`, `@PATCH` + `@Path`.
+
+Each endpoint carries a `security` policy. Standard annotations (`@PreAuthorize`, `@Secured`, `@RolesAllowed`, …) are recognized automatically; a custom authorization annotation reports `policy: "none_detected"` until declared in a `sourcecode.config.json` at the repo root:
+
+```json
+{
+  "customSecurityAnnotations": [
+    {"shortName": "M3FiltroSeguridad", "resourceParam": "nombreRecurso", "levelParam": "nivelRequerido"}
+  ]
+}
+```
+
+Matching endpoints then report `policy: "custom"` with `annotation`, `resourceName`, and `requiredLevel`.
 
 **Note:** JAX-RS sub-resource locator pattern (endpoints mounted dynamically via factory methods) is not individually counted — ~65% recall for JAX-RS.
 
