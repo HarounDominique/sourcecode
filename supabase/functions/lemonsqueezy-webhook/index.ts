@@ -6,6 +6,13 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 // HMAC signature is the authentication). Keep "Generate license keys" ON on
 // every Pro variant: LS emails the key to the customer and we store that same
 // native key here, so there is a single key system end to end.
+//
+// Ordering safety: LS delivers events out of order and Edge Functions run
+// concurrently. We never blind-upsert status. Instead apply_license_event()
+// (see supabase/sql/license_event_ordering.sql) locks the row and applies a
+// status change only when the event is not older than the last one applied,
+// using each event's own LS timestamp. A stale `subscription_paused`/`expired`
+// can therefore never clobber a newer paid state.
 const LEMON_SQUEEZY_WEBHOOK_SECRET = Deno.env.get("LEMON_SQUEEZY_WEBHOOK_SECRET")!;
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -30,6 +37,29 @@ const REVOKE_EVENTS = [
   "subscription_paused",
 ];
 const HANDLED_EVENTS = [...LICENSE_EVENTS, ...ACTIVATE_EVENTS, ...REVOKE_EVENTS];
+
+// Map a Lemon Squeezy subscription status to our access status. This is the
+// authoritative current state LS attaches to every subscription_* event, so we
+// prefer it over inferring from the event name (an out-of-order event still
+// carries the status that was true at its own event time, and the recency
+// guard in apply_license_event decides whether it wins).
+//   cancelled keeps access until period end (LS sends subscription_expired at
+//   the real end); past_due is a payment-retry grace window — keep access.
+function mapLsStatus(lsStatus: string | undefined): "active" | "inactive" | null {
+  switch ((lsStatus ?? "").toLowerCase()) {
+    case "on_trial":
+    case "active":
+    case "cancelled":
+    case "past_due":
+      return "active";
+    case "paused":
+    case "unpaid":
+    case "expired":
+      return "inactive";
+    default:
+      return null; // unknown -> do not infer a status
+  }
+}
 
 async function verifySignature(rawBody: string, signature: string): Promise<boolean> {
   if (!signature) return false;
@@ -82,7 +112,7 @@ serve(async (req: Request) => {
     return json({ received: true, skipped: true });
   }
 
-  const attributes = data?.attributes as Record<string, unknown>;
+  const attributes = (data?.attributes ?? {}) as Record<string, unknown>;
   const email = ((attributes?.user_email ?? attributes?.customer_email) as string ?? "")
     .toLowerCase();
 
@@ -91,56 +121,77 @@ serve(async (req: Request) => {
     return new Response("Bad request: no email", { status: 400 });
   }
 
+  // The license key only ever arrives on license_key_created.
+  const licenseKey = LICENSE_EVENTS.includes(eventName)
+    ? ((attributes?.key as string) ?? null)
+    : null;
+  if (LICENSE_EVENTS.includes(eventName) && !licenseKey) {
+    console.error("license_key_created without attributes.key");
+    return new Response("Bad request: no key", { status: 400 });
+  }
+
+  // Desired status: prefer LS's authoritative subscription status, fall back to
+  // event-name semantics. Non-subscription events (order/license) only activate.
+  let desiredStatus: "active" | "inactive" | null;
+  if (eventName.startsWith("subscription_")) {
+    desiredStatus = mapLsStatus(attributes?.status as string | undefined);
+    if (desiredStatus === null) {
+      desiredStatus = REVOKE_EVENTS.includes(eventName)
+        ? "inactive"
+        : ACTIVATE_EVENTS.includes(eventName)
+        ? "active"
+        : null;
+    }
+  } else if (LICENSE_EVENTS.includes(eventName) || ACTIVATE_EVENTS.includes(eventName)) {
+    desiredStatus = "active";
+  } else if (REVOKE_EVENTS.includes(eventName)) {
+    desiredStatus = "inactive";
+  } else {
+    desiredStatus = null;
+  }
+
+  // Recency key: the event's own LS timestamp, NOT our receipt time.
+  const eventAt =
+    (attributes?.updated_at as string) ??
+    (attributes?.created_at as string) ??
+    new Date().toISOString();
+
+  // Only grant features when we are activating; a revoke leaves them untouched.
+  const features = desiredStatus === "active" ? PRO_FEATURES : null;
+
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  // Idempotency
+  // Idempotency: skip if we already logged this exact event.
   if (eventId) {
     const { data: existing } = await supabase
       .from("license_events").select("id").eq("event_id", eventId).maybeSingle();
     if (existing) return json({ received: true, duplicate: true });
   }
 
-  const { data: existingUser } = await supabase
-    .from("users").select("id, license_key").eq("email", email).maybeSingle();
+  // Atomic, recency-guarded apply. A stale event cannot downgrade newer state.
+  const { data: rpcData, error: rpcErr } = await supabase.rpc("apply_license_event", {
+    p_email: email,
+    p_desired_status: desiredStatus,
+    p_event_at: eventAt,
+    p_features: features,
+    p_license_key: licenseKey,
+    p_plan: "pro",
+  });
 
-  let userId = existingUser?.id;
-  const now = new Date().toISOString();
-
-  // #3  license_key_created -> store the native Lemon Squeezy key
-  if (LICENSE_EVENTS.includes(eventName)) {
-    const lsKey = attributes?.key as string;
-    if (!lsKey) {
-      console.error("license_key_created without attributes.key");
-      return new Response("Bad request: no key", { status: 400 });
-    }
-    const { data: up, error } = await supabase.from("users").upsert(
-      { email, plan: "pro", status: "active", features: PRO_FEATURES,
-        license_key: lsKey, updated_at: now },
-      { onConflict: "email", ignoreDuplicates: false },
-    ).select("id").single();
-    if (error) { console.error("upsert key", error); return json({ error: "DB" }, 500); }
-    userId = up?.id ?? userId;
+  if (rpcErr) {
+    console.error("apply_license_event", rpcErr);
+    return json({ error: "DB" }, 500); // LS retries; the apply is idempotent.
   }
+  // PostgREST may return the composite as an object or a single-element array.
+  const row = (Array.isArray(rpcData) ? rpcData[0] : rpcData) as
+    | Record<string, unknown>
+    | null;
+  const userId = (row?.id as string | undefined) ?? null;
 
-  // #4  Revocation -> status inactive (does NOT touch license_key or plan)
-  else if (REVOKE_EVENTS.includes(eventName)) {
-    const { error } = await supabase.from("users")
-      .update({ status: "inactive", updated_at: now }).eq("email", email);
-    if (error) console.error("revoke", error);
-    if (userId) {
-      await supabase.from("subscriptions").update({ status: "inactive" }).eq("user_id", userId);
-    }
-  }
-
-  // Activation -> plan pro + active (preserves existing license_key)
-  else {
-    const { data: up, error } = await supabase.from("users").upsert(
-      { email, plan: "pro", status: "active", features: PRO_FEATURES, updated_at: now },
-      { onConflict: "email", ignoreDuplicates: false },
-    ).select("id").single();
-    if (error) { console.error("upsert activate", error); return json({ error: "DB" }, 500); }
-    userId = up?.id ?? userId;
-
+  // Mirror period end into the subscriptions table on activation (informational;
+  // get-license reads users.status, not this row).
+  if (ACTIVATE_EVENTS.includes(eventName) && userId) {
+    const now = new Date().toISOString();
     const periodEnd = (attributes?.renews_at ?? attributes?.ends_at ?? null) as string | null;
     await supabase.from("subscriptions").upsert(
       { user_id: userId, provider: "lemonsqueezy", status: "active",
@@ -149,15 +200,21 @@ serve(async (req: Request) => {
     );
   }
 
-  // Audit
+  // Reliable audit: a failed log returns 500 so LS retries. Because the apply
+  // above is idempotent (same event_at re-applies the same state) and the
+  // idempotency guard keys on this not-yet-inserted event_id, the retry safely
+  // reprocesses and re-attempts the log. No silent, unlogged state changes.
   const { error: evErr } = await supabase.from("license_events").insert({
-    user_id: userId ?? null,
+    user_id: userId,
     event_type: eventName,
     event_id: eventId ?? null,
     payload: JSON.parse(JSON.stringify(payload)),
   });
-  if (evErr) console.error("license_event insert", evErr);
+  if (evErr) {
+    console.error("license_event insert", evErr);
+    return json({ error: "audit_failed" }, 500);
+  }
 
-  console.log(`Processed ${eventName} for ${email}`);
-  return json({ received: true, email, event: eventName });
+  console.log(`Processed ${eventName} for ${email} -> status=${desiredStatus}`);
+  return json({ received: true, email, event: eventName, status: desiredStatus });
 });
