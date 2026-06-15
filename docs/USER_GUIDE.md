@@ -27,7 +27,7 @@ pipx install sourcecode   # isolated install, no venv needed
 
 # Verify
 sourcecode version
-# sourcecode 1.36.5
+# sourcecode 1.38.0
 ```
 
 Requires Python 3.9+.
@@ -113,6 +113,18 @@ Each endpoint carries a `security` policy. Standard annotations (`@PreAuthorize`
 Matching endpoints then report `policy: "custom"` with `annotation`, `resourceName`, and `requiredLevel`.
 
 **Note:** JAX-RS sub-resource locator pattern (endpoints mounted dynamically via factory methods) is not individually counted — ~65% recall for JAX-RS.
+
+**OpenAPI-generator / interface-defined controllers.** When a `@RestController`
+`implements XxxApi` and the HTTP mappings live on a generated interface (under
+`target/generated-sources`, not scanned), the surface is recovered from the
+OpenAPI spec shipped in the repo (`src/main/resources/openapi.yml` & co.) —
+deterministic, no build required. Such endpoints carry `source: "openapi-spec"`,
+and POST/PUT entries include a `request_body` with the DTO schema name and its
+validation `constraints` (`pattern`, `minLength`/`maxLength`, `required`, `type`).
+The result then reports `resolved_from_openapi_spec`, `spec_sourced_endpoints`
+and `openapi_spec` (the spec path). Controllers whose interface has no matching
+spec operation keep an explicit `warnings[]` entry instead of being silently
+blind.
 
 ### `sourcecode spring-audit` [free]
 
@@ -369,6 +381,35 @@ The cache is stored locally. No content leaves your machine.
 | `--no-redact` | | Disable automatic secret redaction |
 | `--exclude PATTERN` | | Skip directories matching pattern |
 | `--version` | `-v` | Show version and exit |
+
+---
+
+## Output format contract
+
+`-f json` is a strict, machine-readable contract on **every** command: with it,
+stdout is pure JSON and nothing else (all logs and warnings go to stderr). This
+holds regardless of `--no-cache`. An invalid `--format` is an argument-validation
+error: exit code **2**, empty stdout, and a JSON error envelope on stderr that
+carries `flag`, `value` and `valid_values` — identical shape across all commands.
+
+Allowed formats per command (the first is the default):
+
+| Command | Formats | Default |
+|---------|---------|---------|
+| `sourcecode .` (root) | `json`, `yaml` | `json` |
+| `repo-ir` | `json`, `yaml` | `json` |
+| `impact` | `json`, `yaml` | `json` |
+| `endpoints` | `json`, `yaml` | `json` |
+| `impact-chain` | `json`, `yaml` | `json` |
+| `spring-audit` | `json`, `yaml`, `github-comment` | `json` |
+| `prepare-context` | `json`, `github-comment` | `json` |
+| `migrate-check` | `json`, `text` | `json` |
+| `explain` | `text`, `json` | `text` |
+| `pr-impact` | `text`, `json` | `text` |
+
+`explain` and `pr-impact` default to a human-readable `text` view; pass `-f json`
+for programmatic consumption. The single source of truth is
+`sourcecode/format_contract.py`.
 
 ---
 
