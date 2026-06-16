@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.46.0] — 2026-06-16
+
+### Added
+- **Two Java/Spring agent flow presets in the MCP orchestrator.** These wrap existing
+  tools into one-call, intent-routed flows so an agent can describe a task in natural
+  language and get the right sequence without reading docs:
+  - `run_migrate_flow` — wraps `migrate-check` for Spring Boot 2→3 planning and lifts a
+    top-level `headline` (`readiness_score`, `blocking_count`, `estimated_effort_days`,
+    `by_severity`, `by_target`) so the agent need not parse the full report.
+  - `run_security_audit_flow` — wraps `spring-audit` + `endpoints`. **Config-less
+    safeguard:** when no `sourcecode.config.json` is present and every endpoint reads
+    `none_detected`, the flow flags a likely custom-annotation blind spot
+    (`quality_warnings`) and returns a ready-to-paste `security_config_hint`, instead of
+    letting a misleading 100%-unsecured surface stand (prevents a false negative).
+- **Intent routing for migration and security audit.** New `INTENT_MIGRATION` /
+  `INTENT_SECURITY_AUDIT` detection plus orchestration rules R5 (migration → lead with
+  `get_migration_readiness`) and R6 (security audit → `get_endpoints` first, mirroring R2)
+  route `start_session` / `analyze_task` to the new presets.
+
+  Note: these presets add no new analysis — they are orchestration ergonomics over tools
+  that were already callable directly. The standout value is the config-less safeguard.
+
 ## [1.45.0] — 2026-06-16
 
 ### Fixed

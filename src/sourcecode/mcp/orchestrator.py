@@ -6,29 +6,20 @@ Converts the MCP from a flat tool collection into a guided agent operating syste
 - run_pr_review_flow: auto-chains delta + review_pr + blast radius
 - run_bug_investigation_flow: auto-chains fix_bug + impact + IR context
 - run_feature_flow: auto-chains context + endpoints + delta + structural awareness
+- run_migrate_flow: wraps migrate-check; Spring Boot 2→3 readiness in one call
+- run_security_audit_flow: wraps spring-audit + endpoints; config-less blind-spot warning
 
-TODO — planned high-value Java/Spring flow presets (audit 2026-06-16, repo SAINT):
-  These extend the existing orchestrator; they are NOT yet implemented.
-
-  1. TODO: implement later — run_migrate_flow
-     Preset wrapping `migrate-check`. Primary high-value entry point for
-     Spring Boot 2→3 planning (audit: produces 1,356-file prioritized
-     inventory in ~6s — the strongest determinante win). Should surface
-     readiness_score, blocking count, per-target breakdown (jakarta /
-     spring_security_6 / java_11) and estimated_effort_days.
-
-  2. TODO: implement later — run_security_audit_flow
-     Preset wrapping `spring-audit` + `endpoints`. Auto-handle the
-     config-less case: when no sourcecode.config.json is present and the
-     repo carries custom security annotations, emit a fallback WARNING +
-     hint to add sourcecode.config.json (customAnnotations) rather than
-     returning a misleading 100% none_detected result.
-
-  3. TODO: implement later — extend R2 orchestration rule (apply_orchestration_rules)
-     Inject preset (1)/(2) when detected intent maps to migration or
-     security audit, mirroring the existing R2 java_no_endpoints rule.
-     Requires new INTENT_MIGRATION / INTENT_SECURITY_AUDIT constants +
-     _INTENT_PATTERNS entries + WORKFLOW_SEQUENCES / FLOW_RUNNERS wiring.
+High-value Java/Spring flow presets (audit 2026-06-16, repo SAINT) — implemented:
+  1. run_migrate_flow — preset over `migrate-check`, the primary entry point for
+     Spring Boot 2→3 planning. Lifts readiness_score, blocking_count,
+     estimated_effort_days and the per-target breakdown to a top-level headline.
+  2. run_security_audit_flow — preset over `spring-audit` + `endpoints`. Detects the
+     config-less case (no sourcecode.config.json + every endpoint none_detected) and
+     emits a warning plus a ready-to-paste config hint instead of a misleading 100%
+     unsecured surface.
+  3. apply_orchestration_rules R5/R6 — inject these presets when the detected intent
+     maps to migration (INTENT_MIGRATION) or security audit (INTENT_SECURITY_AUDIT),
+     mirroring the existing R2 java_no_endpoints rule.
 """
 from __future__ import annotations
 
@@ -55,6 +46,8 @@ SESSION_READY_FOR_REVIEW = "READY_FOR_REVIEW"  # flow complete
 # ---------------------------------------------------------------------------
 
 INTENT_PR_REVIEW = "pr_review"
+INTENT_MIGRATION = "migration"
+INTENT_SECURITY_AUDIT = "security_audit"
 INTENT_BUG_INVESTIGATION = "bug_investigation"
 INTENT_FEATURE_IMPLEMENTATION = "feature_implementation"
 INTENT_REFACTOR = "refactor"
@@ -67,6 +60,8 @@ INTENT_ORIENTATION = "orientation"
 
 WORKFLOW_SEQUENCES: dict[str, list[str]] = {
     INTENT_PR_REVIEW: ["get_delta", "review_pr_context", "get_impact_context"],
+    INTENT_MIGRATION: ["get_migration_readiness"],
+    INTENT_SECURITY_AUDIT: ["get_spring_audit", "get_endpoints"],
     INTENT_BUG_INVESTIGATION: ["fix_bug_context", "get_impact_context"],
     INTENT_FEATURE_IMPLEMENTATION: ["get_compact_context", "get_endpoints", "get_delta"],
     INTENT_REFACTOR: ["get_agent_context", "modernize_context", "get_ir_summary"],
@@ -76,6 +71,8 @@ WORKFLOW_SEQUENCES: dict[str, list[str]] = {
 
 WORKFLOW_DESCRIPTIONS: dict[str, str] = {
     INTENT_PR_REVIEW: "PR review: delta → execution paths → blast radius of changed classes",
+    INTENT_MIGRATION: "Spring Boot 2→3 migration: readiness score → javax→jakarta blockers → effort estimate",
+    INTENT_SECURITY_AUDIT: "Security audit: Spring TX/security findings → endpoint authorization surface",
     INTENT_BUG_INVESTIGATION: "Bug investigation: risk-ranked files → impact of suspect class",
     INTENT_FEATURE_IMPLEMENTATION: "Feature implementation: context → API surface → recent changes",
     INTENT_REFACTOR: "Refactor: deep context → modernization opportunities → IR coupling",
@@ -85,6 +82,8 @@ WORKFLOW_DESCRIPTIONS: dict[str, str] = {
 
 FLOW_RUNNERS: dict[str, str] = {
     INTENT_PR_REVIEW: "run_pr_review_flow",
+    INTENT_MIGRATION: "run_migrate_flow",
+    INTENT_SECURITY_AUDIT: "run_security_audit_flow",
     INTENT_BUG_INVESTIGATION: "run_bug_investigation_flow",
     INTENT_FEATURE_IMPLEMENTATION: "run_feature_flow",
     INTENT_REFACTOR: "run_feature_flow",
@@ -100,6 +99,16 @@ _INTENT_PATTERNS: list[tuple[str, list[str]]] = [
     (INTENT_PR_REVIEW, [
         r"\bpr\b", r"pull request", r"review pr", r"\bdiff\b", r"merge request",
         r"code review", r"changes in branch", r"review.*branch", r"branch.*review",
+    ]),
+    (INTENT_MIGRATION, [
+        r"\bmigrat", r"spring.?boot.?[23]", r"spring boot 2.*3", r"boot 2.*3",
+        r"\bjakarta\b", r"\bjavax\b", r"javax.*jakarta", r"namespace.*(migrat|change)",
+        r"2\s*(?:->|to|→|–|—)\s*3", r"\bupgrade\b.*(spring|boot|jakarta|java)",
+    ]),
+    (INTENT_SECURITY_AUDIT, [
+        r"security audit", r"audit.*security", r"security.*surface",
+        r"\bauthoriz", r"\bpreauthorize\b", r"\bsecured\b", r"access control",
+        r"who can (?:call|access)", r"endpoint.*(secur|auth)", r"(secur|auth).*endpoint",
     ]),
     (INTENT_BUG_INVESTIGATION, [
         r"\bbug\b", r"\berror\b", r"\bexception\b", r"\bcrash\b", r"\bnpe\b",
@@ -168,6 +177,9 @@ def apply_orchestration_rules(
       R2 java_no_endpoints → prepend get_endpoints (api_surface must exist first)
       R3 large_repo (>1000) → note RIS path preferred (informational, no seq change)
       R4 no_symptom_bug_flow → quality warning issued by caller (not a seq change)
+      R5 migration_intent (Java) → ensure get_migration_readiness leads the sequence
+      R6 security_audit_intent (Java) → ensure get_endpoints precedes the audit so the
+         authorization surface is available when findings are interpreted
     """
     seq = list(sequence)
     rules: list[str] = []
@@ -185,6 +197,17 @@ def apply_orchestration_rules(
     # R3: large repo informational flag
     if repo_class_count > 1000:
         rules.append("R3:large_repo→RIS_path_preferred")
+
+    # R5: migration intent on a Java repo → migration readiness is the entry point.
+    if intent == INTENT_MIGRATION and is_java and "get_migration_readiness" not in seq:
+        seq.insert(0, "get_migration_readiness")
+        rules.append("R5:migration_intent→prepend_migration_readiness")
+
+    # R6: security-audit intent on a Java repo → endpoints surface must precede the
+    # audit (mirrors R2: the authorization surface has to exist first).
+    if intent == INTENT_SECURITY_AUDIT and is_java and "get_endpoints" not in seq:
+        seq.insert(0, "get_endpoints")
+        rules.append("R6:security_audit_intent→prepend_get_endpoints")
 
     return seq, rules
 
@@ -720,6 +743,169 @@ def run_feature_flow_impl(repo_path: str, feature_description: str = "") -> dict
         "session_state": SESSION_READY_FOR_REVIEW,
         "flow": "feature_implementation",
         "feature_description": feature_description,
+        "steps_executed": steps,
+        "quality_warnings": quality_warnings,
+        "consolidated_output": output,
+        "session_meta": {
+            "ttfca_ms": ttfca_ms,
+            "steps_auto_executed": len(steps),
+            "tools_suggested_to_agent": 0,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Flow: Spring Boot 2→3 Migration
+# ---------------------------------------------------------------------------
+
+def run_migrate_flow_impl(repo_path: str, min_severity: str = "low") -> dict[str, Any]:
+    """Migration Flow: Spring Boot 2→3 readiness in one call.
+
+    Primary high-value entry point for migration planning. Wraps ``migrate-check``
+    and lifts the headline numbers (readiness_score, blocking_count,
+    estimated_effort_days, per-target breakdown) to the top level so the agent
+    can plan a 2→3 upgrade without parsing the full report.
+    """
+    t0 = time.monotonic()
+    steps: list[str] = []
+    quality_warnings: list[str] = []
+    output: dict[str, Any] = {}
+
+    if not _is_java_repo(repo_path):
+        quality_warnings.append(
+            "not_a_java_repo: migration analysis targets Spring Boot / Java repos. "
+            "Result will be empty (readiness_score=100, no findings)."
+        )
+
+    report = _exec(["migrate-check", repo_path, "--min-severity", min_severity])
+    steps.append(f"get_migration_readiness(min_severity={min_severity})")
+    headline: dict[str, Any] = {}
+    if "_exec_error" not in report:
+        output["migration_readiness"] = report
+        # Lift the planning-relevant headline numbers to the top level.
+        for key in (
+            "readiness_score", "blocking_count", "estimated_effort_days",
+            "spring_boot_2_detected",
+        ):
+            if key in report:
+                headline[key] = report[key]
+        _summary = report.get("summary", {})
+        if isinstance(_summary, dict):
+            headline["total_findings"] = _summary.get("total_findings")
+            headline["affected_files"] = _summary.get("affected_files")
+            headline["by_severity"] = _summary.get("by_severity")
+            headline["by_target"] = _summary.get("by_target") or _summary.get("by_rule")
+    else:
+        quality_warnings.append(f"migrate_check_failed: {report['_exec_error']}")
+
+    ttfca_ms = int((time.monotonic() - t0) * 1000)
+
+    return {
+        "session_state": SESSION_READY_FOR_REVIEW,
+        "flow": "migration",
+        "min_severity": min_severity,
+        "headline": headline,
+        "steps_executed": steps,
+        "quality_warnings": quality_warnings,
+        "consolidated_output": output,
+        "session_meta": {
+            "ttfca_ms": ttfca_ms,
+            "steps_auto_executed": len(steps),
+            "tools_suggested_to_agent": 0,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Flow: Security Audit
+# ---------------------------------------------------------------------------
+
+def _endpoint_security_coverage(endpoints: dict[str, Any]) -> tuple[int, int]:
+    """Return (total_endpoints, none_detected) from an endpoints result."""
+    if "_exec_error" in endpoints:
+        return 0, 0
+    data = endpoints.get("data", endpoints) if isinstance(endpoints, dict) else {}
+    total = int(data.get("total", 0) or 0)
+    none_detected = int(data.get("no_security_signal", 0) or 0)
+    return total, none_detected
+
+
+def run_security_audit_flow_impl(repo_path: str, scope: str = "all") -> dict[str, Any]:
+    """Security Audit Flow: Spring findings + endpoint authorization surface.
+
+    Wraps ``spring-audit`` (TX + security findings) and ``endpoints`` (authorization
+    surface) in one call. Auto-handles the config-less case: when no
+    ``sourcecode.config.json`` is present and every endpoint reads as
+    ``none_detected``, the all-zero security surface is almost certainly a
+    custom-annotation blind spot rather than a truly unsecured API — so the flow
+    emits a warning plus a ready-to-paste config hint instead of letting the
+    misleading result stand.
+    """
+    from sourcecode.security_config import CONFIG_FILENAME
+
+    t0 = time.monotonic()
+    steps: list[str] = []
+    quality_warnings: list[str] = []
+    output: dict[str, Any] = {}
+
+    if not _is_java_repo(repo_path):
+        quality_warnings.append(
+            "not_a_java_repo: spring-audit targets Java/Spring repos and will "
+            "report spring_detected=false."
+        )
+
+    # Step 1: Spring semantic audit (TX anomalies + security findings).
+    audit = _exec(["spring-audit", repo_path, "--scope", scope])
+    steps.append(f"get_spring_audit(scope={scope})")
+    if "_exec_error" not in audit:
+        output["spring_audit"] = audit
+    else:
+        quality_warnings.append(f"spring_audit_failed: {audit['_exec_error']}")
+
+    # Step 2: endpoint authorization surface.
+    endpoints = _exec(["endpoints", repo_path])
+    steps.append("get_endpoints")
+    if "_exec_error" not in endpoints:
+        output["endpoint_security_surface"] = endpoints
+    else:
+        quality_warnings.append(f"endpoints_failed: {endpoints['_exec_error']}")
+
+    # Config-less blind-spot detection: no sourcecode.config.json + every endpoint
+    # none_detected → warn rather than report a misleading 100% unsecured surface.
+    has_config = (Path(repo_path) / CONFIG_FILENAME).exists()
+    total, none_detected = _endpoint_security_coverage(endpoints)
+    if not has_config and total > 0 and none_detected == total:
+        quality_warnings.append(
+            "config_less_security_blind_spot: no sourcecode.config.json found and "
+            f"all {total} endpoints report none_detected. If this repo uses a custom "
+            "authorization annotation, the surface is a false negative — add the "
+            "config below and re-run."
+        )
+        output["security_config_hint"] = {
+            "reason": "no_custom_security_annotations_configured",
+            "file": CONFIG_FILENAME,
+            "example": {
+                "customSecurityAnnotations": [
+                    {
+                        "shortName": "YourSecurityAnnotation",
+                        "resourceParam": "resourceName",
+                        "levelParam": "requiredLevel",
+                    }
+                ]
+            },
+        }
+
+    ttfca_ms = int((time.monotonic() - t0) * 1000)
+
+    return {
+        "session_state": SESSION_READY_FOR_REVIEW,
+        "flow": "security_audit",
+        "scope": scope,
+        "endpoint_security_coverage": {
+            "total_endpoints": total,
+            "none_detected": none_detected,
+            "config_present": has_config,
+        },
         "steps_executed": steps,
         "quality_warnings": quality_warnings,
         "consolidated_output": output,

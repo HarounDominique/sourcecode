@@ -511,6 +511,75 @@ def run_feature_flow(repo_path: str = ".", feature_description: str = "") -> dic
 
 
 @mcp.tool()
+def run_migrate_flow(repo_path: str = ".", min_severity: str = "low") -> dict:
+    """Migration Flow — Spring Boot 2→3 readiness in one call. JAVA/SPRING ONLY.
+
+    Primary high-value entry point for migration planning. Wraps migrate-check and
+    lifts the headline numbers to the top level so the agent can plan a 2→3 upgrade
+    without parsing the full report:
+      - readiness_score (0–100; 100 = ready), blocking_count, estimated_effort_days
+      - by_severity and by_target breakdown (jakarta / spring_security_6 / java_11)
+
+    Use this instead of calling get_migration_readiness and interpreting it by hand.
+    Returns headline + consolidated_output.migration_readiness (full report).
+
+    repo_path: absolute path to the Java repository (default: current working directory).
+    min_severity: "critical" | "high" | "medium" | "low" (default — include everything).
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
+        from sourcecode.mcp.orchestrator import run_migrate_flow_impl
+        return _ok(run_migrate_flow_impl(repo_path, min_severity or "low"))
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
+@mcp.tool()
+def run_security_audit_flow(repo_path: str = ".", scope: str = "all") -> dict:
+    """Security Audit Flow — Spring findings + endpoint authorization surface. JAVA/SPRING ONLY.
+
+    Auto-chains in one call:
+      1. get_spring_audit(scope) — TX anomalies + security-surface findings
+      2. get_endpoints — endpoint authorization surface
+
+    Config-less safeguard: when no sourcecode.config.json is present and every
+    endpoint reads none_detected, the flow flags a likely custom-annotation blind
+    spot (quality_warnings) and returns a ready-to-paste security_config_hint —
+    rather than letting a misleading 100% none_detected surface stand.
+
+    Returns endpoint_security_coverage + consolidated_output (spring_audit,
+    endpoint_security_surface, optional security_config_hint).
+
+    repo_path: absolute path to the Java repository (default: current working directory).
+    scope: "all" (default) | "tx" | "security".
+    """
+    _raw = repo_path
+    try:
+        if not isinstance(repo_path, str):
+            return _err("repo_path must be a string", "INVALID_ARGUMENT")
+        repo_path = _normalize_repo_path(repo_path)
+        _path_err = _check_repo_path(repo_path)
+        if _path_err is not None:
+            return _path_err
+        from sourcecode.mcp.orchestrator import run_security_audit_flow_impl
+        return _ok(run_security_audit_flow_impl(repo_path, scope or "all"))
+    except Exception as exc:
+        return _err(
+            f"Internal error: {type(exc).__name__}: {exc} — repo_path: {_raw}",
+            "INTERNAL_ERROR",
+        )
+
+
+@mcp.tool()
 def get_cold_start_context(repo_path: str = ".") -> dict:
     """Instant session bootstrap from persisted Repository Intelligence Snapshot (RIS).
 
@@ -1333,16 +1402,19 @@ _NATIVE_MCP_TOOLS: frozenset[str] = frozenset({
     "run_pr_review_flow",
     "run_bug_investigation_flow",
     "run_feature_flow",
+    "run_migrate_flow",
+    "run_security_audit_flow",
 })
 
 
 def _finalize_mcp_registry() -> None:
     """Sync the MCP server with the runtime-generated registry.
 
-    Removes every tool except the 5 native orchestration tools (start_session,
-    analyze_task, flow runners) which are registered via @mcp.tool() in this
-    module and have no backing CLI command. All other tools are rebuilt from the
-    runtime-derived registry (build_mcp_tool_specs).
+    Removes every tool except the native orchestration tools (start_session,
+    analyze_task, and the flow runners — see _NATIVE_MCP_TOOLS) which are
+    registered via @mcp.tool() in this module and have no backing CLI command.
+    All other tools are rebuilt from the runtime-derived registry
+    (build_mcp_tool_specs).
     """
     from sourcecode.mcp.registry import build_mcp_tool_specs, make_tool_callable, validate_registry
 

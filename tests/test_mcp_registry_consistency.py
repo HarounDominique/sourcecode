@@ -19,6 +19,8 @@ def test_public_registry_matches_live_mcp_tools():
         "run_pr_review_flow",
         "run_bug_investigation_flow",
         "run_feature_flow",
+        "run_migrate_flow",
+        "run_security_audit_flow",
     })
     mcp_specs = mcp_registry.build_mcp_tool_specs()
     registered = {tool.name for tool in mcp._tool_manager.list_tools()}
