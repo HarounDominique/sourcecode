@@ -1265,7 +1265,11 @@ def _build_relations(
             # commas so each base produces its own edge and the reverse graph sees
             # every supertype (not a single mangled token).
             for base in _split_supertype_list(extends_str):
-                to = import_map.get(base, base)
+                # CH-004: resolve same-package / wildcard-imported supertypes to their
+                # FQN (not just import_map), else a same-package `extends Base` stays a
+                # bare name and the implementation_graph cannot link sub→supertype.
+                _sbase = re.sub(r'<.*', '', base).strip()
+                to = _resolve_dep_type(_sbase) or import_map.get(_sbase, base)
                 edges.append(RelationEdge(
                     from_symbol=class_fqn,
                     to_symbol=to,
@@ -1276,7 +1280,8 @@ def _build_relations(
 
         if implements_str:
             for base in _split_supertype_list(implements_str):
-                to = import_map.get(base, base)
+                _sbase = re.sub(r'<.*', '', base).strip()
+                to = _resolve_dep_type(_sbase) or import_map.get(_sbase, base)
                 edges.append(RelationEdge(
                     from_symbol=class_fqn,
                     to_symbol=to,
@@ -3127,6 +3132,14 @@ def build_repo_ir(
         '@RequiredArgsConstructor', '@AllArgsConstructor',
         '@Inject', '@ApplicationScoped', '@RequestScoped', '@Singleton',
         '@EnableMethodSecurity', '@EnableGlobalMethodSecurity',
+        # Field/setter injection markers (CH-004). A class wired purely by field
+        # injection — no class-level stereotype — is still a node in the DI graph:
+        # e.g. an abstract base controller that holds @Autowired/@Resource services
+        # its concrete subclasses inherit. Omitting these pre-scan-skips such classes,
+        # dropping their injects edges, so impact-chain cannot reach callers through
+        # them (Broadleaf: AbstractCheckoutController → checkout endpoints went missing).
+        '@Autowired', '@Resource', '@Qualifier', '@Value',
+        '@PersistenceContext', '@PersistenceUnit',
         # JPA / persistence (needed for stereotype detection in all commands)
         '@Entity', '@MappedSuperclass', '@Embeddable',
         # AOP / messaging / event sourcing

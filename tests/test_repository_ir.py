@@ -3328,3 +3328,78 @@ class TestInstantiatesEdges:
         assert inst_from_controller == [], (
             f"controller must not emit instantiates edges, got {inst_from_controller!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# CH-004 — graph completeness: field-injection-only classes + same-package supertypes
+# ---------------------------------------------------------------------------
+
+# Abstract base wired purely by field injection — NO class-level stereotype.
+# Pre-scan must still fully parse it so its injects edge survives (else impact-chain
+# cannot reach callers through such bases, e.g. Broadleaf's AbstractCheckoutController).
+_INJECTED_BASE = """\
+package com.example.web;
+
+import com.example.svc.PaymentService;
+import org.springframework.beans.factory.annotation.Autowired;
+
+public abstract class AbstractCheckoutBase {
+
+\t@Autowired
+\tprotected PaymentService paymentService;
+}
+"""
+
+_CONCRETE_SUB = """\
+package com.example.web;
+
+import org.springframework.stereotype.Controller;
+
+@Controller
+public class CheckoutController extends AbstractCheckoutBase {
+\tpublic String go() { return paymentService.pay(); }
+}
+"""
+
+_PAYMENT_SVC = """\
+package com.example.svc;
+
+public interface PaymentService {
+\tString pay();
+}
+"""
+
+
+class TestCH004GraphCompleteness:
+    def test_field_injection_only_class_not_prescan_skipped(self, tmp_path):
+        # @Autowired field, no @Service/@Controller → must NOT be dropped.
+        (tmp_path / "AbstractCheckoutBase.java").write_text(_INJECTED_BASE, encoding="utf-8")
+        (tmp_path / "PaymentService.java").write_text(_PAYMENT_SVC, encoding="utf-8")
+        ir = build_repo_ir(["AbstractCheckoutBase.java", "PaymentService.java"], tmp_path)
+        injects = [
+            (e["from"], e["to"]) for e in ir["graph"]["edges"]
+            if e.get("type") == "injects"
+        ]
+        assert (
+            "com.example.web.AbstractCheckoutBase.paymentService",
+            "com.example.svc.PaymentService",
+        ) in injects, f"field-injection-only base was pre-scan skipped: {injects!r}"
+
+    def test_same_package_supertype_resolves_to_fqn(self, tmp_path):
+        # `extends AbstractCheckoutBase` (same package, no import) must resolve to the
+        # FQN so the implementation graph links sub→supertype.
+        (tmp_path / "AbstractCheckoutBase.java").write_text(_INJECTED_BASE, encoding="utf-8")
+        (tmp_path / "CheckoutController.java").write_text(_CONCRETE_SUB, encoding="utf-8")
+        (tmp_path / "PaymentService.java").write_text(_PAYMENT_SVC, encoding="utf-8")
+        ir = build_repo_ir(
+            ["AbstractCheckoutBase.java", "CheckoutController.java", "PaymentService.java"],
+            tmp_path,
+        )
+        extends = [
+            (e["from"], e["to"]) for e in ir["graph"]["edges"]
+            if e.get("type") == "extends"
+        ]
+        assert (
+            "com.example.web.CheckoutController",
+            "com.example.web.AbstractCheckoutBase",
+        ) in extends, f"same-package supertype not FQN-resolved: {extends!r}"
