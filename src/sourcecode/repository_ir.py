@@ -3115,6 +3115,28 @@ def build_repo_ir(
         custom_security=_custom_sec_tuple,
     )
 
+    # Fase 21: merge OpenAPI-spec-recovered routes for interface-defined controllers
+    # into route_surface, so spec-sourced endpoints reach the CIR → EndpointIndex →
+    # impact-chain (previously only the `endpoints` command saw them). Same shared
+    # linking as extract_java_endpoints. Full build only (route_diffs is a diff view
+    # when `since` is set). Done here, where `root` is available; placed before the
+    # XML-security retag so spec routes lacking security get the same treatment.
+    if route_diffs_arg is None:
+        _routed_fqns_ir = {
+            r.get("effective_class")
+            for r in (ir.get("route_surface") or [])
+            if isinstance(r, dict)
+        }
+        _spec_recovery = _recover_openapi_spec_routes(all_symbols, _routed_fqns_ir, root)
+        if _spec_recovery["route_surface"]:
+            ir["route_surface"] = (ir.get("route_surface") or []) + _spec_recovery["route_surface"]
+        if _spec_recovery["resolved"]:
+            ir["resolved_from_openapi_spec"] = _spec_recovery["resolved"]
+            if _spec_recovery["spec_path"]:
+                ir["openapi_spec"] = _spec_recovery["spec_path"]
+        if _spec_recovery["unresolved"]:
+            ir["interface_defined_controllers"] = _spec_recovery["unresolved"]
+
     # BUG-7: XML Spring Security detection for the canonical CIR pipeline.
     # _assemble only sees Java symbols — XML config is invisible to it.
     # Scan here (where root is available) and retag route_surface entries so
@@ -3455,6 +3477,159 @@ def apply_ir_size_limits(
 
 
 # ---------------------------------------------------------------------------
+# OpenAPI spec → interface-defined controller route recovery (shared)
+# ---------------------------------------------------------------------------
+
+def _recover_openapi_spec_routes(
+    all_symbols: "list[SymbolRecord]",
+    routed_fqns: "set[str]",
+    root: Path,
+) -> "dict[str, Any]":
+    """Recover HTTP routes for interface-defined controllers from the repo's OpenAPI spec.
+
+    openapi-generator emits @RestController classes that ``implements XxxApi``, with the
+    actual @RequestMapping/@GetMapping annotations on the generated *Api interface under
+    ``target/generated-sources`` (excluded from the scan). Such a controller contributes
+    zero method-level routes, so its surface is invisible. The spec shipped in the repo
+    (``src/main/resources/openapi.yml`` & co.) lets us recover routes + request-body
+    constraints deterministically, without a build.
+
+    Single source of truth for spec→controller linking. Consumed by BOTH:
+      - build_repo_ir → route_surface → CanonicalRepositoryIR → EndpointIndex → impact-chain
+      - extract_java_endpoints → ``endpoints`` command output
+
+    Args:
+        all_symbols: parsed symbols (classes + methods).
+        routed_fqns: controller FQNs that already contribute method-level routes from
+                     source (skipped — their surface is captured).
+        root:        repo root, used to locate the spec.
+
+    Returns a dict with keys:
+        route_surface: route_surface-shaped entries (symbol=FQN#operationId,
+                       effective_class=controller FQN) for CIR/impact-chain.
+        endpoints:     ``endpoints``-command-shaped entries (controller simple name).
+        resolved:      controller FQNs resolved from the spec.
+        unresolved:    controller FQNs implementing *Api with no spec match.
+        warnings:      one "surface NOT captured" warning per unresolved controller.
+        spec_path:     spec file path, or None.
+    """
+    _CONTROLLER_ANNS = {"@RestController", "@Controller"}
+    _IMPLEMENTS_RE = re.compile(r'\bimplements\s+(.+)$')
+
+    iface_controllers: list[tuple[str, list[str]]] = []
+    for sym in all_symbols:
+        if sym.type != "class":
+            continue
+        if not (_CONTROLLER_ANNS & set(sym.annotations)):
+            continue
+        if sym.symbol in routed_fqns:
+            continue  # already contributes routes — surface is captured
+        m = _IMPLEMENTS_RE.search(sym.signature or "")
+        if not m:
+            continue
+        ifaces = _split_supertype_list(m.group(1))
+        api_ifaces = [i for i in ifaces if i.endswith("Api")]
+        if not api_ifaces:
+            continue
+        iface_controllers.append((sym.symbol, api_ifaces))
+
+    route_surface: list[dict] = []
+    endpoints: list[dict] = []
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    warnings: list[str] = []
+    spec_path: "str | None" = None
+
+    if not iface_controllers:
+        return {
+            "route_surface": route_surface,
+            "endpoints": endpoints,
+            "resolved": resolved,
+            "unresolved": unresolved,
+            "warnings": warnings,
+            "spec_path": spec_path,
+        }
+
+    from sourcecode.openapi_surface import build_openapi_surface, tag_to_interface
+    surface = build_openapi_surface(root)
+    iface_to_ops: dict[str, list] = {}
+    if surface is not None:
+        spec_path = surface.spec_path
+        for op in surface.operations:
+            for tag in op.tags:
+                iface_to_ops.setdefault(tag_to_interface(tag), []).append(op)
+
+    for fqn, api_ifaces in iface_controllers:
+        matched = [op for i in api_ifaces for op in iface_to_ops.get(i, [])]
+        if not matched:
+            unresolved.append(fqn)
+            warnings.append(
+                f"{fqn.split('.')[-1]} implements {', '.join(api_ifaces)}: HTTP "
+                "mappings are declared on the implemented interface (commonly "
+                "generated by openapi-generator under target/generated-sources, "
+                "which is not scanned) and no matching OpenAPI spec operation was "
+                "found. Endpoint surface for this controller is NOT captured."
+            )
+            continue
+        resolved.append(fqn)
+        ctrl_simple = fqn.split(".")[-1]
+        for op in matched:
+            handler = op.operation_id or "(operation)"
+            sec_present = op.has_security
+            request_body: "dict | None" = None
+            if op.request_body_schema and surface is not None:
+                schema = surface.schemas.get(op.request_body_schema)
+                if schema is not None:
+                    request_body = {
+                        "schema": op.request_body_schema,
+                        "constraints": [f.to_dict() for f in schema.fields],
+                        "source": "openapi-spec",
+                    }
+            # `endpoints` command shape (byte-identical to the legacy inline form).
+            ep_entry: dict = {
+                "method": op.method,
+                "path": op.path,
+                "controller": ctrl_simple,
+                "handler": handler,
+                "source": "openapi-spec",
+                # Security for generated controllers is declared in the spec /
+                # enforced by the filter chain, not by per-endpoint annotations.
+                "security": {
+                    "policy": "openapi_spec" if sec_present else "openapi_spec_unspecified"
+                },
+            }
+            if request_body is not None:
+                ep_entry["request_body"] = request_body
+            endpoints.append(ep_entry)
+            # route_surface shape — consumed by _route_to_canonical_endpoint:
+            #   effective_class → controller_class (FQN), symbol → handler_symbol (FQN).
+            rs_entry: dict = {
+                "symbol": f"{fqn}#{handler}",
+                "effective_class": fqn,
+                "declaring_class": fqn,
+                "controller": ctrl_simple,
+                "method": op.method,
+                "path": op.path,
+                "source": "openapi-spec",
+                "security_annotations": (
+                    {"policy": "openapi_security"} if sec_present else None
+                ),
+            }
+            if request_body is not None:
+                rs_entry["request_body"] = request_body
+            route_surface.append(rs_entry)
+
+    return {
+        "route_surface": route_surface,
+        "endpoints": endpoints,
+        "resolved": resolved,
+        "unresolved": unresolved,
+        "warnings": warnings,
+        "spec_path": spec_path,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Convenience: find Java files in a repo
 # ---------------------------------------------------------------------------
 
@@ -3547,93 +3722,18 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             "note": "interface-based Spring MVC controller — URL mapped via XML",
         })
 
-    # Detect controllers whose HTTP mappings live on an IMPLEMENTED interface that is
-    # not part of the scanned source surface. The dominant case is openapi-generator
-    # "interface-only" output (e.g. PetV2Api, VetsApi) emitted under
-    # target/generated-sources, which the scanner excludes. Such a controller carries
-    # @RestController/@Controller and an `implements XxxApi` clause but contributes no
-    # method-level routes, so its endpoints are invisible. Emit an explicit warning so
-    # an empty/partial surface is not silently misread as "no endpoints / no security".
-    _CONTROLLER_ANNS = {"@RestController", "@Controller"}
-    _IMPLEMENTS_RE = _re.compile(r'\bimplements\s+(.+)$')
+    # Recover routes for interface-defined controllers (openapi-generator "interface-only"
+    # output: @RestController implements XxxApi, mappings on the generated interface under
+    # target/generated-sources, not scanned) from the OpenAPI spec shipped in the repo.
+    # Shared helper — same linking feeds build_repo_ir's route_surface, so the
+    # impact-chain endpoint surface matches this command (Fase 21).
     _routed_fqns = {route.get("effective_class") for route in routes}
-    # Collect (controller_fqn, [implemented *Api interfaces]) pairs; resolution
-    # against the OpenAPI spec happens below.
-    _iface_controllers: list[tuple[str, list[str]]] = []
-    for sym in all_symbols:
-        if sym.type != "class":
-            continue
-        if not (_CONTROLLER_ANNS & set(sym.annotations)):
-            continue
-        if sym.symbol in _routed_fqns:
-            continue  # already contributes routes — surface is captured
-        m = _IMPLEMENTS_RE.search(sym.signature or "")
-        if not m:
-            continue
-        ifaces = _split_supertype_list(m.group(1))
-        api_ifaces = [i for i in ifaces if i.endswith("Api")]
-        if not api_ifaces:
-            continue
-        _iface_controllers.append((sym.symbol, api_ifaces))
-
-    # Recover the surface of interface-defined controllers from an OpenAPI spec
-    # shipped in the repo (src/main/resources/openapi.yml & co.). The spec is
-    # always present and deterministic — unlike target/generated-sources — so it
-    # lets us populate routes + request-body constraints without a build. A
-    # controller is "resolved" when its implemented *Api interface maps (via tag)
-    # to spec operations; otherwise it keeps the explicit "not captured" warning.
-    _spec_endpoints: list[dict] = []
-    resolved_from_openapi_spec: list[str] = []
-    interface_defined_controllers: list[str] = []
-    endpoint_warnings: list[str] = []
-    _openapi_spec_path: "str | None" = None
-    _iface_to_ops: dict[str, list] = {}
-    if _iface_controllers:
-        from sourcecode.openapi_surface import build_openapi_surface, tag_to_interface
-        _surface = build_openapi_surface(root)
-        if _surface is not None:
-            _openapi_spec_path = _surface.spec_path
-            for _op in _surface.operations:
-                for _tag in _op.tags:
-                    _iface_to_ops.setdefault(tag_to_interface(_tag), []).append(_op)
-        for _fqn, _api_ifaces in _iface_controllers:
-            _matched = [op for i in _api_ifaces for op in _iface_to_ops.get(i, [])]
-            if not _matched:
-                interface_defined_controllers.append(_fqn)
-                endpoint_warnings.append(
-                    f"{_fqn.split('.')[-1]} implements {', '.join(_api_ifaces)}: HTTP "
-                    "mappings are declared on the implemented interface (commonly "
-                    "generated by openapi-generator under target/generated-sources, "
-                    "which is not scanned) and no matching OpenAPI spec operation was "
-                    "found. Endpoint surface for this controller is NOT captured."
-                )
-                continue
-            resolved_from_openapi_spec.append(_fqn)
-            _ctrl_simple = _fqn.split(".")[-1]
-            for _op in _matched:
-                _entry: dict = {
-                    "method": _op.method,
-                    "path": _op.path,
-                    "controller": _ctrl_simple,
-                    "handler": _op.operation_id or "(operation)",
-                    "source": "openapi-spec",
-                    # Security for generated controllers is declared in the spec /
-                    # enforced by the filter chain, not by per-endpoint annotations.
-                    "security": {
-                        "policy": "openapi_spec"
-                        if _op.has_security
-                        else "openapi_spec_unspecified"
-                    },
-                }
-                if _op.request_body_schema and _surface is not None:
-                    _schema = _surface.schemas.get(_op.request_body_schema)
-                    if _schema is not None:
-                        _entry["request_body"] = {
-                            "schema": _op.request_body_schema,
-                            "constraints": [f.to_dict() for f in _schema.fields],
-                            "source": "openapi-spec",
-                        }
-                _spec_endpoints.append(_entry)
+    _recovery = _recover_openapi_spec_routes(all_symbols, _routed_fqns, root)
+    _spec_endpoints = _recovery["endpoints"]
+    resolved_from_openapi_spec = _recovery["resolved"]
+    interface_defined_controllers = _recovery["unresolved"]
+    endpoint_warnings = _recovery["warnings"]
+    _openapi_spec_path = _recovery["spec_path"]
 
     endpoints: list[dict] = []
     for route in routes:

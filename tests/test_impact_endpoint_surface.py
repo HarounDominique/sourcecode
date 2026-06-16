@@ -11,17 +11,14 @@ Root cause (diagnosed 21-01): the OpenAPI spec→controller linking lives only i
 endpoints never reach the impact model: `EndpointIndex` is empty for interface-defined
 controllers and `_collect_endpoints` can never resolve them.
 
-The tests below pin both sides of the asymmetry:
-  - GREEN guard: the `endpoints` path DOES recover the spec endpoint.
-  - xfail (strict): the CIR/impact path does NOT yet — flips to xpass when 21-02
-    lifts the linking into the shared route-surface builder, forcing the marker's
-    removal.
+Fase 21-02 closed the gap: the spec→controller linking is now shared
+(`_recover_openapi_spec_routes`) and merged into `build_repo_ir`'s route_surface, so
+spec-sourced endpoints reach the CIR → EndpointIndex → impact-chain, matching the
+`endpoints` command. The tests pin both paths now carry the surface.
 """
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 
 from sourcecode.canonical_ir import build_canonical_ir
 from sourcecode.repository_ir import build_repo_ir, extract_java_endpoints
@@ -85,17 +82,14 @@ class TestEndpointsPathHasSpecSurface:
         ), f"endpoints command must recover the spec route; got {eps}"
 
 
-class TestImpactPathMissingSpecSurface:
-    """The CIR/impact path lacks the spec surface (Fase 21 gap).
+class TestImpactPathHasSpecSurface:
+    """Fase 21-02: the CIR/impact path now carries the spec surface.
 
-    xfail(strict) — passes (xfail) while the gap exists, and will FAIL (xpass) once
-    21-02 wires the linking into `_build_route_surface`, forcing this marker's removal.
+    The OpenAPI spec→controller linking is shared (`_recover_openapi_spec_routes`) and
+    merged into `build_repo_ir`'s route_surface, so spec-sourced endpoints reach the
+    CIR → EndpointIndex → impact-chain — not only the `endpoints` command.
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Fase 21-02: openapi spec linking not yet in _build_route_surface/build_repo_ir",
-    )
     def test_route_surface_includes_spec_route(self, tmp_path):
         files = _make_repo(tmp_path)
         ir = build_repo_ir(files, tmp_path)
@@ -105,10 +99,6 @@ class TestImpactPathMissingSpecSurface:
             for r in rs
         ), f"build_repo_ir route_surface must include the spec route; got {rs}"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Fase 21-02: spec endpoints absent from CIR → EndpointIndex empty for iface-defined controller",
-    )
     def test_endpoint_index_has_controller(self, tmp_path):
         files = _make_repo(tmp_path)
         cir = build_canonical_ir(files, tmp_path)
