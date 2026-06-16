@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.44.0] — 2026-06-16
+
+### Fixed
+- **CH-004c — annotation-free structural classes dropped their inheritance edges.**
+  `build_repo_ir`'s fast pre-scan skips files with no recognized annotation marker,
+  emitting only minimal class-name symbols (for same-package resolution) and **no
+  relations**. A class with no annotation and no injected field of its own that
+  participates purely structurally — `class X extends Base implements I {}` — therefore
+  lost its `extends`/`implements` edges, so `implementation_graph` could not link
+  sub→supertype and impact analysis could not traverse the hierarchy. The pre-scan now
+  also keeps a file when a type declaration carries an `extends`/`implements` clause
+  (`_INHERIT_PRESCAN_RE`), routing it through full extraction so its inheritance edges
+  are built and resolved in pass 2 with the same-package map. Annotation-free leaf
+  classes with no inheritance still skip, preserving the pre-scan optimization. Closes
+  the last open layer of CH-004 (a/b shipped in 1.43.0).
+
 ## [1.43.0] — 2026-06-16
 
 ### Fixed
