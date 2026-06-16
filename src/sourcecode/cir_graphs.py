@@ -25,21 +25,66 @@ class ImplementationGraph:
 
     Built from implements edges where BOTH ends are known CIR symbols (internal
     interface/class pairs).  External framework interfaces are excluded.
+
+    Subtype indices (CH-001c): `extends` edges are also captured so that
+    interface-to-interface inheritance (`SubIface extends BaseIface`) and abstract
+    base classes (`SubClass extends BaseClass`) are modeled as descendants of the
+    supertype.  The `implements`-only indices (`_impl_of`/`_ifaces_of`) are kept
+    separate to preserve DI resolution semantics (primary_implementation).
     """
     _impl_of: dict[str, list[str]] = field(default_factory=dict)
     _ifaces_of: dict[str, list[str]] = field(default_factory=dict)
+    # CH-001c: union of implements + extends descendants (impl classes, sub-interfaces,
+    # subclasses) keyed by supertype FQN, and its reverse.
+    _subtype_of: dict[str, list[str]] = field(default_factory=dict)
+    _supertype_of: dict[str, list[str]] = field(default_factory=dict)
 
     # ---------------------------------------------------------------------------
     # Queries
     # ---------------------------------------------------------------------------
 
     def implementations_of(self, interface_fqn: str) -> list[str]:
-        """Return FQNs of classes that implement interface_fqn (in-repo only)."""
+        """Return FQNs of classes that implement interface_fqn (in-repo only).
+
+        Strictly `implements` edges — excludes sub-interfaces/subclasses. Use
+        subtypes_of()/all_subtypes_of() for the full impact-relevant descendant set.
+        """
         return self._impl_of.get(interface_fqn, [])
 
     def interfaces_of(self, class_fqn: str) -> list[str]:
         """Return FQNs of in-repo interfaces implemented by class_fqn."""
         return self._ifaces_of.get(class_fqn, [])
+
+    def subtypes_of(self, type_fqn: str) -> list[str]:
+        """Return direct in-repo subtypes of type_fqn.
+
+        Union of `implements` (concrete impls) and `extends` (sub-interfaces,
+        subclasses) children.  This is the impact-relevant descendant set: a change
+        to type_fqn's contract propagates to all of these.
+        """
+        return self._subtype_of.get(type_fqn, [])
+
+    def supertypes_of(self, type_fqn: str) -> list[str]:
+        """Return direct in-repo supertypes of type_fqn (implemented/extended)."""
+        return self._supertype_of.get(type_fqn, [])
+
+    def all_subtypes_of(self, type_fqn: str) -> list[str]:
+        """Return the transitive closure of in-repo subtypes (BFS, cycle-safe).
+
+        Covers multi-level hierarchies, e.g. a base interface → sub-interface →
+        concrete impl chain.  Order is breadth-first from type_fqn; deduplicated.
+        """
+        seen: set[str] = set()
+        out: list[str] = []
+        queue: list[str] = list(self._subtype_of.get(type_fqn, []))
+        while queue:
+            sub = queue.pop(0)
+            if sub in seen:
+                continue
+            seen.add(sub)
+            out.append(sub)
+            queue.extend(self._subtype_of.get(sub, []))
+        return out
 
     def primary_implementation(self, interface_fqn: str) -> str | None:
         """Return the single implementation if unambiguous, else None.
@@ -89,9 +134,14 @@ class ImplementationGraph:
 
         impl_of: dict[str, list[str]] = {}
         ifaces_of: dict[str, list[str]] = {}
+        subtype_of: dict[str, list[str]] = {}
+        supertype_of: dict[str, list[str]] = {}
 
         for edge in dependencies:
-            if edge.get("type") != "implements":
+            etype = edge.get("type")
+            # CH-001c: extends edges (sub-interface / subclass) are subtype relations
+            # too, even though they never feed the implements-only DI indices.
+            if etype not in ("implements", "extends"):
                 continue
             from_fqn = (edge.get("from") or "").strip()
             to_fqn = (edge.get("to") or "").strip()
@@ -110,12 +160,27 @@ class ImplementationGraph:
             if ">" in from_fqn or "<" in from_fqn:
                 continue
 
-            if from_fqn not in impl_of.get(to_fqn, []):
-                impl_of.setdefault(to_fqn, []).append(from_fqn)
-            if to_fqn not in ifaces_of.get(from_fqn, []):
-                ifaces_of.setdefault(from_fqn, []).append(to_fqn)
+            # Subtype indices — both implements and extends contribute descendants.
+            if from_fqn not in subtype_of.get(to_fqn, []):
+                subtype_of.setdefault(to_fqn, []).append(from_fqn)
+            if to_fqn not in supertype_of.get(from_fqn, []):
+                supertype_of.setdefault(from_fqn, []).append(to_fqn)
 
-        return cls(_impl_of=impl_of, _ifaces_of=ifaces_of)
+            # Implements-only indices — preserve DI resolution semantics. Sub-interfaces
+            # and subclasses (extends) must NOT count as "implementations" for
+            # primary_implementation() bean resolution.
+            if etype == "implements":
+                if from_fqn not in impl_of.get(to_fqn, []):
+                    impl_of.setdefault(to_fqn, []).append(from_fqn)
+                if to_fqn not in ifaces_of.get(from_fqn, []):
+                    ifaces_of.setdefault(from_fqn, []).append(to_fqn)
+
+        return cls(
+            _impl_of=impl_of,
+            _ifaces_of=ifaces_of,
+            _subtype_of=subtype_of,
+            _supertype_of=supertype_of,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.40.0] — 2026-06-16
+
+### Added
+- **CH-001c — interface impact models implementors.** `impact-chain` over an
+  interface or abstract base now resolves its full in-repo descendant set:
+  concrete `implements` classes, `extends` sub-interfaces, and subclasses, traversed
+  transitively. A base interface query reaches impls hidden behind an intermediate
+  sub-interface (e.g. Spring Data repositories: `SpringDataVetRepository extends
+  VetRepository` alongside the JPA/JDBC impls).
+- `ImplementationGraph` gains `subtypes_of()`, `supertypes_of()`, and
+  `all_subtypes_of()` (transitive, cycle-safe). `extends` edges are now captured;
+  `implements`-only indices (`implementations_of`/`primary_implementation`) keep their
+  strict DI-resolution semantics — sub-interfaces are not counted as bean implementations.
+- `ImpactChainResult.implementations`: new output field listing the in-repo subtypes
+  of the queried type, making the implementation blast radius visible (previously the
+  impls were silent BFS seeds).
+
+### Why
+Field test of spring-petclinic-rest issue #11 surfaced the gap: `impact-chain
+VetRepository` returned only the SpringData sub-interface, missing the JPA/JDBC impls —
+exactly the "3 impls" graph the maintainer cared about. Interface impact did not model
+implementors.
+
 ## [1.33.0] — 2026-05-29
 
 ### Changed

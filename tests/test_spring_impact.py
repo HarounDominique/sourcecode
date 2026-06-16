@@ -925,6 +925,53 @@ class TestRegressionCH001InterfaceDispatch:
             f"Expected implementation expansion warning. warnings={result.analysis_warnings}"
         )
 
+    def test_ch001c_subtypes_surfaced_via_extends(self):
+        """petclinic #11 regression: base interface query surfaces ALL subtypes.
+
+        VetRepository has two concrete impls (implements) plus a SpringData
+        sub-interface (extends).  Before CH-001c, extends was invisible and impls
+        were only added as silent BFS seeds.  Now result.implementations lists the
+        full descendant set, and the impl's caller is reachable.
+        """
+        symbols = [
+            "com.example.VetRepository",
+            "com.example.VetRepository#findAll",
+            "com.example.JpaVetRepositoryImpl",
+            "com.example.JpaVetRepositoryImpl#findAll",
+            "com.example.JdbcVetRepositoryImpl",
+            "com.example.JdbcVetRepositoryImpl#findAll",
+            "com.example.SpringDataVetRepository",
+            "com.example.ClinicServiceImpl",
+            "com.example.ClinicServiceImpl#findVets",
+        ]
+        # Service calls the JPA impl's method.
+        reverse_graph = {
+            "com.example.JpaVetRepositoryImpl#findAll": {
+                "calls": ["com.example.ClinicServiceImpl#findVets"],
+            },
+        }
+        deps = [
+            {"from": "com.example.JpaVetRepositoryImpl", "to": "com.example.VetRepository",
+             "type": "implements", "confidence": "high"},
+            {"from": "com.example.JdbcVetRepositoryImpl", "to": "com.example.VetRepository",
+             "type": "implements", "confidence": "high"},
+            {"from": "com.example.SpringDataVetRepository", "to": "com.example.VetRepository",
+             "type": "extends", "confidence": "high"},
+        ]
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph, dependencies=deps)
+        model = _make_model()
+        result = ImpactOrchestrator().query(cir, model, "com.example.VetRepository", depth=2)
+
+        assert set(result.implementations) == {
+            "com.example.JpaVetRepositoryImpl",
+            "com.example.JdbcVetRepositoryImpl",
+            "com.example.SpringDataVetRepository",
+        }, f"All subtypes must surface, got {result.implementations}"
+        all_callers = set(result.direct_callers) | set(result.indirect_callers)
+        assert "com.example.ClinicServiceImpl#findVets" in all_callers, (
+            f"Service caller of impl must be reachable. callers={all_callers}"
+        )
+
     def test_ch001_no_expansion_when_no_impl(self):
         """Interface with no in-repo implementation: no false expansion, no crash."""
         cir = _FakeCIR(

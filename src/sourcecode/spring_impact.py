@@ -99,6 +99,7 @@ class ImpactChainResult:
     resolution: str = "not_found"              # "exact" | "class_expanded" | "partial" | "not_found"
     direct_callers: list[str] = field(default_factory=list)
     indirect_callers: list[str] = field(default_factory=list)
+    implementations: list[str] = field(default_factory=list)  # in-repo subtypes of queried interface/base
     endpoints_affected: list[AffectedEndpoint] = field(default_factory=list)
     transaction_boundary: Optional[dict] = None   # TransactionBoundary.to_dict() or None
     security_surfaces: list[dict] = field(default_factory=list)   # per-endpoint security info
@@ -115,6 +116,7 @@ class ImpactChainResult:
             "resolution": self.resolution,
             "direct_callers": self.direct_callers,
             "indirect_callers": self.indirect_callers,
+            "implementations": self.implementations,
             "endpoints_affected": [ep.to_dict() for ep in self.endpoints_affected],
             "transaction_boundary": self.transaction_boundary,
             "security_surfaces": self.security_surfaces,
@@ -566,31 +568,36 @@ class ImpactOrchestrator:
             seed_classes = {_class_of(s) for s in seed_fqns}
             resolved_symbol = next(iter(seed_classes)) if len(seed_classes) == 1 else symbol
 
-        # CH-001: expand interface seeds to include in-repo implementations.
-        # When the queried class is an interface, BFS should also start from
-        # implementation symbols so TX boundaries and callers on the impl are found.
+        # CH-001: expand interface seeds to include in-repo subtypes.
+        # When the queried class is an interface (or abstract base), BFS should also
+        # start from every descendant symbol so TX boundaries and callers on the
+        # concrete impls are found.  CH-001c: the descendant set is the transitive
+        # closure of implements + extends edges — concrete impls, sub-interfaces, and
+        # subclasses alike — so a base interface query reaches impls hidden behind an
+        # intermediate sub-interface (e.g. SpringData repositories).
         impl_graph = getattr(cir, "implementation_graph", None)
         # Track original seed classes BEFORE CH-001a expansion so CH-001b does not
         # cascade through interfaces shared by impl classes added here (false positives).
         original_seed_classes: set[str] = {_class_of(s) for s in seed_fqns}
+        # Subtype classes surfaced to the caller as the impacted implementation set.
+        subtype_classes_added: set[str] = set()
         if impl_graph is not None:
             seed_classes_ch001 = {_class_of(s) for s in seed_fqns}
             impl_seeds: list[str] = []
-            impl_classes_added: set[str] = set()
             for seed_class in sorted(seed_classes_ch001):
-                impls = impl_graph.implementations_of(seed_class)
-                if not impls:
+                subtypes = impl_graph.all_subtypes_of(seed_class)
+                if not subtypes:
                     continue
-                for impl_class in impls:
-                    if impl_class in impl_classes_added:
+                for impl_class in subtypes:
+                    if impl_class in subtype_classes_added:
                         continue
-                    impl_classes_added.add(impl_class)
+                    subtype_classes_added.add(impl_class)
                     for sym in cir.symbols:
                         if _class_of(sym) == impl_class and sym not in set(seed_fqns):
                             impl_seeds.append(sym)
             if impl_seeds:
                 seed_fqns = list(dict.fromkeys(seed_fqns + impl_seeds))
-                n_classes = len(impl_classes_added)
+                n_classes = len(subtype_classes_added)
                 n_syms = len(impl_seeds)
                 warnings.append(
                     f"Interface implementation expansion: "
@@ -698,6 +705,7 @@ class ImpactOrchestrator:
             resolution=resolution,
             direct_callers=direct_callers,
             indirect_callers=indirect_callers,
+            implementations=sorted(subtype_classes_added),
             endpoints_affected=endpoints_affected,
             transaction_boundary=tx_boundary,
             security_surfaces=security_surfaces,

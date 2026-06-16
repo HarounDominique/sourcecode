@@ -211,6 +211,95 @@ class TestImplementationGraphMalformedExcluded:
 
 
 # ---------------------------------------------------------------------------
+# IG-11  extends edges modeled as subtypes (CH-001c)
+# ---------------------------------------------------------------------------
+
+class TestImplementationGraphSubtypes:
+    def test_extends_interface_is_subtype_not_implementation(self) -> None:
+        # SubIface extends BaseIface — a sub-interface, not a concrete impl.
+        deps = [_ext_edge("com.example.SubIface", "com.example.BaseIface", "extends")]
+        known = {"com.example.BaseIface", "com.example.SubIface"}
+        graph = ImplementationGraph.build(deps, known)
+        # Modeled as a subtype...
+        assert graph.subtypes_of("com.example.BaseIface") == ["com.example.SubIface"]
+        # ...but NOT an implementation (DI semantics preserved).
+        assert graph.implementations_of("com.example.BaseIface") == []
+
+    def test_implements_also_counts_as_subtype(self) -> None:
+        deps = [_impl_edge("com.example.Impl", "com.example.Iface")]
+        known = {"com.example.Iface", "com.example.Impl"}
+        graph = ImplementationGraph.build(deps, known)
+        assert graph.subtypes_of("com.example.Iface") == ["com.example.Impl"]
+        assert graph.implementations_of("com.example.Iface") == ["com.example.Impl"]
+
+    def test_subtypes_union_implements_and_extends(self) -> None:
+        # petclinic VetRepository shape: 2 impls (implements) + 1 sub-interface (extends).
+        deps = [
+            _impl_edge("com.example.JpaVetRepositoryImpl", "com.example.VetRepository"),
+            _impl_edge("com.example.JdbcVetRepositoryImpl", "com.example.VetRepository"),
+            _ext_edge("com.example.SpringDataVetRepository", "com.example.VetRepository", "extends"),
+        ]
+        known = {
+            "com.example.VetRepository",
+            "com.example.JpaVetRepositoryImpl",
+            "com.example.JdbcVetRepositoryImpl",
+            "com.example.SpringDataVetRepository",
+        }
+        graph = ImplementationGraph.build(deps, known)
+        subs = set(graph.subtypes_of("com.example.VetRepository"))
+        assert subs == {
+            "com.example.JpaVetRepositoryImpl",
+            "com.example.JdbcVetRepositoryImpl",
+            "com.example.SpringDataVetRepository",
+        }
+        # implementations_of stays strictly the implements edges.
+        assert set(graph.implementations_of("com.example.VetRepository")) == {
+            "com.example.JpaVetRepositoryImpl",
+            "com.example.JdbcVetRepositoryImpl",
+        }
+
+    def test_all_subtypes_transitive_closure(self) -> None:
+        # Base ← Mid (extends) ← Leaf (implements) — multi-level hierarchy.
+        deps = [
+            _ext_edge("com.example.Mid", "com.example.Base", "extends"),
+            _impl_edge("com.example.Leaf", "com.example.Mid"),
+        ]
+        known = {"com.example.Base", "com.example.Mid", "com.example.Leaf"}
+        graph = ImplementationGraph.build(deps, known)
+        # Direct subtypes of Base: only Mid.
+        assert graph.subtypes_of("com.example.Base") == ["com.example.Mid"]
+        # Transitive: Mid + Leaf.
+        assert set(graph.all_subtypes_of("com.example.Base")) == {
+            "com.example.Mid",
+            "com.example.Leaf",
+        }
+
+    def test_external_supertype_excluded(self) -> None:
+        # extends an out-of-repo base (not in known_symbols) → dropped.
+        deps = [_ext_edge("com.example.MyList", "java.util.ArrayList", "extends")]
+        known = {"com.example.MyList"}
+        graph = ImplementationGraph.build(deps, known)
+        assert graph.subtypes_of("java.util.ArrayList") == []
+        assert graph.supertypes_of("com.example.MyList") == []
+
+    def test_supertypes_reverse_lookup(self) -> None:
+        deps = [_ext_edge("com.example.Sub", "com.example.Base", "extends")]
+        known = {"com.example.Base", "com.example.Sub"}
+        graph = ImplementationGraph.build(deps, known)
+        assert graph.supertypes_of("com.example.Sub") == ["com.example.Base"]
+
+    def test_all_subtypes_cycle_safe(self) -> None:
+        # Defensive: malformed CIR with a cycle must not hang.
+        deps = [
+            _ext_edge("com.example.A", "com.example.B", "extends"),
+            _ext_edge("com.example.B", "com.example.A", "extends"),
+        ]
+        known = {"com.example.A", "com.example.B"}
+        graph = ImplementationGraph.build(deps, known)
+        assert set(graph.all_subtypes_of("com.example.A")) == {"com.example.A", "com.example.B"}
+
+
+# ---------------------------------------------------------------------------
 # INJ-01  Constructor injection lifts to class
 # ---------------------------------------------------------------------------
 
