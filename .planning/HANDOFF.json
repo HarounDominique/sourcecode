@@ -1,70 +1,57 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-16T18:49:39Z",
+  "timestamp": "2026-06-16T19:55:41Z",
   "phase": null,
-  "phase_name": "post-milestone — SAINT field-audit fixes (P1/#2/#3/#5) + Java/Spring orchestrator flow presets",
+  "phase_name": "post-milestone — real-repo benchmark of sourcecode + product strategy",
   "phase_dir": null,
   "plan": null,
   "task": null,
-  "total_tasks": 5,
+  "total_tasks": 4,
   "status": "paused",
-  "session_type": "field-audit-driven bug fixes + MCP orchestrator feature",
+  "session_type": "field benchmark on a real maintained OSS repo + product/monetization strategy",
   "completed_tasks": [
     {
       "id": 1,
-      "name": "P1 — cache clear hang on non-interactive stdin",
+      "name": "Benchmark PR #3131 — Fix #3124 open-redirect (protocol-relative bypass) in LocalRedirectStrategy",
       "status": "done",
-      "commit": "b6b96ab",
-      "detail": "Root cause: click.confirm() blocks forever on a never-EOF pipe (CI/MCP). Gated prompt behind sys.stdin.isatty() (cli.py:6136); non-interactive proceeds (RIS preserved unless --all) ~0.2s exit 0. Proved old path hangs on open pipe, new path 0.19s. v1.45.0."
+      "detail": "BroadleafCommerce (real, maintained). Reject protocol-relative '//host' + backslash variants before the startsWith('/') gate. Verified 6/6 JUnit via standalone javac + .m2 jars + JUnitCore (no mvn in env). PR open from fork HarounDominique. SHOWCASE WEAK: impact/impact-chain returned 0 callers (DI/interface-mediated blindspot), so the tool did NOT light up here. Competing open PR #3126 cited honestly."
     },
     {
       "id": 2,
-      "name": "#2 — --no-cache rejected by analysis subcommands",
+      "name": "Benchmark PR #3132 — Fix #2280 add index on BLC_FIELD.ABBREVIATION",
       "status": "done",
-      "commit": "b6b96ab",
-      "detail": "Added accepted no-op --no-cache to endpoints, validation, spring-audit, migrate-check, impact, impact-chain (always read fresh). Was exit 2 'No such option'."
+      "detail": "SHOWCASE STRONG. impact-chain lit up (readFieldByAbbreviation: 4 direct / 13 transitive callers, cacheable hot path, <100ms over 7488-file repo). Tool guided issue selection AND ruled out #2232 as already-fixed in 7.0.x (true negative). One-line @Index addition matching ENTITY_TYPE_INDEX convention. PR open from fork."
     },
     {
       "id": 3,
-      "name": "#3 — endpoints --limit incoherent security counters",
+      "name": "Benchmark report + honest scoring",
       "status": "done",
-      "commit": "b6b96ab",
-      "detail": "Recompute no_security_signal/undocumented over the limited set; repo-wide originals preserved under _filter.*_before_filter (cli.py endpoints_cmd)."
+      "detail": "atlas-cli/.planning/benchmark-broadleaf-3124.md. Scored: performance 8.5-9/10, value-to-issue 3.5/10 (#3124) vs 8/10 (#2280). Verdict: tool brilla on direct call-chain blast-radius / migration, weak on DI-mediated security."
     },
     {
       "id": 4,
-      "name": "#5 — validation silent all-zeros without OpenAPI",
+      "name": "Product/monetization strategy documented",
       "status": "done",
-      "commit": "b6b96ab",
-      "detail": "validation_surface emits openapi_spec:null + note (also stderr) when no spec found. +6 regression tests (test_audit_fixes_v145.py + test_cache_cli.py). v1.45.0."
-    },
-    {
-      "id": 5,
-      "name": "Java/Spring orchestrator flow presets + intent routing",
-      "status": "done",
-      "commit": "3997665",
-      "detail": "run_migrate_flow (wraps migrate-check, lifts headline) + run_security_audit_flow (wraps spring-audit+endpoints, config-less blind-spot warning + security_config_hint). INTENT_MIGRATION/INTENT_SECURITY_AUDIT + R5/R6 rules. Both registered as native MCP tools (added to _NATIVE_MCP_TOOLS). +17 tests. v1.46.0."
+      "detail": "atlas-cli/.planning/ESTRATEGIA-PRODUCTO-TODO.md + memory project_product_strategy. Focus deterministic Java/Spring intel; NO security-detection scope (enrichment only); fix DI/interface call-graph blindspot as core quality; monetize open-core + per-seat Pro + per-project migration SKU; replace class-count cap with command-tier+seat gating; watch OpenRewrite + IntelliJ."
     }
   ],
   "remaining_tasks": [
-    {"id": 6, "name": "Audit bug #4 — endpoints config-less none_detected heuristic/auto-detect", "status": "not_started", "needs": "SAINT repo or synthetic fixture with class-level custom security annotations"},
-    {"id": 7, "name": "Audit bug #6 — class-level security annotation propagation to handlers (1136 vs 2549 in SAINT)", "status": "not_started", "needs": "SAINT repo to reproduce; meatier semantic fix"}
+    {"id": 5, "name": "Watch PR #3131 + #3132 review feedback from Broadleaf maintainers", "status": "not_started", "needs": "maintainer response; #3131 contends with competing PR #3126"},
+    {"id": 6, "name": "CORE: fix DI/interface-mediated call-graph blindspot", "status": "not_started", "needs": "reproduce with LocalRedirectStrategy; impact-chain should report the login flows that wire it. High leverage — see strategy doc section 3"},
+    {"id": 7, "name": "Revisit prior post-milestone open items audit #4/#6 (custom-annotation security) THROUGH new strategy lens", "status": "not_started", "needs": "decision: per new strategy, security-detection scope is deprioritized -> reframe as enrichment, not a detector"}
   ],
-  "blockers": [
-    {"description": "Audit bugs #4 and #6 cannot be reproduced on local testing repos (petclinic/Broadleaf) — both need the SAINT repo or a synthetic fixture with a custom @M3FiltroSeguridad-style class-level annotation", "type": "external", "workaround": "Build a synthetic Java fixture: controller with class-level custom security annotation + multiple handlers, no method-level annotation."}
-  ],
+  "blockers": [],
   "human_actions_pending": [
-    {"action": "Provide SAINT repo access or confirm a synthetic fixture is acceptable for #4/#6", "context": "Both remaining audit bugs are custom-annotation security detection; not reproducible on public test repos", "blocking": false},
-    {"action": "git push (not done — releases v1.45.0 + v1.46.0 are local only)", "context": "User asked to commit, not push; HEAD is 2 commits ahead of origin/master", "blocking": false}
+    {"action": "Optionally indicate in PR bodies that analysis used sourcecode", "context": "User decided to leave PR bodies generic (self-promo risk). No action unless reversed.", "blocking": false}
   ],
   "decisions": [
-    {"decision": "Release commits go directly to master", "rationale": "Matches established repo convention (every chore(release)/fix commit on master); no PR workflow in this solo repo", "phase": null},
-    {"decision": "Flow presets add no new analysis — orchestration ergonomics only", "rationale": "They wrap tools already callable directly; the genuine value is the config-less security safeguard (prevents a false-negative). Documented honestly in CHANGELOG per no-trap-promo rule.", "phase": null},
-    {"decision": "explain exit-code audit item (P3) closed as already-fixed", "rationale": "cli.py:4781 already raises Exit(1) when class not found; audit ran v1.42, fixed by v1.44.", "phase": null}
+    {"decision": "Focus product on deterministic structural intel; do NOT build security detection", "rationale": "Benchmark proved tool is decisive on direct call-chain blast-radius (#2280) but useless on DI-mediated security (#3124); security is a red ocean (Snyk/Semgrep/CodeQL)", "phase": null},
+    {"decision": "Monetization: open-core + PLG via MCP, per-seat Pro on high-value verbs, per-project migration SKU; replace class-count cap with command-tier+seat gating", "rationale": "Class-count cap blocks the aha on the best prospect (large monolith) on first run; meters input not value; never cap onboarding", "phase": null},
+    {"decision": "Picked #2280 over #2232/#3124-style for the strong-showcase PR", "rationale": "#2232 already fixed in 7.0.x; #2280 hot-path with rich blast radius + safe verifiable fix", "phase": null},
+    {"decision": "Leave PR bodies generic (no sourcecode mention)", "rationale": "Maintainers may read vendor-tool mention as self-promo", "phase": null}
   ],
   "uncommitted_files": [],
-  "git_state": "clean after WIP commit; HEAD == 3997665 (v1.46.0), 2 commits ahead of origin/master (v1.45.0 b6b96ab + v1.46.0). NOT pushed.",
-  "tests": "2669 passed, 3 skipped (system /opt/homebrew/bin/python3; venv SIGKills with 137)",
-  "next_action": "Either (a) build a synthetic Java fixture (class-level custom security annotation + multiple handlers) to reproduce + fix audit bugs #4/#6, or (b) push the two local releases, or (c) start unrelated next work. No known open bugs reproducible locally.",
-  "context_notes": "Field-audit on repo SAINT (7488 files, 3996 endpoints) drove this session. Verified every fix live on testing/spring-petclinic before committing. Honest-benchmarks rule active: the orchestrator feature was assessed as ergonomics+1 safeguard, NOT a transformative win — strongest honest value remains migrate-check itself + the config-less safeguard. Two releases shipped: v1.45.0 (4 audit fixes), v1.46.0 (orchestrator flow presets)."
+  "git_state": "atlas-cli clean, HEAD 211d697 (.planning gitignored except .continue-here.md + HANDOFF.json). broadleaf-fieldtest: 2 branches pushed to fork HarounDominique, 2 PRs OPEN (#3131, #3132); local HEAD on fix/2280-index-blc-field-abbreviation.",
+  "next_action": "Either (a) monitor PR #3131/#3132 review, (b) start the CORE DI/interface call-graph blindspot fix (highest-leverage, on-strategy), or (c) reframe the deferred security audit items #4/#6 as enrichment per new strategy. No active blockers.",
+  "context_notes": "This was a benchmark+strategy session, NOT phase execution. Two real PRs opened on a maintained OSS repo (Broadleaf) to prove sourcecode value honestly. Key insight: the tool's edge is real but narrow (direct call-chain impact + migration); honest-benchmarks rule held throughout (reported what did NOT work). Verification of Java fixes done standalone (javac + ~/.m2 jars + JUnitCore) because no mvn/mvnw in env. gh CLI authenticated as HarounDominique. Strategy fully captured in ESTRATEGIA-PRODUCTO-TODO.md."
 }
