@@ -762,6 +762,74 @@ class TestBuildRepoIr:
 
 
 # ---------------------------------------------------------------------------
+# Constructor-injection parser fixes (field test petclinic-rest #11, weakness #2)
+# ---------------------------------------------------------------------------
+
+class TestMultilineAndWildcardConstructorInjection:
+    """Two compounding parser gaps hid the constructor-injection edges that the
+    canonical Spring idiom (single ctor, one param per line, wildcard import of
+    the repository package) relies on:
+
+      BUG-PARSER-002 — a constructor signature spanning multiple physical lines
+        lost its parameter list (`[^)]*` stopped at EOL), so no injects edges.
+      BUG-PARSER-003 — a dependency type pulled in via `import pkg.*` was never
+        resolved to an FQN, so even a single-line ctor produced no injects edge.
+
+    Together they made `impact-chain <Repository>` report 0 affected endpoints in
+    petclinic-rest even though every controller transitively depends on it.
+    """
+
+    _REPO = """\
+package com.example.repository;
+public interface VetRepository {
+    java.util.List findAll();
+}
+"""
+
+    # Single ctor, one param per line, wildcard import of the repository package —
+    # exactly ClinicServiceImpl's shape.
+    _SERVICE = """\
+package com.example.service;
+import com.example.repository.*;
+import org.springframework.stereotype.Service;
+@Service
+public class ClinicServiceImpl implements ClinicService {
+
+    private final VetRepository vetRepository;
+
+    public ClinicServiceImpl(
+        VetRepository vetRepository) {
+        this.vetRepository = vetRepository;
+    }
+}
+"""
+
+    def _injects(self, tmp_path):
+        (tmp_path / "VetRepository.java").write_text(self._REPO, encoding="utf-8")
+        (tmp_path / "ClinicServiceImpl.java").write_text(self._SERVICE, encoding="utf-8")
+        ir = build_repo_ir(["VetRepository.java", "ClinicServiceImpl.java"], tmp_path)
+        return [e for e in ir["graph"]["edges"] if e["type"] == "injects"]
+
+    def test_multiline_wildcard_ctor_injection_edge_present(self, tmp_path):
+        inject_edges = self._injects(tmp_path)
+        assert any(
+            e["from"] == "com.example.service.ClinicServiceImpl#<init>"
+            and e["to"] == "com.example.repository.VetRepository"
+            for e in inject_edges
+        ), f"expected ClinicServiceImpl#<init> injects VetRepository; got {inject_edges}"
+
+    def test_reverse_graph_exposes_dependency(self, tmp_path):
+        (tmp_path / "VetRepository.java").write_text(self._REPO, encoding="utf-8")
+        (tmp_path / "ClinicServiceImpl.java").write_text(self._SERVICE, encoding="utf-8")
+        ir = build_repo_ir(["VetRepository.java", "ClinicServiceImpl.java"], tmp_path)
+        rg = ir["reverse_graph"]
+        injectors = (rg.get("com.example.repository.VetRepository") or {}).get("injects") or []
+        assert any("ClinicServiceImpl" in i for i in injectors), (
+            f"reverse_graph[VetRepository].injects must list the service; got {injectors}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Stable symbol identities
 # ---------------------------------------------------------------------------
 

@@ -594,6 +594,21 @@ def _count_net_braces(line: str) -> int:
     return clean.count('{') - clean.count('}')
 
 
+def _net_parens(line: str) -> int:
+    """Net unbalanced parentheses on a line (open minus close), string-literal-aware.
+
+    Used to join multi-line method/constructor signatures whose parameter list spans
+    several physical lines — without it the per-line decl regexes capture an empty
+    param list and constructor-injection edges are silently dropped (BUG-PARSER-002).
+    """
+    if '(' not in line and ')' not in line:
+        return 0
+    if '"' not in line and "'" not in line:
+        return line.count('(') - line.count(')')
+    clean = _STRING_LITERAL_RE.sub('', line)
+    return clean.count('(') - clean.count(')')
+
+
 def _extract_modifiers(text: str) -> list[str]:
     return sorted(w for w in text.split() if w in _MODIFIER_WORDS)
 
@@ -684,6 +699,24 @@ def _extract_symbols(
                 _i += 1
                 if '{' in _cont:
                     break
+            _joined.append(_buf)
+        elif (
+            (_METHOD_DECL_RE.match(_stripped) or _CONSTRUCTOR_DECL_RE.match(_stripped))
+            and _net_parens(_stripped) > 0
+        ):
+            # BUG-PARSER-002: a method/constructor signature whose parameter list spans
+            # multiple physical lines (e.g. the canonical Spring constructor-injection
+            # idiom with one param per line). Join continuation lines until the parens
+            # balance so the decl regex captures the full param list — otherwise
+            # `[^)]*` stops at EOL and constructor-injection edges are dropped.
+            _buf = _line
+            _bal = _net_parens(_stripped)
+            _i += 1
+            while _i < len(_raw_lines) and _bal > 0:
+                _cont = _raw_lines[_i]
+                _buf = _buf.rstrip() + ' ' + _cont.strip()
+                _bal += _net_parens(_cont)
+                _i += 1
             _joined.append(_buf)
         else:
             _joined.append(_line)
@@ -1063,6 +1096,7 @@ def _build_relations(
     package: str,
     rel_path: str,
     same_pkg_types: dict[str, str] | None = None,
+    pkg_type_map: dict[str, dict[str, str]] | None = None,
 ) -> list[RelationEdge]:
     """Phase 3: Build directed relation graph for symbols in one file.
 
@@ -1070,6 +1104,11 @@ def _build_relations(
     Passed by build_repo_ir after a first pass that collects all symbols.
     Enables resolving injection targets that share a package with the caller
     and therefore need no explicit Java import statement.
+
+    pkg_type_map: {package → {simple_name → FQN}} for every class in the repo.
+    Used to resolve types brought in by a wildcard import (`import pkg.*`) — a
+    common idiom (e.g. petclinic-rest's services `import ...repository.*`) that
+    otherwise leaves constructor-injected dependency types unresolved (BUG-PARSER-003).
     """
     edges: list[RelationEdge] = []
     _same_pkg: dict[str, str] = same_pkg_types or {}
@@ -1079,6 +1118,27 @@ def _build_relations(
         parts = fqn.split(".")
         if parts[-1] != "*":
             import_map[parts[-1]] = fqn
+
+    # Wildcard import resolution: collect the {simple → FQN} submaps of every
+    # `import pkg.*` package, searched in sorted-package order for determinism.
+    _wildcard_pkgs: list[str] = sorted(
+        fqn[:-2] for fqn in raw_imports if fqn.endswith(".*")
+    )
+    _pkg_type_map: dict[str, dict[str, str]] = pkg_type_map or {}
+
+    def _resolve_dep_type(base: str) -> Optional[str]:
+        """Resolve a simple type name to an in-repo FQN for a DI target.
+
+        Tries explicit import, then same-package, then wildcard-imported packages.
+        """
+        fqn = import_map.get(base) or _same_pkg.get(base)
+        if fqn:
+            return fqn
+        for _wpkg in _wildcard_pkgs:
+            _cand = _pkg_type_map.get(_wpkg, {}).get(base)
+            if _cand:
+                return _cand
+        return None
 
     for sym in symbols:
         sym_fqn = sym.symbol
@@ -1137,7 +1197,7 @@ def _build_relations(
             continue
         for simple_type in sym.param_types:
             base = re.sub(r'<.*', '', simple_type).strip()
-            fqn = import_map.get(base) or _same_pkg.get(base)
+            fqn = _resolve_dep_type(base)
             if fqn:
                 edges.append(RelationEdge(
                     from_symbol=sym.symbol,
@@ -1170,7 +1230,7 @@ def _build_relations(
                 continue
             _ftype = fld.group("type").strip()
             _base = re.sub(r'<.*', '', _ftype).strip()
-            _fqn = import_map.get(_base) or _same_pkg.get(_base)
+            _fqn = _resolve_dep_type(_base)
             if _fqn:
                 edges.append(RelationEdge(
                     from_symbol=sym.symbol,
@@ -3068,6 +3128,7 @@ def build_repo_ir(
         relations = _build_relations(
             symbols, raw_imports, source, package, rel_path,
             same_pkg_types=same_pkg_types,
+            pkg_type_map=_same_pkg_map,
         )
 
         old_source: Optional[str] = None
