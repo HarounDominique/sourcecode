@@ -1,66 +1,70 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-14T11:48:21Z",
+  "timestamp": "2026-06-16T18:49:39Z",
   "phase": null,
-  "phase_name": "session 96 — hybrid size-based monetization model",
+  "phase_name": "post-milestone — SAINT field-audit fixes (P1/#2/#3/#5) + Java/Spring orchestrator flow presets",
   "phase_dir": null,
   "plan": null,
   "task": null,
-  "total_tasks": 3,
+  "total_tasks": 5,
   "status": "paused",
-  "session_type": "monetization-refactor",
+  "session_type": "field-audit-driven bug fixes + MCP orchestrator feature",
   "completed_tasks": [
     {
       "id": 1,
-      "name": "Hybrid size-based gating (Free/Pro)",
+      "name": "P1 — cache clear hang on non-interactive stdin",
       "status": "done",
-      "commit": "1ade205",
-      "detail": "license.py: is_large_repo/count_java_files/_FREE_REPO_JAVA_FILE_LIMIT=500, require_repo_or_pro(), _emit_upgrade_and_exit(). cli.py: 8 gate sites converted from capability to size gating; delta keeps 30-run quota. Docs PRODUCT_TIERS.md + README pricing. Tests updated. 2516 passed."
+      "commit": "b6b96ab",
+      "detail": "Root cause: click.confirm() blocks forever on a never-EOF pipe (CI/MCP). Gated prompt behind sys.stdin.isatty() (cli.py:6136); non-interactive proceeds (RIS preserved unless --all) ~0.2s exit 0. Proved old path hangs on open pipe, new path 0.19s. v1.45.0."
     },
     {
       "id": 2,
-      "name": "Landing page pricing update (sourcecode-landing repo)",
+      "name": "#2 — --no-cache rejected by analysis subcommands",
       "status": "done",
-      "commit": "a0016f6",
-      "detail": "Free/Pro cards reframed, price 29.99->19/mo (+190/yr per dev), MCP marked Free, [Pro] badges->[Free <=500 Java], EN+ES i18n, success.html. Separate repo at ~/Documents/workspace/sourcecode-landing."
+      "commit": "b6b96ab",
+      "detail": "Added accepted no-op --no-cache to endpoints, validation, spring-audit, migrate-check, impact, impact-chain (always read fresh). Was exit 2 'No such option'."
     },
     {
       "id": 3,
-      "name": "Version bump 1.35.35",
+      "name": "#3 — endpoints --limit incoherent security counters",
       "status": "done",
-      "commit": "39d2706",
-      "detail": "pyproject.toml, src/sourcecode/__init__.py, README badge + verify line."
-    }
-  ],
-  "remaining_tasks": [],
-  "blockers": [
-    {
-      "description": "Lemon Squeezy product still priced at old 29.99 EUR; landing now displays 19 EUR. Checkout charges wrong price until updated.",
-      "type": "external",
-      "workaround": "none — requires Lemon Squeezy dashboard access"
-    }
-  ],
-  "human_actions_pending": [
-    {
-      "action": "Update Lemon Squeezy product to 19 EUR/mo and create a 190 EUR/yr annual variant + link",
-      "context": "Landing shows 19/190 but checkout buy/99c8675f points to old 29.99 product. Blocking for go-live; annual has no checkout link yet.",
-      "blocking": true
+      "commit": "b6b96ab",
+      "detail": "Recompute no_security_signal/undocumented over the limited set; repo-wide originals preserved under _filter.*_before_filter (cli.py endpoints_cmd)."
     },
     {
-      "action": "Push commits for both repos (atlas-cli + sourcecode-landing)",
-      "context": "All work committed locally to master; nothing pushed.",
-      "blocking": false
+      "id": 4,
+      "name": "#5 — validation silent all-zeros without OpenAPI",
+      "status": "done",
+      "commit": "b6b96ab",
+      "detail": "validation_surface emits openapi_spec:null + note (also stderr) when no spec found. +6 regression tests (test_audit_fixes_v145.py + test_cache_cli.py). v1.45.0."
+    },
+    {
+      "id": 5,
+      "name": "Java/Spring orchestrator flow presets + intent routing",
+      "status": "done",
+      "commit": "3997665",
+      "detail": "run_migrate_flow (wraps migrate-check, lifts headline) + run_security_audit_flow (wraps spring-audit+endpoints, config-less blind-spot warning + security_config_hint). INTENT_MIGRATION/INTENT_SECURITY_AUDIT + R5/R6 rules. Both registered as native MCP tools (added to _NATIVE_MCP_TOOLS). +17 tests. v1.46.0."
     }
   ],
+  "remaining_tasks": [
+    {"id": 6, "name": "Audit bug #4 — endpoints config-less none_detected heuristic/auto-detect", "status": "not_started", "needs": "SAINT repo or synthetic fixture with class-level custom security annotations"},
+    {"id": 7, "name": "Audit bug #6 — class-level security annotation propagation to handlers (1136 vs 2549 in SAINT)", "status": "not_started", "needs": "SAINT repo to reproduce; meatier semantic fix"}
+  ],
+  "blockers": [
+    {"description": "Audit bugs #4 and #6 cannot be reproduced on local testing repos (petclinic/Broadleaf) — both need the SAINT repo or a synthetic fixture with a custom @M3FiltroSeguridad-style class-level annotation", "type": "external", "workaround": "Build a synthetic Java fixture: controller with class-level custom security annotation + multiple handlers, no method-level annotation."}
+  ],
+  "human_actions_pending": [
+    {"action": "Provide SAINT repo access or confirm a synthetic fixture is acceptable for #4/#6", "context": "Both remaining audit bugs are custom-annotation security detection; not reproducible on public test repos", "blocking": false},
+    {"action": "git push (not done — releases v1.45.0 + v1.46.0 are local only)", "context": "User asked to commit, not push; HEAD is 2 commits ahead of origin/master", "blocking": false}
+  ],
   "decisions": [
-    {"decision": "Gate by repo size (>500 Java files) + automation (delta), not by command", "rationale": "Data: gating core capability churns users; gating scale/collaboration ~doubles conversion. Free hooks solo devs; Pro charges enterprise monoliths."},
-    {"decision": "Java-only monetization (non-Java repos free at any size)", "rationale": "Product targets enterprise Java monoliths; is_large_repo counts only .java by design. Documented in license.py + PRODUCT_TIERS.md."},
-    {"decision": "Keep 500 Java file threshold", "rationale": "User confirmed; generous, maximizes adoption."},
-    {"decision": "Pro price 19 EUR/mo / 190 EUR/yr per-dev (down from 29.99)", "rationale": "CLI is focused tool, not platform; sit at CodeScene floor ($20-30) / Cursor norm ($20), not above. Adoption-oriented. Per-LOC/per-repo reserved for a future org tier."},
-    {"decision": "Only Free + Pro; no Enterprise tier", "rationale": "Nothing org-level built yet (SSO/dashboards/hosted MCP). Honest. Listed as roadmap in PRODUCT_TIERS.md."},
-    {"decision": "MCP local serve Free; hosted MCP = future Enterprise", "rationale": "Local serve already free in code; aligns README/landing."}
+    {"decision": "Release commits go directly to master", "rationale": "Matches established repo convention (every chore(release)/fix commit on master); no PR workflow in this solo repo", "phase": null},
+    {"decision": "Flow presets add no new analysis — orchestration ergonomics only", "rationale": "They wrap tools already callable directly; the genuine value is the config-less security safeguard (prevents a false-negative). Documented honestly in CHANGELOG per no-trap-promo rule.", "phase": null},
+    {"decision": "explain exit-code audit item (P3) closed as already-fixed", "rationale": "cli.py:4781 already raises Exit(1) when class not found; audit ran v1.42, fixed by v1.44.", "phase": null}
   ],
   "uncommitted_files": [],
-  "next_action": "Either update Lemon Squeezy pricing to 19/190, or push the three commits. Code work is complete and committed.",
-  "context_notes": "Post-milestone ad-hoc work (all 13 GSD phases already 100%). Monetization model change driven by competitor research (CodeScene/SonarQube/Sourcegraph/Cursor) + SaaS gating best-practice data. Gate is client-side (cli.py) + Apache 2.0 — no DRM; moat = convenience, known/accepted for v1. atlas-cli on master, landing on master."
+  "git_state": "clean after WIP commit; HEAD == 3997665 (v1.46.0), 2 commits ahead of origin/master (v1.45.0 b6b96ab + v1.46.0). NOT pushed.",
+  "tests": "2669 passed, 3 skipped (system /opt/homebrew/bin/python3; venv SIGKills with 137)",
+  "next_action": "Either (a) build a synthetic Java fixture (class-level custom security annotation + multiple handlers) to reproduce + fix audit bugs #4/#6, or (b) push the two local releases, or (c) start unrelated next work. No known open bugs reproducible locally.",
+  "context_notes": "Field-audit on repo SAINT (7488 files, 3996 endpoints) drove this session. Verified every fix live on testing/spring-petclinic before committing. Honest-benchmarks rule active: the orchestrator feature was assessed as ergonomics+1 safeguard, NOT a transformative win — strongest honest value remains migrate-check itself + the config-less safeguard. Two releases shipped: v1.45.0 (4 audit fixes), v1.46.0 (orchestrator flow presets)."
 }
