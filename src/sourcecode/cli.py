@@ -3685,6 +3685,10 @@ def impact_cmd(
         "-c",
         help="Copy output to system clipboard after a successful run. No-op when --output is used or clipboard is unavailable.",
     ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache",
+        help="Accepted for compatibility; this command always reads fresh source (no snapshot cache). No-op.",
+    ),
 ) -> None:
     """Blast-radius analysis: who calls this class and what breaks if it changes?
 
@@ -3836,6 +3840,10 @@ def endpoints_cmd(
         None, "--limit", "-n",
         help="Maximum number of endpoints to return.",
     ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache",
+        help="Accepted for compatibility; this command always reads fresh source (no snapshot cache). No-op.",
+    ),
 ) -> None:
     """Extract REST API endpoint surface from Java source files.
 
@@ -3899,13 +3907,26 @@ def endpoints_cmd(
     if limit is not None and limit > 0:
         endpoints_list = endpoints_list[:limit]
     if path_prefix or controller or limit is not None:
+        # Preserve the repo-wide aggregates before overwriting them with the
+        # filtered counts, so a --limit/--filter request stays internally
+        # coherent (total must match the security counters it is reported with).
+        _no_sec_before = data.get("no_security_signal")
+        _undoc_before = data.get("undocumented")
+        _no_sec_after = sum(
+            1 for e in endpoints_list
+            if e.get("security", {}).get("policy") == "none_detected"
+        )
         data["endpoints"] = endpoints_list
         data["total"] = len(endpoints_list)
+        data["no_security_signal"] = _no_sec_after
+        data["undocumented"] = _no_sec_after
         data["_filter"] = {
             "path_prefix": path_prefix,
             "controller": controller,
             "limit": limit,
             "total_before_filter": _total_before,
+            "no_security_signal_before_filter": _no_sec_before,
+            "undocumented_before_filter": _undoc_before,
         }
 
     output = _serialize_dict(data, format)
@@ -3947,6 +3968,10 @@ def validation_cmd(
     gaps_only: bool = typer.Option(
         False, "--gaps-only",
         help="Report only endpoints/fields with no declared validation (the gaps section).",
+    ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache",
+        help="Accepted for compatibility; this command always reads fresh source (no snapshot cache). No-op.",
     ),
 ) -> None:
     """Map request-body validation per endpoint (constraints + custom validators).
@@ -3997,14 +4022,21 @@ def validation_cmd(
             g for g in data.get("gaps", [])
             if str(g.get("path", "")).startswith(path_prefix)
         ]
+    _note = data.get("note")
     if gaps_only:
         data = {
             "gaps": data.get("gaps", []),
             "summary": data.get("summary", {}),
         }
+        if _note:
+            data["note"] = _note
 
     output = _serialize_dict(data, format)
     _summary = data.get("summary", {})
+    # Human-facing heads-up when the result is empty purely because no OpenAPI
+    # spec was found — otherwise the all-zero JSON reads as a false negative.
+    if _note:
+        typer.echo(f"Note: {_note}", err=True)
     _emit_command_output(
         output, output_path, copy,
         success_msg=f"Validation surface written to {output_path} "
@@ -4132,6 +4164,10 @@ def spring_audit_cmd(
         False,
         "--ci/--no-ci",
         help="Exit with code 1 if any findings at or above --min-severity are found. For CI/CD gates.",
+    ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache",
+        help="Accepted for compatibility; this command always reads fresh source (no snapshot cache). No-op.",
     ),
 ) -> None:
     """Spring semantic audit: TX anomalies (TX-001..005) + security surface (SEC-001..003).
@@ -4315,6 +4351,10 @@ def migrate_check_cmd(
         help="Minimum severity to include: critical, high, medium, or low (default).",
         show_default=True,
     ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache",
+        help="Accepted for compatibility; this command always reads fresh source (no snapshot cache). No-op.",
+    ),
 ) -> None:
     """Spring Boot 2→3 migration readiness: detect javax→jakarta namespace blockers.
 
@@ -4422,6 +4462,10 @@ def impact_chain_cmd(
         "impact", "--type", "-t",
         help="Query type: impact (default) or events.",
         show_default=True,
+    ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache",
+        help="Accepted for compatibility; this command always reads fresh source (no snapshot cache). No-op.",
     ),
 ) -> None:
     """Spring impact-chain: systemic blast radius of a symbol with TX/SEC enrichment.
@@ -6135,8 +6179,19 @@ def cache_clear_cmd(
     _clear_ris = include_ris or all_
     if not yes:
         _ris_note = " (including RIS)" if _clear_ris else " (RIS preserved — use --all to also clear it)"
-        import click as _click
-        _click.confirm(f"Delete all cache files for {target}{_ris_note}?", abort=True, err=True)
+        # P1: never block on stdin in a non-interactive context (CI, MCP, pipes).
+        # The interactive prompt is only meaningful on a TTY; elsewhere it would
+        # hang indefinitely waiting for input. Treat non-interactive as confirmed
+        # (clear is idempotent cleanup; RIS is preserved unless --all is passed).
+        if sys.stdin.isatty():
+            import click as _click
+            _click.confirm(f"Delete all cache files for {target}{_ris_note}?", abort=True, err=True)
+        else:
+            typer.echo(
+                f"Non-interactive: clearing cache for {target}{_ris_note}. "
+                "Pass --yes to silence this notice.",
+                err=True,
+            )
     removed = _cm.clear(target, clear_ris=_clear_ris)
     typer.echo(f"Removed {removed} file(s).", err=True)
 

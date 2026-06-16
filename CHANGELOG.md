@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.45.0] — 2026-06-16
+
+### Fixed
+- **P1 — `cache clear` hung indefinitely in non-interactive contexts (CI, MCP, pipes).**
+  Without `--yes`, the command called `click.confirm()`, which blocks reading stdin
+  forever when stdin is an open pipe that never sends EOF (exactly the CI/agent case) —
+  breaking pipelines and leaving the cache uncleared. The confirm prompt is now gated
+  behind `sys.stdin.isatty()`: interactive terminals still prompt, while non-interactive
+  runs proceed immediately (clear is idempotent; RIS stays preserved unless `--all`) and
+  print a one-line notice. Verified: old path times out on a never-EOF pipe, new path
+  returns in ~0.2s with exit 0.
+- **`--no-cache` rejected by analysis subcommands ("No such option").** The flag existed
+  only on the root analysis command, so `sourcecode endpoints --no-cache` (and `validation`,
+  `spring-audit`, `migrate-check`, `impact`, `impact-chain`) aborted with exit 2, breaking
+  scripted invocations that pass a uniform flag. These subcommands always read fresh source,
+  so `--no-cache` is now accepted as a documented no-op on each.
+- **`endpoints --limit` reported incoherent security counters.** `total` was recomputed to
+  the limited set while `no_security_signal` / `undocumented` kept their repo-wide values
+  (e.g. `total:2` next to `no_security_signal:3996`). The counters are now recomputed over
+  the filtered set; the repo-wide originals are preserved under `_filter.*_before_filter`.
+- **`validation` returned all-zeros silently when no OpenAPI spec was present.** A repo with
+  no spec (no `target/generated-sources`/spec on disk) produced an empty result with no
+  explanation, easily misread as "no validation anywhere". The result now carries an explicit
+  `openapi_spec: null` + `note` field (also echoed to stderr) clarifying that declarative DTO
+  constraints can't be recovered without a spec and that zero counts are expected, not a finding.
+
+### Notes
+- MCP orchestrator (`mcp/orchestrator.py`) gained a scoped TODO documenting three planned
+  high-value Java/Spring flow presets (`run_migrate_flow`, `run_security_audit_flow`, and an
+  R2-rule extension) — documented only, not implemented.
+
 ## [1.44.0] — 2026-06-16
 
 ### Fixed

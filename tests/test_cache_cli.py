@@ -102,6 +102,40 @@ class TestCacheCommandRegistration:
         assert stats["snapshots"] == 0
         assert stats["cores"] == 0
 
+    def test_cache_clear_non_interactive_no_hang(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P1 regression: `cache clear` without --yes on a non-interactive stdin
+        must NOT block on a confirm prompt (it hung indefinitely in CI before the
+        fix). It should proceed and clear, since stdin is not a TTY."""
+        monkeypatch.setenv("SOURCECODE_CACHE_DIR", str(tmp_path / "cache"))
+        repo = _make_repo(tmp_path)
+        _cache.write(repo, "abc1234-aabbccdd",
+                     json.dumps({"project_type": "python"}))
+        assert _cache.status(repo)["snapshots"] >= 1
+
+        # CliRunner stdin is not a TTY and we pass no input — the old code would
+        # have blocked on click.confirm(); the fix detects non-tty and proceeds.
+        result = runner.invoke(app, ["cache", "clear", str(repo)], input="")
+        assert result.exit_code == 0, result.output
+        assert _cache.status(repo)["snapshots"] == 0
+
+    def test_cache_clear_preserves_ris_by_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default clear keeps RIS; --all removes it."""
+        monkeypatch.setenv("SOURCECODE_CACHE_DIR", str(tmp_path / "cache"))
+        repo = _make_repo(tmp_path)
+        ris = _cache.cache_dir(repo) / "ris.json.gz"
+        ris.parent.mkdir(parents=True, exist_ok=True)
+        ris.write_bytes(gzip.compress(b"{}"))
+
+        runner.invoke(app, ["cache", "clear", str(repo), "--yes"])
+        assert ris.exists(), "default clear must preserve RIS"
+
+        runner.invoke(app, ["cache", "clear", str(repo), "--yes", "--all"])
+        assert not ris.exists(), "--all must remove RIS"
+
     def test_cache_status_exit_code_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

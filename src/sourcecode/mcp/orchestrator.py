@@ -6,6 +6,29 @@ Converts the MCP from a flat tool collection into a guided agent operating syste
 - run_pr_review_flow: auto-chains delta + review_pr + blast radius
 - run_bug_investigation_flow: auto-chains fix_bug + impact + IR context
 - run_feature_flow: auto-chains context + endpoints + delta + structural awareness
+
+TODO — planned high-value Java/Spring flow presets (audit 2026-06-16, repo SAINT):
+  These extend the existing orchestrator; they are NOT yet implemented.
+
+  1. TODO: implement later — run_migrate_flow
+     Preset wrapping `migrate-check`. Primary high-value entry point for
+     Spring Boot 2→3 planning (audit: produces 1,356-file prioritized
+     inventory in ~6s — the strongest determinante win). Should surface
+     readiness_score, blocking count, per-target breakdown (jakarta /
+     spring_security_6 / java_11) and estimated_effort_days.
+
+  2. TODO: implement later — run_security_audit_flow
+     Preset wrapping `spring-audit` + `endpoints`. Auto-handle the
+     config-less case: when no sourcecode.config.json is present and the
+     repo carries custom security annotations, emit a fallback WARNING +
+     hint to add sourcecode.config.json (customAnnotations) rather than
+     returning a misleading 100% none_detected result.
+
+  3. TODO: implement later — extend R2 orchestration rule (apply_orchestration_rules)
+     Inject preset (1)/(2) when detected intent maps to migration or
+     security audit, mirroring the existing R2 java_no_endpoints rule.
+     Requires new INTENT_MIGRATION / INTENT_SECURITY_AUDIT constants +
+     _INTENT_PATTERNS entries + WORKFLOW_SEQUENCES / FLOW_RUNNERS wiring.
 """
 from __future__ import annotations
 

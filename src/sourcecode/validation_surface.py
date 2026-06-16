@@ -302,4 +302,19 @@ def build_validation_surface(
     spec_path = endpoints_data.get("openapi_spec")
     if spec_path:
         result["openapi_spec"] = spec_path
+    else:
+        # No OpenAPI spec on disk / under target/generated-sources. Declarative
+        # DTO constraints cannot be recovered, so a sea of zeros here is expected
+        # and NOT a sign the repo lacks validation — it just isn't OpenAPI-driven.
+        # Surface this explicitly so the result is not silently misread as
+        # "no validation anywhere".
+        result["openapi_spec"] = None
+        result["note"] = (
+            "No OpenAPI spec found (no spec on disk or under "
+            "target/generated-sources). Declarative DTO constraints cannot be "
+            "recovered; only source-declared custom validators are reported. "
+            "Body-endpoint and validated-field counts will read zero unless an "
+            "OpenAPI spec is present — this is expected, not a missing-validation "
+            "finding."
+        )
     return result
