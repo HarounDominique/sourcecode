@@ -599,6 +599,96 @@ class TestOrchestratorIntegration:
 
 
 # ---------------------------------------------------------------------------
+# Fase 21-03 — repo/service seed must reach the controller across the
+# interface-only DI chain (openapi-generator petclinic shape).
+# ---------------------------------------------------------------------------
+
+class TestInterfaceChainReachesController:
+    """Field test (petclinic-rest #11, weakness #2): impact-chain on a repository
+    seed reports endpoints_affected=0 even though the route exists.
+
+    Chain shape:
+        VetRepository  ← injected by VetServiceImpl
+        VetService     ← injected by VetRestController  (impl injects the *interface*)
+        VetServiceImpl implements VetService
+        VetRestController implements VetsApi → GET /api/vets (spec-recovered)
+
+    BFS from VetRepository reaches VetServiceImpl, but its callers inject the
+    *interface* VetService — the injects edge lives on reverse_graph[VetService],
+    not reverse_graph[VetServiceImpl].  CH-001b only expands impl→interface for the
+    SEED; mid-chain it was never done, so the controller was unreachable.
+    """
+
+    def _build_chain(self):
+        symbols = [
+            "com.example.repo.VetRepository",
+            "com.example.service.VetService",
+            "com.example.service.VetServiceImpl",
+            "com.example.service.VetServiceImpl#findAll",
+            "com.example.web.VetRestController",
+            "com.example.web.VetRestController#listVets",
+        ]
+        # Impl→interface edge so implementation_graph.interfaces_of(VetServiceImpl)
+        # resolves to VetService.
+        dependencies = [
+            {"from": "com.example.service.VetServiceImpl",
+             "to": "com.example.service.VetService", "type": "implements"},
+            {"from": "com.example.service.VetServiceImpl#<init>",
+             "to": "com.example.repo.VetRepository", "type": "injects"},
+            {"from": "com.example.web.VetRestController#<init>",
+             "to": "com.example.service.VetService", "type": "injects"},
+        ]
+        reverse_graph = {
+            # VetServiceImpl injects the repo → repo's caller is the service impl.
+            "com.example.repo.VetRepository": {
+                "injects": ["com.example.service.VetServiceImpl#<init>"],
+            },
+            # The controller injects the *interface*, so the edge sits on VetService.
+            "com.example.service.VetService": {
+                "injects": ["com.example.web.VetRestController#<init>"],
+            },
+        }
+        ep = _FakeEndpoint(
+            ep_id="ep-vets",
+            method="GET",
+            path="/api/vets",
+            controller_class="com.example.web.VetRestController",
+            handler_symbol="com.example.web.VetRestController#listVets",
+        )
+        ei = _make_endpoint_index([ep])
+        model = _make_model(endpoint_index=ei)
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph,
+                       dependencies=dependencies)
+        return cir, model
+
+    def test_repo_seed_reaches_controller_endpoint(self):
+        cir, model = self._build_chain()
+        orchestrator = ImpactOrchestrator()
+        result = orchestrator.query(cir, model, "VetRepository", depth=3)
+
+        assert "com.example.web.VetRestController" in (
+            result.direct_callers + result.indirect_callers
+        ), (
+            f"controller must be reachable across the interface DI chain; "
+            f"direct={result.direct_callers} indirect={result.indirect_callers}"
+        )
+        paths = {ep.path for ep in result.endpoints_affected}
+        assert "/api/vets" in paths, (
+            f"repo seed must surface the controller endpoint; got {paths}"
+        )
+
+    def test_service_seed_reaches_controller_endpoint(self):
+        cir, model = self._build_chain()
+        orchestrator = ImpactOrchestrator()
+        result = orchestrator.query(cir, model, "VetServiceImpl", depth=3)
+
+        paths = {ep.path for ep in result.endpoints_affected}
+        assert "/api/vets" in paths, (
+            f"service seed must surface the controller endpoint; got {paths}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Regression tests for IC-V1..V5 (validation-session bugs)
 # ---------------------------------------------------------------------------
 

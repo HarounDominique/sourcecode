@@ -235,6 +235,7 @@ def _bfs_callers(
     seed_fqns: list[str],
     reverse_graph: dict[str, dict[str, list[str]]],
     max_depth: int,
+    impl_graph: object | None = None,
 ) -> tuple[list[str], list[str], bool]:
     """BFS from seed FQNs through reverse_graph.
 
@@ -252,6 +253,14 @@ def _bfs_callers(
     class live on method-level keys (e.g. 'Foo#doWork') rather than the class key
     ('Foo').  A class→method-key index is built upfront so the BFS also traverses
     method-level entries when processing a class-level FQN.
+
+    Fase 21-03 (mid-chain impl→interface): when BFS reaches an implementation class
+    node, its callers typically inject the *interface* type, so the injects reverse
+    edges live on the interface node — not on the impl class.  When `impl_graph` is
+    supplied, the interfaces of each class-level node are folded into its edge set so
+    BFS crosses the DI boundary (e.g. VetServiceImpl → VetService → VetRestController).
+    CH-001b performs the same expansion for the SEED only; this extends it to every
+    impl reached during traversal, closing repo→service→controller chains.
     """
     visited: set[str] = set(seed_fqns)
     direct: list[str] = []
@@ -270,11 +279,18 @@ def _bfs_callers(
 
     def _edges_for(fqn: str) -> list[tuple[str, list[str]]]:
         """Return all (etype, fqn_list) pairs from reverse_graph for fqn.
-        For class-level FQNs also includes method-level entries (BUG-004)."""
+        For class-level FQNs also includes method-level entries (BUG-004) and,
+        when impl_graph is supplied, the reverse edges of the class's interfaces
+        (Fase 21-03 mid-chain impl→interface DI boundary crossing)."""
         edges: list[tuple[str, list[str]]] = list((reverse_graph.get(fqn) or {}).items())
         if "#" not in fqn:
             for mk in class_method_index.get(fqn, []):
                 edges.extend((reverse_graph.get(mk) or {}).items())
+            if impl_graph is not None:
+                for iface in impl_graph.interfaces_of(fqn):
+                    edges.extend((reverse_graph.get(iface) or {}).items())
+                    for mk in class_method_index.get(iface, []):
+                        edges.extend((reverse_graph.get(mk) or {}).items())
         return edges
 
     # Hub-class guard: cap depth to 1 when the UNIQUE direct caller set exceeds
@@ -635,7 +651,7 @@ class ImpactOrchestrator:
 
         # ── 2. BFS through reverse graph ─────────────────────────────────
         direct_callers, indirect_callers, truncated = _bfs_callers(
-            seed_fqns, cir.reverse_graph, depth
+            seed_fqns, cir.reverse_graph, depth, impl_graph=impl_graph
         )
         if truncated:
             warnings.append(
