@@ -134,6 +134,10 @@ _CLASS_DECL_RE = re.compile(
 _METHOD_DECL_RE = re.compile(
     r'^(?P<modifiers>(?:(?:public|private|protected|static|final|synchronized'
     r'|abstract|default|native|strictfp|override)\s+)*)'
+    # Inline (modifier-position) annotations, e.g. `public @ResponseBody Vets foo()`
+    # or `@Valid`, `@Nonnull`. Without this the whole declaration fails to match and
+    # the method (its endpoint + return-type edge) is silently dropped (CH-003/Fase 22).
+    r'(?P<inline_anns>(?:@[\w.]+(?:\s*\([^)]*\))?\s+)*)'
     r'(?:<[\w,\s?]+>\s+)?'
     r'(?P<return_type>(?:void|boolean|byte|char|short|int|long|float|double|String|[\w.<>\[\]?,]+)\s+)'
     r'(?P<name>[a-z_]\w*)\s*\(',
@@ -830,6 +834,11 @@ def _extract_symbols(
                 if mname not in _JAVA_KEYWORDS:
                     fqn = f"{class_fqn}#{mname}"
                     modifiers = _parse_modifier_str(mth_m.group("modifiers") or "")
+                    # Fold modifier-position inline annotations into pending_anns so
+                    # symbol_kind / endpoint detection see them (e.g. @ResponseBody).
+                    for _inl in re.findall(r'@[\w.]+', mth_m.group("inline_anns") or ""):
+                        if _inl not in pending_anns:
+                            pending_anns.append(_inl)
                     used = _resolve_types_from_text(stripped, import_map)
                     conf = "high" if ("public" in modifiers or pending_anns) else "medium"
 
@@ -1329,6 +1338,32 @@ def _build_relations(
                     confidence="high",
                     evidence={"type": "annotation", "value": ann},
                 ))
+
+    # ── Type-usage: return-type edges (CH-003 / Fase 22) ──────────────────────
+    # A method's declared return type is a real dependency edge the call/DI graph
+    # misses: for a value/DTO/response type returned (esp. @ResponseBody) by a
+    # controller handler, this is the ONLY link from the type back to its endpoint.
+    # method → returnTypeFQN, type="returns".  Resolution reuses _resolve_dep_type,
+    # so only in-repo / imported types produce edges (primitives & void are skipped).
+    _PRIMITIVE_RETURNS: frozenset[str] = frozenset({
+        "void", "boolean", "byte", "char", "short", "int", "long", "float",
+        "double", "String", "Object",
+    })
+    for sym in symbols:
+        if sym.type != "method" or not sym.return_type:
+            continue
+        _ret_base = re.sub(r'<.*', '', sym.return_type).replace("[]", "").strip()
+        if not _ret_base or _ret_base in _PRIMITIVE_RETURNS or not _ret_base[0].isupper():
+            continue
+        _ret_fqn = _resolve_dep_type(_ret_base)
+        if _ret_fqn and _ret_fqn != _enclosing_class(sym.symbol):
+            edges.append(RelationEdge(
+                from_symbol=sym.symbol,
+                to_symbol=_ret_fqn,
+                type="returns",
+                confidence="high",
+                evidence={"type": "return_type", "value": sym.return_type},
+            ))
 
     _class_syms = [s for s in symbols if s.type in ("class", "interface") and "#" not in s.symbol]
 

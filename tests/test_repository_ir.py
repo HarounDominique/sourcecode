@@ -3200,3 +3200,75 @@ class TestAnalysisMeta:
         # symbols_analyzed counts ALL symbols (class + methods + fields),
         # graph.nodes are only classes/interfaces with edges — so symbols >= nodes
         assert meta["symbols_analyzed"] >= len(nodes)
+
+
+# ---------------------------------------------------------------------------
+# CH-003 / Fase 22 — inline annotations + type-usage (return-type) edges
+# ---------------------------------------------------------------------------
+
+_VETS_CONTROLLER = """\
+package com.example.vet;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.ResponseBody;
+
+class VetController {
+
+\t@GetMapping({ "/vets" })
+\tpublic @ResponseBody Vets showResourcesVetList() {
+\t\tVets vets = new Vets();
+\t\treturn vets;
+\t}
+}
+"""
+
+_VETS_TYPE = """\
+package com.example.vet;
+
+class Vets {
+}
+"""
+
+
+class TestInlineAnnotationMethodParsing:
+    """CH-003 — a modifier-position inline annotation (e.g. `public @ResponseBody Vets
+    foo()`) must not cause the whole method declaration to be dropped."""
+
+    def test_inline_annotated_method_is_parsed(self):
+        _, symbols, _ = _extract_symbols(_VETS_CONTROLLER, "VetController.java")
+        methods = {s.symbol.split("#")[-1]: s for s in symbols if s.type == "method"}
+        assert "showResourcesVetList" in methods, (
+            "method with `public @ResponseBody Vets ...` was dropped by the parser"
+        )
+
+    def test_inline_annotation_captured_and_return_type(self):
+        _, symbols, _ = _extract_symbols(_VETS_CONTROLLER, "VetController.java")
+        m = next(s for s in symbols if s.symbol.endswith("#showResourcesVetList"))
+        assert m.return_type == "Vets"
+        assert "@ResponseBody" in m.annotations
+        # @GetMapping on the preceding line still drives endpoint classification.
+        assert m.symbol_kind == "endpoint"
+
+
+class TestReturnTypeEdges:
+    """Fase 22 — a method's declared return type produces a `returns` type-usage edge
+    so value/DTO/response types have a visible blast radius."""
+
+    def test_return_type_edge_emitted(self):
+        ir = _build_di_ir(
+            (_VETS_CONTROLLER, "VetController.java"),
+            (_VETS_TYPE, "Vets.java"),
+        )
+        edges = ir["graph"]["edges"]
+        returns_edges = [
+            (e["from"], e["to"]) for e in edges if e.get("type") == "returns"
+        ]
+        assert (
+            "com.example.vet.VetController#showResourcesVetList",
+            "com.example.vet.Vets",
+        ) in returns_edges, f"expected returns edge to Vets, got {returns_edges!r}"
+
+    def test_primitive_and_void_returns_skipped(self):
+        ir = _build_di_ir((_VETS_CONTROLLER, "VetController.java"), (_VETS_TYPE, "Vets.java"))
+        targets = {e["to"] for e in ir["graph"]["edges"] if e.get("type") == "returns"}
+        assert not any(t in {"void", "String", "int", "boolean"} for t in targets)
