@@ -3369,6 +3369,15 @@ public interface PaymentService {
 }
 """
 
+# CH-004c: no annotation at all, no injected field of its own — purely structural.
+_BARE_STRUCTURAL_SUB = """\
+package com.example.web;
+
+public class WebCheckoutController extends AbstractCheckoutBase {
+\tpublic String run() { return paymentService.pay(); }
+}
+"""
+
 
 class TestCH004GraphCompleteness:
     def test_field_injection_only_class_not_prescan_skipped(self, tmp_path):
@@ -3403,3 +3412,24 @@ class TestCH004GraphCompleteness:
             "com.example.web.CheckoutController",
             "com.example.web.AbstractCheckoutBase",
         ) in extends, f"same-package supertype not FQN-resolved: {extends!r}"
+
+    def test_annotation_free_structural_subclass_keeps_extends_edge(self, tmp_path):
+        # CH-004c: a class with NO annotation and no injected field of its own still
+        # owns an extends edge. The fast pre-scan must not drop it.
+        (tmp_path / "AbstractCheckoutBase.java").write_text(_INJECTED_BASE, encoding="utf-8")
+        (tmp_path / "WebCheckoutController.java").write_text(
+            _BARE_STRUCTURAL_SUB, encoding="utf-8"
+        )
+        (tmp_path / "PaymentService.java").write_text(_PAYMENT_SVC, encoding="utf-8")
+        ir = build_repo_ir(
+            ["AbstractCheckoutBase.java", "WebCheckoutController.java", "PaymentService.java"],
+            tmp_path,
+        )
+        extends = [
+            (e["from"], e["to"]) for e in ir["graph"]["edges"]
+            if e.get("type") == "extends"
+        ]
+        assert (
+            "com.example.web.WebCheckoutController",
+            "com.example.web.AbstractCheckoutBase",
+        ) in extends, f"annotation-free structural subclass pre-scan skipped: {extends!r}"

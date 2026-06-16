@@ -131,6 +131,15 @@ _CLASS_DECL_RE = re.compile(
     r'\s*\{',
 )
 
+# CH-004c: detect a type declaration that participates structurally via inheritance
+# (`class X extends Base` / `interface I extends A` / `class C implements I`). Used by
+# the fast pre-scan to NOT skip annotation-free files that still own extends/implements
+# edges the impact graph needs. `[^{;]*?` keeps the match within a single declaration
+# head (stops at the body `{` or a `;`), matching the precision of _CLASS_DECL_RE.
+_INHERIT_PRESCAN_RE = re.compile(
+    r'\b(?:class|interface)\s+[A-Z]\w*[^{;]*?\b(?:extends|implements)\b'
+)
+
 _METHOD_DECL_RE = re.compile(
     r'^(?P<modifiers>(?:(?:public|private|protected|static|final|synchronized'
     r'|abstract|default|native|strictfp|override)\s+)*)'
@@ -3186,7 +3195,8 @@ def build_repo_ir(
         _meta_chars_read += len(source)
         # Fast pre-scan: if file has no relevant annotations skip full extraction.
         # Still register package/class name for same-package resolution.
-        if not any(marker in source for marker in _effective_markers):
+        if not any(marker in source for marker in _effective_markers) \
+                and not _INHERIT_PRESCAN_RE.search(source):
             pkg_m = _PKG_RE.search(source)
             _pkg = pkg_m.group(1) if pkg_m else ""
             # Minimal class-name symbols for same-package map (no methods/fields)
