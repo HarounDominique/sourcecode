@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.43.0] — 2026-06-16
+
+### Fixed
+- **CH-004a — impact graph dropped field-injection-only classes.** `build_repo_ir`'s fast
+  pre-scan skips files with no recognized annotation marker; the marker set included
+  `@Inject` but not `@Autowired`, `@Resource`, `@Qualifier`, or `@Value`. A class wired
+  purely by field injection with no class-level stereotype (e.g. an abstract base controller
+  that holds the services its concrete subclasses inherit) was skipped entirely, so its
+  `injects` edges never existed and `impact-chain` could not traverse through it. Added the
+  field/setter-injection annotations (`@Autowired`, `@Resource`, `@Qualifier`, `@Value`,
+  `@PersistenceContext`, `@PersistenceUnit`) to the pre-scan marker set.
+- **CH-004b — same-package supertypes were not FQN-resolved.** The `extends`/`implements`
+  edge builder resolved supertype names only via `import_map`, so a same-package
+  `extends Base` (which needs no Java import) produced a **bare-name** edge target. The
+  `implementation_graph` could then not link sub→supertype, making same-package class
+  hierarchies invisible to impact analysis. Supertypes are now resolved via
+  `_resolve_dep_type` (import + same-package + wildcard), matching `injects`/constructor edges.
+
+Both fixes were surfaced by a field test on BroadleafCommerce (2985-file monolith); they
+under-reported blast radius on any large repo, not just that one. See
+`docs/eval/2026-06-16-broadleaf-checkout-impact-fieldtest.md`.
+
 ## [1.42.0] — 2026-06-16
 
 ### Added
