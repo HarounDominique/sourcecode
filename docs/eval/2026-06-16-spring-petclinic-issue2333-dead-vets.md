@@ -110,8 +110,37 @@ controller, grepping the Thymeleaf template for `${listVets}`, and the existing
 - Cold-start latency and the call/DI chain are genuinely production-grade on an unseen
   canonical repo. The gap is edge *coverage*, not performance or the core graph.
 
+## Resolution — Fase 22 / CH-003 (v1.42.0)
+
+The gap surfaced here is closed. Three commits on master (66e6824, 57d5ce9, 688a1ef):
+
+1. **Root cause was deeper than "missing edges".** `_METHOD_DECL_RE` could not match a
+   modifier-position inline annotation — `public @ResponseBody Vets showResourcesVetList()`
+   — so the handler was never parsed: no symbol, no endpoint, no return type. This alone
+   explained both the all-zero `Vets` result *and* "VetController reports 1 of 2 endpoints".
+   Fixed by consuming + capturing inline annotations into the method's annotation set.
+2. **Type-usage edges** (`repository_ir._build_relations`): `returns` (method→return type,
+   drives `@ResponseBody`→endpoint) and `instantiates` (class→`new T()`, controllers
+   excluded since `returns` covers them precisely).
+3. **Safety guard** (`spring_impact`): empty blast on a positively-identified value type →
+   `confidence: low` + warning instead of `high`. Now dormant on `Vets` (real edges exist);
+   remains a fallback for symbol kinds still lacking usage edges.
+
+**After-state (re-run on `spring-petclinic-fix`, 2026-06-16):**
+
+```
+impact-chain Vets          → confidence: high, callers: [VetController#showResourcesVetList],
+                             endpoints: [GET /vets]          (was: high, [], [] — false zero)
+impact-chain VetController  → endpoints: [GET /vets, GET /vets.html]   (was: [GET /vets.html] only)
+```
+
+2643 tests pass. The false zero that read as "globally dead" is gone, and the endpoint is
+recovered precisely (the `@ResponseBody` route, not all controller routes).
+
 ## Artifacts
 
 - Fix: `spring-petclinic-fix` working tree, `VetController.java` (-4 lines), tests green.
 - Issue: spring-projects/spring-petclinic#2333.
-- Follow-up candidate: CH-002 (type-usage / return-type edges in the impact graph).
+- Tool fix: CH-003 / Fase 22 — type-usage edges + inline-annotation parser fix (v1.42.0).
+  Note: the eval above called this "CH-002"; the actual roadmap id is **CH-003** (CH-002 was
+  already taken by injects-FQN normalization).

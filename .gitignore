@@ -34,3 +34,6 @@ src/*.egg-info/
 Thumbs.db
 
 .planning
+
+# Supabase local temp
+supabase/.temp/

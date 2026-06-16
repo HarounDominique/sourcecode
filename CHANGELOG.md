@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.42.0] — 2026-06-16
+
+### Added
+- **Fase 22 — type-usage edges in `impact-chain` (CH-003).** Value/DTO/response
+  types previously had an invisible blast radius: the impact graph modelled call and
+  DI/injection edges but not how a type is wired *by type*. Two new edges close this:
+  - **`returns`** — `method → returnTypeFQN` (method-level). For a `@ResponseBody`
+    handler returning a domain type this is the only link from the type back to its
+    endpoint, so `_collect_endpoints` now surfaces that route precisely.
+  - **`instantiates`** — `class → T` for `new T(...)`, giving build-only value types
+    (commands, receipts) a visible blast radius. Controller-like classes are excluded
+    (already covered precisely by `returns`) to avoid broadening a DTO's impact to
+    every route on the controller.
+
+### Fixed
+- **Inline-annotation method parsing.** `_METHOD_DECL_RE` could not match a
+  modifier-position annotation (`public @ResponseBody Vets foo()`); the whole
+  declaration failed and the method — its endpoint *and* return type — was silently
+  dropped. Inline annotations are now consumed and folded into the method's annotation
+  set. Recovers, e.g., the `GET /vets` handler in spring-petclinic `VetController`.
+
+### Changed
+- **Safety guard for type-usage blind spots (CH-003 Part 1).** A fully empty blast
+  radius on a positively-identified plain value type (node present, `symbol_kind` in
+  class/enum/record, no stereotype annotation, role `other`, not a controller) is no
+  longer reported at `confidence: high` — it drops to `low` with a warning that an
+  empty result is not proof the type is unused. Spine symbols and incomplete-IR cases
+  keep prior behaviour. The guard now stays dormant when real type-usage edges exist.
+
+### Field test (spring-petclinic #2333)
+- `impact-chain Vets`: was `confidence: high` with 0 callers / 0 endpoints (a dangerous
+  false zero) → now `high`, caller `showResourcesVetList`, endpoint `GET /vets`.
+- `impact-chain VetController`: was 1 of 2 endpoints → both (`GET /vets` + `/vets.html`).
+
 ## [1.41.0] — 2026-06-16
 
 ### Added
