@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.41.0] — 2026-06-16
+
+### Added
+- **Fase 21 — spec-recovered HTTP routes reach `impact-chain`.** In
+  openapi-generator "interface-only" repos (`@RestController implements XxxApi`,
+  mappings on the generated interface under `target/generated-sources`), the HTTP
+  surface is recovered from the OpenAPI spec. That recovery previously lived only in
+  the `endpoints` command path, so `impact-chain` on a repository/service symbol
+  reported `endpoints_affected = 0` even though the route existed. The spec→controller
+  linking is now shared and wired through the impact model end to end.
+- **21-02** — `_recover_openapi_spec_routes` (repository_ir): single shared helper that
+  links spec operations to interface-defined controllers and emits both the
+  `endpoints`-command shape and the `route_surface` shape. `build_repo_ir` merges the
+  spec-sourced `route_surface` entries, so they flow `route_surface → CanonicalRepositoryIR
+  → EndpointIndex → impact-chain`. The `endpoints` command output stays byte-identical.
+- **21-03** — `impact-chain` BFS now crosses the interface DI boundary mid-chain.
+  `_bfs_callers` takes the `ImplementationGraph` and, for each implementation class it
+  reaches, folds in the reverse edges of that class's interfaces (callers inject the
+  interface type, so the `injects` edges sit on the interface node). Closes
+  `repo → serviceImpl → (service interface) → controller` so the spec-recovered endpoint
+  surfaces. CH-001b already did this for the seed; 21-03 extends it to every impl in the
+  traversal.
+
+### Fixed
+- **BUG-PARSER-002 — multi-line constructor/method signatures.** A signature whose
+  parameter list spans several physical lines (the canonical Spring constructor-injection
+  idiom, one param per line) lost its parameters: the per-line decl regex captured `[^)]*`
+  up to end-of-line only, so `param_types` was empty and no `injects` edges were emitted.
+  The pre-join pass now balances parentheses for declaration openers, mirroring the
+  existing multi-line class-declaration join.
+- **BUG-PARSER-003 — wildcard-import dependency resolution.** A dependency type pulled in
+  via `import pkg.*` was never resolved to an FQN (`import_map` skips `.*`), so even a
+  single-line constructor produced no `injects` edge. `_build_relations` now receives the
+  global `{package → {simple → FQN}}` map and resolves wildcard-imported types against it.
+
+### Why
+Field test of spring-petclinic-rest issue #11 (weakness #2): `impact-chain` on a repo or
+service symbol surfaced no affected HTTP endpoints in interface-only openapi-generator
+repos, even though the `endpoints` command listed the routes. The break was structural at
+several layers — the spec→controller linking never reached `route_surface`/the CIR, the DI
+chain dead-ended at the service impl, and (the live-repo blocker) the very first hop
+repo→service was missing because petclinic's `ClinicServiceImpl` uses a multi-line
+constructor with a wildcard repository import. With all four fixes, the live E2E
+`impact-chain VetRepository` on petclinic-rest goes from **0** affected endpoints to the
+full transitive set (**35**, reaching every controller incl. the spec-recovered v2 routes).
+
 ## [1.40.0] — 2026-06-16
 
 ### Added
