@@ -124,6 +124,7 @@ class _FakeCIR:
         dependencies: Optional[list[dict]] = None,
         files: Optional[list[str]] = None,
         metadata: Optional[dict] = None,
+        nodes: Optional[list[dict]] = None,
     ):
         self.symbols = symbols or []
         self.reverse_graph = reverse_graph or {}
@@ -133,7 +134,7 @@ class _FakeCIR:
         self.files = files or []
         self.metadata = metadata or {}
         self.cir_hash = "deadbeef00000000"
-        self._raw_ir = {"graph": {"nodes": [], "edges": self.call_graph}}
+        self._raw_ir = {"graph": {"nodes": nodes or [], "edges": self.call_graph}}
         # Derived graph indices — built from dependencies, mirroring canonical_ir behaviour
         self.implementation_graph = ImplementationGraph.build(
             self.dependencies, set(self.symbols)
@@ -790,6 +791,69 @@ class TestRegressionV3ClassExpandedConfidence:
         result = orchestrator.query(cir, model, "OrderService", depth=1)
         assert result.resolution == "partial"
         assert result.confidence == "medium"
+
+
+class TestRegressionCH003ValueTypeBlindSpot:
+    """CH-003 — value/DTO types have an invisible blast radius (type-usage edges
+    not modeled). A fully empty result on such a type must NOT be reported at
+    confidence=high: it reads as 'globally dead' and is a dangerous false negative.
+    See finding_ch003_type_usage_edges + docs/eval/2026-06-16-spring-petclinic-issue2333.
+    """
+
+    def _value_type_node(self, fqn: str) -> dict:
+        # Plain POJO: symbol_kind=class, no stereotype annotation, role=other.
+        return {
+            "fqn": fqn,
+            "symbol_kind": "class",
+            "type": "class",
+            "role": "other",
+            "annotations": [],
+        }
+
+    def test_ch003_value_type_empty_result_not_high(self):
+        # `Vets` — instantiated + returned by @ResponseBody in the real repo, but the
+        # impact graph models no type-usage edges → 0 callers, 0 endpoints.
+        fqn = "org.springframework.samples.petclinic.vet.Vets"
+        cir = _FakeCIR(
+            symbols=[fqn],
+            reverse_graph={},
+            nodes=[self._value_type_node(fqn)],
+        )
+        model = _make_model()
+        result = ImpactOrchestrator().query(cir, model, "Vets", depth=1)
+
+        assert result.direct_callers == []
+        assert result.endpoints_affected == []
+        assert result.confidence != "high", (
+            "empty blast radius on a value/DTO type must not be high-confidence "
+            f"(false negative), got {result.confidence!r}"
+        )
+        assert any(
+            "type-usage" in w.lower() or "not modeled" in w.lower()
+            for w in result.analysis_warnings
+        ), f"expected a type-usage-edge warning, got {result.analysis_warnings!r}"
+
+    def test_ch003_stereotype_bean_empty_result_stays_high(self):
+        # A genuinely-empty @Service is a spine participant — call/DI edges DO cover
+        # its blast radius, so the guard must NOT fire (no false downgrade).
+        fqn = "com.example.OrphanService"
+        node = self._value_type_node(fqn)
+        node["annotations"] = ["@Service"]
+        node["role"] = "service"
+        cir = _FakeCIR(symbols=[fqn], reverse_graph={}, nodes=[node])
+        model = _make_model()
+        result = ImpactOrchestrator().query(cir, model, "OrphanService", depth=1)
+        assert result.confidence == "high", (
+            f"stereotype bean with empty result should stay high, got {result.confidence!r}"
+        )
+
+    def test_ch003_no_node_metadata_preserves_legacy_high(self):
+        # No node metadata available (incomplete IR) → cannot confirm value type →
+        # stay conservative (preserves IC-V3 behaviour, no spurious downgrade).
+        cir = _FakeCIR(symbols=["com.example.OrderService"], reverse_graph={})
+        model = _make_model()
+        result = ImpactOrchestrator().query(cir, model, "OrderService", depth=1)
+        assert result.confidence == "high"
 
 
 class TestRegressionV5EndpointPrecision:

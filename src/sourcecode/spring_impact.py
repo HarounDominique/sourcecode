@@ -130,6 +130,50 @@ class ImpactChainResult:
 
 
 # ---------------------------------------------------------------------------
+# CH-003 — value/DTO type blind-spot detection
+# ---------------------------------------------------------------------------
+# The impact graph models call + DI/injection edges but not *type-usage* edges
+# (constructor instantiation `new T()`, field/local-variable type, and method
+# return type incl. @ResponseBody). For a service/repository the call+DI edges
+# cover the real blast radius; for a value/DTO/response type they cover nothing,
+# so its impact is invisible — and an all-zero result reported at confidence=high
+# reads as "globally dead" (a dangerous false negative). Until type-usage edges
+# are modelled (Fase 22 / CH-002), positively identify plain value types and
+# downgrade confidence + warn instead of asserting an empty high-confidence result.
+_STEREOTYPE_ANNOTATIONS = frozenset({
+    "@Service", "@Repository", "@Controller", "@RestController",
+    "@Component", "@Configuration", "@ControllerAdvice",
+    "@RestControllerAdvice", "@Bean",
+})
+_VALUE_TYPE_KINDS = frozenset({"class", "enum", "record"})
+
+
+def _is_unmodeled_value_type(cir, class_fqn: str, model) -> bool:
+    """True iff class_fqn is positively a plain value/DTO type whose blast radius
+    flows only through type-usage edges the impact graph does not model.
+
+    Conservative: returns False whenever the type cannot be positively confirmed
+    (node metadata absent, stereotype annotation present, recognized Spring role,
+    or controller) so spine symbols and incomplete-IR cases keep legacy behaviour.
+    """
+    graph = (getattr(cir, "_raw_ir", None) or {}).get("graph") or {}
+    node = next((n for n in (graph.get("nodes") or []) if n.get("fqn") == class_fqn), None)
+    if node is None:
+        return False  # cannot confirm — stay conservative (preserves IC-V3)
+    if (node.get("symbol_kind") or node.get("type")) not in _VALUE_TYPE_KINDS:
+        return False  # interface / annotation / bean-method etc.
+    anns = node.get("annotations") or []
+    if any(a.split("(", 1)[0] in _STEREOTYPE_ANNOTATIONS for a in anns):
+        return False  # Spring stereotype bean — spine participant
+    if (node.get("role") or "other") != "other":
+        return False  # recognized Spring role (repository/service/controller/mapper)
+    controllers = getattr(getattr(model, "endpoint_index", None), "controller_fqns", frozenset())
+    if class_fqn in controllers:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Symbol resolution
 # ---------------------------------------------------------------------------
 
@@ -706,8 +750,30 @@ class ImpactOrchestrator:
             impact_findings_raw,
         )
 
+        # CH-003: empty blast radius on a positively-identified value/DTO type is a
+        # type-usage blind spot, not proof of dead code — warn + drop confidence.
+        empty_blast = (
+            not direct_callers and not indirect_callers
+            and not endpoints_affected and not subtype_classes_added
+        )
+        value_type_blind_spot = (
+            empty_blast
+            and "#" not in resolved_symbol
+            and resolution != "not_found"
+            and _is_unmodeled_value_type(cir, resolved_symbol, model)
+        )
+        if value_type_blind_spot:
+            warnings.append(
+                "Type-usage edges not modeled (CH-003): this type's blast radius flows "
+                "through instantiation (new T()), field/local types, and method return "
+                "types (incl. @ResponseBody) — edges impact-chain does not yet track. "
+                "An empty result is NOT proof the type is unused."
+            )
+
         confidence: str
         if resolution == "not_found":
+            confidence = "low"
+        elif value_type_blind_spot:
             confidence = "low"
         elif resolution == "partial" or warnings:
             confidence = "medium"
