@@ -1460,6 +1460,46 @@ def _build_relations(
                     evidence={"type": "signature", "value": f"{ev_label}<{event_simple}>"},
                 ))
 
+    # ── Type-usage: instantiation edges (CH-003 / Fase 22) ────────────────────
+    # `new T(...)` couples the instantiating class to T — a type-usage edge the
+    # call/DI graph misses. Attributed at class level (one primary type per file,
+    # mirroring the publishes_event scan). Controllers are EXCLUDED: their value-type
+    # coupling is already covered precisely by `returns` edges, and a class-level
+    # edge from a controller would broaden a DTO's impact to every route on that
+    # controller (false breadth). Method-level attribution is a future refinement.
+    # Controller-like = class-level @RestController/@Controller OR a class that owns
+    # any endpoint-handler method (mappings are often only method-level).
+    _classes_with_endpoints = {
+        _enclosing_class(s.symbol) for s in symbols if s.symbol_kind == "endpoint"
+    }
+    _instantiating_controllers = {
+        s.symbol for s in symbols
+        if s.type in ("class", "interface")
+        and (
+            any(a in ("@RestController", "@Controller") for a in s.annotations)
+            or s.symbol in _classes_with_endpoints
+        )
+    }
+    _non_controller_classes = [
+        s for s in _class_syms if s.symbol not in _instantiating_controllers
+    ]
+    if _non_controller_classes:
+        _inst_targets: set[str] = set()
+        for _m in re.finditer(r'\bnew\s+([A-Z]\w*)\s*[(<]', _source_no_comments):
+            _t_fqn = _resolve_dep_type(_m.group(1))
+            if _t_fqn:
+                _inst_targets.add(_t_fqn)
+        for cls_sym in _non_controller_classes:
+            for _tgt in sorted(_inst_targets):
+                if _tgt != cls_sym.symbol:
+                    edges.append(RelationEdge(
+                        from_symbol=cls_sym.symbol,
+                        to_symbol=_tgt,
+                        type="instantiates",
+                        confidence="medium",
+                        evidence={"type": "method_call", "value": f"new {_tgt.split('.')[-1]}(...)"},
+                    ))
+
     seen: set[tuple[str, str, str]] = set()
     unique: list[RelationEdge] = []
     for e in edges:

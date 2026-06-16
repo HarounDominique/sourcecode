@@ -3272,3 +3272,59 @@ class TestReturnTypeEdges:
         ir = _build_di_ir((_VETS_CONTROLLER, "VetController.java"), (_VETS_TYPE, "Vets.java"))
         targets = {e["to"] for e in ir["graph"]["edges"] if e.get("type") == "returns"}
         assert not any(t in {"void", "String", "int", "boolean"} for t in targets)
+
+
+_ORDER_SERVICE = """\
+package com.example.order;
+
+import org.springframework.stereotype.Service;
+
+@Service
+class OrderService {
+\tpublic void place() {
+\t\tOrderReceipt r = new OrderReceipt();
+\t}
+}
+"""
+
+_ORDER_RECEIPT = """\
+package com.example.order;
+
+class OrderReceipt {
+}
+"""
+
+
+class TestInstantiatesEdges:
+    """Fase 22 — `new T(...)` produces an `instantiates` type-usage edge from a
+    non-controller class, so build-only value types have a visible blast radius."""
+
+    def test_service_instantiation_edge_emitted(self):
+        ir = _build_di_ir(
+            (_ORDER_SERVICE, "OrderService.java"),
+            (_ORDER_RECEIPT, "OrderReceipt.java"),
+        )
+        inst = {
+            (e["from"], e["to"]) for e in ir["graph"]["edges"]
+            if e.get("type") == "instantiates"
+        }
+        assert (
+            "com.example.order.OrderService",
+            "com.example.order.OrderReceipt",
+        ) in inst, f"expected instantiates edge, got {inst!r}"
+
+    def test_controller_instantiation_excluded(self):
+        # Controllers are covered precisely by `returns`; a class-level instantiates
+        # edge would over-broaden a DTO's impact to every route → excluded.
+        ir = _build_di_ir(
+            (_VETS_CONTROLLER, "VetController.java"),
+            (_VETS_TYPE, "Vets.java"),
+        )
+        inst_from_controller = [
+            e for e in ir["graph"]["edges"]
+            if e.get("type") == "instantiates"
+            and e["from"].startswith("com.example.vet.VetController")
+        ]
+        assert inst_from_controller == [], (
+            f"controller must not emit instantiates edges, got {inst_from_controller!r}"
+        )
