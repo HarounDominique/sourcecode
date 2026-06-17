@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.50.0] — 2026-06-17
+
+### Fixed
+- **F-1 — `impact-chain` confidence no longer capped at `medium` by informational
+  warnings.** Confidence was computed as `medium` whenever *any* warning was present, but
+  the CH-001a/b interface↔implementation expansion notices ("Interface implementation
+  expansion: added N symbols…") are appended on every Spring interface/impl query — the
+  overwhelmingly common case — so a clean exact/`class_expanded` resolution could never
+  report `high`. The signal was meaningless: `medium` meant "normal", not "degraded".
+
+  Fix: track a `confidence_reducing` flag set only by genuinely degrading conditions
+  (hub-guard capped traversal); informational expansion notices no longer affect
+  confidence. `partial` resolution and blind-spot guards (CH-003/CH-005) still degrade as
+  before. Verified on shopizer: `impact-chain ProductService` now reports `confidence:high`
+  (was `medium`) while still surfacing the expansion notice. 2 regression tests
+  (`TestConfidenceNotCappedByInfoWarnings`): expansion warning keeps `high`, hub-guard
+  truncation still caps to `medium`.
+
+  Closes the v1.47.0 field-benchmark backlog (F-3 → CH-006 v1.48.0, F-2 → v1.49.0,
+  F-1 → this release).
+
 ## [1.49.0] — 2026-06-17
 
 ### Added

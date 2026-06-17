@@ -678,6 +678,12 @@ class ImpactOrchestrator:
         t0 = time.monotonic()
         depth = max(1, min(depth, _BFS_HARD_LIMIT))
         warnings: list[str] = []
+        # F-1: not every warning degrades confidence. The CH-001a/b interface↔impl
+        # expansion notices are INFORMATIONAL (they describe normal, correct operation)
+        # and previously forced every Spring interface/impl query — the common case — down
+        # to confidence=medium permanently. Only genuinely degrading conditions (capped
+        # traversal) set this flag; resolution=="partial" is handled separately below.
+        confidence_reducing = False
 
         # ── 1. Resolve symbol ─────────────────────────────────────────────
         resolution, seed_fqns, sym_warnings = _resolve_symbol(symbol, cir.symbols)
@@ -775,6 +781,7 @@ class ImpactOrchestrator:
                 "Hub-class guard active: symbol has > 500 direct callers — "
                 "indirect caller traversal capped at depth=1."
             )
+            confidence_reducing = True  # capped traversal → result is incomplete
 
         # ── 3. Endpoints affected ─────────────────────────────────────────
         all_callers = direct_callers + indirect_callers
@@ -870,7 +877,7 @@ class ImpactOrchestrator:
             confidence = "low"
         elif framework_di_blind_spot or value_type_blind_spot:
             confidence = "low"
-        elif resolution == "partial" or warnings:
+        elif resolution == "partial" or confidence_reducing:
             confidence = "medium"
         else:
             confidence = "high"

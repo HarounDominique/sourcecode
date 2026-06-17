@@ -1711,3 +1711,53 @@ class TestHubInterfaceOverExpansion:
         assert "com.example.SiblingServiceImpl" not in callers, (
             f"CH-006: sibling impl wrongly attributed. callers={callers}"
         )
+
+
+# ---------------------------------------------------------------------------
+# F-1 — informational expansion warnings must not cap confidence
+# ---------------------------------------------------------------------------
+class TestConfidenceNotCappedByInfoWarnings:
+    """The CH-001a/b interface<->impl expansion notices describe normal, correct
+    operation and previously forced every Spring interface/impl query to medium.
+    Only genuinely degrading conditions (capped traversal, partial resolution)
+    should cap confidence.
+    """
+
+    def test_expansion_warning_keeps_high_confidence(self):
+        symbols = [
+            "com.example.OrderService",
+            "com.example.OrderServiceImpl",
+            "com.example.OrderServiceImpl#place",
+            "com.example.OrderController",
+            "com.example.OrderController#create",
+        ]
+        dependencies = [
+            {"from": "com.example.OrderServiceImpl", "to": "com.example.OrderService", "type": "implements"},
+        ]
+        reverse_graph = {
+            "com.example.OrderService#place": {"calls": ["com.example.OrderController#create"]},
+        }
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph, dependencies=dependencies)
+        result = ImpactOrchestrator().query(cir, _make_model(), "com.example.OrderService")
+        assert any("expansion" in w.lower() for w in result.analysis_warnings), (
+            "precondition: an informational expansion warning must be present"
+        )
+        assert result.confidence == "high", (
+            f"F-1: informational expansion warning must not cap confidence. "
+            f"confidence={result.confidence} warnings={result.analysis_warnings}"
+        )
+
+    def test_hub_guard_truncation_caps_confidence_to_medium(self):
+        # >500 unique direct callers trips the hub guard → capped traversal → medium.
+        callers = [f"com.example.Caller{i}#m" for i in range(600)]
+        symbols = ["com.example.Hub", "com.example.Hub#run"] + callers
+        reverse_graph = {"com.example.Hub#run": {"calls": callers}}
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph)
+        result = ImpactOrchestrator().query(cir, _make_model(), "com.example.Hub#run", depth=4)
+        assert any("hub-class guard" in w.lower() for w in result.analysis_warnings), (
+            f"precondition: truncation warning expected. warnings={result.analysis_warnings}"
+        )
+        assert result.confidence == "medium", (
+            f"F-1: capped traversal must reduce confidence to medium. "
+            f"confidence={result.confidence}"
+        )
