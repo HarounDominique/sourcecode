@@ -2,7 +2,7 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.48.0-blue)
+![Version](https://img.shields.io/badge/version-1.49.0-blue)
 ![Python](https://img.shields.io/badge/python-3.9%2B-green)
 
 ---
@@ -329,6 +329,8 @@ sourcecode endpoints /path/to/repo --output endpoints.json
 ```
 
 Extracts all Spring MVC (`@GetMapping`, `@PostMapping`, `@RequestMapping`, etc.) and JAX-RS (`@GET`, `@POST`, `@Path`) endpoint methods. Returns HTTP method, path, controller class, and handler method.
+
+**Functional / WebFlux routing (honest limitation).** Routes registered via the functional DSL — `route().GET("/path", handler)` / `RouterFunction` / `CustomEndpoint`, common in reactive Spring apps — are **not** modeled (their real paths depend on `nest()`/group-version prefixes that can't be resolved statically). Rather than emit partial paths that would mislead, the output reports a `functional_routing` block (`files`, `route_registrations`, `modeled: false`) plus a warning. When the annotation surface is empty but functional routes exist, the warning explicitly tells you not to read it as "no endpoints". Annotation-based (MVC/JAX-RS) repos are unaffected.
 
 **Custom security annotations.** Enterprise repos often guard endpoints with a bespoke annotation instead of `@PreAuthorize`/`@Secured`. Drop a `sourcecode.config.json` at the repo root to teach the scanner about it — otherwise those endpoints report `policy: "none_detected"`:
 

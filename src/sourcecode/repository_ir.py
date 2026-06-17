@@ -3829,6 +3829,18 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
     all_symbols: list[SymbolRecord] = []
     extends_map: dict[str, str] = {}
 
+    # F-2: detect WebFlux / functional (RouterFunction) routing. Such routes register
+    # via a fluent DSL (route().GET("/path", handler)) instead of @RequestMapping
+    # annotations, so the annotation-based surface built below does not see them. We
+    # deliberately do NOT synthesize endpoint entries: the literal paths here are
+    # relative (the real path includes nest()/group-version prefixes that cannot be
+    # resolved statically), and emitting partial paths would mislead more than an empty
+    # surface. Instead we count them and surface an honest limitation so a zero/partial
+    # annotation surface is never read as "this app exposes no endpoints".
+    _FN_ROUTE_RE = _re.compile(r'\.(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s*\(\s*"')
+    _fn_route_files: set[str] = set()
+    _fn_route_count = 0
+
     for jf in java_files:
         try:
             source = jf.read_text(encoding="utf-8", errors="replace")
@@ -3838,6 +3850,11 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             rel = str(jf.relative_to(root)).replace("\\", "/")
         except ValueError:
             rel = str(jf).replace("\\", "/")
+        if "RouterFunction" in source or "RequestPredicates" in source:
+            _fn_hits = len(_FN_ROUTE_RE.findall(source))
+            if _fn_hits:
+                _fn_route_files.add(rel)
+                _fn_route_count += _fn_hits
         _, symbols, _ = _extract_symbols(source, rel, extra_capture=_extra_capture)
         for sym in symbols:
             all_symbols.append(sym)
@@ -4045,6 +4062,26 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
         result["spec_sourced_endpoints"] = len(_spec_endpoints)
         if _openapi_spec_path:
             result["openapi_spec"] = _openapi_spec_path
+    # F-2: surface functional/RouterFunction routing as an honest limitation. Not modeled
+    # in the surface above; counted so an empty/partial annotation surface is not misread.
+    if _fn_route_count:
+        result["functional_routing"] = {
+            "files": len(_fn_route_files),
+            "route_registrations": _fn_route_count,
+            "modeled": False,
+        }
+        _fr_msg = (
+            f"{_fn_route_count} functional route registration(s) across "
+            f"{len(_fn_route_files)} file(s) use WebFlux/RouterFunction routing "
+            f'(route().GET("/path", handler)), which is NOT modeled here — this surface '
+            f"covers annotation-based (@RequestMapping/@GetMapping) endpoints only."
+        )
+        if not endpoints:
+            _fr_msg += (
+                " This surface is EMPTY despite functional routes being present — "
+                "do NOT read it as 'no endpoints'; the app's HTTP surface is unmodeled."
+            )
+        result.setdefault("warnings", []).append(_fr_msg)
     return result
 
 

@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.49.0] — 2026-06-17
+
+### Added
+- **F-2 — honest WebFlux / functional-routing signal in `endpoints`.** The endpoint
+  surface models annotation-based routing (`@RequestMapping`/`@GetMapping`, JAX-RS) only.
+  Routes registered via the functional DSL (`route().GET("/path", handler)` /
+  `RouterFunction` / `CustomEndpoint`) were silently invisible — the v1.47.0 field
+  benchmark found `endpoints` returned **0** for all of halo (a reactive app with 168
+  functional registrations across 51 files), which an agent could misread as "this app
+  exposes no endpoints". `endpoints` now detects functional routing and reports a
+  `functional_routing` block (`files`, `route_registrations`, `modeled: false`) plus a
+  warning; when the annotation surface is empty but functional routes exist, the warning
+  explicitly says not to read it as "no endpoints".
+
+  Deliberately does **not** synthesize endpoint entries: the literal DSL paths are
+  relative (real paths depend on `nest()`/group-version prefixes unresolvable statically),
+  and emitting partial paths would mislead more than an empty surface (same false-positive
+  hazard CH-006 just removed). Full functional-route modeling is a separate effort.
+  Validated: halo → 168 registrations surfaced; shopizer (annotation MVC) → no false
+  trigger, 286 endpoints unchanged. 3 regression tests
+  (`test_functional_routing_surface.py`).
+
 ## [1.48.0] — 2026-06-17
 
 ### Fixed
