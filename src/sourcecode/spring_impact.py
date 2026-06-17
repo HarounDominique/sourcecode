@@ -872,10 +872,35 @@ class ImpactOrchestrator:
                 "An empty result is NOT proof the type is unused."
             )
 
+        # G-2 residual guard: something imports this symbol but no call/DI/instantiation
+        # edge resolved to it. With static-call edges now extracted, the common static
+        # utility case is covered; this catches what remains (static imports invoked
+        # without a qualifier, reflection, method references) — usages the call-graph
+        # cannot bind. An empty blast radius here is NOT proof of dead code, so it must
+        # not be reported as a high-confidence "safe to change".
+        unresolved_ref_blind_spot = False
+        if (
+            empty_blast
+            and class_level_seed
+            and not framework_di_blind_spot
+            and not value_type_blind_spot
+        ):
+            _rev = cir.reverse_graph.get(resolved_symbol) or {}
+            _importers = sorted(set(_rev.get("imports") or []))
+            if _importers:
+                unresolved_ref_blind_spot = True
+                warnings.append(
+                    f"Unresolved inbound references (G-2): {len(_importers)} in-repo "
+                    "file(s) import this symbol but no call/DI/instantiation edge "
+                    "resolves to it — the usage may be a static import, reflection, or "
+                    "method reference the call-graph does not model. 0 callers is NOT "
+                    "proof this symbol is unused."
+                )
+
         confidence: str
         if resolution == "not_found":
             confidence = "low"
-        elif framework_di_blind_spot or value_type_blind_spot:
+        elif framework_di_blind_spot or value_type_blind_spot or unresolved_ref_blind_spot:
             confidence = "low"
         elif resolution == "partial" or confidence_reducing:
             confidence = "medium"
@@ -908,6 +933,7 @@ class ImpactOrchestrator:
                 "blind_spots": (
                     (["framework_di"] if framework_di_blind_spot else [])
                     + (["value_type"] if value_type_blind_spot else [])
+                    + (["unresolved_refs"] if unresolved_ref_blind_spot else [])
                 ),
                 "external_supertypes": external_supertypes,
             },

@@ -856,6 +856,70 @@ class TestRegressionCH003ValueTypeBlindSpot:
         assert result.confidence == "high"
 
 
+class TestRegressionG2UnresolvedRefs:
+    """G-2 — a symbol that is imported by in-repo files but has no resolved
+    call/DI/instantiation edge (static import, reflection, method reference the
+    call-graph cannot bind) must NOT be reported as a high-confidence empty result.
+    Primary recovery is the new static-call edges; this guard catches the residual.
+    See finding_static_call_blindspot_g2.
+    """
+
+    def _bean_node(self, fqn: str) -> dict:
+        # Stereotype bean → NOT a value type, so the CH-003 guard does not pre-empt.
+        return {
+            "fqn": fqn,
+            "symbol_kind": "class",
+            "type": "class",
+            "role": "service",
+            "annotations": ["@Service"],
+        }
+
+    def test_imported_but_unresolved_empty_result_not_high(self):
+        fqn = "com.example.util.AnnotationHelper"
+        cir = _FakeCIR(
+            symbols=[fqn],
+            # something imports it, but no calls/injects edge resolves → empty BFS.
+            reverse_graph={fqn: {"imports": ["com.example.rules.EnumRule"]}},
+            nodes=[self._bean_node(fqn)],
+        )
+        result = ImpactOrchestrator().query(cir, _make_model(), "AnnotationHelper", depth=1)
+
+        assert result.direct_callers == []
+        assert result.confidence == "low", (
+            f"imported-but-unresolved empty result must not stay high, got {result.confidence!r}"
+        )
+        assert "unresolved_refs" in result.metadata.get("blind_spots", [])
+        assert any(
+            "unresolved" in w.lower() or "static import" in w.lower()
+            for w in result.analysis_warnings
+        ), f"expected an unresolved-reference warning, got {result.analysis_warnings!r}"
+
+    def test_no_inbound_imports_stays_high(self):
+        # Truly nothing references it (empty reverse_graph) → confident it is unused.
+        fqn = "com.example.util.AnnotationHelper"
+        cir = _FakeCIR(symbols=[fqn], reverse_graph={}, nodes=[self._bean_node(fqn)])
+        result = ImpactOrchestrator().query(cir, _make_model(), "AnnotationHelper", depth=1)
+        assert result.confidence == "high", (
+            f"no inbound references should stay high, got {result.confidence!r}"
+        )
+        assert "unresolved_refs" not in result.metadata.get("blind_spots", [])
+
+    def test_resolved_callers_do_not_trigger_guard(self):
+        # A real `calls` edge resolves the caller → not empty → guard must not fire.
+        fqn = "com.example.util.AnnotationHelper"
+        cir = _FakeCIR(
+            symbols=[fqn, "com.example.rules.EnumRule"],
+            reverse_graph={fqn: {
+                "calls": ["com.example.rules.EnumRule"],
+                "imports": ["com.example.rules.EnumRule"],
+            }},
+            nodes=[self._bean_node(fqn)],
+        )
+        result = ImpactOrchestrator().query(cir, _make_model(), "AnnotationHelper", depth=1)
+        assert result.direct_callers == ["com.example.rules.EnumRule"]
+        assert "unresolved_refs" not in result.metadata.get("blind_spots", [])
+
+
 class TestRegressionV5EndpointPrecision:
     """IC-V5 — single-method seed returns only that method's endpoint.
     Class-level seed returns all controller endpoints."""

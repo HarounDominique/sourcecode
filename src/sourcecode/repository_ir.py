@@ -1514,6 +1514,34 @@ def _build_relations(
                         evidence={"type": "method_call", "value": f"new {_tgt.split('.')[-1]}(...)"},
                     ))
 
+    # ── Static-utility calls: `Type.method(...)` edges (G-2 / static-call gap) ──
+    # A static call `AnnotationHelper.foo(...)` couples the calling class to the
+    # utility type, but the call/DI graph misses it: only an `imports` edge is
+    # recorded (and impact-chain skips imports), so a static helper showed 0
+    # callers and impact-chain reported a false-confident "no blast radius".
+    # Mirror the instantiation scan: regex over comment-stripped source, resolve the
+    # receiver type via the import map (so JDK/unresolved receivers like Math/LOGGER
+    # yield None and are skipped), attribute at class level. Unlike `instantiates`
+    # this INCLUDES controllers — a controller statically calling a utility is a real
+    # caller and has no `returns`-edge overlap. Emitted as `calls` (traversed by the
+    # caller BFS). Instance calls go through lower-case variables and never match.
+    if _class_syms:
+        _call_targets: set[str] = set()
+        for _m in re.finditer(r'\b([A-Z]\w*)\.\w+\s*\(', _source_no_comments):
+            _ct_fqn = _resolve_dep_type(_m.group(1))
+            if _ct_fqn:
+                _call_targets.add(_ct_fqn)
+        for cls_sym in _class_syms:
+            for _tgt in sorted(_call_targets):
+                if _tgt != cls_sym.symbol:
+                    edges.append(RelationEdge(
+                        from_symbol=cls_sym.symbol,
+                        to_symbol=_tgt,
+                        type="calls",
+                        confidence="medium",
+                        evidence={"type": "method_call", "value": f"{_tgt.split('.')[-1]}.…(…)"},
+                    ))
+
     seen: set[tuple[str, str, str]] = set()
     unique: list[RelationEdge] = []
     for e in edges:

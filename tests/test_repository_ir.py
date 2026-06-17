@@ -260,6 +260,34 @@ class TestRelationGraph:
         ir2 = self._get_ir(SIMPLE_SERVICE, "UserService.java")
         assert ir1["graph"]["edges"] == ir2["graph"]["edges"]
 
+    # G-2: static-utility calls (`Type.method(...)`) must produce a `calls` edge so
+    # impact-chain resolves the caller instead of reporting a false-confident zero.
+    STATIC_CALLER = """\
+package com.example.rules;
+
+import com.example.util.AnnotationHelper;
+
+public class EnumRule {
+    public void apply() {
+        AnnotationHelper.addGeneratedAnnotation(config, jclass);
+        int n = Math.max(1, 2);
+    }
+}
+"""
+
+    def test_static_call_produces_calls_edge(self):
+        ir = self._get_ir(self.STATIC_CALLER, "EnumRule.java")
+        calls = [r for r in ir["graph"]["edges"] if r["type"] == "calls"]
+        targets = {r["to"] for r in calls}
+        assert "com.example.util.AnnotationHelper" in targets
+        assert all(r["from"] == "com.example.rules.EnumRule" for r in calls)
+
+    def test_static_call_ignores_unresolved_jdk_receiver(self):
+        # Math is not imported / not in-repo → _resolve_dep_type returns None → no edge.
+        ir = self._get_ir(self.STATIC_CALLER, "EnumRule.java")
+        call_targets = {r["to"] for r in ir["graph"]["edges"] if r["type"] == "calls"}
+        assert not any(t.endswith("Math") for t in call_targets)
+
 
 # ---------------------------------------------------------------------------
 # Phase 4 — Symbol-level diff (unchanged internals)
