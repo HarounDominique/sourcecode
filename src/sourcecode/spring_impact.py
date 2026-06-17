@@ -148,6 +148,68 @@ _STEREOTYPE_ANNOTATIONS = frozenset({
 _VALUE_TYPE_KINDS = frozenset({"class", "enum", "record"})
 
 
+# ---------------------------------------------------------------------------
+# CH-005 — framework/external-interface DI blind-spot detection
+# ---------------------------------------------------------------------------
+# When a class implements/extends a type that is NOT an in-repo symbol (a
+# framework or library supertype — e.g. Spring Security's RedirectStrategy, a
+# servlet Filter, a JPA base), the class is typically invoked polymorphically
+# *through that external type* and wired by framework DI/config. No in-repo call
+# edge ever names the impl's own method, and ImplementationGraph.build()
+# deliberately drops external supertypes (cir_graphs: `to_fqn not in
+# known_symbols` → skipped), so CH-001b cannot expand to the interface. Result:
+# impact-chain reports 0 callers / risk:low at confidence=high — a dangerous
+# false negative, since the real blast radius flows through framework wiring the
+# static call-graph never traverses. Detect the external supertype positively,
+# warn, and downgrade confidence (parallel to the CH-003 value-type guard).
+#
+# Inert marker interfaces carry no methods → no polymorphic dispatch → no hidden
+# blast radius, so they are excluded to avoid firing on plain Serializable DTOs.
+_INERT_MARKER_SUPERTYPES = frozenset({
+    "Serializable", "java.io.Serializable",
+    "Cloneable", "java.lang.Cloneable",
+    "Externalizable", "java.io.Externalizable",
+})
+
+
+def _external_supertypes(cir, class_fqn: str) -> list[str]:
+    """Return supertypes of class_fqn that are NOT in-repo symbols.
+
+    Reads raw implements/extends edges from cir.dependencies and keeps only those
+    whose target cannot be resolved to a single in-repo class (i.e. framework /
+    library types). Mirrors ImplementationGraph's resolution rules (exact FQN
+    match, then unambiguous simple-name match) so the internal/external split is
+    identical. Inert marker interfaces are dropped. Order-preserving, deduped.
+    """
+    deps = getattr(cir, "dependencies", None) or []
+    known: set[str] = set(getattr(cir, "symbols", None) or [])
+    simple_to_fqn: dict[str, list[str]] = {}
+    for sym in known:
+        if "#" not in sym and "." in sym:
+            simple_to_fqn.setdefault(sym.rsplit(".", 1)[1], []).append(sym)
+
+    external: list[str] = []
+    for edge in deps:
+        if edge.get("type") not in ("implements", "extends"):
+            continue
+        frm = normalize_owner_fqn((edge.get("from") or "").strip())
+        if frm != class_fqn:
+            continue
+        to = (edge.get("to") or "").strip()
+        if not to or ">" in to or "<" in to:
+            continue
+        simple = to.rsplit(".", 1)[1] if "." in to else to
+        if simple in _INERT_MARKER_SUPERTYPES or to in _INERT_MARKER_SUPERTYPES:
+            continue
+        # Internal if it resolves to exactly one in-repo class (exact or simple-name).
+        if to in known:
+            continue
+        if len(simple_to_fqn.get(simple, [])) == 1:
+            continue
+        external.append(to)
+    return list(dict.fromkeys(external))
+
+
 def _is_unmodeled_value_type(cir, class_fqn: str, model) -> bool:
     """True iff class_fqn is positively a plain value/DTO type whose blast radius
     flows only through type-usage edges the impact graph does not model.
@@ -750,16 +812,38 @@ class ImpactOrchestrator:
             impact_findings_raw,
         )
 
-        # CH-003: empty blast radius on a positively-identified value/DTO type is a
-        # type-usage blind spot, not proof of dead code — warn + drop confidence.
+        # Empty blast radius is ambiguous: genuinely-unused code OR an unmodeled-edge
+        # blind spot. Two positively-detected blind spots reclassify it from a
+        # high-confidence "safe to change" into a low-confidence "look further".
         empty_blast = (
             not direct_callers and not indirect_callers
             and not endpoints_affected and not subtype_classes_added
         )
+        class_level_seed = "#" not in resolved_symbol and resolution != "not_found"
+
+        # CH-005: framework/external-interface DI blind spot. Checked first because
+        # its diagnosis (polymorphic invocation via an external supertype + framework
+        # wiring) is more specific than the value-type fallback for the same symbol.
+        external_supertypes: list[str] = []
+        if empty_blast and class_level_seed:
+            external_supertypes = _external_supertypes(cir, resolved_symbol)
+        framework_di_blind_spot = bool(external_supertypes)
+        if framework_di_blind_spot:
+            warnings.append(
+                "Framework/external-interface DI blind spot (CH-005): this class "
+                "implements/extends external type(s) [" + ", ".join(external_supertypes)
+                + "] and is likely invoked polymorphically through them and wired by "
+                "framework DI/config. The static call-graph has no in-repo edge naming "
+                "this class's methods, so 0 callers is NOT proof it is unused — search "
+                "DI/security/config wiring for the supertype to find the real callers."
+            )
+
+        # CH-003: empty blast radius on a positively-identified value/DTO type is a
+        # type-usage blind spot, not proof of dead code — warn + drop confidence.
         value_type_blind_spot = (
             empty_blast
-            and "#" not in resolved_symbol
-            and resolution != "not_found"
+            and class_level_seed
+            and not framework_di_blind_spot
             and _is_unmodeled_value_type(cir, resolved_symbol, model)
         )
         if value_type_blind_spot:
@@ -773,7 +857,7 @@ class ImpactOrchestrator:
         confidence: str
         if resolution == "not_found":
             confidence = "low"
-        elif value_type_blind_spot:
+        elif framework_di_blind_spot or value_type_blind_spot:
             confidence = "low"
         elif resolution == "partial" or warnings:
             confidence = "medium"
@@ -803,6 +887,11 @@ class ImpactOrchestrator:
                 "risk_score": risk_score,
                 "model_build_time_ms": model.build_time_ms,
                 "query_time_ms": elapsed_ms,
+                "blind_spots": (
+                    (["framework_di"] if framework_di_blind_spot else [])
+                    + (["value_type"] if value_type_blind_spot else [])
+                ),
+                "external_supertypes": external_supertypes,
             },
         )
 

@@ -1549,3 +1549,86 @@ class TestRegressionBUG004ClassLevelDeadEnd:
             f"BUG-004: Controller#show not found via class-level intermediate. "
             f"direct={result.direct_callers} indirect={result.indirect_callers}"
         )
+
+
+# ---------------------------------------------------------------------------
+# CH-005 — framework/external-interface DI blind spot
+# ---------------------------------------------------------------------------
+class TestFrameworkDIBlindSpot:
+    """Regression for the BroadleafCommerce #3124 benchmark finding: a class wired
+    via an EXTERNAL framework interface (Spring Security's RedirectStrategy) and
+    invoked polymorphically returns 0 callers. That empty result must be reported as
+    a low-confidence blind spot, never as a high-confidence 'safe to change'.
+    """
+
+    def _redirect_strategy_cir(self):
+        # LocalRedirectStrategy implements an external Spring Security interface.
+        # No in-repo caller names its method — exactly the static-graph blind spot.
+        symbols = [
+            "com.broadleaf.web.LocalRedirectStrategy",
+            "com.broadleaf.web.LocalRedirectStrategy#sendRedirect",
+        ]
+        dependencies = [
+            {
+                "from": "com.broadleaf.web.LocalRedirectStrategy",
+                "to": "org.springframework.security.web.RedirectStrategy",
+                "type": "implements",
+            },
+        ]
+        return _FakeCIR(symbols=symbols, reverse_graph={}, dependencies=dependencies)
+
+    def test_external_interface_empty_blast_is_low_confidence(self):
+        cir = self._redirect_strategy_cir()
+        result = ImpactOrchestrator().query(
+            cir, _make_model(), "com.broadleaf.web.LocalRedirectStrategy"
+        )
+        assert not result.direct_callers and not result.indirect_callers
+        assert result.confidence == "low", (
+            f"CH-005: framework-DI blind spot must not report high confidence. "
+            f"confidence={result.confidence}"
+        )
+        assert "framework_di" in result.metadata.get("blind_spots", []), (
+            f"CH-005: blind_spots metadata missing. metadata={result.metadata}"
+        )
+        assert "org.springframework.security.web.RedirectStrategy" in (
+            result.metadata.get("external_supertypes", [])
+        )
+        assert any("CH-005" in w for w in result.analysis_warnings), (
+            f"CH-005 warning absent. warnings={result.analysis_warnings}"
+        )
+
+    def test_inert_marker_supertype_does_not_trigger(self):
+        # A plain DTO implementing only Serializable is NOT framework-DI-mediated.
+        symbols = ["com.example.dto.OrderDTO", "com.example.dto.OrderDTO#getId"]
+        dependencies = [
+            {"from": "com.example.dto.OrderDTO", "to": "java.io.Serializable", "type": "implements"},
+        ]
+        cir = _FakeCIR(symbols=symbols, reverse_graph={}, dependencies=dependencies)
+        result = ImpactOrchestrator().query(cir, _make_model(), "com.example.dto.OrderDTO")
+        assert "framework_di" not in result.metadata.get("blind_spots", []), (
+            "Serializable is an inert marker — must not trigger CH-005."
+        )
+
+    def test_internal_interface_not_flagged_as_external(self):
+        # In-repo interface with a real caller: normal high/medium path, no CH-005.
+        symbols = [
+            "com.example.OrderService",
+            "com.example.OrderService#place",
+            "com.example.OrderServiceImpl",
+            "com.example.OrderServiceImpl#place",
+            "com.example.OrderController",
+            "com.example.OrderController#create",
+        ]
+        dependencies = [
+            {"from": "com.example.OrderServiceImpl", "to": "com.example.OrderService", "type": "implements"},
+        ]
+        reverse_graph = {
+            "com.example.OrderService#place": {"calls": ["com.example.OrderController#create"]},
+        }
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph, dependencies=dependencies)
+        result = ImpactOrchestrator().query(cir, _make_model(), "com.example.OrderServiceImpl")
+        assert "framework_di" not in result.metadata.get("blind_spots", []), (
+            f"In-repo interface must not be flagged external. warnings={result.analysis_warnings}"
+        )
+        all_callers = set(result.direct_callers) | set(result.indirect_callers)
+        assert "com.example.OrderController#create" in all_callers

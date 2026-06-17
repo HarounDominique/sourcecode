@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.47.0] — 2026-06-17
+
+### Added
+- **CH-005 — framework/external-interface DI blind-spot detection in `impact-chain`.**
+  When a queried class has an empty blast radius *and* implements/extends an external
+  framework supertype (one the in-repo `ImplementationGraph` deliberately drops — e.g.
+  Spring Security's `RedirectStrategy`, a servlet `Filter`), `impact-chain` now positively
+  detects it instead of silently reporting `0 callers / risk:low` at `confidence=high`.
+  Such classes are wired by framework DI/config and invoked polymorphically through the
+  external type, so no in-repo edge names their methods — the empty result is an
+  unmodeled-edge blind spot, not proof of dead code. The query now:
+  - drops `confidence` to `low`,
+  - exposes `metadata.blind_spots` (`framework_di`) and `metadata.external_supertypes`,
+  - emits a `CH-005` warning pointing the agent to search DI/security/config wiring for
+    the supertype to recover the real callers.
+
+  Inert marker interfaces (`Serializable`, `Cloneable`, `Externalizable`) are excluded —
+  they carry no methods, so no polymorphic dispatch and no hidden blast radius.
+
+  This converts a dangerous false negative ("looks safe to change") into an honest "look
+  further" signal. It does **not** recover the real callers (they flow through framework
+  wiring the static call-graph never traverses); that is a separate, larger effort.
+  Mirrors the existing CH-003 value-type guard. Validated end-to-end on BroadleafCommerce
+  (`LocalRedirectStrategy` → flagged; `FieldDaoImpl` with 16 real callers → not flagged).
+
 ## [1.46.0] — 2026-06-16
 
 ### Added
