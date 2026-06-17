@@ -168,6 +168,31 @@ class TestMigrationReportFinalize:
         report = MigrationReport(findings=findings).finalize()
         assert report.readiness_score == 0
 
+    def test_low_severity_deduction_is_capped(self) -> None:
+        # G-1: many low-severity advisory findings (e.g. java.time modernization)
+        # on a repo with zero blockers must NOT collapse the readiness headline.
+        findings = [
+            self._make_finding("MIG-016", "low", f"File{i}.java")
+            for i in range(96)
+        ]
+        report = MigrationReport(findings=findings).finalize()
+        assert report.blocking_count == 0
+        # 96 low files would deduct 96 (→ 4) uncapped; capped at 15 → 85.
+        assert report.readiness_score == 85
+
+    def test_blockers_still_floor_score_with_low_findings_present(self) -> None:
+        # The low-severity cap must not shield a genuinely blocked repo.
+        findings = [
+            self._make_finding("MIG-001", "critical", f"Blk{i}.java")
+            for i in range(20)
+        ] + [
+            self._make_finding("MIG-016", "low", f"Adv{i}.java")
+            for i in range(50)
+        ]
+        report = MigrationReport(findings=findings).finalize()
+        assert report.blocking_count == 20
+        assert report.readiness_score == 0
+
     def test_blocking_count_sums_critical_and_high(self) -> None:
         findings = [
             self._make_finding("MIG-001", "critical", "A.java"),

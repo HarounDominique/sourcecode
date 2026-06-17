@@ -536,6 +536,11 @@ _ALL_RULES: list[_Rule] = (
 
 SEVERITY_ORDER: dict[str, int] = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
+# G-1: cap on total readiness deduction from low-severity (advisory, non-blocking)
+# findings, so optional modernization cleanups cannot collapse the migration-readiness
+# headline on a repo with zero blockers. See MigrationReport.finalize.
+_LOW_SEVERITY_DEDUCTION_CAP: int = 15
+
 
 # ---------------------------------------------------------------------------
 # XML config rules (applied to Spring XML config files)
@@ -1022,11 +1027,17 @@ class MigrationReport:
             else:
                 low_files.add(f.source_file)
 
+        # G-1: low-severity findings are advisory (e.g. java.time modernization),
+        # not Boot-2→3 blockers. Cap their total contribution so a repo with zero
+        # blockers cannot score near zero on optional cleanups alone (mall: 96 low
+        # findings dragged readiness to 4/100 despite 0 blocking, already on Boot 3).
+        # Blockers (critical/high) stay uncapped — a genuinely blocked repo still
+        # floors at 0 (shopizer: 301 blocking → 0/100, unchanged).
         deduction = (
             len(critical_files) * 15
             + len(high_files) * 8
             + len(medium_files) * 3
-            + len(low_files) * 1
+            + min(len(low_files) * 1, _LOW_SEVERITY_DEDUCTION_CAP)
         )
         self.readiness_score = max(0, 100 - deduction)
 
