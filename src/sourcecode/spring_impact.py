@@ -44,7 +44,18 @@ _SCHEMA_VERSION = "1.0"
 #                Only appears on class nodes, never method nodes. Including it
 #                chains through DTOs and entities that merely reference the service
 #                type, inflating caller counts without semantic value.
-_SKIP_EDGE_TYPES: frozenset[str] = frozenset({"contained_in", "imports"})
+# implements /  — CH-006: structural type declarations, NOT calls. The reverse edge
+# extends        on an interface/base lists its implementors/subclasses; an
+#                implementor does not *call* the interface by virtue of implementing
+#                it. Traversing these attributes every SIBLING implementor of a shared
+#                interface as a "caller". On a high-fanout in-repo hub interface (e.g.
+#                halo's CustomEndpoint, 43 implementors) this turned a leaf endpoint
+#                into 42 false direct callers / risk:high. Interface→impl expansion that
+#                IS wanted (CH-001a/b) flows through ImplementationGraph indices, not
+#                through these reverse-graph edges, so excluding them here is loss-free.
+_SKIP_EDGE_TYPES: frozenset[str] = frozenset(
+    {"contained_in", "imports", "implements", "extends"}
+)
 
 # Max BFS depth guard — caller growth is bounded per _bfs_callers
 _BFS_DEFAULT_DEPTH = 4

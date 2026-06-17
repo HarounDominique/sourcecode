@@ -1632,3 +1632,82 @@ class TestFrameworkDIBlindSpot:
         )
         all_callers = set(result.direct_callers) | set(result.indirect_callers)
         assert "com.example.OrderController#create" in all_callers
+
+
+# ---------------------------------------------------------------------------
+# CH-006 — implements/extends edges excluded from caller BFS (hub-interface FP)
+# ---------------------------------------------------------------------------
+class TestHubInterfaceOverExpansion:
+    """Regression for the halo field-benchmark finding: querying a class that
+    implements a high-fanout in-repo interface (CustomEndpoint, 43 impls) returned
+    every SIBLING implementor as a false 'direct caller'. The reverse-graph
+    implements/extends edge is a structural declaration, not a call, so it must not
+    feed the caller BFS. Real callers (injects/calls) must be preserved.
+    """
+
+    def test_sibling_implementors_are_not_callers(self):
+        # Hub interface with 3 implementors; none calls the others.
+        symbols = [
+            "com.example.Endpoint",          # in-repo hub interface
+            "com.example.ThumbnailEndpoint",
+            "com.example.AttachmentEndpoint",
+            "com.example.PostEndpoint",
+        ]
+        dependencies = [
+            {"from": "com.example.ThumbnailEndpoint", "to": "com.example.Endpoint", "type": "implements"},
+            {"from": "com.example.AttachmentEndpoint", "to": "com.example.Endpoint", "type": "implements"},
+            {"from": "com.example.PostEndpoint", "to": "com.example.Endpoint", "type": "implements"},
+        ]
+        # The reverse graph carries the structural implements edge on the interface.
+        reverse_graph = {
+            "com.example.Endpoint": {
+                "implements": [
+                    "com.example.ThumbnailEndpoint",
+                    "com.example.AttachmentEndpoint",
+                    "com.example.PostEndpoint",
+                ],
+            },
+        }
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph, dependencies=dependencies)
+        result = ImpactOrchestrator().query(cir, _make_model(), "com.example.ThumbnailEndpoint")
+        callers = set(result.direct_callers) | set(result.indirect_callers)
+        assert "com.example.AttachmentEndpoint" not in callers, (
+            f"CH-006: sibling implementor wrongly attributed as caller. callers={callers}"
+        )
+        assert "com.example.PostEndpoint" not in callers
+        assert result.direct_callers == [], (
+            f"CH-006: leaf endpoint must have no callers from implements edges. "
+            f"direct={result.direct_callers}"
+        )
+
+    def test_real_injects_caller_preserved_through_shared_interface(self):
+        # A genuine caller injects the interface — must survive the implements skip.
+        symbols = [
+            "com.example.OrderService",
+            "com.example.OrderServiceImpl",
+            "com.example.OrderServiceImpl#place",
+            "com.example.SiblingServiceImpl",   # shares the interface, does NOT call
+            "com.example.OrderController",
+            "com.example.OrderController#create",
+        ]
+        dependencies = [
+            {"from": "com.example.OrderServiceImpl", "to": "com.example.OrderService", "type": "implements"},
+            {"from": "com.example.SiblingServiceImpl", "to": "com.example.OrderService", "type": "implements"},
+        ]
+        reverse_graph = {
+            # structural noise: both impls listed under the interface
+            "com.example.OrderService": {
+                "implements": ["com.example.OrderServiceImpl", "com.example.SiblingServiceImpl"],
+                # real caller injects the interface
+                "injects": ["com.example.OrderController#<init>"],
+            },
+        }
+        cir = _FakeCIR(symbols=symbols, reverse_graph=reverse_graph, dependencies=dependencies)
+        result = ImpactOrchestrator().query(cir, _make_model(), "com.example.OrderServiceImpl")
+        callers = set(result.direct_callers) | set(result.indirect_callers)
+        assert "com.example.OrderController" in callers, (
+            f"CH-006: real injects caller lost. callers={callers}"
+        )
+        assert "com.example.SiblingServiceImpl" not in callers, (
+            f"CH-006: sibling impl wrongly attributed. callers={callers}"
+        )

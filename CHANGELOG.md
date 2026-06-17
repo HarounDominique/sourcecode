@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.48.0] — 2026-06-17
+
+### Fixed
+- **CH-006 — hub-interface caller over-expansion (false-positive callers) in
+  `impact-chain`.** `implements` and `extends` are structural type declarations, not
+  calls, but they were being traversed in the caller BFS. The reverse edge on an
+  interface/base lists its implementors/subclasses, so querying a class that implements a
+  high-fanout in-repo interface attributed **every sibling implementor** as a "direct
+  caller". Found in the v1.47.0 field benchmark: `impact-chain ThumbnailEndpoint` on halo
+  reported 42 direct callers — the other 42 `CustomEndpoint` implementors, none of which
+  call it — inflating a leaf endpoint to `risk:high`. The shopizer monolith had the same
+  pattern via its shared `Mapper<E,D>` base (45 phantom mapper callers on `ProductService`).
+
+  Fix: add `implements`/`extends` to the BFS edge-skip set. This is loss-free — the wanted
+  interface→implementation expansion (CH-001a/b) flows through `ImplementationGraph`
+  indices, not these reverse-graph edges, and real callers travel `injects`/`calls` edges.
+  Verified on both repos: halo `ThumbnailEndpoint` 42→0 false callers (`risk:high`→`low`);
+  shopizer `ProductService` real callers preserved (32 direct unchanged) while 45 phantom
+  `Mapper` callers — confirmed to have zero references to the queried symbol — were dropped.
+  2 regression tests (`TestHubInterfaceOverExpansion`): sibling implementors excluded, real
+  `injects` caller through a shared interface preserved.
+
+  Complements CH-005: that guard handles *external* supertypes (under-reporting); CH-006
+  handles *in-repo high-fanout* supertypes (over-reporting). False positives are worse than
+  an empty result — they actively misdirect a change — so this is the higher-leverage half.
+
 ## [1.47.0] — 2026-06-17
 
 ### Added

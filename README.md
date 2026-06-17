@@ -2,7 +2,7 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.47.0-blue)
+![Version](https://img.shields.io/badge/version-1.48.0-blue)
 ![Python](https://img.shields.io/badge/python-3.9%2B-green)
 
 ---
@@ -401,6 +401,8 @@ Unlike `impact` (which traces the caller graph), `impact-chain` builds on the Sp
 | `metadata.blind_spots` | `framework_di` and/or `value_type` when an empty result is unmodeled-edge driven, not real dead code |
 
 **Framework/DI blind spot (CH-005).** An empty blast radius is ambiguous: genuinely unused, or invoked through an edge the static graph does not model. When the target class implements/extends an **external** framework type (e.g. Spring Security's `RedirectStrategy`, a servlet `Filter`) it is typically wired by framework DI/config and invoked polymorphically — no in-repo edge names its methods, so `direct_callers` is `0`. Rather than report that as `risk:low` at high confidence (a dangerous false negative that reads as "safe to change"), `impact-chain` detects the external supertype, drops `confidence` to `low`, lists it in `metadata.external_supertypes`, and emits a `CH-005` warning telling you to search the DI/security/config wiring for the supertype. Inert markers (`Serializable`, `Cloneable`) are excluded.
+
+**Caller precision (CH-006).** `implements`/`extends` are structural type declarations, not calls — so they are excluded from the caller graph. Querying a class that implements a high-fanout interface (e.g. a 40-implementor `CustomEndpoint` or a shared `Mapper<E,D>` base) does **not** report its sibling implementors as callers; only real `injects`/`calls` edges count. This prevents a leaf class from being inflated to a large false blast radius.
 
 **Event topology** — query the publisher/consumer graph for a Spring event class:
 
