@@ -219,7 +219,7 @@ _HELP = _build_help_text()
 _SUBCOMMANDS: frozenset[str] = frozenset(
     {
         "telemetry", "prepare-context", "version", "config",
-        "repo-ir", "mcp", "endpoints", "impact",
+        "repo-ir", "mcp", "endpoints", "impact", "export",
         # Enterprise workflow commands
         "onboard", "modernize", "fix-bug", "review-pr",
         # License / auth
@@ -3804,6 +3804,30 @@ def impact_cmd(
 # canonical single-source-of-truth endpoint extractor.
 
 
+def _group_endpoints_by_controller(endpoints: "list[dict]") -> "dict":
+    """Group endpoints by their controller FQN into a structured API surface.
+
+    Returns ``{"by_controller": {fqn: [{method, path, return_type}, ...]},
+    "controller_count": int, "total": int}``. Controllers and their routes are
+    ordered deterministically (controllers by name, routes by path then method).
+    """
+    by_ctrl: "dict[str, list[dict]]" = {}
+    for ep in endpoints:
+        ctrl = ep.get("controller", "") or "<unknown>"
+        by_ctrl.setdefault(ctrl, []).append({
+            "method": ep.get("method", ""),
+            "path": ep.get("path", ""),
+            "return_type": ep.get("return_type", "void"),
+        })
+    for ctrl in by_ctrl:
+        by_ctrl[ctrl].sort(key=lambda r: (r["path"], r["method"]))
+    ordered = {k: by_ctrl[k] for k in sorted(by_ctrl)}
+    return {
+        "by_controller": ordered,
+        "controller_count": len(ordered),
+        "total": len(endpoints),
+    }
+
 
 @app.command("endpoints")
 def endpoints_cmd(
@@ -3843,6 +3867,10 @@ def endpoints_cmd(
     no_cache: bool = typer.Option(
         False, "--no-cache",
         help="Accepted for compatibility; this command always reads fresh source (no snapshot cache). No-op.",
+    ),
+    by_controller: bool = typer.Option(
+        False, "--by-controller",
+        help="Group endpoints by controller class (structured API surface for C4/Container synthesis).",
     ),
 ) -> None:
     """Extract REST API endpoint surface from Java source files.
@@ -3929,10 +3957,371 @@ def endpoints_cmd(
             "undocumented_before_filter": _undoc_before,
         }
 
+    if by_controller:
+        _grouped = _group_endpoints_by_controller(data.get("endpoints", []))
+        data["by_controller"] = _grouped["by_controller"]
+        data["controller_count"] = _grouped["controller_count"]
+
     output = _serialize_dict(data, format)
 
     _emit_command_output(output, output_path, copy,
                          success_msg=f"Endpoints written to {output_path} ({data['total']} endpoints)")
+
+    from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
+    _nudge()
+
+
+# ── export ──────────────────────────────────────────────────────────────────
+
+def _group_symbols_by_directory(nodes: "list[dict]") -> "dict":
+    """Group repo-ir graph nodes by source directory with path:line refs.
+
+    Returns ``{dir: [{symbol, kind, ref}]}`` ordered deterministically (dirs by
+    name, symbols by ref). ``ref`` is ``source_file:line`` when the line is known,
+    otherwise just ``source_file``. This is the per-directory, file:line-anchored
+    code-level export — the file:line-anchored input an architecture/code-map
+    consumer needs to proceed by file write instead of per-directory LLM reads.
+    """
+    import posixpath
+    by_dir: "dict[str, list[dict]]" = {}
+    for n in nodes:
+        sf = n.get("source_file") or ""
+        if not sf:
+            continue
+        d = posixpath.dirname(sf) or "."
+        ln = n.get("line")
+        ref = f"{sf}:{ln}" if ln else sf
+        by_dir.setdefault(d, []).append({
+            "symbol": n.get("canonical_name") or n.get("fqn"),
+            "kind": n.get("symbol_kind"),
+            "ref": ref,
+        })
+    for d in by_dir:
+        by_dir[d].sort(key=lambda r: r["ref"])
+    return {k: by_dir[k] for k in sorted(by_dir)}
+
+
+def _build_module_graph(nodes: "list[dict]", edges: "list[dict]") -> "dict":
+    """Roll class-level relation edges up into a module→module dependency graph.
+
+    A *module* is the source directory of a symbol (same grouping key as
+    ``--by-directory``), giving C4 a container/component-level dependency view.
+    Every node FQN maps to its module; each edge whose endpoints resolve to two
+    *different* modules contributes one inter-module dependency, aggregated by
+    ``(from, to)`` with a hit count and the set of underlying edge types.
+
+    Edges whose endpoints are not internal nodes (e.g. imports of external
+    library types) are skipped — only resolvable, internal module→module
+    dependencies are reported. Returns ``{nodes, edges, summary}`` deterministically.
+    """
+    import posixpath
+
+    fqn_to_module: "dict[str, str]" = {}
+    module_symbols: "dict[str, int]" = {}
+    for n in nodes:
+        sf = n.get("source_file") or ""
+        if not sf:
+            continue
+        mod = posixpath.dirname(sf) or "."
+        fqn = n.get("fqn")
+        if fqn:
+            fqn_to_module[fqn] = mod
+        module_symbols[mod] = module_symbols.get(mod, 0) + 1
+
+    # (from_mod, to_mod) -> {"count": int, "types": set[str]}
+    agg: "dict[tuple[str, str], dict]" = {}
+    for e in edges:
+        fm = fqn_to_module.get(e.get("from"))
+        tm = fqn_to_module.get(e.get("to"))
+        if fm is None or tm is None or fm == tm:
+            continue
+        slot = agg.setdefault((fm, tm), {"count": 0, "types": set()})
+        slot["count"] += 1
+        et = e.get("type")
+        if et:
+            slot["types"].add(et)
+
+    graph_edges = [
+        {
+            "from": fm,
+            "to": tm,
+            "count": slot["count"],
+            "types": sorted(slot["types"]),
+        }
+        for (fm, tm), slot in sorted(agg.items())
+    ]
+    out_deg: "dict[str, int]" = {}
+    in_deg: "dict[str, int]" = {}
+    for ed in graph_edges:
+        out_deg[ed["from"]] = out_deg.get(ed["from"], 0) + 1
+        in_deg[ed["to"]] = in_deg.get(ed["to"], 0) + 1
+    graph_nodes = [
+        {
+            "module": mod,
+            "symbol_count": module_symbols[mod],
+            "out_degree": out_deg.get(mod, 0),
+            "in_degree": in_deg.get(mod, 0),
+        }
+        for mod in sorted(module_symbols)
+    ]
+    return {
+        "nodes": graph_nodes,
+        "edges": graph_edges,
+        "summary": {
+            "module_count": len(graph_nodes),
+            "edge_count": len(graph_edges),
+        },
+    }
+
+
+# Build-system markers that identify a deployable/buildable unit (C4 container).
+_BUILD_MARKERS: "tuple[str, ...]" = (
+    "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle",
+)
+
+
+def _detect_containers(root: "Path") -> "list[dict]":
+    """Detect build-module roots as C4 containers (deployable/buildable units).
+
+    A *container* is a directory holding a recognized build file
+    (Maven/Gradle). Detection is purely structural — no build is run. Returns
+    ``[{root, build_file}]`` (relative paths, deterministic order). Empty when no
+    build files are found; the caller records that as a limitation rather than
+    fabricating containers.
+    """
+    import os
+    found: "list[dict]" = []
+    seen: "set[str]" = set()
+    _SKIP = {".git", "node_modules", "target", "build", ".gradle", ".idea", "dist"}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP and not d.startswith(".")]
+        for marker in _BUILD_MARKERS:
+            if marker in filenames:
+                rel = os.path.relpath(dirpath, root).replace(os.sep, "/")
+                rel = "." if rel == "." else rel
+                if rel in seen:
+                    continue
+                seen.add(rel)
+                found.append({"root": rel, "build_file": marker})
+                break
+    found.sort(key=lambda c: c["root"])
+    return found
+
+
+def _directory_hashes(file_list: "list[str]", root: "Path") -> "dict[str, str]":
+    """Content-addressed sha256 per source directory for incremental consumers.
+
+    Hash inputs are the directory's source files as ``(relpath, bytes)`` in
+    sorted order, so the digest is stable across runs and changes iff a file in
+    that directory changes. A consumer compares hashes to skip unchanged
+    directories. Tool-agnostic: just a map ``{dir: sha256[:16]}``.
+    """
+    import hashlib
+    import posixpath
+    by_dir: "dict[str, list[str]]" = {}
+    for rel in file_list:
+        d = posixpath.dirname(rel) or "."
+        by_dir.setdefault(d, []).append(rel)
+    out: "dict[str, str]" = {}
+    for d in sorted(by_dir):
+        h = hashlib.sha256()
+        for rel in sorted(by_dir[d]):
+            h.update(rel.encode("utf-8"))
+            h.update(b"\0")
+            try:
+                h.update((root / rel).read_bytes())
+            except OSError:
+                h.update(b"<unreadable>")
+            h.update(b"\0")
+        out[d] = h.hexdigest()[:16]
+    return out
+
+
+def _build_c4_export(
+    root: "Path",
+    file_list: "list[str]",
+    nodes: "list[dict]",
+    edges: "list[dict]",
+    endpoints: "list[dict]",
+    integrations: "dict",
+) -> "dict":
+    """Assemble a unified, tool-agnostic C4 architecture export + incremental manifest.
+
+    Maps the four already-built views onto the open C4 model (a public notation,
+    not a product): code (L4), components (L3/L2), context external systems (L1),
+    plus build-module containers and an interface-contract API surface. The
+    ``manifest`` carries per-directory content hashes so a downstream consumer can
+    process incrementally. No third-party tool or format is hardcoded.
+    """
+    by_directory = _group_symbols_by_directory(nodes)
+    module_graph = _build_module_graph(nodes, edges)
+    api_surface = _group_endpoints_by_controller(endpoints)
+    containers = _detect_containers(root)
+
+    limitations: "list[str]" = []
+    if not containers:
+        limitations.append(
+            "No build files (Maven/Gradle) found; containers not derived. "
+            "Treat the repository as a single implicit container."
+        )
+
+    return {
+        "schema_version": "c4-v1",
+        "c4": {
+            "context": {
+                "system": {"name": root.name, "file_count": len(file_list)},
+                "external_systems": integrations,
+            },
+            "containers": containers,
+            "components": module_graph,
+            "code": by_directory,
+        },
+        "api_surface": api_surface,
+        "manifest": {
+            "directory_hashes": _directory_hashes(file_list, root),
+            "generated": {
+                "tool": "sourcecode",
+                "schema": "c4-v1",
+                "file_count": len(file_list),
+            },
+        },
+        "limitations": limitations,
+    }
+
+
+@app.command("export")
+def export_cmd(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Repository path to export (default: current directory)",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write output to a file instead of stdout.",
+    ),
+    format: str = typer.Option(
+        "json", "--format", "-f",
+        help="Output format: json (default) or yaml.",
+    ),
+    copy: bool = typer.Option(
+        False, "--copy", "-c",
+        help="Copy output to system clipboard after a successful run.",
+    ),
+    by_directory: bool = typer.Option(
+        False, "--by-directory",
+        help="Group symbols by source directory with path:line refs (C4 code-level export).",
+    ),
+    module_graph: bool = typer.Option(
+        False, "--module-graph",
+        help="Emit a module→module dependency graph (C4 container/component level).",
+    ),
+    integrations: bool = typer.Option(
+        False, "--integrations",
+        help="Detect outbound integrations (HTTP/LDAP/JMS clients) with file:line evidence.",
+    ),
+    c4: bool = typer.Option(
+        False, "--c4",
+        help="Unified C4 architecture export (context/containers/components/code) "
+             "+ per-directory incremental manifest. Vendor-neutral.",
+    ),
+) -> None:
+    """Export structured, tool-agnostic codebase views for downstream tooling.
+
+    Output is plain JSON/YAML that any consumer (architecture-doc generators,
+    diagram renderers, code-search agents) can ingest. Section labels map to the
+    open C4 model (an open architecture notation, not a product) but the schema
+    is vendor-neutral.
+
+    \b
+    --by-directory   One group per source directory, each symbol carrying a
+                     path:line reference — the file:line-anchored code map that
+                     lets a consumer proceed by file write instead of per-dir reads.
+    --module-graph   Module→module dependency graph (container/component level)
+                     rolled up from class-level relation edges.
+    --integrations   Outbound integrations (RestTemplate/WebClient/Feign/LDAP/JMS)
+                     with file:line evidence — external-system dependency arrows.
+    --c4             Unified architecture document mapped onto the open C4 model
+                     (context/containers/components/code) + an API surface and a
+                     per-directory content-hash manifest for incremental consumers.
+
+    The section flags compose; pass several to emit multiple sections in one
+    document. --c4 assembles the full architecture export on its own.
+    """
+    from sourcecode.repository_ir import build_repo_ir, find_java_files
+
+    _enforce_format("export", format)
+
+    root = path.resolve()
+    if not root.is_dir():
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            f"'{root}' is not a valid directory.",
+            path=str(root),
+            hint="Pass an existing repository directory.",
+            expected="A directory path.",
+        )
+        raise typer.Exit(1)
+
+    if not (by_directory or module_graph or integrations or c4):
+        _emit_error_json(
+            INVALID_INPUT_CODE,
+            "export requires a mode flag.",
+            path=str(root),
+            hint="Pass --c4 for the full architecture export, or one of "
+                 "--by-directory / --module-graph / --integrations for a section.",
+            expected="--c4 | --by-directory | --module-graph | --integrations",
+        )
+        raise typer.Exit(1)
+
+    file_list = [
+        f for f in find_java_files(root)
+        if "/test/" not in f and "/tests/" not in f
+    ]
+
+    if c4:
+        # Unified architecture export: assembles every section + manifest.
+        from sourcecode.integration_detector import detect_integrations
+        from sourcecode.repository_ir import extract_java_endpoints
+        ir = build_repo_ir(file_list, root)
+        graph = ir.get("graph", {})
+        endpoints = extract_java_endpoints(root).get("endpoints", [])
+        data = _build_c4_export(
+            root,
+            file_list,
+            graph.get("nodes", []),
+            graph.get("edges", []),
+            endpoints,
+            detect_integrations(file_list, root),
+        )
+        output = _serialize_dict(data, format)
+        _emit_command_output(output, output_path, copy,
+                             success_msg=f"C4 architecture export written to {output_path}")
+        from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
+        _nudge()
+        return
+
+    data: "dict" = {}
+    # IR is only needed for the symbol/graph-derived views, not for the
+    # source-scanned integration detector.
+    if by_directory or module_graph:
+        ir = build_repo_ir(file_list, root)
+        graph = ir.get("graph", {})
+        nodes = graph.get("nodes", [])
+        if by_directory:
+            grouped = _group_symbols_by_directory(nodes)
+            data["by_directory"] = grouped
+            data["directory_count"] = len(grouped)
+            data["symbol_count"] = sum(len(v) for v in grouped.values())
+        if module_graph:
+            data["module_graph"] = _build_module_graph(nodes, graph.get("edges", []))
+
+    if integrations:
+        from sourcecode.integration_detector import detect_integrations
+        data["integrations"] = detect_integrations(file_list, root)
+
+    output = _serialize_dict(data, format)
+    _emit_command_output(output, output_path, copy,
+                         success_msg=f"Export written to {output_path}")
 
     from sourcecode.mcp_nudge import nudge_mcp_if_needed as _nudge
     _nudge()

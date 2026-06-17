@@ -48,6 +48,7 @@ class SymbolRecord:
     symbol_kind: str = ""       # class|interface|enum|annotation|method|constructor|field|endpoint|bean
     canonical_name: str = ""    # pkg.Class#method(Type1,Type2) — human-readable
     source_file: str = ""       # alias for declaring_file (IR output contract)
+    line: Optional[int] = None  # 1-based source line of the declaration
     signature: str = ""         # (Type1,Type2)->ReturnType for methods; type for fields
     param_types: list[str] = field(default_factory=list)
     return_type: str = ""
@@ -696,8 +697,12 @@ def _extract_symbols(
     # here makes the regex work without changing the per-line brace-depth counter.
     _raw_lines = source.splitlines()
     _joined: list[str] = []
+    # Parallel list: 1-based source line where each _joined entry STARTS, so symbol
+    # declarations can carry their source line through the join/normalize transforms.
+    _joined_lines: list[int] = []
     _i = 0
     while _i < len(_raw_lines):
+        _start = _i  # 0-based source index where this joined entry begins
         _line = _raw_lines[_i]
         _stripped = _line.strip()
         if (_CLASS_KW_RE.search(_stripped) and '{' not in _stripped
@@ -713,6 +718,7 @@ def _extract_symbols(
                 if '{' in _cont:
                     break
             _joined.append(_buf)
+            _joined_lines.append(_start + 1)
         elif (
             (_METHOD_DECL_RE.match(_stripped) or _CONSTRUCTOR_DECL_RE.match(_stripped))
             and _net_parens(_stripped) > 0
@@ -731,15 +737,20 @@ def _extract_symbols(
                 _bal += _net_parens(_cont)
                 _i += 1
             _joined.append(_buf)
+            _joined_lines.append(_start + 1)
         else:
             _joined.append(_line)
+            _joined_lines.append(_start + 1)
             _i += 1
 
     # P1 fix: normalize multiline annotations (e.g. @RequestMapping(\n  value="..."\n))
     # into single lines so the per-line regex can capture annotation args correctly.
-    _normalized_lines = _normalize_multiline_annotations(_joined)
+    _normalized_lines, _normalized_src_lines = _normalize_multiline_annotations(
+        _joined, _joined_lines
+    )
 
-    for line in _normalized_lines:
+    for _ni, line in enumerate(_normalized_lines):
+        cur_line = _normalized_src_lines[_ni] if _ni < len(_normalized_src_lines) else None
         stripped = line.strip()
 
         if in_block_comment:
@@ -821,6 +832,7 @@ def _extract_symbols(
                 symbol_kind=sym_kind,
                 canonical_name=fqn,
                 source_file=rel_path,
+                line=cur_line,
                 signature=" ".join(_sig_parts),
                 annotation_values=dict(pending_ann_values),
             ))
@@ -888,6 +900,7 @@ def _extract_symbols(
                         symbol_kind=_sym_kind,
                         canonical_name=_canonical,
                         source_file=rel_path,
+                        line=cur_line,
                         signature=_signature,
                         param_types=_param_types,
                         return_type=_ret_raw,
@@ -923,6 +936,7 @@ def _extract_symbols(
                     symbol_kind="constructor",
                     canonical_name=f"{class_fqn}#{_class_simple}({_param_str})",
                     source_file=rel_path,
+                    line=cur_line,
                     signature=f"({_param_str})->void",
                     param_types=_ctor_param_types,
                     return_type="void",
@@ -958,6 +972,7 @@ def _extract_symbols(
                             symbol_kind="field",
                             canonical_name=fqn,
                             source_file=rel_path,
+                            line=cur_line,
                             signature=f"{ftype} {fname}",
                         ))
                         pending_anns = []
@@ -1770,7 +1785,7 @@ def _resolve_ann_path_expr(ann_args: str, constants: dict[str, str]) -> str:
     return ann_args
 
 
-def _normalize_multiline_annotations(lines: list[str]) -> list[str]:
+def _normalize_multiline_annotations(lines, line_nums=None):
     """Merge multiline annotation spans into a single line.
 
     Handles annotations split across lines because their args span multiple lines:
@@ -1782,10 +1797,13 @@ def _normalize_multiline_annotations(lines: list[str]) -> list[str]:
     Merges into: '@RequestMapping(value = "/add", method = RequestMethod.GET)'
     """
     result: list[str] = []
+    result_lines: list[int] = []
     buf: list[str] = []
+    buf_line: Optional[int] = None
     paren_depth = 0
 
-    for line in lines:
+    for _idx, line in enumerate(lines):
+        src_line = line_nums[_idx] if (line_nums is not None and _idx < len(line_nums)) else None
         stripped = line.strip()
         if buf:
             # Continuation of a multiline annotation
@@ -1793,7 +1811,9 @@ def _normalize_multiline_annotations(lines: list[str]) -> list[str]:
             paren_depth += stripped.count("(") - stripped.count(")")
             if paren_depth <= 0:
                 result.append(" ".join(buf))
+                result_lines.append(buf_line if buf_line is not None else (src_line or 0))
                 buf = []
+                buf_line = None
                 paren_depth = 0
         elif stripped.startswith("@") and "(" in stripped:
             opens = stripped.count("(")
@@ -1801,16 +1821,24 @@ def _normalize_multiline_annotations(lines: list[str]) -> list[str]:
             if opens > closes:
                 # Unbalanced — start collecting continuation lines
                 buf = [stripped]
+                buf_line = src_line
                 paren_depth = opens - closes
             else:
                 result.append(line)
+                result_lines.append(src_line or 0)
         else:
             result.append(line)
+            result_lines.append(src_line or 0)
 
     # Flush any dangling buffer (shouldn't happen in well-formed code)
     if buf:
-        result.extend(buf)
-    return result
+        for _bi, _bl in enumerate(buf):
+            result.append(_bl)
+            result_lines.append(buf_line if buf_line is not None else 0)
+
+    if line_nums is None:
+        return result
+    return result, result_lines
 
 
 def _parse_route_path(args_str: str) -> str:
@@ -2643,6 +2671,7 @@ def _assemble(
             "symbol_kind": s.symbol_kind,
             "canonical_name": s.canonical_name or s.symbol,
             "source_file": s.declaring_file,
+            "line": s.line,
             "signature": s.signature,
             "type": s.type,
             "role": spring_role_map.get(s.symbol, "other"),
@@ -3009,6 +3038,7 @@ def _build_route_surface(
                     "effective_class": cls_fqn,
                     "path": full_path,
                     "method": method,
+                    "return_type": (sym.return_type.strip() if sym.return_type else "void"),
                     "stable_id": sym.stable_id,
                     "inheritance_depth": 0,
                 }
@@ -3027,6 +3057,10 @@ def _build_route_surface(
         # Build lookup for security_annotations from phase-2 routes
         _parent_sec_by_sym: dict[str, object] = {
             r["symbol"]: r.get("security_annotations") for r in routes
+        }
+        # Build lookup for return_type from phase-2 routes (inherited methods reuse parent's)
+        _parent_rt_by_sym: dict[str, str] = {
+            r["symbol"]: r.get("return_type", "void") for r in routes
         }
 
         for cls_simple, data in class_info.items():
@@ -3066,6 +3100,7 @@ def _build_route_surface(
                                     "effective_class": data["fqn"],
                                     "path": full_path,
                                     "method": verb,
+                                    "return_type": _parent_rt_by_sym.get(declaring_sym, "void"),
                                     "stable_id": stable_id,
                                     "inheritance_depth": depth,
                                     "security_annotations": _parent_sec_by_sym.get(declaring_sym),
@@ -3778,6 +3813,9 @@ def _recover_openapi_spec_routes(
                 "path": op.path,
                 "controller": ctrl_simple,
                 "handler": handler,
+                # Response type is not parsed from the OpenAPI spec (only request
+                # bodies are). "unknown" is honest here — these are spec-sourced.
+                "return_type": "unknown",
                 "source": "openapi-spec",
                 # Security for generated controllers is declared in the spec /
                 # enforced by the filter chain, not by per-endpoint annotations.
@@ -3953,6 +3991,7 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             "path": route["path"],
             "controller": controller,
             "handler": handler,
+            "return_type": route.get("return_type", "void"),
         }
         # Use security_annotations already extracted by _build_route_surface
         # via the canonical _route_security_from_sym extractor.

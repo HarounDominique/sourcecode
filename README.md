@@ -2,7 +2,7 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.52.0-blue)
+![Version](https://img.shields.io/badge/version-1.53.0-blue)
 ![Python](https://img.shields.io/badge/python-3.9%2B-green)
 
 ---
@@ -76,7 +76,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.52.0
+# sourcecode 1.53.0
 ```
 
 ---
@@ -326,9 +326,10 @@ sourcecode impact OrderService . --depth 2                 # limit BFS depth
 ```bash
 sourcecode endpoints /path/to/repo
 sourcecode endpoints /path/to/repo --output endpoints.json
+sourcecode endpoints /path/to/repo --by-controller
 ```
 
-Extracts all Spring MVC (`@GetMapping`, `@PostMapping`, `@RequestMapping`, etc.) and JAX-RS (`@GET`, `@POST`, `@Path`) endpoint methods. Returns HTTP method, path, controller class, and handler method.
+Extracts all Spring MVC (`@GetMapping`, `@PostMapping`, `@RequestMapping`, etc.) and JAX-RS (`@GET`, `@POST`, `@Path`) endpoint methods. Returns HTTP method, path, controller class, and handler method. Each endpoint also carries its `return_type`. `--by-controller` groups the surface per controller (`{by_controller, controller_count, total}`) for an API-surface view.
 
 **Functional / WebFlux routing (honest limitation).** Routes registered via the functional DSL — `route().GET("/path", handler)` / `RouterFunction` / `CustomEndpoint`, common in reactive Spring apps — are **not** modeled (their real paths depend on `nest()`/group-version prefixes that can't be resolved statically). Rather than emit partial paths that would mislead, the output reports a `functional_routing` block (`files`, `route_registrations`, `modeled: false`) plus a warning. When the annotation surface is empty but functional routes exist, the warning explicitly tells you not to read it as "no endpoints". Annotation-based (MVC/JAX-RS) repos are unaffected.
 
@@ -348,6 +349,26 @@ Extracts all Spring MVC (`@GetMapping`, `@PostMapping`, `@RequestMapping`, etc.)
 ```
 
 Matching endpoints then report `policy: "custom"` with `annotation`, `resourceName`, and `requiredLevel`, and are no longer counted in `no_security_signal`. Repos without the config behave exactly as before.
+
+### `export` — architecture views for downstream tooling
+
+```bash
+sourcecode export /path/to/repo --by-directory      # code map, path:line refs
+sourcecode export /path/to/repo --module-graph       # module→module dependencies
+sourcecode export /path/to/repo --integrations       # outbound HTTP/LDAP/JMS clients
+sourcecode export /path/to/repo --c4                  # unified architecture + manifest
+```
+
+Emits **structured, tool-agnostic** codebase views as plain JSON/YAML — the kind of input an architecture-doc generator, diagram renderer, or code-search agent can consume directly instead of walking the tree file by file. Section labels map to the open [C4 model](https://c4model.com) (an open architecture notation, not a product); the schema is vendor-neutral.
+
+| Flag | Output |
+|------|--------|
+| `--by-directory` | One group per source directory, each symbol with a `source_file:line` reference. |
+| `--module-graph` | `{nodes, edges, summary}` — directories as modules, inter-module dependencies rolled up from class-level relation edges with hit counts + edge types. |
+| `--integrations` | Outbound integrations (`RestTemplate`, `WebClient`, `@FeignClient`, `LdapTemplate`, `JmsTemplate`, ActiveMQ) with `file:line` evidence and a literal `target` URL/name when present. |
+| `--c4` | Unified document: `c4.{context, containers, components, code}` + `api_surface` + a `manifest` with per-directory content hashes for **incremental** consumers (skip directories whose hash is unchanged). |
+
+The section flags compose (pass several for one multi-section document); `--c4` assembles the full export on its own. URLs assembled at runtime yield `target: null` (honest absence, never a guess); containers are derived from build files (Maven/Gradle) and reported as a limitation when none are found.
 
 ### `spring-audit` — Spring semantic audit [free]
 
