@@ -347,12 +347,17 @@ _SPRING_OTHER: frozenset[str] = frozenset({
     "@MatrixParam", "@CookieParam", "@Context",
 })
 
-_PUBLISH_EVENT_RE = re.compile(r'\.publishEvent\s*\(\s*new\s+(\w+)\s*[(\{]')
+# Optional generic type args between the event class name and its constructor
+# parens — diamond `<>` or explicit `<Order>` / `<Map<String,Integer>>`.
+# Required so `publishEvent(new SaveServiceEvent<>(obj))` (generic event wrappers,
+# e.g. OpenMRS *ServiceEvent family) is recognised as a publisher edge.
+_GENERIC_ARGS = r'(?:<[^<>;{}()]*(?:<[^<>;{}()]*>[^<>;{}()]*)*>)?'
+_PUBLISH_EVENT_RE = re.compile(r'\.publishEvent\s*\(\s*new\s+(\w+)\s*' + _GENERIC_ARGS + r'\s*[(\{]')
 
 # Two-step publish: SomeEvent var = new SomeEvent(...); publisher.publishEvent(var)
 # Used when event is created before passing to publishEvent (common pattern).
 _PUBLISH_EVENT_CALL_RE = re.compile(r'\.publishEvent\s*\(')
-_NEW_EVENT_INSTANTIATION_RE = re.compile(r'\bnew\s+(\w+Event)\s*[\({]')
+_NEW_EVENT_INSTANTIATION_RE = re.compile(r'\bnew\s+(\w+Event)\s*' + _GENERIC_ARGS + r'\s*[\({]')
 
 # Keycloak SPI event fire pattern: XxxEvent.fire(session, ...)
 _FIRE_EVENT_RE = re.compile(r'\b(\w+Event)\.fire\s*\(')
@@ -1122,6 +1127,102 @@ def _build_same_package_map(symbols: list[SymbolRecord]) -> dict[str, dict[str, 
     return result
 
 
+# Reserved words that read like calls (`if (`, `for (`, …). Can never be sibling
+# method names (Java reserves them), but guard the intra-class scan anyway.
+_CALL_KEYWORDS: frozenset[str] = frozenset({
+    "if", "for", "while", "switch", "catch", "return", "synchronized",
+    "new", "super", "this", "assert",
+})
+
+
+def _method_body(raw_lines: list[str], start_idx: int) -> str:
+    """Source text of the method/constructor declared at raw_lines[start_idx],
+    from its first '{' to the matching '}' (brace-matched, string/char aware).
+
+    The signature prefix before '{' is dropped so the method's own name is not
+    scanned as a call site. Returns "" for a bodyless declaration (abstract /
+    interface method terminated by ';' before any '{').
+    """
+    depth = 0
+    started = False
+    out: list[str] = []
+    for i in range(start_idx, len(raw_lines)):
+        line = raw_lines[i]
+        if not started:
+            if "{" in line:
+                started = True
+                line = line[line.index("{"):]
+            elif ";" in line:
+                return ""           # bodyless declaration
+            else:
+                continue            # multi-line signature continuation
+        out.append(line)
+        depth += _count_net_braces(line)
+        if depth <= 0:
+            break
+    return "\n".join(out)
+
+
+def _intra_class_call_edges(symbols: list[SymbolRecord], source: str) -> list[RelationEdge]:
+    """Method-level `calls` edges for intra-class invocations.
+
+    `discontinueOrder(){ stopOrder(...); }` →
+    OrderServiceImpl#discontinueOrder --calls--> OrderServiceImpl#stopOrder.
+
+    Class-level call scans miss method-to-method calls within a single class, so
+    impact-chain on a private/helper method (e.g. OrderServiceImpl#stopOrder) found
+    zero method-level callers and degraded to a wrong class-level expansion. Resolves
+    bare `m(...)` and `this.m(...)` calls whose target is a sibling METHOD of the same
+    class. Overloads link to all same-name siblings (arity not resolved by regex).
+    Deterministic, in-source only — no cross-file or runtime inference.
+    """
+    callers = [s for s in symbols if s.symbol_kind in ("method", "constructor") and s.line]
+    if not callers:
+        return []
+
+    # Per-class sibling index: simple method name → [method FQNs]. Constructors are
+    # not call targets (a `new X(...)` site is a different relation).
+    siblings: dict[str, dict[str, list[str]]] = {}
+    for s in symbols:
+        if s.symbol_kind == "method" and "#" in s.symbol:
+            cls = _enclosing_class(s.symbol)
+            name = s.symbol.rsplit("#", 1)[1]
+            siblings.setdefault(cls, {}).setdefault(name, []).append(s.symbol)
+    if not siblings:
+        return []
+
+    raw_lines = source.splitlines()
+    edges: list[RelationEdge] = []
+    for caller in callers:
+        cls = _enclosing_class(caller.symbol)
+        sib = siblings.get(cls)
+        if not sib:
+            continue
+        body = _method_body(raw_lines, caller.line - 1)
+        if not body:
+            continue
+        body = _STRING_LITERAL_RE.sub('', _strip_java_comments(body))
+        for name, fqns in sib.items():
+            if name in _CALL_KEYWORDS:
+                continue
+            # bare `name(` (not preceded by word char or '.') OR explicit `this.name(`
+            pat = (r'(?<![\w.])' + re.escape(name) + r'\s*\('
+                   + r'|\bthis\s*\.\s*' + re.escape(name) + r'\s*\(')
+            if not re.search(pat, body):
+                continue
+            for tgt in fqns:
+                if tgt == caller.symbol:
+                    continue        # skip self-recursion self-loop
+                edges.append(RelationEdge(
+                    from_symbol=caller.symbol,
+                    to_symbol=tgt,
+                    type="calls",
+                    confidence="medium",
+                    evidence={"type": "method_call", "value": f"{name}(...)"},
+                ))
+    return edges
+
+
 def _build_relations(
     symbols: list[SymbolRecord],
     raw_imports: list[str],
@@ -1556,6 +1657,9 @@ def _build_relations(
                         confidence="medium",
                         evidence={"type": "method_call", "value": f"{_tgt.split('.')[-1]}.…(…)"},
                     ))
+
+    # ── Intra-class method calls: EnclosingMethod -> calls -> SameClass#sibling ──
+    edges.extend(_intra_class_call_edges(symbols, source))
 
     seen: set[tuple[str, str, str]] = set()
     unique: list[RelationEdge] = []

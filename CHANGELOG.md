@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.59.0] — 2026-06-19
+
+### Fixed
+- **Event topology now recognizes generic-wrapper event publishers.**
+  `publishEvent(new SaveServiceEvent<>(obj))` and explicit forms like
+  `new SaveServiceEvent<Order>(obj)` were silently dropped: the publisher-edge
+  regex required the constructor `(` to immediately follow the class name, so any
+  diamond `<>` or type argument broke the match. `repo-ir` / event-topology then
+  reported no producers for the whole generic `*ServiceEvent` family (e.g. OpenMRS
+  `SaveServiceEvent`/`VoidServiceEvent`/`RetireServiceEvent`). The inline and
+  two-step publish scans now skip an optional (incl. nested) generic argument list.
+- **`impact-chain` now resolves intra-class method callers.** A query on a
+  private/helper method (e.g. `OrderServiceImpl#stopOrder`) found zero direct
+  callers and degraded to a wrong class-level expansion, because method-to-method
+  calls inside a single class produced no graph edge — only class-level `calls`
+  edges existed. The relation builder now emits method-level `calls` edges for
+  bare `m(...)` and `this.m(...)` invocations whose target is a sibling method of
+  the same class (string/comment-aware, overload-safe, no self-loops). The two
+  defects were found dogfooding the tool on OpenMRS issue #6197.
+
 ## [1.58.0] — 2026-06-19
 
 ### Added

@@ -288,6 +288,77 @@ public class EnumRule {
         call_targets = {r["to"] for r in ir["graph"]["edges"] if r["type"] == "calls"}
         assert not any(t.endswith("Math") for t in call_targets)
 
+    # openmrs #6197: publishers of generic-wrapper events
+    # (`publishEvent(new SaveServiceEvent<>(obj))`) were missed because the
+    # diamond/generic args between the class name and `(` broke the regex.
+    GENERIC_EVENT_PUBLISHER = """\
+package org.openmrs.aop;
+
+import org.openmrs.aop.event.SaveServiceEvent;
+import org.openmrs.event.EventPublisher;
+
+public class OpenmrsServiceEventAdvice {
+    private final EventPublisher eventPublisher;
+    public void interceptSaveOrCreate(Object object) {
+        eventPublisher.publishEvent(new SaveServiceEvent<>(object));
+    }
+}
+"""
+
+    def test_generic_event_publisher_edge(self):
+        ir = self._get_ir(self.GENERIC_EVENT_PUBLISHER, "OpenmrsServiceEventAdvice.java")
+        pub = [r for r in ir["graph"]["edges"] if r["type"] == "publishes_event"]
+        targets = {r["to"] for r in pub}
+        assert "org.openmrs.aop.event.SaveServiceEvent" in targets
+        assert all(r["from"] == "org.openmrs.aop.OpenmrsServiceEventAdvice" for r in pub)
+
+    def test_explicit_generic_event_publisher_edge(self):
+        src = self.GENERIC_EVENT_PUBLISHER.replace("SaveServiceEvent<>", "SaveServiceEvent<Order>")
+        ir = self._get_ir(src, "OpenmrsServiceEventAdvice.java")
+        targets = {r["to"] for r in ir["graph"]["edges"] if r["type"] == "publishes_event"}
+        assert "org.openmrs.aop.event.SaveServiceEvent" in targets
+
+    # openmrs #6197: impact-chain on a private/helper method found zero callers
+    # because intra-class method-to-method calls produced no `calls` edge. Bare
+    # `m(...)` and `this.m(...)` sibling calls must yield method-level edges.
+    INTRA_CLASS_CALLS = """\
+package com.ex;
+
+public class OrderServiceImpl {
+    public Order discontinueOrder(Order o, String reason) {
+        stopOrder(o, reason);
+        log("stopOrder fired");
+        return o;
+    }
+    public void voidOrder(Order o) {
+        this.stopOrder(o, null);
+    }
+    private void stopOrder(Order o, String r) {
+        saveOrderInternal(o, null);
+    }
+    private void saveOrderInternal(Order o, Object x) {}
+    private void log(String m) {}
+}
+"""
+
+    def test_intra_class_method_calls_edges(self):
+        ir = self._get_ir(self.INTRA_CLASS_CALLS, "OrderServiceImpl.java")
+        calls = {(r["from"], r["to"]) for r in ir["graph"]["edges"] if r["type"] == "calls"}
+        c = "com.ex.OrderServiceImpl"
+        assert (f"{c}#discontinueOrder", f"{c}#stopOrder") in calls
+        assert (f"{c}#voidOrder", f"{c}#stopOrder") in calls
+        assert (f"{c}#stopOrder", f"{c}#saveOrderInternal") in calls
+
+    def test_intra_class_calls_ignore_string_literals(self):
+        # `log("stopOrder fired")` must not be read as a call to stopOrder.
+        ir = self._get_ir(self.INTRA_CLASS_CALLS, "OrderServiceImpl.java")
+        c = "com.ex.OrderServiceImpl"
+        calls = {(r["from"], r["to"]) for r in ir["graph"]["edges"] if r["type"] == "calls"}
+        # discontinueOrder calls stopOrder (real) + log (real) but only those.
+        assert (f"{c}#discontinueOrder", f"{c}#log") in calls
+        # no self-loop edge
+        assert not any(frm == to for frm, to in calls)
+
 
 # ---------------------------------------------------------------------------
 # Phase 4 — Symbol-level diff (unchanged internals)
