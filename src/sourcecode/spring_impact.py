@@ -70,6 +70,17 @@ _SEVERITY_WEIGHT: dict[str, float] = {
     "low": 1.0,
 }
 
+# Maps the categorical confidence to a numeric score so impact-chain output
+# carries the same `confidence_score`/`confidence_level` pair as the `impact`
+# command. Deterministic — mirrors impact's confidence banding (high≥0.75,
+# medium≥0.45).
+_CONFIDENCE_SCORE: dict[str, float] = {
+    "high": 0.9,
+    "medium": 0.6,
+    "low": 0.3,
+    "unknown": 0.0,
+}
+
 
 # ---------------------------------------------------------------------------
 # Output model
@@ -117,10 +128,16 @@ class ImpactChainResult:
     impact_findings: list[dict] = field(default_factory=list)     # SpringFinding.to_dict() filtered
     analysis_warnings: list[str] = field(default_factory=list)
     risk_level: str = "unknown"                # "critical" | "high" | "medium" | "low" | "unknown"
-    confidence: str = "high"                   # "high" | "medium" | "low"
+    risk_score: float = 0.0                    # numeric score behind risk_level (parity with `impact`)
+    confidence: str = "high"                   # "high" | "medium" | "low" (legacy field, kept)
+    explanation: str = ""                      # human-readable rationale (parity with `impact`)
     metadata: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
+        # `confidence_level`/`confidence_score` mirror the `impact` command's schema
+        # so AI agents parse both commands with one shape. `confidence` (string) is
+        # retained for backward compatibility — it equals `confidence_level`.
+        confidence_level = self.confidence
         d: dict = {
             "schema_version": self.schema_version,
             "symbol": self.symbol,
@@ -134,7 +151,11 @@ class ImpactChainResult:
             "impact_findings": self.impact_findings,
             "analysis_warnings": self.analysis_warnings,
             "risk_level": self.risk_level,
+            "risk_score": self.risk_score,
             "confidence": self.confidence,
+            "confidence_level": confidence_level,
+            "confidence_score": _CONFIDENCE_SCORE.get(confidence_level, 0.0),
+            "explanation": self.explanation,
             "metadata": self.metadata,
         }
         return d
@@ -680,6 +701,33 @@ def _compute_risk(
     return level, round(total, 2)
 
 
+def _build_chain_explanation(
+    risk_level: str,
+    direct_callers: int,
+    indirect_callers: int,
+    endpoints_affected: int,
+    findings: int,
+    confidence: str,
+) -> str:
+    """Human-readable rationale, phrased to match the `impact` command's
+    explanation so both surfaces read consistently."""
+    if not direct_callers and not indirect_callers and not endpoints_affected:
+        return "No callers or endpoints found in the impact chain. Low-risk isolated change."
+    parts: list[str] = []
+    if direct_callers:
+        parts.append(f"{direct_callers} direct caller{'s' if direct_callers != 1 else ''}")
+    if indirect_callers:
+        parts.append(f"{indirect_callers} indirect caller{'s' if indirect_callers != 1 else ''}")
+    if endpoints_affected:
+        parts.append(f"{endpoints_affected} endpoint{'s' if endpoints_affected != 1 else ''} exposed")
+    if findings:
+        parts.append(f"{findings} TX/SEC finding{'s' if findings != 1 else ''} in chain")
+    text = f"Risk={risk_level.upper()}: {'; '.join(parts)}."
+    if confidence != "high":
+        text += f" (confidence={confidence}: IR may be incomplete)"
+    return text
+
+
 # ---------------------------------------------------------------------------
 # Security surface aggregation
 # ---------------------------------------------------------------------------
@@ -762,6 +810,7 @@ class ImpactOrchestrator:
                 analysis_warnings=warnings or [f"Symbol '{symbol}' not found in CIR."],
                 risk_level="unknown",
                 confidence="low",
+                explanation=f"Symbol {symbol!r} not found in the IR.",
                 metadata={"analysis_depth": depth},
             )
 
@@ -1041,7 +1090,16 @@ class ImpactOrchestrator:
             impact_findings=impact_findings,
             analysis_warnings=warnings,
             risk_level=risk_level,
+            risk_score=risk_score,
             confidence=confidence,
+            explanation=_build_chain_explanation(
+                risk_level,
+                len(direct_callers),
+                len(indirect_callers),
+                len(endpoints_affected),
+                len(impact_findings),
+                confidence,
+            ),
             metadata={
                 "analysis_depth": depth,
                 "callers_total": len(direct_callers) + len(indirect_callers),
@@ -1132,4 +1190,5 @@ def run_impact_chain(
             analysis_warnings=[f"Internal error: {type(exc).__name__}: {exc}"],
             risk_level="unknown",
             confidence="low",
+            explanation=f"Internal error during analysis: {type(exc).__name__}.",
         )

@@ -517,6 +517,51 @@ class TestToDict:
 
 
 # ---------------------------------------------------------------------------
+# D2 — schema parity with the `impact` command
+#   impact-chain must expose the same risk/confidence/explanation field names
+#   the `impact` command does, so agents parse one shape across both.
+# ---------------------------------------------------------------------------
+
+class TestImpactSchemaParity:
+    # The risk/confidence/rationale block emitted by the `impact` command.
+    PARITY_KEYS = {
+        "risk_score", "risk_level",
+        "confidence_score", "confidence_level",
+        "explanation",
+    }
+
+    def test_parity_keys_present(self):
+        d = ImpactChainResult(symbol="com.example.Foo", resolution="exact").to_dict()
+        assert self.PARITY_KEYS <= set(d.keys())
+
+    def test_legacy_confidence_kept_and_equals_level(self):
+        # Backward compatibility: the old `confidence` string is retained and
+        # must equal the new `confidence_level`.
+        d = ImpactChainResult(
+            symbol="com.example.Foo", resolution="exact", confidence="medium"
+        ).to_dict()
+        assert d["confidence"] == "medium"
+        assert d["confidence_level"] == "medium"
+
+    def test_confidence_score_is_numeric_and_banded(self):
+        d = ImpactChainResult(symbol="X", resolution="exact", confidence="high").to_dict()
+        assert isinstance(d["confidence_score"], float)
+        assert d["confidence_score"] >= 0.75  # high band
+
+    def test_explanation_populated_on_real_query(self):
+        cir, model = TestOrchestratorIntegration()._build_scenario()
+        result = ImpactOrchestrator().query(cir, model, "OrderService#placeOrder", depth=2)
+        d = result.to_dict()
+        assert d["explanation"], "explanation must not be empty for a resolved symbol"
+        assert d["risk_score"] >= 0.0
+        assert d["risk_level"] in ("low", "medium", "high", "critical", "unknown")
+
+    def test_not_found_has_explanation(self):
+        result = run_impact_chain(_FakeCIR(symbols=[]), "NonExistent")
+        assert result.to_dict()["explanation"]
+
+
+# ---------------------------------------------------------------------------
 # IC-18  run_impact_chain convenience (no pre-built model)
 # ---------------------------------------------------------------------------
 
