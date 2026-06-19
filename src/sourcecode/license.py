@@ -45,7 +45,33 @@ _DEFAULT_SUPABASE_URL: str = "https://qkndlmyekvujjdgthtmz.supabase.co"
 # Paste your project's anon key here so `sourcecode activate` works out of the
 # box; env var still overrides for testing against another project.
 _DEFAULT_SUPABASE_ANON_KEY: str = "sb_publishable_qiJFLWjbBbTqjg-fb0mAGA_cl8PBOKH"
-_SUPABASE_URL: str = os.environ.get("SOURCECODE_SUPABASE_URL", _DEFAULT_SUPABASE_URL)
+def _safe_supabase_url(override: "Optional[str]") -> str:
+    """Validate the SOURCECODE_SUPABASE_URL override before trusting it.
+
+    The license key is POSTed to this host, so a plaintext ``http://`` endpoint
+    would expose the credential on the wire. Allow ``https://`` to any host, and
+    ``http://`` only to loopback (Supabase local dev serves on
+    ``http://127.0.0.1:54321``). Anything else is rejected back to the default.
+    """
+    if not override or override == _DEFAULT_SUPABASE_URL:
+        return _DEFAULT_SUPABASE_URL
+    from urllib.parse import urlparse
+
+    parsed = urlparse(override)
+    host = (parsed.hostname or "").lower()
+    is_loopback = host in {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme == "https" or (parsed.scheme == "http" and is_loopback):
+        return override
+    sys.stderr.write(
+        f"[sourcecode] WARNING: ignoring SOURCECODE_SUPABASE_URL={override!r} — "
+        "must be https:// (or http:// to localhost). Using the default endpoint "
+        "to avoid sending the license key over plaintext.\n"
+    )
+    sys.stderr.flush()
+    return _DEFAULT_SUPABASE_URL
+
+
+_SUPABASE_URL: str = _safe_supabase_url(os.environ.get("SOURCECODE_SUPABASE_URL"))
 _SUPABASE_ANON_KEY: str = os.environ.get(
     "SOURCECODE_SUPABASE_ANON_KEY",
     _DEFAULT_SUPABASE_ANON_KEY,
@@ -152,12 +178,35 @@ _license_data: Optional[dict] = None
 is_pro: bool = False
 
 
+def _secure_dir() -> None:
+    """Create ~/.sourcecode owner-only (0700). Holds the license secret.
+
+    ``mkdir(mode=...)`` is ignored when the dir already exists, so chmod
+    unconditionally. Best-effort: a chmod failure (e.g. Windows) is non-fatal.
+    """
+    try:
+        _LICENSE_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(_LICENSE_DIR, 0o700)
+    except OSError:
+        pass
+
+
 def _write_license_file(data: dict) -> None:
-    """Atomically write license data via tmp file + rename."""
+    """Atomically write license data via tmp file + rename, owner-only (0600).
+
+    The payload contains the Pro ``license_key`` and account email, so the file
+    must not be world/group-readable on shared hosts. Permissions are set on the
+    tmp file *before* the rename so there is no readable window at the final path.
+    """
+    _secure_dir()
     payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
     tmp = _LICENSE_FILE.with_suffix(".tmp")
     try:
         tmp.write_bytes(payload)
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
         tmp.replace(_LICENSE_FILE)
     except Exception:
         try:
@@ -192,7 +241,7 @@ def check_delta_free_tier(repo_path: str) -> "tuple[bool, int, int]":
     new_used = used + 1
     runs[key] = new_used
     try:
-        _LICENSE_DIR.mkdir(parents=True, exist_ok=True)
+        _secure_dir()
         tmp = _DELTA_RUNS_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(runs, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(_DELTA_RUNS_FILE)
@@ -506,7 +555,7 @@ def activate_license(license_key: str) -> None:
         _emit_telemetry("activation", feature="key", success=False, error_kind="NotPro")
         _fail("not_pro", "This license is not a Pro license.")
 
-    _LICENSE_DIR.mkdir(parents=True, exist_ok=True)
+    _secure_dir()
     now = datetime.now(timezone.utc).isoformat()
     data = {
         "license_key": license_key,

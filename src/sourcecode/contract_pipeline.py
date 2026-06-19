@@ -634,11 +634,13 @@ def _find_symbol_files(
     try:
         result = subprocess.run(
             [
-                "grep", "-rl",
+                "grep", "-rlF",
                 "--include=*.ts", "--include=*.tsx",
                 "--include=*.js", "--include=*.jsx",
                 "--include=*.py", "--include=*.java",
-                symbol, ".",
+                # -e guards a symbol that begins with '-' from being parsed as a
+                # flag; -- terminates options so the search root can't be either.
+                "-e", symbol, "--", ".",
             ],
             cwd=str(root),
             capture_output=True,

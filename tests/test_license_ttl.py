@@ -31,6 +31,58 @@ class TestGetCacheTtl:
         assert lic._get_cache_ttl() == 1800
 
 
+class TestSafeSupabaseUrl:
+    """License key is POSTed here — only https (or http to loopback) is trusted."""
+
+    def test_none_and_default_pass_through(self) -> None:
+        assert lic._safe_supabase_url(None) == lic._DEFAULT_SUPABASE_URL
+        assert lic._safe_supabase_url(lic._DEFAULT_SUPABASE_URL) == lic._DEFAULT_SUPABASE_URL
+
+    def test_https_override_allowed(self) -> None:
+        assert lic._safe_supabase_url("https://other.example.co") == "https://other.example.co"
+
+    def test_http_localhost_allowed_for_dev(self) -> None:
+        for url in ("http://localhost:54321", "http://127.0.0.1:54321"):
+            assert lic._safe_supabase_url(url) == url
+
+    def test_http_remote_rejected_to_default(self) -> None:
+        assert lic._safe_supabase_url("http://evil.example.co") == lic._DEFAULT_SUPABASE_URL
+
+    def test_non_http_scheme_rejected(self) -> None:
+        assert lic._safe_supabase_url("ftp://host/x") == lic._DEFAULT_SUPABASE_URL
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file-mode semantics")
+class TestLicenseFilePermissions:
+    """License file holds a secret (license_key + email) — must be owner-only."""
+
+    def test_license_file_is_owner_only(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        lic_dir = tmp_path / ".sourcecode"
+        monkeypatch.setattr(lic, "_LICENSE_DIR", lic_dir)
+        monkeypatch.setattr(lic, "_LICENSE_FILE", lic_dir / "license.json")
+        lic._write_license_file({"license_key": "secret-key", "email": "a@b.c"})
+        mode = (lic_dir / "license.json").stat().st_mode & 0o777
+        assert mode == 0o600, oct(mode)
+
+    def test_license_dir_is_owner_only(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        lic_dir = tmp_path / ".sourcecode"
+        monkeypatch.setattr(lic, "_LICENSE_DIR", lic_dir)
+        monkeypatch.setattr(lic, "_LICENSE_FILE", lic_dir / "license.json")
+        lic._write_license_file({"license_key": "secret-key"})
+        mode = lic_dir.stat().st_mode & 0o777
+        assert mode == 0o700, oct(mode)
+
+    def test_world_readable_dir_is_tightened(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pre-existing world-readable dir must be tightened (mkdir mode is ignored when it exists)."""
+        lic_dir = tmp_path / ".sourcecode"
+        lic_dir.mkdir(mode=0o755)
+        os.chmod(lic_dir, 0o755)
+        monkeypatch.setattr(lic, "_LICENSE_DIR", lic_dir)
+        monkeypatch.setattr(lic, "_LICENSE_FILE", lic_dir / "license.json")
+        lic._secure_dir()
+        assert (lic_dir.stat().st_mode & 0o777) == 0o700
+
+
 class TestMaybeRevalidateCISkip:
     """_maybe_revalidate must NOT call network when CI env is set and cache is fresh enough."""
 

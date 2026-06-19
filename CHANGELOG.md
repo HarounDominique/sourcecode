@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.55.0] — 2026-06-19
+
+### Security
+- **License secret no longer written world-readable.** `~/.sourcecode/license.json`
+  stores the Pro `license_key` and account email but was written with the default
+  umask (typically `0644`, dir `0755`), so any other local user could read the
+  credential on a shared host. Now the directory is created/tightened to `0700` and
+  the file is `chmod 0600` on the tmp file *before* the atomic rename (no
+  world-readable window at the final path). `_secure_dir()` is applied at every
+  write site (activation, license file, delta-run counter).
+
+- **License-endpoint override now scheme-validated.** `SOURCECODE_SUPABASE_URL` was
+  trusted verbatim; an `http://` value sent the license key over plaintext. The
+  override is now accepted only when `https://` (any host) or `http://` to loopback
+  (preserves Supabase local dev on `http://127.0.0.1:54321`); anything else is
+  rejected back to the default endpoint with a warning.
+
+- **Hardened the symbol grep in the contract pipeline.** The deep-scan symbol
+  search ran `grep <symbol> .` with the symbol in pattern position and as a regex,
+  while the Python fallback matched literally — inconsistent, and a leading-dash
+  symbol could be parsed as a flag. Switched to `grep -F -e <symbol> -- .`: literal
+  match (matches the fallback, removes the regex/ReDoS surface) and `-e`/`--` guard
+  option parsing. No `shell=True` anywhere; this is defense-in-depth on argv.
+
+Dependency audit (`pip-audit`): no known vulnerabilities in runtime dependencies.
+
 ## [1.54.0] — 2026-06-19
 
 ### Added
