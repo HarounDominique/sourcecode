@@ -182,6 +182,25 @@ _INERT_MARKER_SUPERTYPES = frozenset({
     "Externalizable", "java.io.Externalizable",
 })
 
+# Concrete JDK base classes extended for implementation reuse, NOT framework-DI
+# interfaces. `class Foo extends ArrayList` is code reuse, not polymorphic wiring,
+# and consumers that merely hold an ArrayList/InputStream field are not callers of
+# Foo. Validated on BroadleafCommerce: without this, CH-007 mis-recovered consumers
+# of ArrayList/Stack/InputStream as callers of EmptyFilterValues/IdentityUtilContext/
+# ResourceInputStream. Simple-name match (the external type is, by definition, not in-repo).
+_NON_DI_SUPERTYPES = frozenset({
+    # java.util containers
+    "ArrayList", "LinkedList", "Vector", "Stack", "HashMap", "LinkedHashMap",
+    "TreeMap", "HashSet", "LinkedHashSet", "TreeSet", "ArrayDeque", "Properties",
+    "AbstractList", "AbstractMap", "AbstractSet", "AbstractCollection", "EnumMap",
+    # java.io / java.nio streams + readers
+    "InputStream", "OutputStream", "Reader", "Writer", "FilterInputStream",
+    "FilterOutputStream", "ByteArrayInputStream", "ByteArrayOutputStream",
+    # java.lang base classes
+    "Object", "Thread", "Throwable", "Exception", "RuntimeException", "Error",
+    "Number", "Enum", "ClassLoader", "ThreadLocal",
+})
+
 
 def _external_supertypes(cir, class_fqn: str) -> list[str]:
     """Return supertypes of class_fqn that are NOT in-repo symbols.
@@ -212,6 +231,8 @@ def _external_supertypes(cir, class_fqn: str) -> list[str]:
         simple = to.rsplit(".", 1)[1] if "." in to else to
         if simple in _INERT_MARKER_SUPERTYPES or to in _INERT_MARKER_SUPERTYPES:
             continue
+        if simple in _NON_DI_SUPERTYPES:
+            continue  # concrete JDK base extended for reuse, not DI dispatch
         # Internal if it resolves to exactly one in-repo class (exact or simple-name).
         if to in known:
             continue
@@ -244,6 +265,51 @@ def _is_unmodeled_value_type(cir, class_fqn: str, model) -> bool:
     if class_fqn in controllers:
         return False
     return True
+
+
+# CH-007 — external-interface DI bridge (caller recovery)
+# ---------------------------------------------------------------------------
+# When a class is reachable only through an external interface it implements
+# (the CH-005 blind spot), its consumers inject/reference the *external* type,
+# never the impl — so no reverse-graph edge names the impl and CH-001b (in-repo
+# interface expansion) cannot bridge. The wiring sites are still in-repo, though:
+# the raw dependency edges record `<consumer> -[injects|calls|instantiates|returns]->
+# <external interface>`. Read those to recover the consumer classes, and count how
+# many in-repo classes implement/extend each external supertype: exactly one means
+# the binding is unambiguous (this impl IS the injected bean); several means any
+# could be, so recover all candidates and flag the ambiguity rather than assert.
+_DI_USE_EDGE_TYPES = frozenset({"injects", "calls", "instantiates", "returns"})
+
+
+def _recover_external_iface_callers(
+    cir, external_supertypes: list[str], impl_class_fqn: str
+) -> tuple[list[str], int]:
+    """Recover in-repo wiring/consumer classes for an impl wired via an external
+    interface (CH-007). See module note above.
+
+    Returns ``(recovered_caller_classes, max_impl_count)`` where max_impl_count is
+    the largest number of in-repo implementors across the matched supertypes — 1
+    means the impl→bean binding is unambiguous, >1 means it is not.
+    """
+    deps = getattr(cir, "dependencies", None) or []
+    ext = set(external_supertypes)
+    if not ext:
+        return [], 0
+    recovered: list[str] = []
+    impl_count: dict[str, int] = {e: 0 for e in ext}
+    for edge in deps:
+        to = (edge.get("to") or "").strip()
+        if to not in ext:
+            continue
+        et = edge.get("type")
+        if et in ("implements", "extends"):
+            impl_count[to] = impl_count.get(to, 0) + 1
+        elif et in _DI_USE_EDGE_TYPES:
+            owner = normalize_owner_fqn((edge.get("from") or "").strip())
+            if owner and owner != impl_class_fqn:
+                recovered.append(owner)
+    max_impl = max(impl_count.values()) if impl_count else 0
+    return list(dict.fromkeys(recovered)), max_impl
 
 
 # ---------------------------------------------------------------------------
@@ -846,7 +912,57 @@ class ImpactOrchestrator:
         if empty_blast and class_level_seed:
             external_supertypes = _external_supertypes(cir, resolved_symbol)
         framework_di_blind_spot = bool(external_supertypes)
+
+        # CH-007: external-interface DI bridge. Before treating the empty result as a
+        # blind spot, recover the in-repo wiring/consumer classes that inject the
+        # external supertype (they never name this impl, so the BFS missed them).
+        di_recovered_callers: list[str] = []
+        di_binding_ambiguous = False
         if framework_di_blind_spot:
+            di_recovered_callers, _max_impl = _recover_external_iface_callers(
+                cir, external_supertypes, resolved_symbol
+            )
+            di_binding_ambiguous = _max_impl > 1
+            # Keep only genuinely new caller classes (not seeds / already found).
+            _known = set(seed_fqns) | set(direct_callers) | set(indirect_callers)
+            di_recovered_callers = [c for c in di_recovered_callers if c not in _known]
+
+        di_recovered = bool(di_recovered_callers)
+        if di_recovered:
+            # Merge recovered wiring sites into the chain and recompute the views
+            # that depend on the caller set (endpoints, findings, surfaces, risk).
+            direct_callers = direct_callers + di_recovered_callers
+            empty_blast = False
+            all_callers = direct_callers + indirect_callers
+            endpoints_affected = _collect_endpoints(all_callers, seed_fqns, model)
+            impact_findings_raw = _filter_findings(
+                all_findings, seed_fqns, direct_callers, indirect_callers, endpoints_affected
+            )
+            impact_findings_raw.sort(
+                key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.symbol)
+            )
+            impact_findings = [f.to_dict() for f in impact_findings_raw]
+            security_surfaces = _build_security_surfaces(endpoints_affected, impact_findings_raw)
+            risk_level, risk_score = _compute_risk(
+                len(direct_callers), len(indirect_callers),
+                len(endpoints_affected), impact_findings_raw,
+            )
+            _ambig = (
+                " Binding is ambiguous (the external type has multiple in-repo "
+                "implementors); the recovered caller(s) wire one of them — verify "
+                "which bean is configured." if di_binding_ambiguous else ""
+            )
+            warnings.append(
+                f"External-interface DI bridge (CH-007): recovered "
+                f"{len(di_recovered_callers)} in-repo wiring/consumer class(es) that "
+                "inject the external supertype(s) [" + ", ".join(external_supertypes)
+                + "] this class implements. These callers reference the interface, not "
+                "this class directly, so the static call-graph missed them. They reach "
+                "this class only if it is the bean configured for that interface — the "
+                "interface may also have framework/third-party implementations; verify "
+                "the wiring." + _ambig
+            )
+        elif framework_di_blind_spot:
             warnings.append(
                 "Framework/external-interface DI blind spot (CH-005): this class "
                 "implements/extends external type(s) [" + ", ".join(external_supertypes)
@@ -900,6 +1016,10 @@ class ImpactOrchestrator:
         confidence: str
         if resolution == "not_found":
             confidence = "low"
+        elif di_recovered:
+            # Callers recovered structurally via the external-interface DI bridge.
+            # Unambiguous binding (single in-repo impl) → medium; ambiguous → low.
+            confidence = "low" if di_binding_ambiguous else "medium"
         elif framework_di_blind_spot or value_type_blind_spot or unresolved_ref_blind_spot:
             confidence = "low"
         elif resolution == "partial" or confidence_reducing:
@@ -931,11 +1051,14 @@ class ImpactOrchestrator:
                 "model_build_time_ms": model.build_time_ms,
                 "query_time_ms": elapsed_ms,
                 "blind_spots": (
-                    (["framework_di"] if framework_di_blind_spot else [])
+                    # framework_di stops being a blind spot once CH-007 recovers callers
+                    (["framework_di"] if framework_di_blind_spot and not di_recovered else [])
                     + (["value_type"] if value_type_blind_spot else [])
                     + (["unresolved_refs"] if unresolved_ref_blind_spot else [])
                 ),
                 "external_supertypes": external_supertypes,
+                "external_iface_callers_recovered": len(di_recovered_callers),
+                "external_iface_binding_ambiguous": di_binding_ambiguous,
             },
         )
 

@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.56.0] — 2026-06-19
+
+### Added
+- **CH-007 — `impact-chain` recovers callers wired through an external interface.**
+  The flagship blast-radius gap (BroadleafCommerce #3124): a class wired by DI through
+  an external framework interface (e.g. a Spring Security `UserDetailsService` /
+  `RedirectStrategy` impl) reported `0 callers` because consumers inject the *interface*,
+  never the impl — so no reverse-graph edge names it and CH-001b (in-repo interface
+  expansion) cannot bridge. CH-005 only warned; it did not recover the callers.
+
+  `_recover_external_iface_callers()` now reads the raw dependency edges (which record
+  `<consumer> -[injects|calls|instantiates|returns]-> <external interface>` even though
+  those edges never reach `reverse_graph`) and attributes the in-repo wiring/consumer
+  classes as callers, then recomputes the endpoints/findings/surfaces/risk that depend
+  on them. In-repo implementors of the interface are counted: exactly one → unambiguous
+  binding (`confidence:medium`, `framework_di` dropped from `metadata.blind_spots`);
+  several → `metadata.external_iface_binding_ambiguous:true`, confidence stays `low`
+  with an ambiguity warning. No in-repo wiring → the honest CH-005 blind-spot path is
+  unchanged. New metadata: `external_iface_callers_recovered`, `external_iface_binding_ambiguous`.
+
+- **Precision: concrete JDK base classes excluded from DI detection.** `class Foo extends
+  ArrayList`/`Stack`/`InputStream` is implementation reuse, not DI dispatch, and a consumer
+  holding an `ArrayList` field is not a caller of `Foo`. Added `_NON_DI_SUPERTYPES`
+  (java.util containers, java.io streams, java.lang bases) to the external-supertype
+  filter — found via real-repo validation, where it cut false recoveries from 12 to 7.
+
+  Validated on BroadleafCommerce (2762 files, 22 247 symbols): CH-007 recovers wiring
+  callers for 7 classes, all genuine DI interfaces; querying a `UserDetailsService`
+  implementation recovers the security-config + login-service classes that wire it.
+  Report: `.planning/benchmark-broadleaf-3124.md`. Tests: `TestExternalInterfaceDIBridge`
+  (recovery / ambiguity / no-wiring fallback).
+
 ## [1.55.0] — 2026-06-19
 
 ### Security

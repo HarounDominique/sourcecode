@@ -1699,6 +1699,83 @@ class TestFrameworkDIBlindSpot:
 
 
 # ---------------------------------------------------------------------------
+# CH-007 — external-interface DI bridge (caller recovery)
+# ---------------------------------------------------------------------------
+class TestExternalInterfaceDIBridge:
+    """The BroadleafCommerce #3124 acceptance criterion: a class wired via an
+    EXTERNAL framework interface must recover the in-repo wiring/consumer sites
+    that inject that interface, instead of reporting a bare 0-caller blind spot.
+    """
+
+    def _wired_cir(self, *, extra_impl=False):
+        # LocalRedirectStrategy implements external RedirectStrategy; LoginController
+        # injects the EXTERNAL interface (never names the impl).
+        symbols = [
+            "com.x.web.LocalRedirectStrategy",
+            "com.x.web.LocalRedirectStrategy#sendRedirect",
+            "com.x.auth.LoginController",
+            "com.x.auth.LoginController#login",
+            "com.x.auth.LoginController.redirectStrategy",
+        ]
+        dependencies = [
+            {"from": "com.x.web.LocalRedirectStrategy",
+             "to": "org.springframework.security.web.RedirectStrategy", "type": "implements"},
+            {"from": "com.x.auth.LoginController.redirectStrategy",
+             "to": "org.springframework.security.web.RedirectStrategy", "type": "injects"},
+        ]
+        if extra_impl:
+            symbols.append("com.x.web.OtherRedirectStrategy")
+            dependencies.append(
+                {"from": "com.x.web.OtherRedirectStrategy",
+                 "to": "org.springframework.security.web.RedirectStrategy", "type": "implements"}
+            )
+        return _FakeCIR(symbols=symbols, reverse_graph={}, dependencies=dependencies)
+
+    def test_recovers_wiring_consumer_as_caller(self):
+        cir = self._wired_cir()
+        result = ImpactOrchestrator().query(
+            cir, _make_model(), "com.x.web.LocalRedirectStrategy"
+        )
+        assert "com.x.auth.LoginController" in result.direct_callers, result.direct_callers
+        # Recovery means it is no longer a bare blind spot.
+        assert "framework_di" not in result.metadata.get("blind_spots", [])
+        assert result.confidence == "medium", result.confidence
+        assert result.metadata.get("external_iface_callers_recovered") == 1
+        assert not result.metadata.get("external_iface_binding_ambiguous")
+        assert any("CH-007" in w for w in result.analysis_warnings), result.analysis_warnings
+
+    def test_ambiguous_binding_when_multiple_impls(self):
+        cir = self._wired_cir(extra_impl=True)
+        result = ImpactOrchestrator().query(
+            cir, _make_model(), "com.x.web.LocalRedirectStrategy"
+        )
+        assert "com.x.auth.LoginController" in result.direct_callers
+        assert result.metadata.get("external_iface_binding_ambiguous") is True
+        # Ambiguous binding stays cautious.
+        assert result.confidence == "low", result.confidence
+        assert any("ambiguous" in w.lower() for w in result.analysis_warnings)
+
+    def test_no_wiring_falls_back_to_ch005_blind_spot(self):
+        # No consumer injects the interface → nothing to recover → CH-005 still fires.
+        symbols = [
+            "com.x.web.LocalRedirectStrategy",
+            "com.x.web.LocalRedirectStrategy#sendRedirect",
+        ]
+        dependencies = [
+            {"from": "com.x.web.LocalRedirectStrategy",
+             "to": "org.springframework.security.web.RedirectStrategy", "type": "implements"},
+        ]
+        cir = _FakeCIR(symbols=symbols, reverse_graph={}, dependencies=dependencies)
+        result = ImpactOrchestrator().query(
+            cir, _make_model(), "com.x.web.LocalRedirectStrategy"
+        )
+        assert not result.direct_callers
+        assert "framework_di" in result.metadata.get("blind_spots", [])
+        assert result.confidence == "low"
+        assert any("CH-005" in w for w in result.analysis_warnings)
+
+
+# ---------------------------------------------------------------------------
 # CH-006 — implements/extends edges excluded from caller BFS (hub-interface FP)
 # ---------------------------------------------------------------------------
 class TestHubInterfaceOverExpansion:
