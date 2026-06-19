@@ -1,36 +1,35 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-17T09:43:55Z",
+  "timestamp": "2026-06-19T14:08:58+0200",
   "phase": null,
-  "phase_name": "post-milestone — field benchmark + impact-chain/endpoints honesty fixes (v1.47.0→v1.50.0)",
+  "phase_name": "ad-hoc product + landing work (post-milestone v1.53)",
   "phase_dir": null,
-  "plan": null,
-  "task": null,
-  "total_tasks": 7,
+  "context": "default",
   "status": "paused",
-  "session_type": "field benchmark on fresh OSS Spring repos + tool-improvement backlog (honest-signal fixes), NOT phase execution",
   "completed_tasks": [
-    {"id": 1, "name": "CH-005 — framework/external-interface DI blind-spot detection in impact-chain", "status": "done", "commit": "46edb44", "detail": "v1.47.0. _external_supertypes() reads raw implements/extends from cir.dependencies; on empty blast radius + non-inert external supertype → confidence=low, metadata.blind_spots=['framework_di']+external_supertypes, CH-005 warning. Validated on Broadleaf LocalRedirectStrategy (flagged) + FieldDaoImpl (not flagged). Mirrors CH-003 value-type guard."},
-    {"id": 2, "name": "Field benchmark on fresh repos (shopizer + halo) + honest report", "status": "done", "detail": "Cloned shopizer-fieldtest (Boot 2.5.12, javax, 1210 java, MVC) + halo-fieldtest (Boot 3, WebFlux fn, 1254 java). migrate-check 9/10 decisive on shopizer (555 findings, readiness 0/100, 301 blocking, 107.3 days, OpenRewrite recipes). impact-chain interface/impl proven on fresh repo (CH-001b holds). Report: .planning/benchmark-fieldtest-2026-06-17.md. Found 3 honest gaps F-1/F-2/F-3."},
-    {"id": 3, "name": "F-3 / CH-006 — hub-interface caller over-expansion fix", "status": "done", "commit": "122fa23", "detail": "v1.48.0. implements/extends were traversed in caller BFS, attributing sibling implementors of a shared in-repo interface as false direct callers (halo ThumbnailEndpoint 42 phantom = other 42 CustomEndpoint impls; shopizer 45 phantom Mapper callers). Fix: added implements/extends to _SKIP_EDGE_TYPES. Loss-free (CH-001a/b expansion uses ImplementationGraph indices, not these edges). Verified halo 42→0, shopizer ProductService 32 direct preserved."},
-    {"id": 4, "name": "F-2 — honest WebFlux/functional-routing signal in endpoints", "status": "done", "commit": "0503325", "detail": "v1.49.0. extract_java_endpoints modeled annotation routing only; functional DSL (route().GET(...)/RouterFunction/CustomEndpoint) was silently invisible (halo endpoints=0). Now reports functional_routing block {files,route_registrations,modeled:false} + warning; empty-surface case warns against misreading. Deliberately does NOT synthesize partial paths (relative, would mislead). Verified halo 168 regs/51 files; shopizer no false trigger."},
-    {"id": 5, "name": "F-1 — don't cap impact-chain confidence on informational expansion warnings", "status": "done", "commit": "5f243ec", "detail": "v1.50.0. confidence was medium whenever any warning existed, but CH-001a/b expansion notices are appended on every iface/impl query → never high. Fix: confidence_reducing flag set only by hub-guard truncation; 'or warnings' → 'or confidence_reducing'. Verified shopizer ProductService medium→high. Closes field-benchmark backlog (F-1/F-2/F-3 all fixed)."}
+    {"id": 1, "name": "v1.54.0 C4 module-root rollup (export --c4 module_roots)", "status": "done", "commit": "earlier", "pushed": true},
+    {"id": 2, "name": "v1.55.0 security hardening (license-file perms, endpoint validation, grep -F)", "status": "done", "commit": "a97db33", "pushed": true},
+    {"id": 3, "name": "v1.56.0 CH-007 external-interface DI caller recovery", "status": "done", "commit": "990142e", "pushed": true},
+    {"id": 4, "name": "v1.57.0 TEMPORARY Pro unlock (_PRO_UNLOCK_ALL floors is_pro)", "status": "done", "commit": "9560796", "pushed": false},
+    {"id": 5, "name": "landing: pricing temp-free banner + version 1.57.0 + current commands + meta/og/hero", "status": "done", "commit": "94f7c76 (sourcecode-landing repo)", "pushed": false},
+    {"id": 6, "name": "landing: #output showcase — 3 moat panels (migrate-check / spring-audit / export --c4) from real Broadleaf runs", "status": "done", "commit": "2973953 (sourcecode-landing repo)", "pushed": false}
   ],
   "remaining_tasks": [
-    {"id": 6, "name": "Watch Broadleaf PRs #3131 + #3132 review feedback", "status": "not_started", "needs": "maintainer response; both still OPEN/REVIEW_REQUIRED. From prior session, unrelated to this session's work."},
-    {"id": 7, "name": "Reframe deferred security-audit items #4/#6 (custom-annotation security) as enrichment per product strategy", "status": "not_started", "needs": "decision per project_product_strategy (security-detection deprioritized). Low priority."}
+    {"id": 7, "name": "PUSH both repos (atlas-cli 9560796; sourcecode-landing 2973953)", "status": "not_started", "note": "user pushes manually — established pattern"},
+    {"id": 8, "name": "Strategy priority #3 — public reproducible migrate-check proof", "status": "not_started"},
+    {"id": 9, "name": "Strategy priority #4 — multi-repo regression corpus", "status": "not_started"},
+    {"id": 10, "name": "Optional: model setter/XML-injection edges (Broadleaf RedirectStrategy field+setter not recoverable by CH-007)", "status": "not_started"}
   ],
   "blockers": [],
   "human_actions_pending": [
-    {"action": "Optionally push master + tags to origin", "context": "origin/master == master (0 ahead per local ref); tags v1.47.0/1.48.0/1.49.0/1.50.0 are local — user has been pushing manually ('ya he pusheado yo'). Verify tags reached origin if release artifacts depend on them.", "blocking": false}
+    {"action": "git push in atlas-cli (HEAD 9560796) and sourcecode-landing (HEAD 2973953)", "context": "user pushes manually each session; commits ready", "blocking": false}
   ],
   "decisions": [
-    {"decision": "CH-005/CH-006/F-2 implemented as HONEST-SIGNAL guards, not full modeling", "rationale": "Per feedback_honest_benchmarks: false positives/silent zeros are worse than admitting a gap. CH-005 detects external-DI blindness (under-report), CH-006 kills in-repo hub over-report (false positives), F-2 surfaces functional-routing instead of synthesizing misleading partial paths. Full caller/route recovery = larger separate efforts.", "phase": null},
-    {"decision": "No upstream PR opened this benchmark round", "rationale": "Tool was decisive on DIAGNOSIS (migrate-check/blast-radius) but the motivating issues were either full-migration scope (too large for one verifiable PR) or cases the tool did NOT help find (halo #9898 functional-endpoint blindness) — claiming credit would be trap promo. Next-round PR candidate: shopizer single-module javax→jakarta slice driven by migrate-check, verified by compile (deferred — no mvn/gradle runnable in env).", "phase": null},
-    {"decision": "Each fix validated against the real repo that exposed it before merge", "rationale": "Synthetic unit tests alone missed pipeline-level behavior; ran impact-chain/endpoints on shopizer+halo to confirm fixes fire (and don't false-trigger) end-to-end.", "phase": null}
+    {"decision": "Pro paywall disabled via reversible flag _PRO_UNLOCK_ALL (env SOURCECODE_PRO_UNLOCK), NOT by deleting gate logic", "rationale": "early-adoption: maximize adoption now, resume paywall later with a 1-line flip", "phase": null},
+    {"decision": "Landing pricing reframed as 'temporarily no payment / fully open', not as a Free tier", "rationale": "explicit user instruction — indicate payment is temporarily off, keep the future paid model visible", "phase": null},
+    {"decision": "Output showcase = 3 NEW moat commands (migrate-check, spring-audit, export --c4), complementing the hero's existing impact panel", "rationale": "broaden demonstrated value beyond blast-radius; all numbers are real Broadleaf runs (evidence-over-claims brand principle)", "phase": null}
   ],
   "uncommitted_files": [],
-  "git_state": "atlas-cli clean. master HEAD 5f243ec (v1.50.0), 0 ahead of origin/master per local ref. Local tags v1.47.0/1.48.0/1.49.0/1.50.0 (push state of tags unverified). Fieldtest repos at ../shopizer-fieldtest + ../halo-fieldtest (shallow clones, gitignored siblings, NOT part of atlas-cli). .planning gitignored except .continue-here.md + HANDOFF.json.",
-  "next_action": "Either (a) start a new field-benchmark round to find the next honest gap (clone a different fresh Spring repo; stress migrate-check + blast-radius; honest scoring), (b) pursue the deferred shopizer migrate-check-driven PR once a build is runnable, or (c) task 7 security-audit reframe. No active blockers.",
-  "context_notes": "Session 74. Full loop: honest field benchmark (3 real gaps found by stressing fresh repos shopizer+halo, chosen to avoid Broadleaf confirmation bias) → closed all 3 across 4 releases v1.47.0→v1.50.0, each validated on the repo that exposed it, no regression to the strong side. Strong side reconfirmed on unseen repos: migrate-check decisive (shopizer 9/10), impact-chain interface/impl solid. Tool measurably more honest now: fewer false positives (CH-006), fewer silent zeros (CH-005/F-2), confidence signal restored (F-1). Verification of Java behavior done via the tool's own CLI on real clones (no mvn/gradle in env). gh authenticated as HarounDominique. Memories updated: finding_benchmark_di_mediated_blindspot (CH-005), finding_fieldtest_endpoint_hub_gaps (F-1/2/3 all FIXED)."
+  "next_action": "If continuing: push both repos, or start strategy priority #3 (public reproducible migrate-check proof). Nothing is blocked.",
+  "context_notes": "All code/landing work committed in both repos; trees clean. Memory project_pro_unlock_temporary.md records the unlock state. Run tests with /opt/homebrew/bin/python3 (system python; .venv SIGKILLs 137). CLI invocation: PYTHONPATH=src /opt/homebrew/bin/python3 run_cli.py <cmd> (python -m sourcecode.cli produces no output). 2728 tests pass."
 }
