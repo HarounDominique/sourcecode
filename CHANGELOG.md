@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.58.0] — 2026-06-19
+
+### Added
+- **`validation` recovers DTO constraints from source when no OpenAPI spec is
+  present.** Previously `validated_fields` read `0` for any repo without a spec
+  on disk, even when DTOs carried bean-validation annotations. The command now
+  locates each body-shaped handler's `@Valid`/`@Validated` parameter, resolves
+  the DTO in-repo, and reads its field constraints (following one in-repo
+  supertype so inherited constraints are kept). Recovered routes are tagged
+  `source="source-derived"` at medium confidence with a `binding` hint
+  (body vs form). The core symbol/endpoint extractor is untouched, so the
+  OpenAPI-driven path is unchanged. Verified: spring-petclinic 0 → 13 validated
+  fields; repos with no `@Valid` usage correctly stay at 0 (no false positives).
+
+### Changed
+- **`impact-chain` output now matches the `impact` command's risk schema.**
+  `risk_score`, `confidence_score`, `confidence_level`, and `explanation` are
+  emitted at the top level (previously `risk_score` lived only in `metadata`
+  and there was no `explanation`). The legacy `confidence` string is retained
+  and equals `confidence_level`. Risk/confidence formulas are unchanged — only
+  the output contract was aligned so agents parse both commands with one shape.
+
 ## [1.57.0] — 2026-06-19
 
 ### Changed
