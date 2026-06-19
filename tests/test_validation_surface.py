@@ -263,3 +263,118 @@ class TestBuildValidationSurface:
         assert surf["endpoints"] == []
         assert surf["gaps"] == []
         assert surf["summary"]["endpoints_with_body"] == 0
+
+
+# ── Source-derived constraints (no OpenAPI spec) ─────────────────────────────
+
+_SRC_CONTROLLER = """\
+package com.example.web;
+
+import org.springframework.web.bind.annotation.*;
+import jakarta.validation.Valid;
+
+@RestController
+@RequestMapping("/owners")
+public class OwnerController {
+
+    @PostMapping("/new")
+    public String create(@Valid @RequestBody Owner owner) {
+        return "ok";
+    }
+
+    @GetMapping("/find")
+    public String find() {
+        return "form";
+    }
+}
+"""
+
+_SRC_OWNER = """\
+package com.example.web;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
+
+public class Owner extends Person {
+    @NotBlank
+    private String address;
+
+    @NotBlank
+    @Pattern(regexp = "\\\\d{10}")
+    private String telephone;
+
+    private String notValidated;
+}
+"""
+
+_SRC_PERSON = """\
+package com.example.web;
+
+import jakarta.validation.constraints.NotBlank;
+
+public class Person {
+    @NotBlank
+    private String firstName;
+}
+"""
+
+
+def _src_repo(tmp_path: Path) -> Path:
+    java = tmp_path / "src" / "main" / "java" / "com" / "example" / "web"
+    java.mkdir(parents=True)
+    (java / "OwnerController.java").write_text(_SRC_CONTROLLER)
+    (java / "Owner.java").write_text(_SRC_OWNER)
+    (java / "Person.java").write_text(_SRC_PERSON)
+    (tmp_path / "pom.xml").write_text("<project></project>")
+    return tmp_path
+
+
+class TestSourceDerivedConstraints:
+    def test_recovers_body_dto_constraints(self, tmp_path: Path):
+        surf = build_validation_surface(_src_repo(tmp_path))
+        assert surf["openapi_spec"] is None
+        post = next(e for e in surf["endpoints"] if e["handler"] == "create")
+        assert post["source"] == "source-derived"
+        assert post["binding"] == "body"
+        names = {f["name"] for f in post["validatedFields"]}
+        # own fields + inherited supertype field; unvalidated field excluded
+        assert names == {"address", "telephone", "firstName"}
+        assert "notValidated" not in names
+
+    def test_pattern_args_captured(self, tmp_path: Path):
+        surf = build_validation_surface(_src_repo(tmp_path))
+        post = next(e for e in surf["endpoints"] if e["handler"] == "create")
+        tel = next(f for f in post["validatedFields"] if f["name"] == "telephone")
+        kinds = {r["kind"] for r in tel["rules"]}
+        assert "NotBlank" in kinds and "Pattern" in kinds
+
+    def test_summary_and_note_reflect_source_recovery(self, tmp_path: Path):
+        surf = build_validation_surface(_src_repo(tmp_path))
+        assert surf["summary"]["validated_fields"] == 3
+        assert surf["summary"]["source_derived_routes"] == 1
+        assert "source" in surf["note"].lower()
+
+    def test_get_endpoint_not_treated_as_body(self, tmp_path: Path):
+        surf = build_validation_surface(_src_repo(tmp_path))
+        handlers = {e["handler"] for e in surf["endpoints"]}
+        assert "find" not in handlers  # GET handler has no validated body
+
+    def test_no_false_positive_without_valid_annotation(self, tmp_path: Path):
+        java = tmp_path / "src" / "main" / "java" / "com" / "x"
+        java.mkdir(parents=True)
+        (java / "PlainController.java").write_text(
+            "package com.x;\n"
+            "import org.springframework.web.bind.annotation.*;\n"
+            "@RestController\n@RequestMapping(\"/p\")\n"
+            "public class PlainController {\n"
+            "  @PostMapping(\"/x\")\n"
+            "  public String x(@RequestBody Owner o) { return \"\"; }\n"
+            "}\n"
+        )
+        (java / "Owner.java").write_text(
+            "package com.x;\nimport jakarta.validation.constraints.NotBlank;\n"
+            "public class Owner { @NotBlank private String a; }\n"
+        )
+        surf = build_validation_surface(tmp_path)
+        # No @Valid on the param → not recovered as validated.
+        assert surf["summary"].get("source_derived_routes", 0) == 0

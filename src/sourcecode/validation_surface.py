@@ -180,6 +180,226 @@ def discover_custom_validators(root: Path) -> "dict[str, CustomConstraint]":
     return catalog
 
 
+# ---------------------------------------------------------------------------
+# Source-derived constraints (no OpenAPI spec)
+#
+# When a repo ships no OpenAPI spec, declarative DTO constraints still live in
+# the Java source as bean-validation annotations. We recover them directly:
+# locate the handler's validated body parameter (@Valid/@Validated), resolve
+# that DTO class in-repo, and read its fields' constraint annotations. This is
+# pure extraction — it never fabricates constraints, and it is reported with
+# source="source-derived" + a lower confidence than spec-carried constraints.
+# ---------------------------------------------------------------------------
+
+# jakarta/javax bean-validation built-in constraints. @Valid marks nested
+# validation, which still means "this field is validated".
+_BEAN_CONSTRAINTS = frozenset({
+    "NotNull", "NotEmpty", "NotBlank", "Null", "AssertTrue", "AssertFalse",
+    "Min", "Max", "DecimalMin", "DecimalMax", "Digits", "Positive",
+    "PositiveOrZero", "Negative", "NegativeOrZero", "Size", "Pattern", "Email",
+    "Past", "PastOrPresent", "Future", "FutureOrPresent", "Valid",
+})
+_VALIDATE_MARKERS = frozenset({"Valid", "Validated"})
+# A class-typed identifier (starts uppercase) — heuristic for "a DTO type".
+_CLASS_TYPE_RE = re.compile(r"^[A-Z][\w]*$")
+_ANN_TOKEN_RE = re.compile(r"@(\w+)\s*(?:\(([^)]*)\))?")
+_FIELD_DECL_RE = re.compile(
+    r"^\s*(?:private|protected|public)\s+"
+    r"(?:final\s+|static\s+|transient\s+|volatile\s+)*"
+    r"[\w.$<>\[\], ]+?\s+(\w+)\s*[;=]"
+)
+_CLASS_EXTENDS_RE = re.compile(r"\bclass\s+\w+\s+extends\s+(\w+)")
+
+
+def _index_repo_classes(root: Path) -> "dict[str, Path]":
+    """Map a class's simple name → its source file (first non-test match)."""
+    index: "dict[str, Path]" = {}
+    count = 0
+    for jf in root.rglob("*.java"):
+        rel = str(jf).replace("\\", "/")
+        if is_test_path(rel) or "/target/" in rel:
+            continue
+        count += 1
+        if count > _SCAN_CAP:
+            break
+        index.setdefault(jf.stem, jf)
+    return index
+
+
+def _balanced_parens(src: str, open_idx: int) -> "Optional[str]":
+    """Given the index of a '(', return the inner text up to its matching ')'."""
+    depth = 0
+    for i in range(open_idx, len(src)):
+        c = src[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return src[open_idx + 1:i]
+    return None
+
+
+def _split_top_level(params: str) -> "list[str]":
+    """Split a parameter list on top-level commas (ignoring generics/parens)."""
+    out: "list[str]" = []
+    depth = 0
+    buf: "list[str]" = []
+    for c in params:
+        if c in "<(":
+            depth += 1
+        elif c in ">)":
+            depth -= 1
+        if c == "," and depth == 0:
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(c)
+    if buf:
+        out.append("".join(buf))
+    return out
+
+
+def _handler_body_dto(controller_src: str, handler: str) -> "Optional[tuple[str, str]]":
+    """Find ``handler``'s validated body parameter. Returns (dto_simple, binding)
+    where binding is 'body' (@RequestBody), 'form' (@ModelAttribute / implicit),
+    or None when the handler has no @Valid/@Validated DTO parameter."""
+    for m in re.finditer(r"\b" + re.escape(handler) + r"\s*\(", controller_src):
+        params = _balanced_parens(controller_src, m.end() - 1)
+        if params is None:
+            continue
+        for raw in _split_top_level(params):
+            raw = raw.strip()
+            if not raw:
+                continue
+            anns = {a.group(1) for a in _ANN_TOKEN_RE.finditer(raw)}
+            if not (anns & _VALIDATE_MARKERS):
+                continue
+            # Strip annotations, then read the parameter's declared type.
+            without_ann = _ANN_TOKEN_RE.sub("", raw).strip()
+            without_ann = re.sub(r"^final\s+", "", without_ann)
+            parts = without_ann.split()
+            if not parts:
+                continue
+            dto = re.sub(r"<.*", "", parts[0]).strip()
+            if not _CLASS_TYPE_RE.match(dto):
+                continue
+            binding = "body" if "RequestBody" in anns else "form"
+            return dto, binding
+    return None
+
+
+def _dto_field_constraints(
+    dto: str,
+    class_index: "dict[str, Path]",
+    catalog: "dict[str, CustomConstraint]",
+    _seen: "Optional[set[str]]" = None,
+) -> "list[dict[str, Any]]":
+    """Read a DTO's validated fields (own file + in-repo supertypes, depth-guarded)."""
+    if _seen is None:
+        _seen = set()
+    if dto in _seen or dto not in class_index:
+        return []
+    _seen.add(dto)
+    try:
+        src = class_index[dto].read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    fields: "list[dict[str, Any]]" = []
+    pending: "list[tuple[str, str]]" = []  # (annotation, args)
+    for line in src.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("@"):
+            mt = _ANN_TOKEN_RE.match(stripped)
+            if mt:
+                pending.append((mt.group(1), (mt.group(2) or "").strip()))
+            continue
+        fm = _FIELD_DECL_RE.match(line)
+        if fm:
+            rules: "list[dict[str, Any]]" = []
+            customs: "list[dict[str, Any]]" = []
+            for ann, args in pending:
+                if ann in _BEAN_CONSTRAINTS:
+                    rule: "dict[str, Any]" = {"kind": ann}
+                    if args:
+                        rule["value"] = args
+                    rules.append(rule)
+                elif ann in catalog:
+                    customs.append({"annotation": ann, "resolved": True})
+            if rules or customs:
+                entry: "dict[str, Any]" = {"name": fm.group(1)}
+                if rules:
+                    entry["rules"] = rules
+                if customs:
+                    entry["customValidators"] = customs
+                fields.append(entry)
+            pending = []
+        elif stripped and not stripped.startswith("//") and not stripped.startswith("*"):
+            # Any other meaningful line breaks the annotation→field adjacency.
+            pending = []
+
+    # Follow a single in-repo supertype so inherited constraints are not lost.
+    ext = _CLASS_EXTENDS_RE.search(src)
+    if ext:
+        seen_names = {f["name"] for f in fields}
+        for inherited in _dto_field_constraints(ext.group(1), class_index, catalog, _seen):
+            if inherited["name"] not in seen_names:
+                fields.append(inherited)
+    return fields
+
+
+def _recover_source_endpoints(
+    root: Path,
+    endpoints: "list[dict[str, Any]]",
+    catalog: "dict[str, CustomConstraint]",
+) -> "tuple[list[dict[str, Any]], int]":
+    """Build validation routes for source endpoints whose handler validates a
+    DTO. Returns (routes, validated_field_count). Only body-shaped verbs are
+    considered, matching the OpenAPI path's scope."""
+    class_index = _index_repo_classes(root)
+    controller_cache: "dict[str, Optional[str]]" = {}
+    routes: "list[dict[str, Any]]" = []
+    total = 0
+    for ep in endpoints:
+        if not _is_body_endpoint(ep):
+            continue
+        controller = ep.get("controller")
+        handler = ep.get("handler")
+        if not controller or not handler or controller not in class_index:
+            continue
+        if controller not in controller_cache:
+            try:
+                controller_cache[controller] = class_index[controller].read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except OSError:
+                controller_cache[controller] = None
+        csrc = controller_cache[controller]
+        if csrc is None:
+            continue
+        dto_binding = _handler_body_dto(csrc, str(handler))
+        if dto_binding is None:
+            continue
+        dto, binding = dto_binding
+        validated = _dto_field_constraints(dto, class_index, catalog)
+        if not validated:
+            continue
+        total += len(validated)
+        routes.append({
+            "method": ep.get("method"),
+            "path": ep.get("path"),
+            "controller": controller,
+            "handler": handler,
+            "schema": dto,
+            "binding": binding,
+            "source": "source-derived",
+            "confidence": "medium",
+            "validatedFields": validated,
+        })
+    return routes, total
+
+
 def _field_rules(fieldc: "dict[str, Any]") -> "list[dict[str, Any]]":
     """Render a constraint dict's built-in rules as a list of {kind, value}."""
     rules: "list[dict[str, Any]]" = []
@@ -303,18 +523,44 @@ def build_validation_surface(
     if spec_path:
         result["openapi_spec"] = spec_path
     else:
-        # No OpenAPI spec on disk / under target/generated-sources. Declarative
-        # DTO constraints cannot be recovered, so a sea of zeros here is expected
-        # and NOT a sign the repo lacks validation — it just isn't OpenAPI-driven.
-        # Surface this explicitly so the result is not silently misread as
-        # "no validation anywhere".
+        # No OpenAPI spec on disk / under target/generated-sources. Recover
+        # declarative constraints directly from the Java DTOs that handlers
+        # validate (@Valid/@Validated body params), so a repo without a spec is
+        # no longer reported as a sea of zeros.
         result["openapi_spec"] = None
-        result["note"] = (
-            "No OpenAPI spec found (no spec on disk or under "
-            "target/generated-sources). Declarative DTO constraints cannot be "
-            "recovered; only source-declared custom validators are reported. "
-            "Body-endpoint and validated-field counts will read zero unless an "
-            "OpenAPI spec is present — this is expected, not a missing-validation "
-            "finding."
+        source_routes, source_fields = _recover_source_endpoints(
+            root, endpoints_data.get("endpoints", []), catalog
         )
+        if source_routes:
+            existing = {(r.get("method"), r.get("path")) for r in out_endpoints}
+            for r in source_routes:
+                if (r.get("method"), r.get("path")) not in existing:
+                    out_endpoints.append(r)
+            total_validated_fields += source_fields
+            # Recompute the gaps that depended on the now-recovered routes.
+            recovered = {(r.get("method"), r.get("path")) for r in source_routes}
+            gaps = [
+                g for g in gaps
+                if (g.get("method"), g.get("path")) not in recovered
+            ]
+            result["endpoints"] = out_endpoints
+            result["gaps"] = gaps
+            result["summary"]["endpoints_with_body"] = len(out_endpoints)
+            result["summary"]["validated_fields"] = total_validated_fields
+            result["summary"]["gaps"] = len(gaps)
+            result["summary"]["source_derived_routes"] = len(source_routes)
+            result["note"] = (
+                "No OpenAPI spec found; constraints were recovered from Java DTO "
+                "source (bean-validation annotations on @Valid/@Validated handler "
+                "bodies). Routes carry source=\"source-derived\" at medium "
+                "confidence. Custom-validator linkage and nested generics may be "
+                "partial; OpenAPI-carried constraints would be more complete."
+            )
+        else:
+            result["note"] = (
+                "No OpenAPI spec found and no source DTO constraints recovered "
+                "(no handler validates an in-repo DTO via @Valid/@Validated, or "
+                "the DTOs declare no bean-validation annotations). This is "
+                "expected for such repos, not a missing-validation finding."
+            )
     return result
