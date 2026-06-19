@@ -2,7 +2,7 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.53.0-blue)
+![Version](https://img.shields.io/badge/version-1.54.0-blue)
 ![Python](https://img.shields.io/badge/python-3.9%2B-green)
 
 ---
@@ -366,7 +366,7 @@ Emits **structured, tool-agnostic** codebase views as plain JSON/YAML — the ki
 | `--by-directory` | One group per source directory, each symbol with a `source_file:line` reference. |
 | `--module-graph` | `{nodes, edges, summary}` — directories as modules, inter-module dependencies rolled up from class-level relation edges with hit counts + edge types. |
 | `--integrations` | Outbound integrations (`RestTemplate`, `WebClient`, `@FeignClient`, `LdapTemplate`, `JmsTemplate`, ActiveMQ) with `file:line` evidence and a literal `target` URL/name when present. |
-| `--c4` | Unified document: `c4.{context, containers, components, code}` + `api_surface` + a `manifest` with per-directory content hashes for **incremental** consumers (skip directories whose hash is unchanged). |
+| `--c4` | Unified document: `c4.{context, containers, components, code}` + `api_surface` + a `manifest` with per-directory content hashes for **incremental** consumers (skip directories whose hash is unchanged). `components.module_roots` rolls leaf source dirs up to architectural module roots and classifies each `layered` (DDD: ≥2 of `domain`/`application`/`infrastructure`) vs `flat` (legacy/flat package), with a verifiable `module_count` — so a consumer enumerates real modules instead of inferring boundaries from leaf directories. |
 
 The section flags compose (pass several for one multi-section document); `--c4` assembles the full export on its own. URLs assembled at runtime yield `target: null` (honest absence, never a guess); containers are derived from build files (Maven/Gradle) and reported as a limitation when none are found.
 

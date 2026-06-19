@@ -4137,6 +4137,82 @@ def _directory_hashes(file_list: "list[str]", root: "Path") -> "dict[str, str]":
     return out
 
 
+# Architectural layer directory names used to recognize a layered module
+# (DDD / hexagonal). The module *root* is the directory directly above the
+# shallowest layer dir, so symbols living in domain/application/infrastructure
+# subdirs all roll up to one module — a consumer counts modules, not leaf dirs.
+_LAYER_MARKERS: "frozenset[str]" = frozenset({
+    "domain", "application", "infrastructure",
+    "interfaces", "presentation", "adapters", "ports", "api",
+})
+# Core DDD layers — presence of >=2 marks a module as DDD-layered vs flat/legacy.
+_DDD_CORE_LAYERS: "frozenset[str]" = frozenset({
+    "domain", "application", "infrastructure",
+})
+
+
+def _module_root_of(leaf_dir: "str") -> "tuple[str, str | None]":
+    """Map a leaf source directory to its architectural module root.
+
+    For a layered module ``<root>/<layer>/...`` the root is the path above the
+    shallowest recognized layer dir, and the layer name is returned alongside.
+    Flat directories (no layer marker) are their own root with a ``None`` layer.
+    Pure-structural — no file reads.
+    """
+    parts = leaf_dir.split("/")
+    for i, seg in enumerate(parts):
+        if seg.lower() in _LAYER_MARKERS:
+            return "/".join(parts[:i]) or ".", seg.lower()
+    return leaf_dir, None
+
+
+def _detect_module_roots(by_directory: "dict[str, list]") -> "dict":
+    """Roll leaf source dirs up to architectural module roots and classify them.
+
+    Resolves the leaf-directory-vs-module mismatch in the C4 component view: a
+    DDD module split across ``domain/`` / ``application/`` / ``infrastructure/``
+    subdirs is reported once, with its layers and a structural ``pattern``
+    (``layered`` when it carries >=2 core DDD layers, else ``flat``). Gives a
+    downstream consumer a verifiable module enumeration and a DDD-vs-legacy
+    signal instead of forcing it to infer module boundaries from directory names.
+    """
+    roots: "dict[str, dict]" = {}
+    for leaf, symbols in by_directory.items():
+        root, layer = _module_root_of(leaf)
+        slot = roots.setdefault(
+            root, {"layers": set(), "symbol_count": 0, "leaf_dirs": 0}
+        )
+        if layer:
+            slot["layers"].add(layer)
+        slot["symbol_count"] += len(symbols)
+        slot["leaf_dirs"] += 1
+
+    modules: "list[dict]" = []
+    layered = flat = 0
+    for root in sorted(roots):
+        s = roots[root]
+        pattern = "layered" if len(s["layers"] & _DDD_CORE_LAYERS) >= 2 else "flat"
+        if pattern == "layered":
+            layered += 1
+        else:
+            flat += 1
+        modules.append({
+            "root": root,
+            "pattern": pattern,
+            "layers": sorted(s["layers"]),
+            "symbol_count": s["symbol_count"],
+            "leaf_dir_count": s["leaf_dirs"],
+        })
+    return {
+        "modules": modules,
+        "summary": {
+            "module_count": len(modules),
+            "layered_module_count": layered,
+            "flat_module_count": flat,
+        },
+    }
+
+
 def _build_c4_export(
     root: "Path",
     file_list: "list[str]",
@@ -4155,6 +4231,9 @@ def _build_c4_export(
     """
     by_directory = _group_symbols_by_directory(nodes)
     module_graph = _build_module_graph(nodes, edges)
+    # Architectural module-root rollup + DDD/legacy classification, so a
+    # consumer counts/classifies modules instead of inferring them from leaf dirs.
+    module_graph["module_roots"] = _detect_module_roots(by_directory)
     api_surface = _group_endpoints_by_controller(endpoints)
     containers = _detect_containers(root)
 

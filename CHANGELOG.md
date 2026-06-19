@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.54.0] — 2026-06-19
+
+### Added
+- **`export --c4` now emits `components.module_roots` — architectural module
+  enumeration + DDD/legacy classification.** Field test (saint-server C4 doc pass)
+  surfaced that the C4 export keyed modules by *leaf source directory*
+  (`dirname(source_file)`), so a DDD module split across
+  `domain/` / `application/` / `infrastructure/` subdirs fragmented into several
+  unrelated "modules". A downstream consumer had to infer module boundaries from
+  directory names, which produced a module **undercount** and **DDD-vs-legacy
+  misclassification** in the generated docs.
+
+  Fix: `_detect_module_roots()` rolls leaf dirs up to their architectural module
+  root (the directory above the shallowest recognized layer dir) and classifies
+  each `layered` (≥2 of `domain`/`application`/`infrastructure`) vs `flat`
+  (legacy/flat package). `c4.components.module_roots` carries the per-module
+  `{root, pattern, layers, symbol_count, leaf_dir_count}` plus a summary with a
+  verifiable `module_count` / `layered_module_count` / `flat_module_count`, so a
+  consumer enumerates real modules instead of guessing.
+
+  Pure-structural (no extra file reads). Non-breaking: top-level `c4` keys and the
+  leaf-level `--module-graph` dependency view are unchanged. 3 regression tests
+  (layered rollup, flat classification, summary counts).
+
 ## [1.50.0] — 2026-06-17
 
 ### Fixed

@@ -107,6 +107,83 @@ def test_c4_manifest_hash_changes_on_edit(tmp_path):
     assert after["manifest"]["directory_hashes"][svc_dir] != h_before
 
 
+_DDD_ENTITY = """\
+package com.x.cotizacion.domain;
+public class Cotizacion {
+    private Long id;
+    public Long getId() { return id; }
+}
+"""
+_DDD_SERVICE = """\
+package com.x.cotizacion.application;
+import com.x.cotizacion.domain.Cotizacion;
+public class CotizacionService {
+    public Cotizacion build() { return new Cotizacion(); }
+}
+"""
+_DDD_REPO = """\
+package com.x.cotizacion.infrastructure;
+import com.x.cotizacion.domain.Cotizacion;
+public class CotizacionRepo {
+    public void save(Cotizacion c) {}
+}
+"""
+_LEGACY_ENTITY = """\
+package com.x.puesto;
+public class Puesto {
+    private Long id;
+    public Long getId() { return id; }
+}
+"""
+
+
+def _write_ddd_repo(tmp_path):
+    base = tmp_path / "src" / "main" / "java" / "com" / "x"
+    (base / "cotizacion" / "domain").mkdir(parents=True)
+    (base / "cotizacion" / "application").mkdir(parents=True)
+    (base / "cotizacion" / "infrastructure").mkdir(parents=True)
+    (base / "puesto").mkdir(parents=True)
+    (base / "cotizacion" / "domain" / "Cotizacion.java").write_text(_DDD_ENTITY, encoding="utf-8")
+    (base / "cotizacion" / "application" / "CotizacionService.java").write_text(_DDD_SERVICE, encoding="utf-8")
+    (base / "cotizacion" / "infrastructure" / "CotizacionRepo.java").write_text(_DDD_REPO, encoding="utf-8")
+    (base / "puesto" / "Puesto.java").write_text(_LEGACY_ENTITY, encoding="utf-8")
+    (tmp_path / "pom.xml").write_text(_POM, encoding="utf-8")
+    return tmp_path
+
+
+def test_c4_module_roots_rollup_layered_module(tmp_path):
+    """DDD module split across domain/application/infrastructure -> one module root."""
+    repo = _write_ddd_repo(tmp_path)
+    data = json.loads(runner.invoke(app, ["export", str(repo), "--c4"]).stdout)
+    roots = data["c4"]["components"]["module_roots"]
+    cot = [m for m in roots["modules"] if m["root"].endswith("com/x/cotizacion")]
+    assert len(cot) == 1, roots["modules"]
+    m = cot[0]
+    assert m["pattern"] == "layered", m
+    assert set(m["layers"]) == {"domain", "application", "infrastructure"}, m
+    assert m["leaf_dir_count"] == 3, m
+
+
+def test_c4_module_roots_flat_module_classified_legacy(tmp_path):
+    """Flat package (no DDD layers) -> classified flat, not layered."""
+    repo = _write_ddd_repo(tmp_path)
+    data = json.loads(runner.invoke(app, ["export", str(repo), "--c4"]).stdout)
+    roots = data["c4"]["components"]["module_roots"]
+    puesto = [m for m in roots["modules"] if m["root"].endswith("com/x/puesto")]
+    assert len(puesto) == 1, roots["modules"]
+    assert puesto[0]["pattern"] == "flat", puesto[0]
+    assert puesto[0]["layers"] == [], puesto[0]
+
+
+def test_c4_module_roots_summary_counts(tmp_path):
+    repo = _write_ddd_repo(tmp_path)
+    data = json.loads(runner.invoke(app, ["export", str(repo), "--c4"]).stdout)
+    summary = data["c4"]["components"]["module_roots"]["summary"]
+    assert summary["module_count"] == summary["layered_module_count"] + summary["flat_module_count"]
+    assert summary["layered_module_count"] >= 1
+    assert summary["flat_module_count"] >= 1
+
+
 def test_c4_output_is_vendor_neutral(tmp_path):
     repo = _write_repo(tmp_path)
     out = runner.invoke(app, ["export", str(repo), "--c4"]).stdout.lower()
