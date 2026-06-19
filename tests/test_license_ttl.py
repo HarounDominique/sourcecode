@@ -52,6 +52,35 @@ class TestSafeSupabaseUrl:
         assert lic._safe_supabase_url("ftp://host/x") == lic._DEFAULT_SUPABASE_URL
 
 
+class TestProUnlock:
+    """TEMPORARY early-adoption Pro unlock — floors is_pro, gate logic intact."""
+
+    def test_unlock_floors_is_pro_with_no_license(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(lic, "_PRO_UNLOCK_ALL", True)
+        monkeypatch.setattr(lic, "_load_license_file", lambda: None)
+        lic._init()
+        assert lic.is_pro is True
+
+    def test_disabled_restores_paywall_with_no_license(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(lic, "_PRO_UNLOCK_ALL", False)
+        monkeypatch.setattr(lic, "_load_license_file", lambda: None)
+        lic._init()
+        assert lic.is_pro is False
+
+    def test_unlock_keeps_floor_when_revalidation_invalidates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(lic, "_PRO_UNLOCK_ALL", True)
+        monkeypatch.setattr(lic, "_license_data", {"license_key": "k", "validated_at": "2000-01-01T00:00:00+00:00"})
+        monkeypatch.setattr(lic, "_call_get_license", lambda key: {"valid": False})
+        monkeypatch.setattr(lic, "_LICENSE_FILE", Path("/nonexistent/license.json"))
+        lic._maybe_revalidate()
+        assert lic.is_pro is True
+
+    def test_gate_logic_intact_require_pro_exits_when_not_pro(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(lic, "is_pro", False)
+        with pytest.raises(SystemExit):
+            lic.require_pro("impact")
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file-mode semantics")
 class TestLicenseFilePermissions:
     """License file holds a secret (license_key + email) — must be owner-only."""

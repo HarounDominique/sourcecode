@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.57.0] — 2026-06-19
+
+### Changed
+- **TEMPORARY: Pro unlocked for everyone (early-adoption phase).** A new
+  `_PRO_UNLOCK_ALL` switch in `license.py` (env `SOURCECODE_PRO_UNLOCK`, default on)
+  floors `is_pro` to `True` at init, so anyone who installs gets Pro from the start —
+  removing onboarding friction to maximize adoption. The gate *logic*
+  (`require_feature` / `require_repo_or_pro` / `require_pro`, size limits, upgrade
+  prompts, telemetry) is left fully intact; this only raises the entitlement floor.
+  Real Pro license activation still works. To resume the paywall: set
+  `_PRO_UNLOCK_ALL = False` (or `SOURCECODE_PRO_UNLOCK=0`) — no other change needed.
+
 ## [1.56.0] — 2026-06-19
 
 ### Added

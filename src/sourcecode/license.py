@@ -177,6 +177,17 @@ _FEATURE_INFO: dict[str, dict[str, str]] = {
 _license_data: Optional[dict] = None
 is_pro: bool = False
 
+# ---------------------------------------------------------------------------
+# TEMPORARY PRO UNLOCK (early-adoption phase)
+# ---------------------------------------------------------------------------
+# Floors `is_pro` to True at init so every gate passes — anyone who installs
+# gets Pro from the start (remove onboarding friction, maximize adoption).
+# The gate LOGIC below (require_feature / require_repo_or_pro / require_pro) is
+# left fully intact; this only raises the entitlement floor. To resume the
+# paywall: set _PRO_UNLOCK_ALL = False (or SOURCECODE_PRO_UNLOCK=0), no other
+# change needed. Tests of the gated paths set SOURCECODE_PRO_UNLOCK=0.
+_PRO_UNLOCK_ALL = os.environ.get("SOURCECODE_PRO_UNLOCK", "1") != "0"
+
 
 def _secure_dir() -> None:
     """Create ~/.sourcecode owner-only (0700). Holds the license secret.
@@ -323,7 +334,7 @@ def _maybe_revalidate() -> None:
 
     if not result.get("valid"):
         _license_data = None
-        is_pro = False
+        is_pro = _PRO_UNLOCK_ALL  # TEMPORARY: keep Pro floor during unlock
         try:
             if _LICENSE_FILE.exists():
                 _LICENSE_FILE.unlink()
@@ -334,7 +345,7 @@ def _maybe_revalidate() -> None:
     _license_data["plan"] = result.get("plan", "pro")
     _license_data["features"] = result.get("features", [])
     _license_data["validated_at"] = datetime.now(timezone.utc).isoformat()
-    is_pro = _license_data.get("plan") == "pro"
+    is_pro = _PRO_UNLOCK_ALL or _license_data.get("plan") == "pro"
     try:
         _write_license_file(_license_data)
     except Exception:
@@ -349,6 +360,8 @@ def _init() -> None:
         and _license_data.get("plan") == "pro"
         and _license_data.get("status", "active") != "inactive"
     )
+    if _PRO_UNLOCK_ALL:
+        is_pro = True  # TEMPORARY: early-adoption Pro unlock (see _PRO_UNLOCK_ALL)
 
 
 _init()

@@ -2,7 +2,7 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.56.0-blue)
+![Version](https://img.shields.io/badge/version-1.57.0-blue)
 ![Python](https://img.shields.io/badge/python-3.9%2B-green)
 
 ---
@@ -256,6 +256,10 @@ Specifically:
 ---
 
 ## Pricing
+
+> **🎉 Early-adoption: Pro is currently unlocked for everyone.** During this phase
+> every install runs with full Pro entitlements — no size gate, no key required. The
+> tiers below describe the model the paywall will return to later.
 
 Two tiers. **Gating is by repo size and automation — never by command.** Every
 command runs at full power on Free for small and mid-size repos. You upgrade
