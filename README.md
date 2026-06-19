@@ -2,7 +2,7 @@
 
 **Persistent structural context and ultra-fast repeated analysis for AI coding agents.**
 
-![Version](https://img.shields.io/badge/version-1.57.0-blue)
+![Version](https://img.shields.io/badge/version-1.58.0-blue)
 ![Python](https://img.shields.io/badge/python-3.9%2B-green)
 
 ---
@@ -76,7 +76,7 @@ pipx install sourcecode
 
 ```bash
 sourcecode version
-# sourcecode 1.53.0
+# sourcecode 1.58.0
 ```
 
 ---
@@ -112,6 +112,8 @@ sourcecode impact-chain OrderPlacedEvent /path/to/repo --type events
 sourcecode endpoints /path/to/repo
 
 # Request-body validation per endpoint: constraints + custom validators (free)
+# Recovers constraints from the OpenAPI spec, or directly from Java DTO
+# bean-validation annotations when no spec is present.
 sourcecode validation /path/to/repo
 
 # Onboard to an unfamiliar codebase
