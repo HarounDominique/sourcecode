@@ -619,6 +619,58 @@ Detects migration blockers across Java source files, Spring XML config files, an
 
 Each finding includes `severity`, `title`, `source_file`, `first_line`, `explanation`, `fix_hint`, `migration_target`, and `openrewrite_recipe` (when an automated recipe exists).
 
+#### Hibernate 5.x → 6.x stratification (the `hibernate` output section)
+
+A Hibernate major upgrade is **not** a single dependency bump for systems that use
+dynamic persistence. `migrate-check` stratifies Hibernate exposure into four
+independent migration domains — never one aggregated score — and emits **actionable,
+machine-readable rewrite targets** so a migration agent can consume the output
+directly instead of re-parsing the repo. Sub-`schema_version`: `2.0`.
+
+**Four layers** (each on its own risk axis):
+
+| Layer | Baseline | Escalates to |
+|-------|----------|--------------|
+| `jpa_annotations` | LOW (namespace handled by jakarta) | HIGH on deprecated `@Type(type=)` / `@TypeDef` / `@GenericGenerator` |
+| `criteria_api` | HIGH (JPA Criteria semantics changed; legacy `org.hibernate.Criteria` removed) | **CRITICAL** when built via reflection / abstraction DAOs (`DynamicEntityDao`, `GenericDao`, `BasicPersistenceModule`) |
+| `hql_string_queries` | MEDIUM (revalidate against H6 parser) | HIGH on string concatenation (SQL shape not statically inferable) |
+| `hibernate_spi_internal` | CRITICAL blocker | `UserType`, `CompositeUserType`, `Interceptor`, `EventListener`, `org.hibernate.engine.spi` |
+
+**Output keys (under `hibernate`):**
+
+- `classification` — `upgrade_zone` / `upgrade_with_care` / `rewrite_zone`. Any of
+  {dynamic Criteria, custom SPI, reflection-built queries, concatenated query
+  strings} forces **`rewrite_zone`** ("HIGH RISK REWRITE ZONE, NOT UPGRADE ZONE").
+- `risk_matrix[]` — per layer: `risk`, `reason`, `effort_range {low, high, confidence}`,
+  `file_count`, `occurrence_count`, migration-kind sub-counts (`manual_count`,
+  `assisted_count`, `mechanical_count`, `review_count`); Criteria adds
+  `static_count` vs `dynamic_count`; SPI adds `userType_rewrite_count` vs
+  `userType_resolvable_count`.
+- `rewrite_targets[]` — one actionable target per call site: `id`, `layer`,
+  `source_file`, `line_start`/`line_end`, `current_pattern`, `current_snippet`,
+  `target_api` (the Hibernate-6 destination), `migration_kind`
+  (`manual_rewrite` / `assisted` / `mechanical` / `review`), `auto_migratable`,
+  `blocking_reason`, `symbol` (enclosing `Class#method`), `module`, `dynamic`.
+- `module_exposure_map` — per Maven/Gradle module: `max_risk`, layers present, and
+  `dynamic-criteria` / `custom-SPI` / `reflection` tags.
+- `critical_call_chains[]` — dynamic query-generation paths (reflection-based DAOs).
+- `golden_sql_hotspots[]` — classes/methods ranked by dynamic-query volume — where
+  to pin golden-SQL behaviour tests before migrating.
+- `total_effort_range_days` + `effort_model` — aggregate range plus the auditable
+  formula (and the caveat that layers may share files, so the total is an upper bound).
+- `stop_conditions_triggered[]`, `risk_separation` (observable vs inferred runtime risk).
+
+The report also exposes **`hibernate_readiness`** (0–100) as a fourth readiness
+dimension alongside `jakarta_readiness` / `boot3_readiness` / `jdk_modernization`.
+Hibernate is an orthogonal rewrite axis, so it does not sink the headline
+`readiness_score`; instead, in a rewrite zone the top-level `headline_blocker` is set
+to `"hibernate_rewrite"` so a reader of the headline score is not misled.
+
+```bash
+# inspect only the Hibernate rewrite targets
+sourcecode migrate-check . --format json | jq '.hibernate.rewrite_targets[]'
+```
+
 ### `rename-class` — Java class rename
 
 ```bash
