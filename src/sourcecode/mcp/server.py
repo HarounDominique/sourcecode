@@ -792,7 +792,10 @@ def get_migration_readiness(repo_path: str = ".", min_severity: str = "low") -> 
 
     Maps to: sourcecode migrate-check <repo_path> --min-severity <min_severity>
     Returns: MigrationReport with schema_version, readiness_score (0–100; 100=ready to migrate),
-             blocking_count, estimated_effort_days, spring_boot_2_detected,
+             jakarta_readiness / boot3_readiness / jdk_modernization (per-dimension 0–100),
+             blocking_count, estimated_effort_days,
+             spring_boot_2_detected (true|false|null — null=undetermined, never assumed true),
+             spring_boot_version_detected,
              summary (total_findings, affected_files, by_severity, by_rule),
              findings[], limitations, metadata.
     findings fields: id, rule_id, severity, title, source_file, first_line,

@@ -216,6 +216,42 @@ class TestRiskFlags:
         flags = _dep_risk_flags("lombok", "1.18.30")
         assert flags == []
 
+    # BUG-3: javax.* JDK/JSR namespaces that keep the javax prefix forever must
+    # NOT carry javax→jakarta migration risk.
+    @pytest.mark.parametrize("name", [
+        "javax.cache",          # JSR-107 JCache
+        "javax.sql",
+        "javax.xml",            # JAXP (plain)
+        "javax.xml.parsers",
+        "javax.naming",
+        "javax.management",
+        "javax.net",
+        "javax.security.auth",
+        "javax.crypto",
+        "javax.script",
+        "javax.imageio",
+        "javax.swing",
+    ])
+    def test_jdk_javax_namespaces_no_jakarta_flag(self, name):
+        from sourcecode.serializer import _dep_risk_flags
+        flags = _dep_risk_flags(name, "1.1.0")
+        assert "javax-to-jakarta-migration-risk" not in flags
+
+    # EE namespaces actually renamed to jakarta.* must still flag.
+    @pytest.mark.parametrize("name", [
+        "javax.servlet",
+        "javax.servlet.jsp",
+        "javax.persistence",
+        "javax.validation",
+        "javax.xml.bind",       # JAXB moved (unlike plain javax.xml)
+        "javax.ws.rs",
+        "javax.annotation",
+    ])
+    def test_ee_javax_namespaces_still_flag(self, name):
+        from sourcecode.serializer import _dep_risk_flags
+        flags = _dep_risk_flags(name, None)
+        assert "javax-to-jakarta-migration-risk" in flags
+
     def test_java8_deployment_risk(self):
         from sourcecode.serializer import _project_deployment_risks
         from sourcecode.schema import SourceMap, AnalysisMetadata

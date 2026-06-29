@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.61.0] — 2026-06-29
+
+### Fixed — `migrate-check` false positives on already-migrated Spring Boot 3 repos
+
+Three defects made `migrate-check` report a Boot 3 / Jakarta repo as an
+un-migrated Boot 2 project (verified on Broadleaf Commerce CE 7.0.x —
+Boot 3.5.14, Java 17, `jakarta.*` fully adopted). The verdict contradicted the
+code; this corrects all three at the root and adds regression guardrails.
+Report `schema_version` bumped **1.2 → 1.3**.
+
+- **`spring_boot_2_detected` no longer defaults to `true`.** The detector now
+  resolves Maven `${...}` properties before reading versions and recognises
+  Boot in every form: `spring-boot-starter-parent`, a managed
+  `spring-boot-dependencies` BOM, a `spring-boot*` dependency versioned by
+  property, and the Gradle plugin. The old heuristic used a `DOTALL` regex that
+  matched any stray `2.x` library version anywhere in the pom. The field is now
+  **tri-state** — `true` (Boot 2 confirmed) / `false` (Boot 3+ confirmed) /
+  `null` (undetermined). **Absence of evidence is never reported as `true`.**
+  A new `spring_boot_version_detected` exposes the resolved version. Massive
+  `jakarta.*` import adoption vetoes any Boot-2 verdict.
+- **`readiness_score` no longer collapses to 0 on JDK-modernization volume.**
+  Blockers (critical/high) still floor a genuinely blocked repo, but orthogonal
+  JDK debt (`java.util.Date`, reflection) is capped so it can no longer sink a
+  jakarta-ready repo. The report now separates dimensions:
+  `jakarta_readiness`, `boot3_readiness`, and `jdk_modernization` (each 0–100).
+- **`javax.*` JDK/JSR namespaces are no longer flagged with
+  `javax-to-jakarta-migration-risk`.** `javax.cache` (JSR-107), `javax.sql`,
+  `javax.xml` (JAXP), `javax.naming`, `javax.management`, `javax.crypto`, etc.
+  keep the `javax` prefix forever and are now allowlisted. Only the Jakarta EE 9
+  renamed namespaces (`javax.servlet`, `javax.persistence`, `javax.validation`,
+  `javax.xml.bind`, …) still carry the flag.
+
 ## [1.60.0] — 2026-06-29
 
 ### Changed

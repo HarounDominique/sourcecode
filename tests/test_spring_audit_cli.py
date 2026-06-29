@@ -489,7 +489,7 @@ class TestGetMigrationReadinessMCP:
         from sourcecode.mcp.server import get_migration_readiness
         result = get_migration_readiness(repo_path=str(non_java_repo))
         data = result["data"] if isinstance(result, dict) else json.loads(result.content[0].text)["data"]
-        assert data.get("schema_version") == "1.2"
+        assert data.get("schema_version") == "1.3"
 
     def test_java_repo_with_javax_findings(self, tmp_path: Path):
         from sourcecode.mcp.server import get_migration_readiness

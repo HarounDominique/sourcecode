@@ -1415,9 +1415,12 @@ Rules detected:
   MIG-007 medium   — javax.inject imports (DI annotations)
   MIG-008 medium   — javax.ws.rs imports (JAX-RS API)
 
-Returns: schema_version, readiness_score (0–100; 100=ready to migrate), blocking_count,
-  estimated_effort_days, spring_boot_2_detected, summary (total_findings, affected_files,
-  by_severity, by_rule), findings[], limitations, metadata.
+Returns: schema_version, readiness_score (0–100; 100=ready to migrate),
+  jakarta_readiness / boot3_readiness / jdk_modernization (per-dimension 0–100),
+  blocking_count, estimated_effort_days, spring_boot_2_detected (true|false|null —
+  null=undetermined, never assumed true), spring_boot_version_detected,
+  summary (total_findings, affected_files, by_severity, by_rule), findings[],
+  limitations, metadata.
 findings fields: id, rule_id, severity, title, source_file, first_line,
   imports_found, explanation, fix_hint.
 

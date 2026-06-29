@@ -541,6 +541,26 @@ SEVERITY_ORDER: dict[str, int] = {"critical": 0, "high": 1, "medium": 2, "low": 
 # headline on a repo with zero blockers. See MigrationReport.finalize.
 _LOW_SEVERITY_DEDUCTION_CAP: int = 15
 
+# Migration targets that block a Spring Boot 2→3 upgrade (namespace + security).
+# Everything else (java_8_best_practice, java_9_plus, java_11/15/17/18+) is
+# orthogonal JDK modernization debt and must not sink the migration headline.
+_JAKARTA_TARGETS: frozenset[str] = frozenset({"jakarta"})
+_BOOT3_MIGRATION_TARGETS: frozenset[str] = frozenset(
+    {"jakarta", "spring_boot_3", "spring_security_6"}
+)
+# Cap on total readiness deduction from JDK-modernization findings (medium/low),
+# so reflection/date cleanups cannot collapse a jakarta-ready repo's headline.
+_JDK_ADVISORY_DEDUCTION_CAP: int = 15
+
+# Jakarta EE 9+ namespace imports — strong evidence the repo is already on
+# Boot 3 / Jakarta. Used to veto a false spring_boot_2_detected verdict.
+_JAKARTA_IMPORT_RE: re.Pattern = re.compile(
+    r"^[ \t]*import\s+jakarta\.(?:persistence|servlet|validation|annotation|"
+    r"transaction|inject|ws\.rs|jms|ejb|mail|websocket|faces|enterprise|batch|"
+    r"json|el|security)\b",
+    re.MULTILINE,
+)
+
 
 # ---------------------------------------------------------------------------
 # XML config rules (applied to Spring XML config files)
@@ -979,17 +999,63 @@ class MigrationFinding:
 # Report
 # ---------------------------------------------------------------------------
 
+def _dimension_score(
+    findings: list["MigrationFinding"],
+    targets: "Optional[frozenset[str]]",
+) -> int:
+    """0-100 readiness for one migration dimension.
+
+    targets=None scores the JDK-modernization dimension (every target NOT in the
+    Boot 2→3 migration set). Otherwise scores only findings whose migration_target
+    is in `targets`. Severity-weighted by distinct file (low capped, G-1).
+    """
+    crit: set[str] = set()
+    high: set[str] = set()
+    med: set[str] = set()
+    low: set[str] = set()
+    for f in findings:
+        if targets is None:
+            if f.migration_target in _BOOT3_MIGRATION_TARGETS:
+                continue
+        elif f.migration_target not in targets:
+            continue
+        if f.severity == "critical":
+            crit.add(f.source_file)
+        elif f.severity == "high":
+            high.add(f.source_file)
+        elif f.severity == "medium":
+            med.add(f.source_file)
+        else:
+            low.add(f.source_file)
+    deduction = (
+        len(crit) * 15
+        + len(high) * 8
+        + len(med) * 3
+        + min(len(low) * 1, _LOW_SEVERITY_DEDUCTION_CAP)
+    )
+    return max(0, 100 - deduction)
+
+
 @dataclass
 class MigrationReport:
-    schema_version: str = "1.2"
+    schema_version: str = "1.3"
     generated_at: str = ""
     repo_id: str = ""
     git_head: str = ""
 
     readiness_score: int = 100
+    # Per-dimension readiness (0-100). javax→jakarta namespace, full Boot 2→3
+    # migration, and orthogonal JDK modernization are scored independently so
+    # JDK debt (java.util.Date, reflection) does not sink a jakarta-ready repo.
+    jakarta_readiness: int = 100
+    boot3_readiness: int = 100
+    jdk_modernization: int = 100
     blocking_count: int = 0
     estimated_effort_days: float = 0.0
-    spring_boot_2_detected: bool = False
+    # Tri-state: True = Boot 2 confirmed, False = Boot 3+ confirmed,
+    # None = could not determine. Absence of evidence is never reported as True.
+    spring_boot_2_detected: Optional[bool] = None
+    spring_boot_version_detected: Optional[str] = None
 
     findings: list[MigrationFinding] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
@@ -1027,19 +1093,36 @@ class MigrationReport:
             else:
                 low_files.add(f.source_file)
 
-        # G-1: low-severity findings are advisory (e.g. java.time modernization),
-        # not Boot-2→3 blockers. Cap their total contribution so a repo with zero
-        # blockers cannot score near zero on optional cleanups alone (mall: 96 low
-        # findings dragged readiness to 4/100 despite 0 blocking, already on Boot 3).
-        # Blockers (critical/high) stay uncapped — a genuinely blocked repo still
-        # floors at 0 (shopizer: 301 blocking → 0/100, unchanged).
+        # BUG-2: aggregate readiness no longer collapses on raw JDK-modernization
+        # volume. Blockers (critical/high, any target) stay uncapped so a genuinely
+        # blocked repo floors at 0 (shopizer: 301 blocking → 0). Medium/low are
+        # split by target: migration-blocking (jakarta/boot3/security) count in
+        # full (low capped, G-1); orthogonal JDK debt (Date/reflection) is capped
+        # so it cannot sink a jakarta-ready repo (Broadleaf: 144 Date + 25 reflection
+        # no longer force 0/100).
+        mig_med = {f.source_file for f in self.findings
+                   if f.severity == "medium" and f.migration_target in _BOOT3_MIGRATION_TARGETS}
+        mig_low = {f.source_file for f in self.findings
+                   if f.severity == "low" and f.migration_target in _BOOT3_MIGRATION_TARGETS}
+        jdk_med = {f.source_file for f in self.findings
+                   if f.severity == "medium" and f.migration_target not in _BOOT3_MIGRATION_TARGETS}
+        jdk_low = {f.source_file for f in self.findings
+                   if f.severity == "low" and f.migration_target not in _BOOT3_MIGRATION_TARGETS}
+
         deduction = (
             len(critical_files) * 15
             + len(high_files) * 8
-            + len(medium_files) * 3
-            + min(len(low_files) * 1, _LOW_SEVERITY_DEDUCTION_CAP)
+            + len(mig_med) * 3
+            + min(len(mig_low) * 1, _LOW_SEVERITY_DEDUCTION_CAP)
+            + min(len(jdk_med) * 3 + len(jdk_low) * 1, _JDK_ADVISORY_DEDUCTION_CAP)
         )
         self.readiness_score = max(0, 100 - deduction)
+
+        # Per-dimension readiness — independent severity-weighted scores so the
+        # output reveals that jakarta/Boot3 may be complete even with JDK debt.
+        self.jakarta_readiness = _dimension_score(self.findings, _JAKARTA_TARGETS)
+        self.boot3_readiness = _dimension_score(self.findings, _BOOT3_MIGRATION_TARGETS)
+        self.jdk_modernization = _dimension_score(self.findings, None)
 
         self.estimated_effort_days = round(
             len(critical_files) * 0.5
@@ -1065,9 +1148,13 @@ class MigrationReport:
             "repo_id": self.repo_id,
             "git_head": self.git_head,
             "readiness_score": self.readiness_score,
+            "jakarta_readiness": self.jakarta_readiness,
+            "boot3_readiness": self.boot3_readiness,
+            "jdk_modernization": self.jdk_modernization,
             "blocking_count": self.blocking_count,
             "estimated_effort_days": self.estimated_effort_days,
             "spring_boot_2_detected": self.spring_boot_2_detected,
+            "spring_boot_version_detected": self.spring_boot_version_detected,
             "summary": self.summary,
             "findings": [f.to_dict() for f in self.findings],
             "limitations": self.limitations,
@@ -1078,8 +1165,18 @@ class MigrationReport:
         min_order = SEVERITY_ORDER.get(min_severity, 3)
         visible = [f for f in self.findings if SEVERITY_ORDER.get(f.severity, 3) <= min_order]
 
+        if self.spring_boot_2_detected is True:
+            _boot = "Boot 2 (migration target)"
+        elif self.spring_boot_2_detected is False:
+            _boot = f"Boot {self.spring_boot_version_detected or '3+'} detected"
+        else:
+            _boot = "unknown"
         lines: list[str] = [
             f"Migration Readiness: {self.readiness_score}/100",
+            f"  jakarta: {self.jakarta_readiness}/100  "
+            f"boot3: {self.boot3_readiness}/100  "
+            f"jdk-modernization: {self.jdk_modernization}/100",
+            f"Spring Boot 2 detected: {_boot}",
             f"Blocking issues: {self.blocking_count}  "
             f"(critical: {self.summary.get('by_severity', {}).get('critical', 0)}, "
             f"high: {self.summary.get('by_severity', {}).get('high', 0)})",
@@ -1200,6 +1297,7 @@ def run_migrate_check(
     all_findings: list[MigrationFinding] = []
     limitations: list[str] = []
     read_errors = 0
+    jakarta_import_count = 0
 
     # ── Java source scan ────────────────────────────────────────────────────
     for rel_path in file_paths:
@@ -1209,6 +1307,9 @@ def run_migrate_check(
         except OSError:
             read_errors += 1
             continue
+
+        # Jakarta EE 9+ namespace adoption signal (vetoes a false Boot-2 verdict).
+        jakarta_import_count += len(_JAKARTA_IMPORT_RE.findall(source))
 
         file_findings = _scan_file(source, rel_path, _ALL_RULES)
         filtered = [f for f in file_findings if SEVERITY_ORDER.get(f.severity, 3) <= min_order]
@@ -1263,10 +1364,11 @@ def run_migrate_check(
 
     limitations.extend(_STATIC_LIMITATIONS)
 
-    spring_boot_2 = _detect_spring_boot_2(root)
+    spring_boot_2, spring_boot_version = _detect_spring_boot(root, jakarta_import_count)
 
     report = MigrationReport(
         spring_boot_2_detected=spring_boot_2,
+        spring_boot_version_detected=spring_boot_version,
         findings=all_findings,
         limitations=limitations,
         metadata={
@@ -1309,36 +1411,105 @@ _STATIC_LIMITATIONS: list[str] = [
 ]
 
 
-def _detect_spring_boot_2(root: Path) -> bool:
-    """Return True if any build file in the repo declares spring-boot 2.x.
+# Spring Boot version captured ONLY in an authoritative context (parent,
+# managed BOM, an explicit spring-boot* dependency version, a spring.boot.version
+# property, or the Gradle plugin) — NOT any stray 2.x library version elsewhere
+# in the pom. These run on property-resolved text so ${spring.boot.version}
+# is already substituted.
+_BOOT_VERSION_PATTERNS: tuple[re.Pattern, ...] = (
+    # <spring.boot.version>3.5.14</...> / <spring-boot.version> property declaration
+    re.compile(r"<spring[.\-_]?boot[.\-_]?version>\s*(\d+)\.\d", re.IGNORECASE),
+    # gradle.properties: springBootVersion=3.5.14 / spring.boot.version=2.7.18
+    re.compile(r"spring[.\-_]?boot[.\-_]?version\s*[=:]\s*[\"']?(\d+)\.\d", re.IGNORECASE),
+    # <artifactId>spring-boot-*</artifactId> immediately followed by <version>
+    re.compile(
+        r"<artifactId>\s*spring-boot[\w-]*\s*</artifactId>\s*<version>\s*(\d+)\.\d",
+        re.IGNORECASE,
+    ),
+    # <version> immediately followed by <artifactId>spring-boot-*</artifactId>
+    re.compile(
+        r"<version>\s*(\d+)\.\d[^<]*</version>\s*<artifactId>\s*spring-boot[\w-]*\s*</artifactId>",
+        re.IGNORECASE,
+    ),
+    # Gradle plugin: id 'org.springframework.boot' version '3.1.0'
+    re.compile(
+        r"org\.springframework\.boot[\"']?[^\n]*?version[^\n]*?[\"'](\d+)\.\d",
+        re.IGNORECASE,
+    ),
+)
 
-    Checks root build files plus one level of child modules to handle monorepos
-    where the Spring Boot parent version lives in a submodule pom.xml.
+_BOOT_FULL_VERSION_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"<spring[.\-_]?boot[.\-_]?version>\s*(\d+\.\d[\w.\-]*)", re.IGNORECASE),
+    re.compile(r"spring[.\-_]?boot[.\-_]?version\s*[=:]\s*[\"']?(\d+\.\d[\w.\-]*)", re.IGNORECASE),
+    re.compile(
+        r"<artifactId>\s*spring-boot[\w-]*\s*</artifactId>\s*<version>\s*(\d+\.\d[\w.\-]*)",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _extract_boot_versions(text: str) -> tuple[set[int], Optional[str]]:
+    """Return (set of detected Spring Boot major versions, first full version string)."""
+    majors: set[int] = set()
+    for pat in _BOOT_VERSION_PATTERNS:
+        for m in pat.finditer(text):
+            try:
+                majors.add(int(m.group(1)))
+            except (ValueError, IndexError):
+                pass
+    full: Optional[str] = None
+    for pat in _BOOT_FULL_VERSION_PATTERNS:
+        m = pat.search(text)
+        if m:
+            full = m.group(1).strip()
+            break
+    return majors, full
+
+
+def _detect_spring_boot(root: Path, jakarta_import_count: int) -> tuple[Optional[bool], Optional[str]]:
+    """Tri-state Spring Boot 2 detection. Returns (spring_boot_2_detected, version).
+
+    - True  → Spring Boot 2.x confirmed by build evidence (migration target).
+    - False → Boot 3+ confirmed, OR jakarta.* namespace already adopted en masse.
+    - None  → version could not be determined. Absence of evidence is never True.
+
+    Resolves Maven ${properties} so version-by-property (no starter-parent) works,
+    and detects Boot via parent, managed BOM, spring-boot* dependency, property,
+    or the Gradle plugin. Massive jakarta.* imports veto a Boot-2 verdict.
     """
-    _SB2 = re.compile(
-        # Maven: <parent>...<artifactId>spring-boot-*</artifactId>...<version>2.x
-        r"spring[.\-]?boot.*?<version>\s*2\.\d+|"
-        r"<version>\s*2\.\d+[\.\d]*\s*</version>.*?spring[.\-]?boot|"
-        # Maven properties: <spring.boot.version>2.x or spring-boot.version=2.x
-        r"spring[.\-_]?boot[.\-_]?version\s*[=>\"'\s]+2\.\d+|"
-        # Gradle plugin: id 'org.springframework.boot' version '2.x'
-        r"org\.springframework\.boot[^\n]*?['\"']2\.\d+",
-        re.IGNORECASE | re.DOTALL,
-    )
-    # Candidate build files: root + one level deep (child modules in monorepos)
     root_files = [
         root / name
         for name in ("pom.xml", "build.gradle", "build.gradle.kts", "gradle.properties")
     ]
     child_poms = list(root.glob("*/pom.xml"))
     child_gradle = list(root.glob("*/build.gradle")) + list(root.glob("*/build.gradle.kts"))
-    # Limit child scan to 30 files to stay fast on large monorepos
+    # Limit child scan to 30 files to stay fast on large monorepos.
     candidates = root_files + (child_poms + child_gradle)[:30]
+
+    majors: set[int] = set()
+    full_version: Optional[str] = None
     for candidate in candidates:
         try:
             text = candidate.read_text(encoding="utf-8", errors="replace")
-            if _SB2.search(text):
-                return True
         except OSError:
-            pass
-    return False
+            continue
+        if candidate.name == "pom.xml":
+            text = _resolve_maven_properties(text)
+        file_majors, file_full = _extract_boot_versions(text)
+        majors |= file_majors
+        if full_version is None and file_full is not None:
+            full_version = file_full
+
+    # Boot 3+ explicitly declared → not a Boot 2 repo.
+    if any(m >= 3 for m in majors):
+        return False, full_version
+    # Boot 2 declared. jakarta.* adoption en masse contradicts a literal Boot-2
+    # verdict (already mid/post namespace migration) → report unknown, never True.
+    if 2 in majors:
+        if jakarta_import_count > 0:
+            return None, full_version
+        return True, full_version
+    # No version evidence. jakarta.* present ⇒ Boot 3 (Jakarta EE 9+).
+    if jakarta_import_count > 0:
+        return False, full_version
+    return None, full_version

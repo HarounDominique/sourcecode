@@ -1105,14 +1105,14 @@ class TestRunMigrateCheckXmlDep:
         assert "MIG-032" in rule_ids   # old namespace in web.xml
         assert "MIG-040" in rule_ids   # springfox in pom.xml
 
-    def test_schema_version_is_1_2(self, tmp_path: Path) -> None:
+    def test_schema_version_is_1_3(self, tmp_path: Path) -> None:
         report = run_migrate_check([], tmp_path)
-        assert report.schema_version == "1.2"
+        assert report.schema_version == "1.3"
 
     def test_to_dict_contains_schema_version(self, tmp_path: Path) -> None:
         report = run_migrate_check([], tmp_path)
         d = report.to_dict()
-        assert d["schema_version"] == "1.2"
+        assert d["schema_version"] == "1.3"
 
     def test_modern_repo_still_100(self, tmp_path: Path) -> None:
         # A clean Spring Boot 3 repo: Jakarta imports, modern namespace
@@ -1379,3 +1379,145 @@ class TestMultiModuleDepDeduplication:
         springfox = [f for f in report.findings if f.rule_id == "MIG-040"]
         assert len(ehcache) == 1, f"EhCache: expected 1, got {len(ehcache)}"
         assert len(springfox) == 1, f"SpringFox: expected 1, got {len(springfox)}"
+
+
+# ---------------------------------------------------------------------------
+# BUG-1: Spring Boot version detection (tri-state, property-resolved, jakarta veto)
+# ---------------------------------------------------------------------------
+
+_BOOT3_NO_PARENT_POM = """\
+<project>
+  <properties>
+    <spring.boot.version>3.5.14</spring.boot.version>
+    <spring.version>6.2.18</spring.version>
+  </properties>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-autoconfigure</artifactId>
+        <version>${spring.boot.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>javax.cache</groupId>
+      <artifactId>cache-api</artifactId>
+      <version>1.1.0</version>
+    </dependency>
+  </dependencies>
+</project>"""
+
+_BOOT2_PARENT_POM = """\
+<project>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>2.7.18</version>
+  </parent>
+</project>"""
+
+
+class TestSpringBootDetection:
+    """BUG-1: never report spring_boot_2_detected=true without real Boot-2 evidence."""
+
+    def test_boot3_no_starter_parent_version_by_property(self, tmp_path: Path) -> None:
+        # Broadleaf shape: no <parent>, Boot version via ${spring.boot.version}.
+        (tmp_path / "pom.xml").write_text(_BOOT3_NO_PARENT_POM)
+        report = run_migrate_check([], tmp_path)
+        assert report.spring_boot_2_detected is False
+        assert report.spring_boot_version_detected == "3.5.14"
+
+    def test_boot2_starter_parent_still_detected(self, tmp_path: Path) -> None:
+        # Control: a genuine Boot 2 repo must still be flagged (no false negative).
+        (tmp_path / "pom.xml").write_text(_BOOT2_PARENT_POM)
+        report = run_migrate_check([], tmp_path)
+        assert report.spring_boot_2_detected is True
+        assert report.spring_boot_version_detected == "2.7.18"
+
+    def test_unknown_when_no_boot_evidence(self, tmp_path: Path) -> None:
+        # No Boot version anywhere, no jakarta imports → unknown, never True.
+        (tmp_path / "pom.xml").write_text(
+            "<project><dependencies></dependencies></project>"
+        )
+        report = run_migrate_check([], tmp_path)
+        assert report.spring_boot_2_detected is None
+
+    def test_stray_2x_library_version_does_not_imply_boot2(self, tmp_path: Path) -> None:
+        # A non-Boot dependency pinned at 2.x must not be read as Boot 2.
+        pom = """\
+<project>
+  <dependencies>
+    <dependency>
+      <groupId>commons-io</groupId>
+      <artifactId>commons-io</artifactId>
+      <version>2.11.0</version>
+    </dependency>
+  </dependencies>
+</project>"""
+        (tmp_path / "pom.xml").write_text(pom)
+        report = run_migrate_check([], tmp_path)
+        assert report.spring_boot_2_detected is not True
+
+    def test_jakarta_imports_veto_boot2_verdict(self, tmp_path: Path) -> None:
+        # Invariant 5: jakarta.persistence|jakarta.servlet imports > 0 ⇒ never True,
+        # even if a Boot-2 property is present (mid-migration repo).
+        (tmp_path / "pom.xml").write_text(
+            "<project><properties>"
+            "<spring.boot.version>2.7.18</spring.boot.version>"
+            "</properties></project>"
+        )
+        (tmp_path / "Entity.java").write_text(
+            "import jakarta.persistence.Entity;\n"
+            "import jakarta.servlet.http.HttpServletRequest;\n"
+        )
+        report = run_migrate_check(["Entity.java"], tmp_path)
+        assert report.spring_boot_2_detected is not True
+
+    def test_jakarta_imports_imply_boot3_when_no_version(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project></project>")
+        (tmp_path / "Entity.java").write_text("import jakarta.persistence.Entity;\n")
+        report = run_migrate_check(["Entity.java"], tmp_path)
+        assert report.spring_boot_2_detected is False
+
+
+# ---------------------------------------------------------------------------
+# BUG-2: per-dimension readiness — JDK debt must not sink jakarta/Boot3 score
+# ---------------------------------------------------------------------------
+
+class TestDimensionalReadiness:
+    @staticmethod
+    def _f(rule_id: str, severity: str, target: str, src: str) -> MigrationFinding:
+        return MigrationFinding(
+            id=MigrationFinding.make_id(rule_id, src),
+            rule_id=rule_id,
+            severity=severity,
+            title="t",
+            source_file=src,
+            first_line=1,
+            migration_target=target,
+        )
+
+    def test_jdk_debt_does_not_collapse_aggregate(self) -> None:
+        # Broadleaf shape: 0 jakarta findings, 1 high security blocker, plus heavy
+        # JDK debt (144 low Date + 25 medium reflection). Aggregate must stay high.
+        findings = [self._f("MIG-031", "high", "spring_security_6", "Sec.xml")]
+        findings += [self._f("MIG-016", "low", "java_8_best_practice", f"D{i}.java")
+                     for i in range(144)]
+        findings += [self._f("MIG-014", "medium", "java_9_plus", f"R{i}.java")
+                     for i in range(25)]
+        report = MigrationReport(findings=findings).finalize()
+        # high(8) + JDK advisory capped(15) = 23 → 77
+        assert report.readiness_score == 77
+        assert report.jakarta_readiness == 100        # namespace fully migrated
+        assert report.boot3_readiness == 92            # only the one high blocker
+        assert report.jdk_modernization < 100          # debt visible in its own axis
+
+    def test_real_jakarta_blockers_still_floor(self) -> None:
+        findings = [self._f("MIG-001", "critical", "jakarta", f"E{i}.java")
+                    for i in range(20)]
+        report = MigrationReport(findings=findings).finalize()
+        assert report.readiness_score == 0
+        assert report.jakarta_readiness == 0
+        assert report.boot3_readiness == 0

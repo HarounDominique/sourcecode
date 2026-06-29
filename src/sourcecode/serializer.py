@@ -261,6 +261,49 @@ def _compact_git_context(sm: "SourceMap") -> "Optional[dict[str, Any]]":
     return ctx if ctx else None
 
 
+# Java EE namespaces that were renamed javax.* → jakarta.* in Jakarta EE 9.
+# Only these carry javax→jakarta migration risk. JDK / JSR namespaces that keep
+# the javax.* prefix forever (javax.cache=JSR-107, javax.sql, javax.xml JAXP,
+# javax.naming, javax.crypto, …) are deliberately NOT listed and must not flag.
+_JAKARTA_RENAMED_NAMESPACES: tuple[str, ...] = (
+    "javax.servlet",            # also covers javax.servlet.jsp
+    "javax.persistence",
+    "javax.validation",
+    "javax.transaction",
+    "javax.ws.rs",
+    "javax.ejb",
+    "javax.jms",
+    "javax.mail",
+    "javax.xml.bind",           # JAXB — moved; plain javax.xml (JAXP) does not
+    "javax.xml.ws",
+    "javax.xml.soap",
+    "javax.activation",
+    "javax.faces",
+    "javax.enterprise",
+    "javax.inject",
+    "javax.batch",
+    "javax.json",
+    "javax.websocket",
+    "javax.el",
+    "javax.security.enterprise",
+    "javax.security.jacc",
+    "javax.annotation",         # ambiguous: JSR-250 EE subset moved to jakarta
+)
+
+
+def _is_jakarta_renamed_namespace(nl: str) -> bool:
+    """True only for javax.* namespaces actually renamed to jakarta.* in Jakarta EE 9.
+
+    Matches exact namespace or a sub-package (e.g. javax.servlet → javax.servlet.http).
+    JDK/JSR namespaces that keep javax.* forever (javax.cache, javax.sql, javax.xml
+    JAXP, javax.naming, …) return False.
+    """
+    for ns in _JAKARTA_RENAMED_NAMESPACES:
+        if nl == ns or nl.startswith(ns + "."):
+            return True
+    return False
+
+
 def _dep_risk_flags(name: str, version: "Optional[str]") -> list[str]:
     """Static heuristic risk flags for a single dependency. No external lookups."""
     flags: list[str] = []
@@ -268,7 +311,7 @@ def _dep_risk_flags(name: str, version: "Optional[str]") -> list[str]:
     if "spring-boot" in nl or "spring.boot" in nl:
         if version and version.startswith("2."):
             flags.append("spring-boot-2.x-eol")
-    if nl.startswith("javax.") or nl == "javax":
+    if _is_jakarta_renamed_namespace(nl):
         flags.append("javax-to-jakarta-migration-risk")
     if "ojdbc" in nl or nl in {"com.oracle.database.jdbc", "oracle.jdbc.driver.oracledriver"}:
         flags.append("oracle-vendor-lock")
