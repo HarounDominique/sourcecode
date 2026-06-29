@@ -1055,6 +1055,12 @@ class MigrationReport:
     jakarta_readiness: int = 100
     boot3_readiness: int = 100
     jdk_modernization: int = 100
+    # 4th dimension: Hibernate 5→6 rewrite readiness (independent of jakarta/Boot3).
+    # 100 when no Hibernate usage; sinks toward 0 in a rewrite zone.
+    hibernate_readiness: int = 100
+    # Names the dominant blocker class when one dimension dwarfs the headline
+    # score (e.g. "hibernate_rewrite") so a reader of readiness_score is not misled.
+    headline_blocker: Optional[str] = None
     blocking_count: int = 0
     estimated_effort_days: float = 0.0
     # Tri-state: True = Boot 2 confirmed, False = Boot 3+ confirmed,
@@ -1133,6 +1139,14 @@ class MigrationReport:
         self.boot3_readiness = _dimension_score(self.findings, _BOOT3_MIGRATION_TARGETS)
         self.jdk_modernization = _dimension_score(self.findings, None)
 
+        # Hibernate is its own rewrite axis (orthogonal to jakarta/Boot3); it does
+        # NOT sink the headline readiness_score, but is surfaced as a dimension and,
+        # in a rewrite zone, as the headline_blocker so 62/100 is not read as "easy".
+        if self.hibernate is not None and self.hibernate.detected:
+            self.hibernate_readiness = self.hibernate.readiness
+            if self.hibernate.classification == "rewrite_zone":
+                self.headline_blocker = "hibernate_rewrite"
+
         self.estimated_effort_days = round(
             len(critical_files) * 0.5
             + len(high_files) * 0.25
@@ -1160,6 +1174,8 @@ class MigrationReport:
             "jakarta_readiness": self.jakarta_readiness,
             "boot3_readiness": self.boot3_readiness,
             "jdk_modernization": self.jdk_modernization,
+            "hibernate_readiness": self.hibernate_readiness,
+            "headline_blocker": self.headline_blocker,
             "blocking_count": self.blocking_count,
             "estimated_effort_days": self.estimated_effort_days,
             "spring_boot_2_detected": self.spring_boot_2_detected,
@@ -1185,7 +1201,11 @@ class MigrationReport:
             f"Migration Readiness: {self.readiness_score}/100",
             f"  jakarta: {self.jakarta_readiness}/100  "
             f"boot3: {self.boot3_readiness}/100  "
-            f"jdk-modernization: {self.jdk_modernization}/100",
+            f"jdk-modernization: {self.jdk_modernization}/100  "
+            f"hibernate: {self.hibernate_readiness}/100",
+            *([f"  ⚠ Headline blocker: {self.headline_blocker} "
+               f"(readiness_score reflects jakarta/Boot3 only — Hibernate is a separate rewrite axis)"]
+              if self.headline_blocker else []),
             f"Spring Boot 2 detected: {_boot}",
             f"Blocking issues: {self.blocking_count}  "
             f"(critical: {self.summary.get('by_severity', {}).get('critical', 0)}, "

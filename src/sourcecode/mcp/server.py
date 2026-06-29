@@ -792,7 +792,11 @@ def get_migration_readiness(repo_path: str = ".", min_severity: str = "low") -> 
 
     Maps to: sourcecode migrate-check <repo_path> --min-severity <min_severity>
     Returns: MigrationReport with schema_version, readiness_score (0–100; 100=ready to migrate),
-             jakarta_readiness / boot3_readiness / jdk_modernization (per-dimension 0–100),
+             jakarta_readiness / boot3_readiness / jdk_modernization / hibernate_readiness
+             (per-dimension 0–100), headline_blocker (e.g. "hibernate_rewrite" or null),
+             hibernate (Hibernate 5→6 stratified model: 4-layer risk_matrix, rewrite_targets[]
+             with line-level call sites + target_api + migration_kind, module_exposure_map,
+             golden_sql_hotspots, total_effort_range_days, classification upgrade/rewrite),
              blocking_count, estimated_effort_days,
              spring_boot_2_detected (true|false|null — null=undetermined, never assumed true),
              spring_boot_version_detected,

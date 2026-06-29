@@ -4841,9 +4841,12 @@ def migrate_check_cmd(
     \b
     Hibernate 5→6 stratification (in the 'hibernate' output section):
       4 independent layers (JPA annotations / Criteria / HQL / SPI), a per-layer
-      risk matrix, a module exposure map, critical call-chain detection, and an
-      UPGRADE vs REWRITE verdict (dynamic Criteria, custom SPI, reflection-built
-      queries, or concatenated query strings force the REWRITE classification).
+      risk matrix with effort ranges, a module exposure map, critical call-chain
+      detection, golden-SQL hotspots, a hibernate_readiness score, and an UPGRADE
+      vs REWRITE verdict (dynamic Criteria, custom SPI, reflection-built queries,
+      or concatenated query strings force the REWRITE classification).
+      Emits actionable rewrite_targets[] (call-site line ranges → target_api +
+      migration_kind) so a migration agent can consume the output directly.
 
     \b
     Examples:

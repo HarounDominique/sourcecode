@@ -1,5 +1,44 @@
 # Changelog
 
+## [1.63.0] — 2026-06-29
+
+### Added — actionable Hibernate rewrite targets (`migrate-check`)
+
+The Hibernate stratification went from **diagnostic** (how many files/occurrences
+per layer) to **actionable** (what to rewrite, where, and to what) so a migration
+agent can consume the output directly without re-parsing the repo. The `hibernate`
+section gains a sub-`schema_version` (now **2.0**); all existing keys preserved.
+
+- **`hibernate.rewrite_targets[]`** — one machine-readable target per call site:
+  `id`, `layer`, `source_file`, `line_start`/`line_end`, `current_pattern`,
+  `current_snippet`, `target_api` (the Hibernate-6 destination), `migration_kind`
+  (`manual_rewrite` / `assisted` / `mechanical` / `review`), `auto_migratable`,
+  `blocking_reason`, `symbol` (enclosing `Class#method`), `module`, `dynamic`.
+  Mapping rules: legacy `org.hibernate.Criteria`/`Restrictions`/`Projections` →
+  `CriteriaBuilder` (manual); `@Type(type=)` → `@Type(value=)`/`@JdbcTypeCode`
+  (mechanical, auto); `@TypeDef`/`@GenericGenerator` → assisted; concatenated HQL →
+  assisted + `runtime-resolved string`; `UserType`/`Interceptor`/`EventListener`/SPI
+  → its H6 contract (manual). Standard JPA annotations emit **no** targets.
+- **Per-layer migration-kind sub-counts** in `risk_matrix` (`manual_count`,
+  `assisted_count`, `mechanical_count`, `review_count`); Criteria adds
+  `static_count` vs `dynamic_count`; SPI adds `userType_rewrite_count` vs
+  `userType_resolvable_count` — so dynamic/reflexive cost is not blended into static.
+- **Honest effort** — each layer carries `effort_range` `{low, high, confidence}`
+  (legacy `estimated_effort` string kept); `hibernate.total_effort_range_days`
+  aggregates them; `hibernate.effort_model` exposes the auditable formula and the
+  caveat that layers may share files (the total is an upper bound, not deduplicated).
+- **`hibernate_readiness` (0–100)** — 4th readiness dimension alongside
+  jakarta/boot3/jdk. It does **not** sink the headline `readiness_score` (Hibernate
+  is an orthogonal rewrite axis), but in a rewrite zone `headline_blocker` is set to
+  `"hibernate_rewrite"` so a reader of "62/100" is not misled.
+- **`hibernate.golden_sql_hotspots[]`** — classes/methods that concentrate dynamic
+  query generation, ranked by reflexive-query volume — where to pin golden-SQL tests.
+
+### Fixed
+
+- `get_migration_readiness` MCP test asserted the pre-1.62 report `schema_version`
+  `1.3`; the v1.62.0 schema bump to `1.4` made it stale. Corrected to `1.4`.
+
 ## [1.62.0] — 2026-06-29
 
 ### Added — Hibernate 5.x → 6.x migration stratification (`migrate-check`)
