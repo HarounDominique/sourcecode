@@ -1105,14 +1105,14 @@ class TestRunMigrateCheckXmlDep:
         assert "MIG-032" in rule_ids   # old namespace in web.xml
         assert "MIG-040" in rule_ids   # springfox in pom.xml
 
-    def test_schema_version_is_1_3(self, tmp_path: Path) -> None:
+    def test_schema_version_is_1_4(self, tmp_path: Path) -> None:
         report = run_migrate_check([], tmp_path)
-        assert report.schema_version == "1.3"
+        assert report.schema_version == "1.4"
 
     def test_to_dict_contains_schema_version(self, tmp_path: Path) -> None:
         report = run_migrate_check([], tmp_path)
         d = report.to_dict()
-        assert d["schema_version"] == "1.3"
+        assert d["schema_version"] == "1.4"
 
     def test_modern_repo_still_100(self, tmp_path: Path) -> None:
         # A clean Spring Boot 3 repo: Jakarta imports, modern namespace

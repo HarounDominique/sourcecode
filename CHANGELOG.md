@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.62.0] — 2026-06-29
+
+### Added — Hibernate 5.x → 6.x migration stratification (`migrate-check`)
+
+`migrate-check` no longer treats Hibernate as a single dependency-version bump.
+For enterprise monoliths that use dynamic persistence (verified against the
+Broadleaf Commerce CE Open Admin Platform pattern), a Hibernate major upgrade is
+a **persistence-layer rewrite problem in the dynamic-ORM areas, not an upgrade**.
+Output now carries a `hibernate` section (and a Hibernate block in `--format text`)
+built by the new `hibernate_strat` module.
+
+- **Four independent migration domains** — each classified on its own risk axis,
+  never aggregated into one score:
+  1. **JPA Annotation Layer** — LOW, escalates to HIGH on deprecated/reworked
+     annotations (`@Type(type=)`, `@TypeDef`, `@GenericGenerator`).
+  2. **Criteria API Layer** — HIGH, escalates to **CRITICAL** when Criteria is
+     built via reflection or abstraction DAOs (`DynamicEntityDao`, `GenericDao`,
+     `BasicPersistenceModule`). Legacy `org.hibernate.Criteria` /
+     `Restrictions` / `Projections` flagged (removed in Hibernate 6).
+  3. **HQL / String Queries** — MEDIUM, escalates to HIGH on string concatenation
+     (SQL shape not statically inferable under H6 parser changes).
+  4. **Hibernate SPI / Internal API** — CRITICAL blocker (`UserType`,
+     `CompositeUserType`, `Interceptor`, `EventListener`, `org.hibernate.engine.spi`).
+- **Hibernate Migration Impact Matrix** — per-layer risk, reason, and estimated effort.
+- **Module-level Hibernate exposure map** — per Maven/Gradle module: max risk,
+  layers present, and `dynamic-criteria` / `custom-SPI` / `reflection` tags.
+- **Critical call-chain detection** — flags dynamic query-generation paths
+  (`DynamicEntityDaoImpl`, `BasicPersistenceModule`, reflection-based DAOs).
+- **Stop-condition logic** — any of {dynamic Criteria, custom SPI, reflection-built
+  queries, concatenated query strings} forces the verdict
+  **"HIBERNATE 6 MIGRATION IS HIGH RISK REWRITE ZONE (NOT UPGRADE ZONE)"**;
+  otherwise UPGRADE-WITH-CARE or UPGRADE ZONE.
+- **Risk separation** — observable code risk vs inferred runtime risk reported distinctly.
+
 ## [1.61.0] — 2026-06-29
 
 ### Fixed — `migrate-check` false positives on already-migrated Spring Boot 3 repos

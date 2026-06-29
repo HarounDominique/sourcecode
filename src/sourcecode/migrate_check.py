@@ -6,6 +6,8 @@ that must be addressed when migrating:
   - Java 8 → 17 / 21 (SecurityManager, Nashorn, Unsafe, reflection, etc.)
   - XML Spring config (applicationContext.xml, web.xml, security XML)
   - Dependency incompatibilities (SpringFox, Hibernate 5, ByteBuddy old)
+  - Hibernate 5→6 stratified migration model (see hibernate_strat) — 4 independent
+    layers, module exposure map, call-chain detection, upgrade-vs-rewrite verdict
 
 Entry point: run_migrate_check(file_paths, root) → MigrationReport
 """
@@ -18,7 +20,10 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sourcecode.hibernate_strat import HibernateStratification
 
 
 # ---------------------------------------------------------------------------
@@ -1038,7 +1043,7 @@ def _dimension_score(
 
 @dataclass
 class MigrationReport:
-    schema_version: str = "1.3"
+    schema_version: str = "1.4"
     generated_at: str = ""
     repo_id: str = ""
     git_head: str = ""
@@ -1061,6 +1066,10 @@ class MigrationReport:
     limitations: list[str] = field(default_factory=list)
     summary: dict = field(default_factory=dict)
     metadata: dict = field(default_factory=dict)
+    # Hibernate 5→6 stratified migration model (4 independent layers, module
+    # exposure map, call-chain detection, upgrade-vs-rewrite verdict). Attached
+    # by run_migrate_check; None when not computed.
+    hibernate: Optional["HibernateStratification"] = None
 
     def finalize(self) -> "MigrationReport":
         if not self.generated_at:
@@ -1157,6 +1166,7 @@ class MigrationReport:
             "spring_boot_version_detected": self.spring_boot_version_detected,
             "summary": self.summary,
             "findings": [f.to_dict() for f in self.findings],
+            "hibernate": self.hibernate.to_dict() if self.hibernate is not None else None,
             "limitations": self.limitations,
             "metadata": self.metadata,
         }
@@ -1184,6 +1194,10 @@ class MigrationReport:
             f"Estimated effort: {self.estimated_effort_days}d",
             "",
         ]
+
+        if self.hibernate is not None and self.hibernate.detected:
+            lines.append(self.hibernate.to_text())
+            lines.append("")
 
         if not visible:
             lines.append("No findings at or above selected severity.")
@@ -1366,10 +1380,16 @@ def run_migrate_check(
 
     spring_boot_2, spring_boot_version = _detect_spring_boot(root, jakarta_import_count)
 
+    # Hibernate 5→6 stratification (independent of min_severity — it is its own
+    # risk model, not a severity-filtered finding stream).
+    from sourcecode.hibernate_strat import analyze_hibernate
+    hibernate_strat = analyze_hibernate(file_paths, root)
+
     report = MigrationReport(
         spring_boot_2_detected=spring_boot_2,
         spring_boot_version_detected=spring_boot_version,
         findings=all_findings,
+        hibernate=hibernate_strat,
         limitations=limitations,
         metadata={
             "java_files_scanned": len(file_paths),

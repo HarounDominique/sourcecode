@@ -4839,6 +4839,13 @@ def migrate_check_cmd(
       MIG-008  javax.ws.rs import (MEDIUM — JAX-RS changed)
 
     \b
+    Hibernate 5→6 stratification (in the 'hibernate' output section):
+      4 independent layers (JPA annotations / Criteria / HQL / SPI), a per-layer
+      risk matrix, a module exposure map, critical call-chain detection, and an
+      UPGRADE vs REWRITE verdict (dynamic Criteria, custom SPI, reflection-built
+      queries, or concatenated query strings force the REWRITE classification).
+
+    \b
     Examples:
       sourcecode migrate-check .
       sourcecode migrate-check /path/to/repo --format text
