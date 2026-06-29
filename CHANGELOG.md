@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.60.0] — 2026-06-29
 
 ### Changed
 - **Anonymous telemetry is now on by default (opt-out).** Previously telemetry
