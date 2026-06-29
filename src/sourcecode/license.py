@@ -372,7 +372,7 @@ _init()
 # ---------------------------------------------------------------------------
 
 def _emit_telemetry(event: str, **kw: object) -> None:
-    """Best-effort telemetry emit. Respects opt-in; never raises or blocks."""
+    """Best-effort telemetry emit. Respects the user's opt-out; never raises or blocks."""
     try:
         from sourcecode import telemetry as _tel
         _tel.record(event, **kw)  # type: ignore[arg-type]

@@ -1,9 +1,11 @@
-"""First-run consent prompt.
+"""First-run telemetry notice.
 
-Shown exactly once, only on interactive TTYs, only when the user hasn't been
-asked before. Default answer is NO — the user must explicitly type 'y' to opt in.
+Telemetry is enabled by default (opt-out) and stays anonymous. The notice is
+shown exactly once, only on interactive TTYs, to inform the user that
+telemetry is on and how to turn it off. It does not ask a question — it
+informs and respects the user's right to disable.
 
-Prompt is written to stderr so it doesn't pollute stdout output.
+Notice is written to stderr so it doesn't pollute stdout output.
 """
 
 from __future__ import annotations
@@ -11,11 +13,11 @@ from __future__ import annotations
 import os
 import sys
 
-_PROMPT = """\
+_NOTICE = """\
 \033[2m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  sourcecode — optional anonymous telemetry
+  sourcecode — anonymous telemetry is ON by default
 
-  Help improve sourcecode by sharing anonymous usage metrics.
+  Anonymous usage metrics help improve sourcecode.
 
   Collected: tool version, Python version, OS, commands used,
   flags used, approximate repo size, execution duration, errors.
@@ -23,9 +25,9 @@ _PROMPT = """\
   Never collected: source code, file paths, file names, secrets,
   tokens, environment variables, or any repository content.
 
-  You can change this at any time:
+  Disable at any time:
     sourcecode telemetry disable
-    export SOURCECODE_TELEMETRY=0
+    export SOURCECODE_TELEMETRY=0   (or DO_NOT_TRACK=1)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m
 """
 
@@ -43,21 +45,16 @@ def _is_interactive() -> bool:
     return not any(os.environ.get(v) for v in ci_vars)
 
 
-def ask_for_consent() -> bool:
-    """Show the consent prompt and return the user's choice.
+def show_first_run_notice() -> None:
+    """Print the one-time telemetry notice on interactive terminals.
 
-    Returns True if the user opted in, False otherwise.
-    Never raises. Default (Enter / non-y input) is False.
+    Never raises. Does nothing on non-interactive / CI environments.
+    Telemetry stays enabled regardless — this only informs the user.
     """
     if not _is_interactive():
-        return False
-
+        return
     try:
-        sys.stderr.write(_PROMPT)
-        sys.stderr.write("  Enable anonymous telemetry? [y/N]: ")
+        sys.stderr.write(_NOTICE)
         sys.stderr.flush()
-        answer = sys.stdin.readline().strip().lower()
-        sys.stderr.write("\n")
-        return answer == "y"
     except Exception:
-        return False
+        pass

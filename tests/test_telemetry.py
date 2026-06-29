@@ -2,9 +2,10 @@
 
 Critical invariants verified here:
   - Sensitive data (paths, code, long strings) never escapes the filter
-  - Telemetry is disabled by default
+  - Telemetry is enabled by default (opt-out) and stays anonymous
   - enable/disable round-trips correctly
-  - Consent prompt defaults to False (opt-in, not opt-out)
+  - SOURCECODE_TELEMETRY=0 and DO_NOT_TRACK turn telemetry off
+  - First-run notice is informational only (no prompt, never changes state)
   - Transport failures are silent
   - record() never raises regardless of input
 """
@@ -165,13 +166,34 @@ def test_sanitize_output_contains_no_paths():
             assert "\\Users" not in val, f"Field {key!r} contains a Windows path: {val!r}"
 
 
-# ── Config: opt-in defaults ───────────────────────────────────────────────────
+# ── Config: opt-out defaults ──────────────────────────────────────────────────
 
-def test_telemetry_disabled_by_default(tmp_path: Path):
-    """Telemetry must be OFF unless the user explicitly enables it."""
+def test_telemetry_enabled_by_default(tmp_path: Path):
+    """Telemetry is ON by default unless the user explicitly disables it."""
     with patch("sourcecode.telemetry.config._CONFIG_FILE", tmp_path / "config.json"):
-        from sourcecode.telemetry.config import is_enabled
-        assert is_enabled() is False
+        with patch.dict(os.environ, {"SOURCECODE_TELEMETRY": "", "DO_NOT_TRACK": ""}):
+            with patch("sourcecode.telemetry.config._in_ci", return_value=False):
+                from sourcecode.telemetry.config import is_enabled
+                assert is_enabled() is True
+
+
+def test_telemetry_off_by_default_in_ci(tmp_path: Path):
+    """With no explicit choice, telemetry defaults OFF under CI."""
+    with patch("sourcecode.telemetry.config._CONFIG_FILE", tmp_path / "config.json"):
+        with patch.dict(os.environ, {"SOURCECODE_TELEMETRY": "", "DO_NOT_TRACK": ""}):
+            with patch("sourcecode.telemetry.config._in_ci", return_value=True):
+                from sourcecode.telemetry.config import is_enabled
+                assert is_enabled() is False
+
+
+def test_explicit_enable_overrides_ci_default(tmp_path: Path):
+    """An explicit config opt-in is honored even under CI."""
+    with patch("sourcecode.telemetry.config._CONFIG_FILE", tmp_path / "config.json"):
+        with patch.dict(os.environ, {"SOURCECODE_TELEMETRY": "", "DO_NOT_TRACK": ""}):
+            with patch("sourcecode.telemetry.config._in_ci", return_value=True):
+                from sourcecode.telemetry.config import is_enabled, set_enabled
+                set_enabled(True)
+                assert is_enabled() is True
 
 
 def test_env_var_zero_disables(tmp_path: Path):
@@ -187,6 +209,31 @@ def test_env_var_one_enables(tmp_path: Path):
         with patch.dict(os.environ, {"SOURCECODE_TELEMETRY": "1"}):
             from sourcecode.telemetry.config import is_enabled
             assert is_enabled() is True
+
+
+def test_do_not_track_disables(tmp_path: Path):
+    """The DO_NOT_TRACK convention turns telemetry off by default."""
+    with patch("sourcecode.telemetry.config._CONFIG_FILE", tmp_path / "config.json"):
+        with patch.dict(os.environ, {"SOURCECODE_TELEMETRY": "", "DO_NOT_TRACK": "1"}):
+            from sourcecode.telemetry.config import is_enabled
+            assert is_enabled() is False
+
+
+def test_explicit_telemetry_env_overrides_do_not_track(tmp_path: Path):
+    """SOURCECODE_TELEMETRY=1 takes precedence over DO_NOT_TRACK."""
+    with patch("sourcecode.telemetry.config._CONFIG_FILE", tmp_path / "config.json"):
+        with patch.dict(os.environ, {"SOURCECODE_TELEMETRY": "1", "DO_NOT_TRACK": "1"}):
+            from sourcecode.telemetry.config import is_enabled
+            assert is_enabled() is True
+
+
+def test_disabled_config_persists(tmp_path: Path):
+    """Once disabled in config, default-on does not re-enable it."""
+    with patch("sourcecode.telemetry.config._CONFIG_FILE", tmp_path / "config.json"):
+        with patch.dict(os.environ, {"SOURCECODE_TELEMETRY": "", "DO_NOT_TRACK": ""}):
+            from sourcecode.telemetry.config import is_enabled, set_enabled
+            set_enabled(False)
+            assert is_enabled() is False
 
 
 def test_set_enabled_round_trip(tmp_path: Path):
@@ -208,38 +255,48 @@ def test_set_enabled_marks_asked(tmp_path: Path):
         assert has_been_asked() is True
 
 
-# ── Consent: opt-in default ───────────────────────────────────────────────────
+# ── First-run notice: informational only ─────────────────────────────────────
 
-def test_consent_non_interactive_returns_false():
-    """In non-TTY environments, consent must default to False."""
+def test_notice_silent_when_non_interactive():
+    """In non-TTY environments, the notice must not be printed."""
+    import io
+    import sys
+    buf = io.StringIO()
     with patch("sourcecode.telemetry.consent._is_interactive", return_value=False):
-        from sourcecode.telemetry.consent import ask_for_consent
-        result = ask_for_consent()
-        assert result is False
+        with patch.object(sys, "stderr", buf):
+            from sourcecode.telemetry.consent import show_first_run_notice
+            show_first_run_notice()
+    assert buf.getvalue() == ""
 
 
-def test_consent_interactive_default_no(monkeypatch: pytest.MonkeyPatch):
-    """User pressing Enter (empty input) must default to No."""
+def test_notice_printed_when_interactive():
+    """On an interactive terminal, the notice is written to stderr."""
     import io
     import sys
-    monkeypatch.setattr(sys, "stdin", io.StringIO("\n"))
-    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    buf = io.StringIO()
     with patch("sourcecode.telemetry.consent._is_interactive", return_value=True):
-        from sourcecode.telemetry.consent import ask_for_consent
-        result = ask_for_consent()
-    assert result is False
+        with patch.object(sys, "stderr", buf):
+            from sourcecode.telemetry.consent import show_first_run_notice
+            show_first_run_notice()
+    out = buf.getvalue()
+    assert "telemetry" in out.lower()
+    assert "disable" in out.lower()
 
 
-def test_consent_interactive_yes(monkeypatch: pytest.MonkeyPatch):
-    """User typing 'y' must enable telemetry."""
+def test_notice_does_not_change_enabled_state(tmp_path: Path):
+    """The notice informs only — it never flips the enabled flag."""
     import io
     import sys
-    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
-    monkeypatch.setattr(sys, "stderr", io.StringIO())
-    with patch("sourcecode.telemetry.consent._is_interactive", return_value=True):
-        from sourcecode.telemetry.consent import ask_for_consent
-        result = ask_for_consent()
-    assert result is True
+    cfg = tmp_path / "config.json"
+    with patch("sourcecode.telemetry.config._CONFIG_FILE", cfg):
+        with patch.dict(os.environ, {"SOURCECODE_TELEMETRY": "", "DO_NOT_TRACK": ""}):
+            with patch("sourcecode.telemetry.consent._is_interactive", return_value=True):
+                with patch.object(sys, "stderr", io.StringIO()):
+                    from sourcecode.telemetry.consent import show_first_run_notice
+                    show_first_run_notice()
+            with patch("sourcecode.telemetry.config._in_ci", return_value=False):
+                from sourcecode.telemetry.config import is_enabled
+                assert is_enabled() is True
 
 
 # ── Transport: silent failures ────────────────────────────────────────────────

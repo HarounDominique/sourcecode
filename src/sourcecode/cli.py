@@ -584,7 +584,7 @@ try:
 except Exception:
     pass
 
-telemetry_app = typer.Typer(help="Manage anonymous telemetry (opt-in).", rich_markup_mode="rich")
+telemetry_app = typer.Typer(help="Manage anonymous telemetry (on by default; opt-out).", rich_markup_mode="rich")
 app.add_typer(telemetry_app, name="telemetry")
 
 mcp_app = typer.Typer(help="MCP integration: setup, status, serve, remove.", rich_markup_mode="rich")
@@ -597,18 +597,18 @@ auth_app = typer.Typer(help="Authentication: status, logout.", rich_markup_mode=
 app.add_typer(auth_app, name="auth")
 
 
-def _maybe_ask_consent() -> None:
-    """Show first-run consent prompt once, on interactive TTYs only."""
+def _maybe_show_telemetry_notice() -> None:
+    """Show first-run telemetry notice once, on interactive TTYs only.
+
+    Telemetry is on by default (opt-out). We inform rather than ask, then
+    mark the notice as shown so it appears only once.
+    """
     try:
-        from sourcecode.telemetry.config import has_been_asked, set_enabled
-        from sourcecode.telemetry.consent import ask_for_consent
+        from sourcecode.telemetry.config import has_been_asked, mark_asked
+        from sourcecode.telemetry.consent import show_first_run_notice
         if not has_been_asked():
-            enabled = ask_for_consent()
-            set_enabled(enabled)
-            if enabled:
-                typer.echo("Telemetry enabled. Thank you. Disable: sourcecode telemetry disable", err=True)
-            else:
-                typer.echo("Telemetry disabled. Enable anytime: sourcecode telemetry enable", err=True)
+            show_first_run_notice()
+            mark_asked()
     except Exception:
         pass
 
@@ -1020,9 +1020,9 @@ def main(
       sourcecode /path/to/repo --compact  analyze specific path
       sourcecode --agent                agent-optimized output (full detail)
     """
-    # First-run consent (skip for telemetry/version/config subcommands)
+    # First-run telemetry notice (skip for telemetry/version/config subcommands)
     if ctx.invoked_subcommand not in ("telemetry", "version", "config"):
-        _maybe_ask_consent()
+        _maybe_show_telemetry_notice()
         _maybe_show_mcp_hint()
 
     # When a subcommand is invoked, skip the main analysis.
@@ -3342,12 +3342,12 @@ def telemetry_status() -> None:
     enabled = is_enabled()
     asked = has_been_asked()
     status = "enabled" if enabled else "disabled"
-    typer.echo(f"Telemetry: {status}")
+    typer.echo(f"Telemetry: {status} (on by default; opt-out)")
     if not asked:
-        typer.echo("  (consent not yet shown — will prompt on next run)")
+        typer.echo("  (first-run notice not yet shown — will show on next run)")
     typer.echo(f"  Config: {config_file_path()}")
-    typer.echo("  Disable permanently: sourcecode telemetry disable")
-    typer.echo("  Or set env var:      SOURCECODE_TELEMETRY=0")
+    typer.echo("  Disable: sourcecode telemetry disable")
+    typer.echo("  Or set env var: SOURCECODE_TELEMETRY=0  (or DO_NOT_TRACK=1)")
 
 
 @telemetry_app.command("enable")
@@ -3369,6 +3369,7 @@ def telemetry_disable() -> None:
     from sourcecode.telemetry.config import set_enabled
     set_enabled(False)
     typer.echo("Telemetry disabled. No data will be collected or sent.")
+    typer.echo("Telemetry is on by default; this opt-out is remembered.")
     typer.echo("Re-enable at any time: sourcecode telemetry enable")
 
 

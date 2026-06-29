@@ -704,7 +704,7 @@ All outputs include:
 
 ## Telemetry
 
-Anonymous, opt-in. Collects: version, OS, commands, flags, duration, repo size range, errors. No source code, paths, secrets, or output content.
+Anonymous, **on by default (opt-out)**. Collects: version, OS, commands, flags, duration, repo size range, errors. No source code, paths, secrets, or output content. A one-time notice is shown on first interactive run.
 
 ```bash
 sourcecode telemetry status
@@ -712,7 +712,7 @@ sourcecode telemetry enable
 sourcecode telemetry disable
 ```
 
-Or: `export SOURCECODE_TELEMETRY=0`
+Disable any time: `export SOURCECODE_TELEMETRY=0` (or `DO_NOT_TRACK=1`)
 
 ---
 

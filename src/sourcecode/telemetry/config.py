@@ -1,6 +1,10 @@
 """Persistent telemetry configuration.
 
+Telemetry is enabled by default (opt-out). It stays anonymous and never
+collects source code, paths, secrets or repository content.
+
 Config file: ~/.config/sourcecode/config.json
+Disable: `sourcecode telemetry disable`, SOURCECODE_TELEMETRY=0, or DO_NOT_TRACK=1
 Env override: SOURCECODE_TELEMETRY=0 (disable) or =1 (enable)
 """
 
@@ -13,6 +17,18 @@ from typing import Any
 
 _ENV_VAR = "SOURCECODE_TELEMETRY"
 _CONFIG_FILE = Path.home() / ".config" / "sourcecode" / "config.json"
+
+# CI markers — when no explicit choice has been made, telemetry defaults OFF
+# in CI (no human to see the first-run notice), ON otherwise.
+_CI_VARS = (
+    "CI", "CONTINUOUS_INTEGRATION", "GITHUB_ACTIONS", "CIRCLECI",
+    "TRAVIS", "JENKINS_URL", "BUILDKITE", "GITLAB_CI", "TF_BUILD",
+    "TEAMCITY_VERSION", "DRONE", "SEMAPHORE",
+)
+
+
+def _in_ci() -> bool:
+    return any(os.environ.get(v) for v in _CI_VARS)
 
 
 def _load() -> dict[str, Any]:
@@ -31,17 +47,27 @@ def _save(data: dict[str, Any]) -> None:
 
 
 def is_enabled() -> bool:
-    """True only when telemetry is explicitly opted in.
+    """True unless telemetry has been explicitly disabled.
 
-    Env var takes absolute precedence over config file.
-    Default is always disabled — telemetry is strictly opt-in.
+    Telemetry is enabled by default (opt-out). Precedence, highest first:
+      1. SOURCECODE_TELEMETRY env var (0 = off, 1 = on)
+      2. DO_NOT_TRACK env var (any value other than ""/"0" turns it off)
+      3. config file 'enabled' flag, if the user has made an explicit choice
+      4. default: True — except in CI, where it defaults to False
     """
     env = os.environ.get(_ENV_VAR, "").strip()
     if env == "0":
         return False
     if env == "1":
         return True
-    return bool(_load().get("telemetry", {}).get("enabled", False))
+    dnt = os.environ.get("DO_NOT_TRACK", "").strip()
+    if dnt not in ("", "0"):
+        return False
+    stored = _load().get("telemetry", {}).get("enabled")
+    if stored is not None:
+        return bool(stored)
+    # No explicit choice yet: on by default, off under CI.
+    return not _in_ci()
 
 
 def has_been_asked() -> bool:

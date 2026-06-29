@@ -1,6 +1,6 @@
 # Privacy & Telemetry
 
-`sourcecode` includes an **opt-in** anonymous telemetry system. It is **disabled by default**. Nothing is collected unless you explicitly enable it.
+`sourcecode` includes an anonymous telemetry system that is **on by default (opt-out)**. The data is strictly anonymous — no source code, paths, secrets, or repository content are ever collected. You can turn it off at any time with a single command, and it defaults to **off** in CI environments.
 
 ---
 
@@ -8,14 +8,20 @@
 
 ```bash
 sourcecode telemetry status   # check current setting
-sourcecode telemetry enable   # opt in
-sourcecode telemetry disable  # opt out
+sourcecode telemetry disable  # opt out (remembered)
+sourcecode telemetry enable   # opt back in
 
 export SOURCECODE_TELEMETRY=0  # disable via environment variable
-export SOURCECODE_TELEMETRY=1  # enable via environment variable
+export SOURCECODE_TELEMETRY=1  # force enable via environment variable
+export DO_NOT_TRACK=1          # disable via the DO_NOT_TRACK convention
 ```
 
-The environment variable always takes precedence over the config file.
+Precedence, highest first:
+
+1. `SOURCECODE_TELEMETRY` environment variable (`0` = off, `1` = on)
+2. `DO_NOT_TRACK` environment variable (any value other than empty/`0` disables)
+3. Your saved choice in the config file (`telemetry disable` / `enable`)
+4. Default: **on** — except in CI, where it defaults to **off**
 
 ---
 
@@ -132,30 +138,30 @@ The file looks like:
 ```json
 {
   "telemetry": {
-    "enabled": false,
+    "enabled": true,
     "asked": true
   }
 }
 ```
 
-You can edit or delete this file directly at any time.
+If you run `sourcecode telemetry disable`, `enabled` is set to `false` and that choice is remembered. If you have never made an explicit choice, the `enabled` key may be absent — telemetry then follows the default (on outside CI, off in CI). You can edit or delete this file directly at any time.
 
 ---
 
-## First-run consent
+## First-run notice
 
-The first time you run `sourcecode` interactively (not in CI, not piped), you will be shown a brief prompt explaining what telemetry is and asking if you want to enable it.
+The first time you run `sourcecode` interactively (not in CI, not piped), you are shown a brief, one-time notice explaining that anonymous telemetry is on, what is collected, and how to turn it off.
 
-- Default answer is **No** (press Enter to decline)
-- The prompt is shown **once only**
-- In CI environments (GitHub Actions, CircleCI, etc.) the prompt is skipped and telemetry stays disabled
-- When piped or run non-interactively, the prompt is skipped
+- It is a **notice, not a prompt** — no answer is required and your input is never read
+- It is shown **once only**
+- In CI environments (GitHub Actions, CircleCI, etc.) the notice is skipped
+- When piped or run non-interactively, the notice is skipped
 
 ---
 
 ## CI environments
 
-Telemetry is always disabled in CI environments, regardless of config file settings. The following environment variables trigger CI detection:
+When you have not made an explicit choice, telemetry **defaults to off in CI** — there is no human present to see the first-run notice. An explicit opt-in (`sourcecode telemetry enable` or `SOURCECODE_TELEMETRY=1`) is still honored in CI. The following environment variables trigger CI detection:
 
 `CI`, `CONTINUOUS_INTEGRATION`, `GITHUB_ACTIONS`, `CIRCLECI`, `TRAVIS`, `JENKINS_URL`, `BUILDKITE`, `GITLAB_CI`, `TF_BUILD`, `TEAMCITY_VERSION`, `DRONE`, `SEMAPHORE`
 
@@ -167,7 +173,7 @@ The entire telemetry implementation is in `src/sourcecode/telemetry/`. You can r
 
 Key files:
 - `config.py` — configuration read/write
-- `consent.py` — first-run consent prompt
+- `consent.py` — first-run informational notice
 - `events.py` — event schema
 - `filters.py` — privacy sanitization (the critical safety layer)
 - `transport.py` — HTTP transmission

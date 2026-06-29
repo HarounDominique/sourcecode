@@ -1,12 +1,12 @@
-"""sourcecode telemetry — opt-in anonymous usage metrics.
+"""sourcecode telemetry — anonymous usage metrics, on by default (opt-out).
 
 Public API:
     is_enabled()          → bool
     record(event, **kw)   → None  (fire-and-forget)
     session_id()          → str   (ephemeral 8-char hex, new each process)
 
-Telemetry is strictly opt-in. It is disabled by default and can be disabled
-at any time via `sourcecode telemetry disable` or SOURCECODE_TELEMETRY=0.
+Telemetry is enabled by default and stays anonymous. It can be disabled at any
+time via `sourcecode telemetry disable`, SOURCECODE_TELEMETRY=0, or DO_NOT_TRACK=1.
 
 Nothing sensitive (code, paths, secrets, output) is ever collected.
 See docs/privacy.md for full details.

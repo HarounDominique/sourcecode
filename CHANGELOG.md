@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Anonymous telemetry is now on by default (opt-out).** Previously telemetry
+  was strictly opt-in and disabled until the user accepted a y/N consent prompt.
+  It now defaults to **on** so usage metrics flow without an extra step, while
+  staying fully anonymous — no source code, paths, file names, secrets, or
+  repository content are ever collected. The first interactive run shows a
+  one-time **notice** (not a prompt) explaining what is collected and how to
+  disable. Disable any time with `sourcecode telemetry disable`,
+  `SOURCECODE_TELEMETRY=0`, or the `DO_NOT_TRACK=1` convention. With no explicit
+  choice, telemetry still defaults to **off in CI** (no human to see the notice);
+  an explicit opt-in is honored everywhere. README, `--help`, and
+  `docs/privacy.md` updated accordingly.
+
 ## [1.59.0] — 2026-06-19
 
 ### Fixed
