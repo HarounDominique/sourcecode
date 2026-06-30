@@ -508,3 +508,57 @@ def test_exp22_never_raises_on_broken_cir():
     result = explain_class("UserService", _BrokenCIR(), model)  # type: ignore[arg-type]
     # Must not raise; class found from symbols list
     assert result.class_name == "UserService"
+
+
+# ── v1.69.0 regression: BUG #4 structural stereotype (JobRunr field test) ─────
+# A central non-annotated class (e.g. library code, clean architecture) must get
+# a structural inference, not the misleading "may be a plain class or utility".
+
+from sourcecode.explain import _structural_purpose, _build_purpose
+
+
+class _FakeCir:
+    """Minimal stand-in — no injection/reverse graph (in_degree resolves to 0)."""
+
+
+def test_structural_purpose_lifecycle_orchestrator():
+    fqn = "org.jobrunr.server.BackgroundJobServer"
+    raw = [
+        {"fqn": fqn + "#start", "symbol_kind": "method", "modifiers": ["public"]},
+        {"fqn": fqn + "#stop", "symbol_kind": "method", "modifiers": ["public"]},
+        {"fqn": fqn + "#pauseProcessing", "symbol_kind": "method", "modifiers": ["public"]},
+    ]
+    out = _structural_purpose(fqn, raw, _FakeCir())
+    assert "Likely" in out
+    assert "server/orchestrator" in out
+    assert "start" in out and "stop" in out
+    assert "no DI annotations" in out
+
+
+def test_structural_purpose_silent_without_signal():
+    # Plain helper, no lifecycle, no telling suffix, no callers → stay honest.
+    fqn = "org.x.Helper"
+    raw = [{"fqn": fqn + "#doThing", "symbol_kind": "method", "modifiers": ["public"]}]
+    assert _structural_purpose(fqn, raw, _FakeCir()) == ""
+
+
+def test_build_purpose_uses_structural_fallback():
+    # _build_purpose should fall back to structural inference, never the generic
+    # "may be a plain class or utility" when structural signal exists.
+    class _Model:
+        class _Inh:
+            def immediate_parent(self, _):
+                return ""
+        class _Tx:
+            class_level: dict = {}
+        inheritance = _Inh()
+        tx_index = _Tx()
+    fqn = "org.jobrunr.server.BackgroundJobServer"
+    raw = [
+        {"fqn": fqn, "annotations": []},
+        {"fqn": fqn + "#start", "symbol_kind": "method", "modifiers": ["public"]},
+        {"fqn": fqn + "#stop", "symbol_kind": "method", "modifiers": ["public"]},
+    ]
+    out = _build_purpose(fqn, raw, "unknown", _FakeCir(), _Model())
+    assert "may be a plain class or utility" not in out
+    assert "Likely" in out

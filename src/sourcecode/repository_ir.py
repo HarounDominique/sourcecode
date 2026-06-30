@@ -3366,9 +3366,20 @@ def build_repo_ir(
                 and not _INHERIT_PRESCAN_RE.search(source):
             pkg_m = _PKG_RE.search(source)
             _pkg = pkg_m.group(1) if pkg_m else ""
-            # Minimal class-name symbols for same-package map (no methods/fields)
+            # Minimal class-name symbols for same-package map (no methods/fields).
+            # BUG #2 (JobRunr field test): this fast-path regex previously ran over RAW
+            # source, so prose inside Javadoc/comments and string literals (e.g.
+            # "This class provides the entry point", "...the interface is Serializable
+            # ...instead.") was tokenized into phantom type symbols like
+            # `org.jobrunr.configuration.provides`. Those leaked into the symbol graph
+            # and every consumer of it (modernize statically_unreferenced /
+            # framework_dispatched, impact, export --c4). Strip comments AND string
+            # literals before scanning so only real declarations are captured. The name
+            # must also start uppercase ([A-Z]) — Java type convention, matching the
+            # precision of the full _CLASS_DECL_RE used on annotated files.
+            _decl_source = _STRING_LITERAL_RE.sub('', _strip_java_comments(source))
             _min_syms: list[SymbolRecord] = []
-            for _cm in re.finditer(r'(?:class|interface|enum)\s+(\w+)', source):
+            for _cm in re.finditer(r'\b(?:class|interface|enum)\s+([A-Z]\w*)', _decl_source):
                 _cls_name = _cm.group(1)
                 _fqn = f"{_pkg}.{_cls_name}" if _pkg else _cls_name
                 _min_syms.append(SymbolRecord(
@@ -4023,6 +4034,27 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
     _SERVLET_RE = _re.compile(r"\bextends\s+\w*HttpServlet\b")
     _nonspring: dict[str, int] = {"webscripts": 0, "jax_rs": 0, "servlets": 0}
 
+    # BUG #3 (JobRunr field test): imperative router-DSL routes. Lightweight HTTP
+    # frameworks that deliberately avoid Spring/JAX-RS (JobRunr's own dashboard
+    # handler, Javalin, Spark Java, hand-rolled routers) register routes as method
+    # calls `get("/path", handler)` / `post(...)` instead of annotations, so the
+    # annotation surface above never sees them and `endpoints` returns 0 — a silent
+    # total false negative that also disables the `validation` command downstream.
+    # Detection is by SYNTACTIC SHAPE (no framework knowledge): an HTTP-verb method
+    # name, a first argument that is a string literal looking like a path (starts
+    # with "/", may contain :param / {param}), AND a second argument (the trailing
+    # comma) — the comma is what distinguishes a route registration from a 1-arg
+    # getter such as Map.get("/k"). Matches both bare `get(...)` (static-import /
+    # Spark style) and `app.get(...)` (Javalin style); the lookbehind only rejects
+    # an identifier char so `forget(` is not mistaken for `get(`. Reported at
+    # confidence "medium" — an occasional flagged false positive beats a total
+    # silent false negative.
+    _DSL_ROUTE_RE = _re.compile(
+        r'(?<![A-Za-z0-9_])(get|post|put|delete|patch|head|options)\s*\(\s*'
+        r'"(/[^"\s]*)"\s*,'
+    )
+    _dsl_routes: list[dict] = []
+
     for jf in java_files:
         try:
             source = jf.read_text(encoding="utf-8", errors="replace")
@@ -4050,6 +4082,27 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
                 m = _EXTENDS_FROM_SIG.search(sym.signature or "")
                 if m:
                     extends_map[sym.symbol] = m.group(1)
+
+        # BUG #3: scan for imperative router-DSL route registrations. Strip comments
+        # first so commented-out / example routes don't leak in. The enclosing class
+        # is the first class/interface symbol in the file (route DSLs live in one
+        # handler class); fall back to the file stem when none was extracted.
+        _dsl_src = _strip_java_comments(source)
+        _dsl_matches = list(_DSL_ROUTE_RE.finditer(_dsl_src))
+        if _dsl_matches:
+            _cls_fqn = next(
+                (s.symbol for s in symbols if s.type in ("class", "interface")), None
+            )
+            _cls_simple = (
+                _cls_fqn.split(".")[-1] if _cls_fqn else Path(rel).stem
+            )
+            for _m in _dsl_matches:
+                _dsl_routes.append({
+                    "method": _m.group(1).upper(),
+                    "path": _m.group(2),
+                    "controller": _cls_simple,
+                    "effective_class": _cls_fqn or _cls_simple,
+                })
 
     routes = _build_route_surface(
         all_symbols, route_diffs=None, extends_map=extends_map,
@@ -4221,6 +4274,32 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             security_model = "mixed"
         # filter_based stays filter_based — XML + filter chain is still filter_based
         # Recompute no_security_signal (now counts only truly unknown endpoints)
+        no_security_signal = sum(
+            1 for e in endpoints
+            if e.get("security", {}).get("policy") == "none_detected"
+        )
+
+    # BUG #3: merge imperative router-DSL endpoints. Dedup against the annotation
+    # surface (method+path) in case a handler is both annotated and DSL-registered.
+    # These carry confidence "medium" (no unambiguous annotation) and explicit
+    # provenance so a consumer can tell shape-detected routes from annotated ones.
+    if _dsl_routes:
+        _seen_mp = {(e.get("method"), e.get("path")) for e in endpoints}
+        for _r in _dsl_routes:
+            _key = (_r["method"], _r["path"])
+            if _key in _seen_mp:
+                continue
+            _seen_mp.add(_key)
+            endpoints.append({
+                "method": _r["method"],
+                "path": _r["path"],
+                "controller": _r["controller"],
+                "handler": _r["controller"],
+                "return_type": "unknown",
+                "security": {"policy": "none_detected"},
+                "confidence": "medium",
+                "source": "router_dsl",
+            })
         no_security_signal = sum(
             1 for e in endpoints
             if e.get("security", {}).get("policy") == "none_detected"

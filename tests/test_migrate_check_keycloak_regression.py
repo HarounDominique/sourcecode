@@ -76,10 +76,13 @@ def _build_keycloak_like(root: Path) -> list[str]:
     files.append(f)
 
     # ── Test-framework module (src/main, but test infra): sun.* (BUG #8) ──────
-    f = "test-framework/core/src/main/java/org/keycloak/testframework/HttpServerSupplier.java"
+    # Uses a genuinely-encapsulated JDK-internal import (sun.misc.*) so MIG-011
+    # fires but is bucketed as test (non-blocking). Note: com.sun.net.httpserver
+    # would NOT fire post-v1.69.0 (BUG #1 — it is exported unconditionally).
+    f = "test-framework/core/src/main/java/org/keycloak/testframework/InternalSupplier.java"
     _write(root, f,
-           "import com.sun.net.httpserver.HttpServer;\n"
-           "public class HttpServerSupplier {}\n")
+           "import sun.misc.BASE64Encoder;\n"
+           "public class InternalSupplier {}\n")
     files.append(f)
 
     # ── Test fixture web.xml with the Java EE namespace (BUG #8) ──────────────

@@ -90,6 +90,19 @@ _GRADLE_JAVA_VERSION_RE = re.compile(
 _GRADLE_JAVA_ENUM_RE = re.compile(
     r"""(?:sourceCompatibility|targetCompatibility)\s*=\s*JavaVersion\.VERSION_(\d+)"""
 )
+# BUG #4: a gradle line that genuinely declares a dependency or plugin. Matches a
+# quoted Maven coordinate (group:artifact, requires the colon), a plugins-block
+# `id '...'`, an `apply plugin:`, or a `classpath`/`platform(`/`enforcedPlatform(`
+# declaration. Deliberately does NOT match `it.name.contains('quarkus')`-style
+# subproject filters (a bare quoted name with no colon and no plugin/dep keyword).
+_GRADLE_DEP_LINE_RE = re.compile(
+    r"""['"][\w.\-]+:[\w.\-]+"""          # maven coordinate "group:artifact..."
+    r"""|\bclasspath\b"""
+    r"""|\b(?:enforced)?platform\s*\("""
+    r"""|\bapply\s+plugin\s*:"""
+    r"""|\bid\s*[('"]""",
+    re.IGNORECASE,
+)
 
 
 class JavaDetector(AbstractDetector):
@@ -279,7 +292,29 @@ class JavaDetector(AbstractDetector):
         original = "\n".join(read_text_lines(path))
         content = original.lower()
         sb_version = self._extract_gradle_sb_version(original)
-        return self._detect_jvm_frameworks(content, "build.gradle", sb_version=sb_version)
+        # BUG #4 (JobRunr field test): framework tokens must be matched only inside
+        # genuine dependency / plugin declarations, never anywhere in the file. A
+        # multi-module root build.gradle that EXCLUDES a subproject by name —
+        # `configure(subprojects.findAll { !it.name.contains('quarkus') })` — must
+        # not be read as "this project uses Quarkus". Restrict the scan to lines
+        # carrying a Maven coordinate / plugin id; the exclusion filter has neither.
+        dep_text = self._gradle_dependency_text(content)
+        return self._detect_jvm_frameworks(dep_text, "build.gradle", sb_version=sb_version)
+
+    @staticmethod
+    def _gradle_dependency_text(content: str) -> str:
+        """Keep only gradle lines that declare a dependency or plugin.
+
+        A real dependency carries a Maven coordinate (`group:artifact`...) and a
+        plugin carries an `id`/`plugin`/`classpath` token. Subproject-name filters
+        and arbitrary prose are dropped, so a framework substring there cannot
+        manufacture a phantom framework detection.
+        """
+        kept: list[str] = []
+        for line in content.splitlines():
+            if _GRADLE_DEP_LINE_RE.search(line):
+                kept.append(line)
+        return "\n".join(kept)
 
     def _extract_gradle_sb_version(self, content: str) -> str | None:
         m = _GRADLE_SB_PLUGIN_RE.search(content)

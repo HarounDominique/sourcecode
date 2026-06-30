@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import Any, Literal
@@ -104,6 +105,21 @@ class TypeClassifier:
         stack_names = {stack.stack for stack in stacks}
         framework_names = {framework.name for stack in stacks for framework in stack.frameworks}
 
+        # BUG #4 (JobRunr field test): a framework present only in a small optional
+        # integration/adapter submodule must NOT label the whole repo as that
+        # framework's app type. JobRunr is a framework-agnostic background-job
+        # LIBRARY whose `core` module holds ~85% of the code; Quarkus/Micronaut/Spring
+        # appear only in tiny per-framework adapter modules — yet presence-based
+        # classification returned project_type="api"+Quarkus. We weight by code
+        # locality: if the DOMINANT source module (the one with the most source files)
+        # contains no evidence of the app-defining framework, the framework is an
+        # optional adapter and the repo is a library. A monolithic Spring app is
+        # unaffected — its dominant module *does* use the framework. Drop such
+        # localized frameworks from the set that drives the app-type decision below.
+        _app_frameworks = framework_names & (_WEB_FRAMEWORKS | _API_FRAMEWORKS)
+        _localized = self._localized_adapter_frameworks(file_tree, stacks, _app_frameworks)
+        framework_names = framework_names - _localized
+
         if len(stack_names) >= 2 and self._is_fullstack(stacks):
             return "fullstack"
 
@@ -129,9 +145,16 @@ class TypeClassifier:
         if framework_names & _API_FRAMEWORKS:
             return "api"
 
+        # All app-defining frameworks were localized to optional adapter submodules
+        # (multi-module library with per-framework integrations) — report library,
+        # never "unknown", when there is clearly source code present.
+        if _localized and not (framework_names & (_WEB_FRAMEWORKS | _API_FRAMEWORKS)):
+            return "library"
+
+        # Strong CLI signals: a CLI framework or an explicit cli entry point.
         if framework_names & _CLI_FRAMEWORKS or any(
             entry.kind == "cli" for entry in entry_points
-        ) or any(path.startswith("bin/") for path in flat_paths):
+        ):
             return "cli"
 
         if stack_names:
@@ -141,7 +164,104 @@ class TypeClassifier:
             if single in {"cpp", "dotnet"} and any(entry.kind == "cli" for entry in entry_points):
                 return "cli"
 
+        # BUG #4 (JobRunr field test): a multi-module JVM repo with no app-defining
+        # web/API framework is a library/toolkit, not an "unknown" — never let the
+        # first command of an audit emit a vacuous classification for a clearly
+        # structured codebase (e.g. JobRunr: core + per-framework adapter modules).
+        # This is checked BEFORE the weak `bin/`-directory CLI heuristic so a build
+        # output / wrapper `bin/` dir does not mislabel a library as a CLI.
+        if stack_names & {"java", "kotlin", "scala"} and self._is_multi_module(file_tree):
+            return "library"
+
+        # Weak CLI heuristic: a top-level bin/ directory (only when nothing stronger).
+        if any(path.startswith("bin/") for path in flat_paths):
+            return "cli"
+
         return "unknown" if stacks else None
+
+    def _is_multi_module(self, file_tree: dict[str, Any]) -> bool:
+        """True when the repo has >1 source module (distinct `*/src/...` roots)."""
+        _CODE_EXTS = (".java", ".kt", ".kts", ".scala", ".groovy")
+        modules = {
+            self._module_of(p)
+            for p in flatten_file_tree(file_tree)
+            if p.endswith(_CODE_EXTS)
+        }
+        modules.discard("")
+        return len(modules) >= 2
+
+    @staticmethod
+    def _module_of(path: str) -> str:
+        """Group a source path into its module root.
+
+        For Maven/Gradle layouts the module is everything before `/src/`
+        (e.g. `framework-support/jobrunr-quarkus/src/main/java/...` →
+        `framework-support/jobrunr-quarkus`). Otherwise the top-level directory.
+        """
+        norm = path.replace("\\", "/")
+        idx = norm.find("/src/")
+        if idx > 0:
+            return norm[:idx]
+        head, _, tail = norm.partition("/")
+        return head if tail else ""
+
+    _EVIDENCE_PATH_RE = re.compile(r"\(([^()]+)\)\s*$")
+
+    def _localized_adapter_frameworks(
+        self,
+        file_tree: dict[str, Any],
+        stacks: Sequence[StackDetection],
+        candidate_frameworks: set[str],
+    ) -> set[str]:
+        """Frameworks confined to a minority module while a framework-agnostic
+        module dominates the codebase (library + per-framework adapters).
+
+        Returns the subset of ``candidate_frameworks`` that should NOT drive the
+        project-type decision. A framework qualifies only when (a) the repo is
+        multi-module, (b) the framework's evidence files are all outside the
+        dominant source module, and (c) the framework has located evidence files
+        (a manifest-only/root detection applies repo-wide and never localizes).
+        """
+        if not candidate_frameworks:
+            return set()
+
+        _CODE_EXTS = (".java", ".kt", ".kts", ".scala", ".groovy")
+        module_file_counts: dict[str, int] = {}
+        for p in flatten_file_tree(file_tree):
+            if not p.endswith(_CODE_EXTS):
+                continue
+            mod = self._module_of(p)
+            module_file_counts[mod] = module_file_counts.get(mod, 0) + 1
+
+        # Need a genuine multi-module repo to reason about locality.
+        if len(module_file_counts) < 2:
+            return set()
+        dominant_module = max(module_file_counts, key=lambda m: module_file_counts[m])
+
+        # Collect evidence file paths per framework from detected_via.
+        evidence: dict[str, set[str]] = {}
+        for stack in stacks:
+            for fw in stack.frameworks:
+                if fw.name not in candidate_frameworks:
+                    continue
+                paths = evidence.setdefault(fw.name, set())
+                for ev in fw.detected_via:
+                    if ev.startswith("manifest:"):
+                        continue
+                    m = self._EVIDENCE_PATH_RE.search(ev)
+                    if m:
+                        paths.add(m.group(1).strip())
+
+        localized: set[str] = set()
+        for fw_name in candidate_frameworks:
+            files = evidence.get(fw_name) or set()
+            if not files:
+                # No locatable evidence (manifest-only) → applies repo-wide.
+                continue
+            modules = {self._module_of(f) for f in files}
+            if dominant_module not in modules:
+                localized.add(fw_name)
+        return localized
 
     def _is_fullstack(self, stacks: Sequence[StackDetection]) -> bool:
         has_web = False

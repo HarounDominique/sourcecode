@@ -1,5 +1,65 @@
 # Changelog
 
+## [1.69.0] — 2026-06-30
+
+### Fixed — framing & symbol-graph fidelity on a non-framework Java library (JobRunr field test)
+
+A full architectural audit of **JobRunr** (Gradle multi-module, 707 classes, a
+background-job-processing **library** that is framework-agnostic at its core and
+integrates with Quarkus/Micronaut/Spring only through small optional adapter
+modules) surfaced four reproducible defects. Each fix targets the **root cause** so
+it generalizes to any equivalent repo, with new regression coverage across five
+suites.
+
+- **`migrate-check` MIG-011 — false positive on JDK-exported packages (BUG #1).**
+  The rule flagged *any* `sun.*` / `com.sun.*` import as a strongly-encapsulated
+  JDK internal on a pure prefix heuristic. On JobRunr this turned 14 benign
+  `com.sun.net.httpserver.*` imports into 14 `high`/`manual_migration` findings —
+  **100% of an inflated `blocking_count: 14`** on a healthy repo (the GO/NO-GO
+  metric). `com.sun.net.httpserver` is exported **unconditionally** by the
+  `jdk.httpserver` module (public since Java 6, basis of JEP 408) and needs no
+  `--add-exports`/`--add-opens`. MIG-011 now consults an allowlist of
+  unconditionally-exported JDK packages **generated from the running JDK** by
+  `scripts/generate_jdk_exports.py` (`src/sourcecode/jdk_exports.py`), never
+  hand-maintained. Genuinely-internal packages (`sun.misc.Unsafe`,
+  `com.sun.tools.*`, `com.sun.jdi.*`, `com.sun.source.*`) stay `high`.
+  `blocking_count` and `estimated_effort_days` recompute accordingly. JobRunr
+  `blocking_count` 14 → 0.
+- **Phantom symbols extracted from prose (BUG #2).** `modernize`'s
+  `statically_unreferenced` / `framework_dispatched` lists (and the shared symbol
+  graph behind `repo-ir` / `impact` / `export --c4`) contained FQNs that match no
+  real type — e.g. `org.jobrunr.configuration.provides` (from the Javadoc "This
+  class **provides** the entry point") and `…details.instead` (from an exception
+  string "…**instead** of an actual implementation"). The non-annotated fast-path
+  symbol scan ran `(?:class|interface|enum)\s+(\w+)` over **raw source**, tokenizing
+  words inside comments and string literals. It now strips comments + string
+  literals first and requires a capitalized type name, matching the precision of the
+  annotated-file extractor. Fixing the shared parser fixes every downstream command.
+- **`endpoints` — total false negative on imperative router DSLs (BUG #3).** JobRunr
+  exposes 12 live dashboard REST routes via `get("/jobs", handler)` /
+  `post(...)` / `delete(...)` calls; the annotation-only extractor returned **0
+  endpoints** (silently disabling `validation` downstream). A shape-based detector
+  now recognizes router-DSL registrations — an HTTP-verb method whose first argument
+  is a path literal **and** that has a second argument (the trailing comma
+  distinguishes a route from a 1-arg `Map.get`). Reported at `confidence: medium`
+  with `source: router_dsl`. Handles bare (Spark/static-import) and `app.get(...)`
+  (Javalin) forms. JobRunr `endpoints` 0 → 12.
+- **Stack/architecture classification biased to the most-recognizable framework (BUG #4).**
+  JobRunr (19 modules, framework only in 3 small adapters, `core` ≈ 85% of code) was
+  reported as `project_type: "api"` / `frameworks: ["Quarkus"]`. Two root causes:
+  (a) the Gradle detector substring-matched `"quarkus"` inside an **exclusion filter**
+  (`configure(subprojects.findAll { !it.name.contains('quarkus') })`) — framework
+  tokens are now matched only inside genuine dependency/plugin lines; and (b)
+  presence-based typing — a framework confined to a minority adapter module (its
+  dominant source module uses no framework) no longer drives the project type, and a
+  multi-module JVM repo with no defining web/API framework classifies as `library`,
+  never `unknown`. A monolithic framework app is unaffected. `explain` no longer
+  emits the misleading "No stereotype detected — may be a plain class or utility" for
+  a structurally central non-annotated class: it infers a low-confidence stereotype
+  from in-degree, lifecycle methods, and naming (e.g. `BackgroundJobServer` →
+  "Likely server/orchestrator … lifecycle methods detected (start/stop)"). JobRunr
+  `project_type` "api" → "library", `frameworks` `["Quarkus"]` → `[]`.
+
 ## [1.68.0] — 2026-06-30
 
 ### Fixed — narrative/structured-data parity on non-Spring DI repos (Netflix Eureka field test)

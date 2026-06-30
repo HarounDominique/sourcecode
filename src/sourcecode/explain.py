@@ -223,7 +223,89 @@ def _build_purpose(
         if role_anns:
             desc = f"{role_anns[0]} bean"
 
-    return desc or "No stereotype detected — may be a plain class or utility."
+    if desc:
+        return desc
+
+    # BUG #4 (JobRunr field test): with no recognized framework annotation, the old
+    # fallback returned "No stereotype detected — may be a plain class or utility",
+    # which is actively misleading for a central domain class. Libraries and clean/
+    # hexagonal architectures model rich roles WITHOUT DI annotations. Infer a
+    # low-confidence structural role from signals the tool already computes:
+    # in-degree (coupling), lifecycle methods, and naming convention.
+    structural = _structural_purpose(class_fqn, raw_nodes, cir)
+    if structural:
+        return structural
+    return "No stereotype detected — may be a plain class or utility."
+
+
+# Lifecycle method names that signal an orchestrator/component managing state.
+_LIFECYCLE_METHODS = frozenset({
+    "start", "stop", "init", "initialize", "shutdown", "close",
+    "pause", "resume", "run", "destroy", "open", "restart",
+})
+
+# Class-name suffix → inferred role (no annotation required).
+_NAME_ROLE_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("Server", "server/orchestrator"),
+    ("Manager", "manager/coordinator"),
+    ("Controller", "controller"),
+    ("Service", "service"),
+    ("Repository", "repository/data access"),
+    ("Factory", "factory"),
+    ("Builder", "builder"),
+    ("Handler", "handler"),
+    ("Listener", "listener"),
+    ("Provider", "provider"),
+    ("Registry", "registry"),
+    ("Scheduler", "scheduler"),
+    ("Dispatcher", "dispatcher"),
+    ("Processor", "processor"),
+    ("Filter", "filter"),
+    ("Interceptor", "interceptor"),
+)
+
+
+def _structural_purpose(
+    class_fqn: str,
+    raw_nodes: list[dict],
+    cir: "CanonicalRepositoryIR",
+) -> str:
+    """Infer a low-confidence stereotype from structural signals (no annotations)."""
+    try:
+        in_degree = len(_build_callers(class_fqn, cir))
+    except Exception:
+        in_degree = 0
+
+    try:
+        method_names = {m.split("(")[0].lower() for m in _build_public_methods(class_fqn, raw_nodes)}
+    except Exception:
+        method_names = set()
+    lifecycle = sorted(method_names & _LIFECYCLE_METHODS)
+
+    simple = _simple(class_fqn)
+    role = ""
+    for suffix, label in _NAME_ROLE_SUFFIXES:
+        if simple.endswith(suffix):
+            role = label
+            break
+    if not role and lifecycle:
+        role = "orchestrator/lifecycle component"
+
+    # Require at least one real signal — otherwise stay honestly silent.
+    if not role and in_degree < 3:
+        return ""
+
+    head = f"Likely {role} (no DI annotations found)" if role else \
+        "Likely a structurally significant class (no DI annotations found)"
+    signals: list[str] = []
+    if in_degree >= 3:
+        signals.append(f"high in-degree ({in_degree})")
+    elif in_degree:
+        signals.append(f"in-degree {in_degree}")
+    if lifecycle:
+        signals.append(f"lifecycle methods detected ({'/'.join(lifecycle)})")
+    suffix = f" — {', '.join(signals)}" if signals else ""
+    return f"{head}{suffix} — inferred from structure, not annotations (low confidence)."
 
 
 def _build_public_methods(class_fqn: str, raw_nodes: list[dict]) -> list[str]:

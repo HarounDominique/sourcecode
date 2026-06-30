@@ -3561,3 +3561,106 @@ class TestDiFrameworkLabel:
     def test_unidentifiable_degrades_to_generic(self) -> None:
         callers = ["com.netflix.discovery.DiscoveryClient"]
         assert _detect_di_framework_label(callers) == "Spring/CDI/Guice"
+
+
+# ── v1.69.0 regression: BUG #2 phantom symbols from prose (JobRunr field test) ─
+# Words inside Javadoc/comments and string literals must never become symbols.
+
+class TestNoPhantomSymbolsFromProse:
+    def _build(self, tmp_path, name, body):
+        f = tmp_path / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(body, encoding="utf-8")
+        rel = str(f.relative_to(tmp_path)).replace("\\", "/")
+        return build_repo_ir([rel], tmp_path)
+
+    def test_javadoc_words_not_symbols(self, tmp_path):
+        # Non-annotated class → fast-path minimal-symbol scan. Javadoc prose
+        # "This class provides..." previously produced a phantom `.provides` node.
+        body = (
+            "package org.demo.cfg;\n\n"
+            "/**\n"
+            " * This class provides the entry point. It also allows starting things\n"
+            " * instead of doing them manually, or so the docs say.\n"
+            " */\n"
+            "public class JobRunr {\n"
+            "  public void go() {}\n"
+            "}\n"
+        )
+        ir = self._build(tmp_path, "org/demo/cfg/JobRunr.java", body)
+        fqns = {n["fqn"] for n in (ir.get("graph") or {}).get("nodes") or []}
+        assert "org.demo.cfg.JobRunr" in fqns
+        for phantom in ("provides", "allows", "instead", "or"):
+            assert f"org.demo.cfg.{phantom}" not in fqns, phantom
+
+    def test_string_literal_words_not_symbols(self, tmp_path):
+        body = (
+            "package org.demo.jobs;\n\n"
+            "public class Converter {\n"
+            "  public void check(Object value) {\n"
+            "    throw new IllegalArgumentException(\n"
+            '        "Please make sure your functional interface is Serializable '
+            'or use the interface instead.\");\n'
+            "  }\n"
+            "}\n"
+        )
+        ir = self._build(tmp_path, "org/demo/jobs/Converter.java", body)
+        fqns = {n["fqn"] for n in (ir.get("graph") or {}).get("nodes") or []}
+        assert "org.demo.jobs.Converter" in fqns
+        for phantom in ("is", "or", "instead", "interface"):
+            assert f"org.demo.jobs.{phantom}" not in fqns, phantom
+
+
+# ── v1.69.0 regression: BUG #3 imperative router-DSL endpoints (JobRunr) ──────
+
+class TestRouterDslEndpoints:
+    def _write(self, tmp_path, rel, body):
+        f = tmp_path / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(body, encoding="utf-8")
+
+    def test_dsl_routes_detected(self, tmp_path):
+        from sourcecode.repository_ir import extract_java_endpoints
+        self._write(tmp_path, "src/main/java/demo/Api.java",
+            "package demo;\n"
+            "public class Api extends RestHttpHandler {\n"
+            "  void routes() {\n"
+            "    get(\"/foo\", handleFoo());\n"
+            "    post(\"/bar/:id\", handleBar());\n"
+            "    delete(\"/baz/:id\", handleBaz());\n"
+            "  }\n"
+            "}\n")
+        result = extract_java_endpoints(tmp_path)
+        by = {(e["method"], e["path"]) for e in result["endpoints"]}
+        assert ("GET", "/foo") in by
+        assert ("POST", "/bar/:id") in by
+        assert ("DELETE", "/baz/:id") in by
+        # DSL-sourced routes carry medium confidence + provenance.
+        dsl = [e for e in result["endpoints"] if e.get("source") == "router_dsl"]
+        assert dsl and all(e.get("confidence") == "medium" for e in dsl)
+
+    def test_no_false_positive_on_map_get(self, tmp_path):
+        # Map.get("/key") is a single-arg getter, not a route (no trailing comma).
+        from sourcecode.repository_ir import extract_java_endpoints
+        self._write(tmp_path, "src/main/java/demo/Plain.java",
+            "package demo;\n"
+            "public class Plain {\n"
+            "  Object load(java.util.Map m) { return m.get(\"/notroute\"); }\n"
+            "}\n")
+        result = extract_java_endpoints(tmp_path)
+        assert not [e for e in result["endpoints"] if e.get("source") == "router_dsl"]
+
+    def test_commented_routes_ignored(self, tmp_path):
+        from sourcecode.repository_ir import extract_java_endpoints
+        self._write(tmp_path, "src/main/java/demo/C.java",
+            "package demo;\n"
+            "public class C extends RestHttpHandler {\n"
+            "  void routes() {\n"
+            "    // get(\"/commented\", x());\n"
+            "    get(\"/live\", handle());\n"
+            "  }\n"
+            "}\n")
+        result = extract_java_endpoints(tmp_path)
+        paths = {e["path"] for e in result["endpoints"] if e.get("source") == "router_dsl"}
+        assert "/live" in paths
+        assert "/commented" not in paths

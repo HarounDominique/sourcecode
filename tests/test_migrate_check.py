@@ -528,10 +528,16 @@ class TestJava9StrongEncapsulation:
         findings = _scan_file(source, "Svc.java", _ALL_RULES)
         assert any(f.rule_id == "MIG-011" for f in findings)
 
-    def test_detects_com_sun_net_import(self) -> None:
+    def test_com_sun_net_httpserver_not_flagged(self) -> None:
+        # v1.69.0 (BUG #1): com.sun.net.httpserver is exported UNCONDITIONALLY by
+        # the jdk.httpserver module — public since Java 6, basis of JEP 408. It needs
+        # no --add-exports/--add-opens and must NOT trip MIG-011. A genuinely-internal
+        # com.sun.* package (e.g. com.sun.tools.*) still does.
         source = "import com.sun.net.httpserver.HttpServer;\n"
         findings = _scan_file(source, "Svc.java", _ALL_RULES)
-        assert any(f.rule_id == "MIG-011" for f in findings)
+        assert not any(f.rule_id == "MIG-011" for f in findings)
+        internal = _scan_file("import com.sun.tools.javac.Main;\n", "Svc.java", _ALL_RULES)
+        assert any(f.rule_id == "MIG-011" for f in internal)
 
     def test_mig011_fixture(self) -> None:
         report = run_migrate_check(["InternalApiService.java"], FIXTURES)
@@ -1585,3 +1591,85 @@ class TestNonSpringNarrative:
         # ...but no explanation may assert a Spring Boot context the repo lacks.
         for f in report.findings:
             assert "Spring Boot" not in (f.explanation or ""), f.rule_id
+
+
+# ── v1.69.0 regression: BUG #1 MIG-011 JDK-exported-package false positive ────
+# (JobRunr field test) — com.sun.net.httpserver et al. are exported unconditionally
+# by the JDK and must NOT be flagged as strongly-encapsulated internals.
+
+class TestMig011JdkUnconditionalExports:
+    """MIG-011 must allowlist sun.*/com.sun.* packages the JDK exports unconditionally."""
+
+    def test_httpserver_not_flagged(self) -> None:
+        src = (
+            "package demo;\n"
+            "import com.sun.net.httpserver.HttpServer;\n"
+            "import com.sun.net.httpserver.HttpExchange;\n"
+            "import com.sun.net.httpserver.HttpHandler;\n"
+            "public class Server {}\n"
+        )
+        findings = _scan_file(src, "src/main/java/demo/Server.java", _ALL_RULES)
+        assert not any(f.rule_id == "MIG-011" for f in findings), \
+            "com.sun.net.httpserver is exported unconditionally — must not trip MIG-011"
+
+    def test_management_package_not_flagged(self) -> None:
+        src = (
+            "package demo;\n"
+            "import com.sun.management.OperatingSystemMXBean;\n"
+            "public class Mx {}\n"
+        )
+        findings = _scan_file(src, "src/main/java/demo/Mx.java", _ALL_RULES)
+        assert not any(f.rule_id == "MIG-011" for f in findings)
+
+    def test_genuine_internals_still_high(self) -> None:
+        # sun.misc, com.sun.tools.*, com.sun.jdi.* are genuinely encapsulated.
+        src = (
+            "package demo;\n"
+            "import sun.misc.Unsafe;\n"
+            "import com.sun.tools.javac.Main;\n"
+            "import com.sun.jdi.VirtualMachine;\n"
+            "public class Internal {}\n"
+        )
+        findings = _scan_file(src, "src/main/java/demo/Internal.java", _ALL_RULES)
+        mig011 = [f for f in findings if f.rule_id == "MIG-011"]
+        assert mig011 and mig011[0].severity == "high"
+        imports = mig011[0].imports_found
+        assert any("sun.misc.Unsafe" in i for i in imports)
+        assert any("com.sun.tools.javac" in i for i in imports)
+        assert any("com.sun.jdi" in i for i in imports)
+        # com.sun.management must NOT appear even when mixed with internals.
+        assert not any("com.sun.management" in i for i in imports)
+
+    def test_blocking_count_not_inflated(self, tmp_path) -> None:
+        src = tmp_path / "src" / "main" / "java" / "demo"
+        src.mkdir(parents=True)
+        (src / "Server.java").write_text(
+            "package demo;\n"
+            "import com.sun.net.httpserver.HttpServer;\n"
+            "import com.sun.net.httpserver.HttpHandler;\n"
+            "public class Server {}\n",
+            encoding="utf-8",
+        )
+        report = run_migrate_check(["src/main/java/demo/Server.java"], tmp_path)
+        assert not any(f.rule_id == "MIG-011" for f in report.findings)
+        assert report.blocking_count == 0
+
+
+class TestJdkExportsAllowlist:
+    """The allowlist must include known public packages and exclude internals."""
+
+    def test_allowlist_contents(self) -> None:
+        from sourcecode.jdk_exports import JDK_UNCONDITIONAL_EXPORTS
+        assert "com.sun.net.httpserver" in JDK_UNCONDITIONAL_EXPORTS
+        assert "com.sun.management" in JDK_UNCONDITIONAL_EXPORTS
+        # genuinely-internal packages must be absent
+        assert "sun.misc" not in JDK_UNCONDITIONAL_EXPORTS
+        assert "com.sun.tools.javac" not in JDK_UNCONDITIONAL_EXPORTS
+        assert "com.sun.jdi" not in JDK_UNCONDITIONAL_EXPORTS
+
+    def test_import_package_extraction(self) -> None:
+        from sourcecode.migrate_check import _import_package
+        assert _import_package("com.sun.net.httpserver.HttpServer") == "com.sun.net.httpserver"
+        assert _import_package("com.sun.net.httpserver.*") == "com.sun.net.httpserver"
+        # a sub-package must not be confused with its exported parent
+        assert _import_package("com.sun.management.internal.Foo") == "com.sun.management.internal"
