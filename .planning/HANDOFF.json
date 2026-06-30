@@ -1,35 +1,36 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-19T14:08:58+0200",
+  "timestamp": "2026-06-30T18:41:02Z",
   "phase": null,
-  "phase_name": "ad-hoc product + landing work (post-milestone v1.53)",
+  "phase_name": "ad-hoc field-test fix — framing accuracy on non-Spring repos (v1.67.0)",
   "phase_dir": null,
   "context": "default",
+  "plan": null,
+  "task": null,
+  "total_tasks": 7,
   "status": "paused",
   "completed_tasks": [
-    {"id": 1, "name": "v1.54.0 C4 module-root rollup (export --c4 module_roots)", "status": "done", "commit": "earlier", "pushed": true},
-    {"id": 2, "name": "v1.55.0 security hardening (license-file perms, endpoint validation, grep -F)", "status": "done", "commit": "a97db33", "pushed": true},
-    {"id": 3, "name": "v1.56.0 CH-007 external-interface DI caller recovery", "status": "done", "commit": "990142e", "pushed": true},
-    {"id": 4, "name": "v1.57.0 TEMPORARY Pro unlock (_PRO_UNLOCK_ALL floors is_pro)", "status": "done", "commit": "9560796", "pushed": false},
-    {"id": 5, "name": "landing: pricing temp-free banner + version 1.57.0 + current commands + meta/og/hero", "status": "done", "commit": "94f7c76 (sourcecode-landing repo)", "pushed": false},
-    {"id": 6, "name": "landing: #output showcase — 3 moat panels (migrate-check / spring-audit / export --c4) from real Broadleaf runs", "status": "done", "commit": "2973953 (sourcecode-landing repo)", "pushed": false}
+    {"id": 1, "name": "spring-test no longer implies runtime Spring (spring_present vs spring_test_only)", "status": "done", "commit": "53dde5a"},
+    {"id": 2, "name": "phantom boot3 0/100 removed (N/A without runtime Spring)", "status": "done", "commit": "53dde5a"},
+    {"id": 3, "name": "applicability gating + readiness_score null when no migration target", "status": "done", "commit": "53dde5a"},
+    {"id": 4, "name": "modernize: dead zones -> statically_unreferenced + framework_dispatched", "status": "done", "commit": "53dde5a"},
+    {"id": 5, "name": "gradle deps string-aware comment stripper (0 -> 59 deps) + gap report", "status": "done", "commit": "53dde5a"},
+    {"id": 6, "name": "vendored web libs excluded from code notes (is_vendor_path)", "status": "done", "commit": "53dde5a"},
+    {"id": 7, "name": "web_mvc project label vendor-neutral", "status": "done", "commit": "53dde5a"}
   ],
   "remaining_tasks": [
-    {"id": 7, "name": "PUSH both repos (atlas-cli 9560796; sourcecode-landing 2973953)", "status": "not_started", "note": "user pushes manually — established pattern"},
-    {"id": 8, "name": "Strategy priority #3 — public reproducible migrate-check proof", "status": "not_started"},
-    {"id": 9, "name": "Strategy priority #4 — multi-repo regression corpus", "status": "not_started"},
-    {"id": 10, "name": "Optional: model setter/XML-injection edges (Broadleaf RedirectStrategy field+setter not recoverable by CH-007)", "status": "not_started"}
+    {"id": 8, "name": "(optional) Jersey/Governator framework detection (eureka project_type=unknown)", "status": "not_started"},
+    {"id": 9, "name": "(optional) migration-only blocker count (blocking_count includes excluded jdk highs)", "status": "not_started"}
   ],
   "blockers": [],
-  "human_actions_pending": [
-    {"action": "git push in atlas-cli (HEAD 9560796) and sourcecode-landing (HEAD 2973953)", "context": "user pushes manually each session; commits ready", "blocking": false}
-  ],
+  "human_actions_pending": [],
   "decisions": [
-    {"decision": "Pro paywall disabled via reversible flag _PRO_UNLOCK_ALL (env SOURCECODE_PRO_UNLOCK), NOT by deleting gate logic", "rationale": "early-adoption: maximize adoption now, resume paywall later with a 1-line flip", "phase": null},
-    {"decision": "Landing pricing reframed as 'temporarily no payment / fully open', not as a Free tier", "rationale": "explicit user instruction — indicate payment is temporarily off, keep the future paid model visible", "phase": null},
-    {"decision": "Output showcase = 3 NEW moat commands (migrate-check, spring-audit, export --c4), complementing the hero's existing impact panel", "rationale": "broaden demonstrated value beyond blast-radius; all numbers are real Broadleaf runs (evidence-over-claims brand principle)", "phase": null}
+    {"decision": "degrade to N/A, never a manufactured 0 or 100", "rationale": "credibility on arbitrary repos; absence of evidence != false certainty", "phase": null},
+    {"decision": "jakarta applicable = migratable javax.* OR jakarta.* namespace adopted", "rationale": "distinguish already-migrated Jakarta repo (100) from never-JavaEE repo (N/A); keeps Keycloak golden at 100", "phase": null},
+    {"decision": "spring-test treated as test artifact regardless of declared scope", "rationale": "OFBiz declares spring-test under legacy compile block", "phase": null},
+    {"decision": "dead-zone detector reframed to statically_unreferenced + config-name scan", "rationale": "static call-graph cannot see framework dispatch (reflection/XML/SPI)", "phase": null}
   ],
   "uncommitted_files": [],
-  "next_action": "If continuing: push both repos, or start strategy priority #3 (public reproducible migrate-check proof). Nothing is blocked.",
-  "context_notes": "All code/landing work committed in both repos; trees clean. Memory project_pro_unlock_temporary.md records the unlock state. Run tests with /opt/homebrew/bin/python3 (system python; .venv SIGKILLs 137). CLI invocation: PYTHONPATH=src /opt/homebrew/bin/python3 run_cli.py <cmd> (python -m sourcecode.cli produces no output). 2728 tests pass."
+  "next_action": "Nothing pending — v1.67.0 shipped (53dde5a) and pushed to master. If resuming for new work, start fresh.",
+  "context_notes": "Task complete and pushed. Working tree clean. Validated on 10 repos at /Users/user/Documents/workspace/testing (no regressions, zero false-Spring). Pre-existing unrelated failure: test_file_chunker TestRealLargeFile (external file 6476 lines vs hardcoded >=7500) — deselect, not a regression. Use system python /opt/homebrew/bin/python3."
 }
