@@ -166,3 +166,48 @@ def test_atlas_cli_structure_detects_layered() -> None:
     assert "detectors" in domain_names, (
         "src/sourcecode/detectors/ should be its own domain, not merged into 'sourcecode'"
     )
+
+
+# ── v1.69.0 regression: BUG #4 phantom MVC on a library (JobRunr field test) ──
+
+def test_no_mvc_without_view_layer() -> None:
+    # controller-ish + model dirs but NO view layer is NOT MVC (it's layered/other).
+    sm = _sm_with_paths(
+        "dashboard/server/http/handlers/JobHandler.java",
+        "dashboard/server/http/handlers/ServerHandler.java",
+        "dashboard/ui/model/JobModel.java",
+        "dashboard/ui/model/ServerModel.java",
+        "storage/StorageProvider.java",
+        "storage/sql/SqlStorage.java",
+    )
+    analysis = ArchitectureAnalyzer().analyze(ROOT, sm)
+    assert analysis.pattern != "mvc", analysis.pattern
+
+
+def test_bundled_frontend_under_resources_not_a_view_layer() -> None:
+    # A React SPA bundled under src/main/resources/.../frontend must not create an
+    # MVC "view" layer for a Java backend (JobRunr dashboard).
+    sm = _sm_with_paths(
+        "core/src/main/java/org/jr/dashboard/server/http/handlers/H.java",
+        "core/src/main/java/org/jr/dashboard/server/http/handlers/H2.java",
+        "core/src/main/java/org/jr/dashboard/ui/model/M.java",
+        "core/src/main/java/org/jr/dashboard/ui/model/M2.java",
+        "core/src/main/resources/org/jr/dashboard/frontend/src/components/App.tsx",
+        "core/src/main/resources/org/jr/dashboard/frontend/src/components/Job.tsx",
+    )
+    analysis = ArchitectureAnalyzer().analyze(ROOT, sm)
+    assert analysis.pattern != "mvc", analysis.pattern
+    layer_names = {l.name for l in analysis.layers}
+    assert "view" not in layer_names
+
+
+def test_real_mvc_with_template_views_still_detected() -> None:
+    # Control: a genuine MVC app whose views are .html templates is still MVC,
+    # even though templates are non-code files.
+    sm = _sm_with_paths(
+        "controllers/home.py", "controllers/users.py",
+        "models/user.py", "models/order.py",
+        "views/home.html", "views/user.html",
+    )
+    analysis = ArchitectureAnalyzer().analyze(ROOT, sm)
+    assert analysis.pattern == "mvc", analysis.pattern

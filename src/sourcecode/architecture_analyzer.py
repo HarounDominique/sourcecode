@@ -38,7 +38,15 @@ _CODE_EXTENSIONS = {
 }
 _GENERIC_NAMES = {"utils", "helpers", "common", "shared", "misc", "core", "root", ""}
 
-_TEST_DIRS: frozenset[str] = frozenset({"tests", "test", "spec", "specs", "__tests__", "e2e"})
+_TEST_DIRS: frozenset[str] = frozenset({
+    "tests", "test", "spec", "specs", "__tests__", "e2e",
+    # Gradle/Maven test-fixture source roots are test code, not runtime architecture.
+    "testfixtures", "testfixture",
+})
+# Always-vendored asset trees — never a backend code layer at any depth.
+_ASSET_DIRS: frozenset[str] = frozenset({
+    "node_modules", "bower_components",
+})
 _BENCHMARK_DIRS: frozenset[str] = frozenset({
     "benchmark", "benchmarks", "bench",
     "example", "examples",
@@ -50,7 +58,7 @@ _BENCHMARK_DIRS: frozenset[str] = frozenset({
 _DOCS_DIRS: frozenset[str] = frozenset({"docs", "doc", "documentation", "wiki"})
 _TOOLING_DIRS: frozenset[str] = frozenset({"scripts", "script", "tools", "tool", "ci"})
 # All dirs that are not part of the runtime source architecture
-_NON_SOURCE_DIRS: frozenset[str] = _TEST_DIRS | _BENCHMARK_DIRS | _DOCS_DIRS | _TOOLING_DIRS
+_NON_SOURCE_DIRS: frozenset[str] = _TEST_DIRS | _BENCHMARK_DIRS | _DOCS_DIRS | _TOOLING_DIRS | _ASSET_DIRS
 
 # Exact file stems that signal a specific architectural layer
 _LAYER_STEM_EXACT: dict[str, str] = {
@@ -150,6 +158,15 @@ LAYER_PATTERNS: dict[str, dict[str, list[str]]] = {
     },
 }
 
+# Layer keys a pattern MUST match to qualify, regardless of score. BUG (JobRunr
+# field test): "mvc" was inferred from a controller-ish dir (`handlers`) plus a
+# `model` dir, with NO view layer — that is not MVC (a library with no templates/
+# pages/components is at most layered). MVC's defining trait is the View, so require
+# it; without it the pattern falls through to layered / a weaker match.
+_PATTERN_REQUIRED_KEYS: dict[str, frozenset[str]] = {
+    "mvc": frozenset({"view"}),
+}
+
 # Higher value = wins when score ties
 _PATTERN_PRIORITY: dict[str, int] = {
     "cqrs":               8,
@@ -245,8 +262,12 @@ class ArchitectureAnalyzer:
         # Step 2: domain clustering
         domains = self._cluster_domains(filtered)
 
-        # Step 3: layer detection
-        pattern, layers = self._detect_layers(filtered)
+        # Step 3: layer detection. Feed the FULL path list (not the code-extension
+        # `filtered` set): a View layer is template files (.html/.jinja/.ejs…) that
+        # `filtered` would drop, hiding the very layer that distinguishes MVC.
+        # _detect_layers applies its own non-source/asset/test dir filtering, so
+        # bundled frontend trees and test fixtures are still excluded.
+        pattern, layers = self._detect_layers(sm.file_paths)
         if pattern in (None, "flat", "unknown"):
             if pattern == "flat":
                 limitations.append("Layer pattern not detected: project has a flat directory structure")
@@ -518,10 +539,18 @@ class ArchitectureAnalyzer:
         return domains
 
     def _detect_layers(self, paths: list[str]) -> tuple[str, list[ArchitectureLayer]]:
-        # Exclude non-source paths (tests, benchmarks, docs, tooling) from layer scoring
+        # Exclude non-source paths (tests, benchmarks, docs, tooling, vendored assets)
+        # from layer scoring. Also exclude anything under a `resources/` segment: in
+        # Maven/Gradle layouts `src/main/resources/**` is bundled config/assets — e.g.
+        # JobRunr ships a React dashboard SPA at
+        # `core/src/main/resources/org/jobrunr/dashboard/frontend/src/components`, whose
+        # `components` dir would otherwise be miscounted as a backend MVC "view" layer.
         source_paths = [
             p for p in paths
-            if not any(part.lower() in _NON_SOURCE_DIRS for part in p.replace("\\", "/").split("/"))
+            if not any(
+                part.lower() in _NON_SOURCE_DIRS or part.lower() == "resources"
+                for part in p.replace("\\", "/").split("/")
+            )
         ]
         if not source_paths:
             return "unknown", []
@@ -544,6 +573,10 @@ class ArchitectureAnalyzer:
                 matched_dirs = [d for d in dir_names if d in keywords]
                 if matched_dirs:
                     matched[layer_key] = matched_dirs
+            # A pattern with unmet required keys cannot qualify (e.g. mvc needs a view).
+            required = _PATTERN_REQUIRED_KEYS.get(pattern_name)
+            if required and not required.issubset(matched.keys()):
+                continue
             score = len(matched)
             priority = _PATTERN_PRIORITY.get(pattern_name, 0)
             if (score, priority) > (best_score, best_priority):

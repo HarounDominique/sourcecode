@@ -57,8 +57,16 @@ suites.
   emits the misleading "No stereotype detected — may be a plain class or utility" for
   a structurally central non-annotated class: it infers a low-confidence stereotype
   from in-degree, lifecycle methods, and naming (e.g. `BackgroundJobServer` →
-  "Likely server/orchestrator … lifecycle methods detected (start/stop)"). JobRunr
-  `project_type` "api" → "library", `frameworks` `["Quarkus"]` → `[]`.
+  "Likely server/orchestrator … lifecycle methods detected (start/stop)"). Finally
+  the `architecture_summary` no longer prints a phantom "MVC pattern with
+  controller, model, view layers" for a non-web library: MVC now requires a real
+  View layer (it was inferred from a `handlers` dir + a `model` dir with no view),
+  a bundled SPA under `src/main/resources/.../frontend` is no longer counted as a
+  backend view layer, `testFixtures` source roots are excluded, and View detection
+  recognizes template files (`.html`/etc.) that the code-extension filter dropped.
+  JobRunr `project_type` "api" → "library", `frameworks` `["Quarkus"]` → `[]`,
+  architecture "MVC … controller, model, view" → "Layered … controller, repository,
+  infrastructure".
 
 ## [1.68.0] — 2026-06-30
 
