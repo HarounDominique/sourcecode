@@ -306,9 +306,13 @@ class TestRunMigrateCheckFixture:
         assert "Migration Readiness:" in text
         assert "MIG-001" in text
 
-    def test_empty_repo_returns_perfect_score(self) -> None:
+    def test_empty_repo_returns_na_score(self) -> None:
+        # BUG #4: a repo with no scanned sources has NO migration target — no Spring,
+        # no migratable javax.*, no Hibernate 5. Readiness is N/A (None), never a
+        # manufactured 100. "Nothing to migrate" is not "100% migration-ready".
         report = run_migrate_check([], FIXTURES)
-        assert report.readiness_score == 100
+        assert report.readiness_score is None
+        assert report.readiness_aggregate["applicable"] is False
         assert report.findings == []
 
 
@@ -1526,14 +1530,16 @@ class TestDimensionalReadiness:
         findings += [self._f("MIG-014", "medium", "java_9_plus", f"R{i}.java")
                      for i in range(25)]
         report = MigrationReport(findings=findings).finalize()
-        # readiness_score = min(applicable migration dims) = min(jakarta 100, boot3 92).
-        # JDK debt is EXCLUDED from the aggregate entirely (orthogonal upkeep axis),
-        # so it cannot collapse the headline — only the real Boot3 blocker counts.
+        # readiness_score = min(applicable migration dims). With ZERO javax findings the
+        # jakarta namespace axis is N/A (BUG #3/#4 — no positive evidence of migratable
+        # javax.*), so the aggregate is driven by the one real Boot3 blocker alone.
+        # JDK debt is EXCLUDED from the aggregate entirely (orthogonal upkeep axis).
         assert report.readiness_score == 92
-        assert report.jakarta_readiness == 100        # namespace fully migrated
+        assert report.jakarta_readiness == 100        # scalar: nothing to migrate
+        assert report.applicable_dimensions["jakarta"]["applicable"] is False
         assert report.boot3_readiness == 92            # only the one high blocker
         assert report.jdk_modernization < 100          # debt visible in its own axis
-        assert report.readiness_aggregate["inputs"] == {"jakarta": 100, "boot3": 92}
+        assert report.readiness_aggregate["inputs"] == {"boot3": 92}
 
     def test_real_jakarta_blockers_still_floor(self) -> None:
         findings = [self._f("MIG-001", "critical", "jakarta", f"E{i}.java")

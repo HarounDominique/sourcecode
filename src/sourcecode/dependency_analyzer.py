@@ -1278,9 +1278,42 @@ class DependencyAnalyzer:
         return records, limitations
 
     def _strip_gradle_comments(self, content: str) -> str:
-        content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
-        content = re.sub(r"//[^\n]*", "", content)
-        return content
+        """Strip // and /* */ comments WITHOUT touching string literals.
+
+        A naive regex treats `/*` inside a string as a block-comment open. Gradle
+        build files routinely embed `/*` in Ant-style glob strings (e.g.
+        '**/*.java') and `//` in URL strings — a regex stripper then eats the entire
+        dependencies block up to the next literal `*/` (real defect on Apache OFBiz,
+        where ~100 deps vanished). This scanner skips quoted strings (single, double,
+        and triple-quoted, with backslash escapes) so only genuine comments are removed.
+        """
+        out: list[str] = []
+        i, n = 0, len(content)
+        quote: Optional[str] = None  # active string delimiter
+        while i < n:
+            if quote is not None:
+                # Inside a string literal — copy verbatim until the matching delimiter.
+                if len(quote) == 1 and content[i] == "\\" and i + 1 < n:
+                    out.append(content[i:i + 2]); i += 2; continue
+                if content.startswith(quote, i):
+                    out.append(quote); i += len(quote); quote = None; continue
+                out.append(content[i]); i += 1; continue
+            if content.startswith("//", i):
+                j = content.find("\n", i)
+                if j == -1:
+                    break
+                i = j; continue
+            if content.startswith("/*", i):
+                j = content.find("*/", i + 2)
+                if j == -1:
+                    break
+                i = j + 2; continue
+            for q in ('"""', "'''", '"', "'"):
+                if content.startswith(q, i):
+                    quote = q; out.append(q); i += len(q); break
+            else:
+                out.append(content[i]); i += 1
+        return "".join(out)
 
     def _analyze_gradle(self, root: Path) -> tuple[list[DependencyRecord], list[str]]:
         for filename in ("build.gradle", "build.gradle.kts"):
@@ -1307,7 +1340,20 @@ class DependencyAnalyzer:
                         except OSError:
                             pass
 
-                return self._dedupe(records), ["gradle: no compatible lockfile found; transitive dependencies unavailable"]
+                deduped = self._dedupe(records)
+                gradle_limitations = [
+                    "gradle: no compatible lockfile found; transitive dependencies unavailable"
+                ]
+                # Honest-zero guard: if the build file declares a dependencies block but
+                # nothing was resolved, report a GAP rather than a confident "0 deps".
+                if not deduped and re.search(r"\bdependencies\s*\{", content):
+                    jar_count = sum(1 for _ in root.glob("lib/**/*.jar"))
+                    gap = ("gradle: dependencies declared but none resolved by static "
+                           "parsing (non-standard declaration syntax)")
+                    if jar_count:
+                        gap += f"; {jar_count} jar(s) present under lib/ (not parsed)"
+                    gradle_limitations.append(gap)
+                return deduped, gradle_limitations
         return [], []
 
     def _parse_gradle_properties(self, root: Path, content: str) -> dict[str, str]:

@@ -798,7 +798,7 @@ depth: BFS depth for indirect caller traversal (1–8, default: 4).
 Analyzes codebase for modernization opportunities: dead zones, hotspot scores, upgrade candidates.
 
 Maps to: sourcecode modernize <repo_path>
-Returns: hotspot_candidates (high fan-in + git churn), dead_zone_candidates (isolated classes),
+Returns: hotspot_candidates (high fan-in + git churn), statically_unreferenced (zero-caller classes — NOT confirmed dead; verify no framework dispatch) + framework_dispatched,
          high_coupling_nodes, subsystem_summary, cross_module_tangles, recommendation.
 
 Best for: refactor planning, identifying where to start, finding safe removal candidates.
@@ -1403,7 +1403,7 @@ Spring Boot 2→3 migration readiness: javax→jakarta namespace blockers. JAVA 
 When to call: when asked about Spring Boot migration readiness, javax vs jakarta imports,
 or upgrading from Spring Boot 2.x to 3.x. Use BEFORE get_spring_audit when the goal
 is migration planning rather than ongoing Spring semantic audit.
-Do NOT call on non-Java repositories — returns readiness_score=100 with no findings.
+Do NOT call on non-Java repositories — returns readiness_score=null (N/A) with no findings.
 
 Rules detected:
   MIG-001 critical — javax.persistence imports (JPA; will not compile after migration)
@@ -1415,7 +1415,7 @@ Rules detected:
   MIG-007 medium   — javax.inject imports (DI annotations)
   MIG-008 medium   — javax.ws.rs imports (JAX-RS API)
 
-Returns: schema_version, readiness_score (0–100; 100=ready to migrate),
+Returns: schema_version, readiness_score (0–100, or null=N/A when no migration target applies; 100=ready to migrate),
   jakarta_readiness / boot3_readiness / jdk_modernization (per-dimension 0–100),
   blocking_count, estimated_effort_days, spring_boot_2_detected (true|false|null —
   null=undetermined, never assumed true), spring_boot_version_detected,

@@ -608,29 +608,79 @@ def _classify_code_context(finding: "MigrationFinding") -> str:
     return "main"
 
 
-# BUG #2: Spring presence signal. The Boot3 dimension only applies to repos that
-# actually use Spring — a Quarkus/Micronaut/Helidon/Jakarta-pure repo has no
-# Spring Boot 2→3 axis. Detected from build coordinates or framework imports.
-_SPRING_BUILD_RE: re.Pattern = re.compile(
-    r"org\.springframework(?:\.boot)?\b|spring-boot-starter", re.IGNORECASE
+# BUG #1/#2: Spring presence must be SCOPE- and ARTIFACT-aware. The Boot 2→3 axis
+# only applies to repos that use Spring AT RUNTIME — a Quarkus/Micronaut/Jakarta-pure
+# repo (or one like Apache OFBiz whose ONLY Spring coordinate is spring-test, a TEST
+# support library declared under a legacy `compile` block) has no Spring Boot axis.
+# We therefore split Spring usage into runtime vs test-only and NEVER let a test
+# artifact poison spring_present (which gates the boot3 readiness dimension).
+
+# Test-only Spring artifacts: their presence — even when declared in a compile/
+# implementation block — never implies Spring at runtime. The ARTIFACT itself is a
+# test library, regardless of the declared scope.
+_SPRING_TEST_ARTIFACT_RE: re.Pattern = re.compile(
+    r"\bspring-(?:test|boot-test(?:-autoconfigure)?|boot-starter-test|security-test)\b",
+    re.IGNORECASE,
 )
+# Any `spring-<artifact>` coordinate token (matches both Gradle `org.springframework:
+# spring-core:…` strings and Maven `<artifactId>spring-core</artifactId>` text).
+_SPRING_ARTIFACT_TOKEN_RE: re.Pattern = re.compile(
+    r"\bspring-[a-z][a-z0-9]*(?:-[a-z0-9]+)*\b", re.IGNORECASE
+)
+# Spring Boot Gradle plugin / BOM group — an unambiguous runtime signal.
+_SPRING_BOOT_PLUGIN_RE: re.Pattern = re.compile(
+    r"""(?:id\s*['"]\s*org\.springframework\.boot|"""
+    r"""org\.springframework\.boot\s*[:'"])""",
+    re.IGNORECASE,
+)
+# Import-side split: a Spring import in a TEST package (org.springframework.*.test
+# or org.springframework.test / .boot.test) is a test-only signal; any other
+# org.springframework import in MAIN sources is a runtime signal.
 _SPRING_IMPORT_RE: re.Pattern = re.compile(
-    r"^[ \t]*import\s+org\.springframework\.", re.MULTILINE
+    r"^[ \t]*import\s+(?:static\s+)?org\.springframework\.([\w.]+)", re.MULTILINE
 )
 
 
-def _detect_spring_present(root: Path, spring_import_seen: bool) -> bool:
-    """True when Spring is actually used (build coordinate or org.springframework import)."""
-    if spring_import_seen:
-        return True
+def _build_text_spring_signals(text: str) -> tuple[bool, bool]:
+    """(runtime, any_spring) for one build-file's text — artifact/scope aware.
+
+    A `spring-*` artifact token that is not a test library, or the Spring Boot
+    plugin/BOM group, counts as runtime. spring-test (and friends) alone count as
+    "spring present but test-only" — never runtime.
+    """
+    runtime = False
+    any_spring = False
+    if _SPRING_BOOT_PLUGIN_RE.search(text):
+        runtime = True
+        any_spring = True
+    for m in _SPRING_ARTIFACT_TOKEN_RE.finditer(text):
+        any_spring = True
+        if not _SPRING_TEST_ARTIFACT_RE.match(m.group(0)):
+            runtime = True
+    return runtime, any_spring
+
+
+def _detect_spring_usage(
+    root: Path, runtime_import_seen: bool, test_import_seen: bool
+) -> tuple[bool, bool]:
+    """Return (runtime_present, test_only).
+
+    runtime_present  — Spring is on the runtime/compile path (build coordinate or a
+                       MAIN-source org.springframework import that is not a test pkg).
+    test_only        — Spring appears ONLY as a test dependency (e.g. spring-test);
+                       the Boot 2→3 migration axis is N/A.
+    """
+    runtime = runtime_import_seen
+    any_spring = runtime_import_seen or test_import_seen
     for abs_path, _rel in _find_build_files(root):
         try:
             text = abs_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if _SPRING_BUILD_RE.search(text):
-            return True
-    return False
+        r, s = _build_text_spring_signals(text)
+        runtime = runtime or r
+        any_spring = any_spring or s
+    return runtime, (any_spring and not runtime)
 
 # G-1: cap on total readiness deduction from low-severity (advisory, non-blocking)
 # findings, so optional modernization cleanups cannot collapse the migration-readiness
@@ -1165,7 +1215,9 @@ class MigrationReport:
     repo_id: str = ""
     git_head: str = ""
 
-    readiness_score: int = 100
+    # Optional[int]: None == N/A (no applicable migration dimension), never a
+    # manufactured 100 on a repo with nothing to migrate.
+    readiness_score: Optional[int] = 100
     # Per-dimension readiness (0-100). javax→jakarta namespace, full Boot 2→3
     # migration, and orthogonal JDK modernization are scored independently so
     # JDK debt (java.util.Date, reflection) does not sink a jakarta-ready repo.
@@ -1192,8 +1244,16 @@ class MigrationReport:
     # None = could not determine. Absence of evidence is never reported as True.
     spring_boot_2_detected: Optional[bool] = None
     spring_boot_version_detected: Optional[str] = None
-    # BUG #2: whether Spring is used at all. The Boot3 dimension is N/A without it.
+    # BUG #2: whether Spring is used AT RUNTIME. The Boot3 dimension is N/A without it.
     spring_present: bool = True
+    # BUG #1/#2: Spring appears ONLY as a test dependency (e.g. spring-test). Reported
+    # so a consumer can see WHY boot3 is N/A despite an org.springframework coordinate.
+    spring_test_only: bool = False
+    # BUG #3/#4: the repo imports the jakarta.* namespace (already on Jakarta EE 9+).
+    # Evidence that the namespace axis is RELEVANT (and complete) — distinguishes an
+    # already-migrated Jakarta repo (jakarta applicable, 100) from a repo that was
+    # never Java EE at all (jakarta N/A).
+    jakarta_namespace_adopted: bool = False
     # BUG #6 / #8: findings that do NOT count toward blocking_count or readiness —
     # best-practice hygiene (java.util.Date…) and test/fixture/generated buckets,
     # surfaced separately so the headline reflects real product migration risk.
@@ -1261,6 +1321,16 @@ class MigrationReport:
         if not self.spring_present:
             self.boot3_readiness = 100
 
+        # BUG #3/#4: the jakarta dimension is applicable ONLY with POSITIVE evidence the
+        # namespace axis is relevant — either migratable javax.* code (a javax→jakarta
+        # finding, axis in-progress) OR the jakarta.* namespace already adopted (axis
+        # complete → 100). A repo with neither was never Java EE: jakarta is N/A, never a
+        # manufactured 100 folded into the headline.
+        _jakarta_applies = (
+            any(f.migration_target in _JAKARTA_TARGETS for f in main_findings)
+            or self.jakarta_namespace_adopted
+        )
+
         # ── BUG #2: Hibernate applicability — version-driven, never heuristic ────
         # The 5→6 axis is applicable ONLY when the repo is actually on Hibernate < 6.
         #   resolved < 6        → applicable (rewrite score is a measurement)
@@ -1316,14 +1386,22 @@ class MigrationReport:
         # cannot sink a framework-complete repo. N/A dimensions carry score=None and
         # never enter the aggregate.
         self.applicable_dimensions = {
-            "jakarta": {"applicable": True, "score": self.jakarta_readiness,
-                        "reason": "javax→jakarta namespace migration"},
+            "jakarta": {
+                "applicable": _jakarta_applies,
+                "score": self.jakarta_readiness if _jakarta_applies else None,
+                "reason": ("javax→jakarta namespace migration"
+                           if _jakarta_applies
+                           else "N/A — no migratable javax.* imports detected"),
+            },
             "boot3": {
                 "applicable": self.spring_present,
                 "score": self.boot3_readiness if self.spring_present else None,
                 "reason": ("Spring Boot 2→3 / Security 6 migration"
                            if self.spring_present
-                           else "N/A — no Spring usage detected (non-Spring stack)"),
+                           else ("N/A — Spring present only as a TEST dependency "
+                                 "(spring-test); no runtime Spring"
+                                 if self.spring_test_only
+                                 else "N/A — no Spring usage detected (non-Spring stack)")),
             },
             "jdk_modernization": {"applicable": True, "score": self.jdk_modernization,
                                   "reason": "orthogonal JDK modernization debt (excluded from "
@@ -1347,14 +1425,22 @@ class MigrationReport:
             for name in _MIGRATION_DIMENSIONS
             if self.applicable_dimensions[name]["applicable"]
         }
-        self.readiness_score = min(agg_inputs.values()) if agg_inputs else 100
+        # BUG #4: when NO migration dimension applies (non-Spring repo, no migratable
+        # javax.*, no Hibernate 5), readiness is N/A (None) — NOT a manufactured 100.
+        # Absence of a migration target is "not applicable", never "100% ready".
+        self.readiness_score = min(agg_inputs.values()) if agg_inputs else None
         self.readiness_aggregate = {
             "method": "min",
             "inputs": agg_inputs,
             "excluded": ["jdk_modernization"],
+            "applicable": bool(agg_inputs),
             "note": ("readiness_score = min over applicable migration dimensions "
                      "(jakarta / boot3 / hibernate). jdk_modernization is an orthogonal "
-                     "upkeep axis and is intentionally excluded."),
+                     "upkeep axis and is intentionally excluded."
+                     if agg_inputs else
+                     "N/A — no migration target detected (no migratable javax.*, no "
+                     "runtime Spring, no Hibernate 5). JDK-modernization findings, if "
+                     "any, are reported on their own axis."),
         }
         # Internal consistency guard — the headline cannot diverge from the dimensions
         # it claims to summarize (catches a future scorer change that breaks the model).
@@ -1431,6 +1517,7 @@ class MigrationReport:
             "hygiene_findings": self.hygiene_findings,
             "non_blocking": self.non_blocking,
             "spring_present": self.spring_present,
+            "spring_test_only": self.spring_test_only,
             "spring_boot_2_detected": self.spring_boot_2_detected,
             "spring_boot_version_detected": self.spring_boot_version_detected,
             "summary": self.summary,
@@ -1464,8 +1551,10 @@ class MigrationReport:
         main_high = sum(1 for f in self.findings
                         if f.code_context == "main" and f.severity == "high")
         nb = self.non_blocking.get("count", 0)
+        _headline = (f"{self.readiness_score}/100" if self.readiness_score is not None
+                     else "N/A (no migration target detected)")
         lines: list[str] = [
-            f"Migration Readiness: {self.readiness_score}/100",
+            f"Migration Readiness: {_headline}",
             f"  {_dim('jakarta')}  {_dim('boot3')}  "
             f"{_dim('jdk_modernization')}  {_dim('hibernate')}",
             *([f"  ⚠ Headline blocker: {self.headline_blocker} "
@@ -1643,7 +1732,12 @@ def run_migrate_check(
     limitations: list[str] = []
     read_errors = 0
     jakarta_import_count = 0
-    spring_import_seen = False
+    # BUG #1/#2: split Spring imports into runtime vs test. A test-tree file, or a
+    # test-only Spring package (org.springframework.test / .boot.test), is a
+    # test-only signal and must NOT mark the repo as runtime-Spring.
+    spring_runtime_import_seen = False
+    spring_test_import_seen = False
+    from sourcecode.path_filters import is_test_path as _is_test_path
 
     # ── Java source scan ────────────────────────────────────────────────────
     for rel_path in file_paths:
@@ -1656,8 +1750,14 @@ def run_migrate_check(
 
         # Jakarta EE 9+ namespace adoption signal (vetoes a false Boot-2 verdict).
         jakarta_import_count += len(_JAKARTA_IMPORT_RE.findall(source))
-        if not spring_import_seen and _SPRING_IMPORT_RE.search(source):
-            spring_import_seen = True
+        _in_test = _is_test_path(rel_path)
+        for _m in _SPRING_IMPORT_RE.finditer(source):
+            _sub = _m.group(1)
+            _is_test_pkg = _sub.startswith(("test.", "boot.test.")) or _sub in ("test", "boot.test")
+            if _in_test or _is_test_pkg:
+                spring_test_import_seen = True
+            else:
+                spring_runtime_import_seen = True
 
         file_findings = _scan_file(source, rel_path, _ALL_RULES)
         filtered = [f for f in file_findings if SEVERITY_ORDER.get(f.severity, 3) <= min_order]
@@ -1713,7 +1813,9 @@ def run_migrate_check(
     limitations.extend(_STATIC_LIMITATIONS)
 
     spring_boot_2, spring_boot_version = _detect_spring_boot(root, jakarta_import_count)
-    spring_present = _detect_spring_present(root, spring_import_seen)
+    spring_present, spring_test_only = _detect_spring_usage(
+        root, spring_runtime_import_seen, spring_test_import_seen
+    )
 
     # BUG #8: classify each finding's code context (main / test / generated) so the
     # report can keep test fixtures and autogenerated sources out of blocking_count.
@@ -1729,6 +1831,8 @@ def run_migrate_check(
         spring_boot_2_detected=spring_boot_2,
         spring_boot_version_detected=spring_boot_version,
         spring_present=spring_present,
+        spring_test_only=spring_test_only,
+        jakarta_namespace_adopted=jakarta_import_count > 0,
         findings=all_findings,
         hibernate=hibernate_strat,
         limitations=limitations,

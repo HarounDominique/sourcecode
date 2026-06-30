@@ -37,3 +37,5 @@ Thumbs.db
 
 # Supabase local temp
 supabase/.temp/
+# Internal agent playbook (not distributed)
+docs/PLAYBOOK_V2.md

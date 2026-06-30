@@ -774,7 +774,7 @@ def run_migrate_flow_impl(repo_path: str, min_severity: str = "low") -> dict[str
     if not _is_java_repo(repo_path):
         quality_warnings.append(
             "not_a_java_repo: migration analysis targets Spring Boot / Java repos. "
-            "Result will be empty (readiness_score=100, no findings)."
+            "Result will be empty (readiness_score=null/N/A, no findings)."
         )
 
     report = _exec(["migrate-check", repo_path, "--min-severity", min_severity])

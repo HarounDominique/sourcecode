@@ -154,5 +154,36 @@ def is_vendor_path(path: str) -> bool:
         for part in dir_parts:
             if part in _LIB_SEGMENTS:
                 return True
+        # Vendored web libraries shipped into a theme/webapp by file name, e.g.
+        # jquery-3.5.1.js, jquery-migrate-1.2.1.js, bootstrap.bundle.js. These carry
+        # third-party comments (jQuery's own "BUG:" notes) that must not be reported
+        # as the project's own code notes.
+        if _is_vendored_web_lib(filename) or any(part in _VENDOR_WEB_LIB_DIRS for part in dir_parts):
+            return True
 
+    return False
+
+
+# Stems of common vendored JS/CSS libraries. A web-asset file whose name starts with
+# one of these (optionally followed by a version/qualifier) is third-party, not the
+# project's own source — wherever it physically sits in the tree.
+_VENDOR_WEB_LIB_STEMS: tuple[str, ...] = (
+    "jquery", "bootstrap", "angular", "react", "vue", "svelte", "ember",
+    "lodash", "underscore", "moment", "d3", "three", "chart", "popper",
+    "modernizr", "select2", "datatables", "ckeditor", "tinymce", "fontawesome",
+    "font-awesome", "backbone", "knockout", "prototype", "scriptaculous",
+    "highcharts", "leaflet", "axios", "polyfill", "babel", "require", "requirejs",
+    "handlebars", "mustache", "dojo", "extjs", "swiper", "slick", "fullcalendar",
+)
+# Directory names that hold only vendored web assets.
+_VENDOR_WEB_LIB_DIRS: frozenset[str] = frozenset({"jquery", "bootstrap", "webjars"})
+
+
+def _is_vendored_web_lib(filename: str) -> bool:
+    base = filename.lower()
+    for stem in _VENDOR_WEB_LIB_STEMS:
+        s = stem.strip()
+        # match "jquery.js", "jquery-3.5.1.js", "jquery.min.js", "jquery-ui.js"
+        if base == f"{s}.js" or base == f"{s}.css" or base.startswith((f"{s}-", f"{s}.")):
+            return True
     return False

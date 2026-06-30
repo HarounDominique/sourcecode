@@ -517,7 +517,7 @@ def run_migrate_flow(repo_path: str = ".", min_severity: str = "low") -> dict:
     Primary high-value entry point for migration planning. Wraps migrate-check and
     lifts the headline numbers to the top level so the agent can plan a 2→3 upgrade
     without parsing the full report:
-      - readiness_score (0–100; 100 = ready), blocking_count, estimated_effort_days
+      - readiness_score (0–100, or null=N/A when no migration target applies; 100 = ready), blocking_count, estimated_effort_days
       - by_severity and by_target breakdown (jakarta / spring_security_6 / java_11)
 
     Use this instead of calling get_migration_readiness and interpreting it by hand.
@@ -788,10 +788,10 @@ def get_migration_readiness(repo_path: str = ".", min_severity: str = "low") -> 
     When to call: when asked about Spring Boot migration readiness, javax vs jakarta imports,
     or upgrading from Spring Boot 2.x to 3.x. Call this BEFORE get_spring_audit when
     the goal is migration planning — not ongoing audit.
-    Do NOT call on non-Java repositories — returns readiness_score=100 with no findings.
+    Do NOT call on non-Java repositories — returns readiness_score=null (N/A) with no findings.
 
     Maps to: sourcecode migrate-check <repo_path> --min-severity <min_severity>
-    Returns: MigrationReport with schema_version, readiness_score (0–100; 100=ready to migrate),
+    Returns: MigrationReport with schema_version, readiness_score (0–100, or null=N/A when no migration target applies; 100=ready to migrate),
              jakarta_readiness / boot3_readiness / jdk_modernization / hibernate_readiness
              (per-dimension 0–100), headline_blocker (e.g. "hibernate_rewrite" or null),
              hibernate (Hibernate 5→6 stratified model: 4-layer risk_matrix, rewrite_targets[]
@@ -1335,7 +1335,7 @@ def modernize_context(repo_path: str = ".", format: str = "json") -> dict:
     """Analyzes codebase for modernization opportunities: dead zones, hotspot scores, upgrade candidates.
 
     Maps to: sourcecode modernize <repo_path>
-    Returns: hotspot_candidates (high fan-in + git churn), dead_zone_candidates (isolated classes),
+    Returns: hotspot_candidates (high fan-in + git churn), statically_unreferenced (zero-caller classes — NOT confirmed dead; verify no framework dispatch) + framework_dispatched,
              high_coupling_nodes, subsystem_summary, cross_module_tangles, recommendation.
 
     Best for: refactor planning, identifying where to start, finding safe removal candidates.

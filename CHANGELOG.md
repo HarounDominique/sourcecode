@@ -1,5 +1,54 @@
 # Changelog
 
+## [1.67.0] — 2026-06-30
+
+### Fixed — framing accuracy on non-Spring repos (Apache OFBiz field test)
+
+A real audit of **Apache OFBiz** (release18.12, ~326k LOC, own framework + Service
+Engine + widgets, **no Spring**) exposed seven defects where the tool collapsed
+"absence of evidence" into high-confidence false framings — a less-critical LLM
+consumer would have emitted a FALSE report (recommending a non-existent migration).
+Guiding principle applied throughout: **degrade to N/A, never to a manufactured 0 or
+100; declare gaps instead of inventing certainty.** New golden fixture:
+`tests/test_ofbiz_framing_regression.py`.
+
+- **`spring-test` no longer implies runtime Spring (BUG #1/#2).** Spring presence is
+  now scope- and artifact-aware: a test support library (`spring-test`,
+  `spring-boot-*-test`, `spring-security-test`) — even declared under a legacy
+  `compile` block — and test-tree `org.springframework.test` imports are classified
+  `spring_test_only`, never runtime Spring. `migrate-check` reports `spring_present`
+  (runtime) vs `spring_test_only` separately.
+- **No phantom `boot3 0/100` dimension (BUG #3).** The Boot 2→3 axis is `applicable`
+  only with runtime Spring; otherwise it is N/A (`score: null`) and excluded from the
+  aggregate — it can no longer drag the readiness headline to 0.
+- **Applicability gating + N/A readiness (BUG #4).** `jakarta` is applicable only with
+  positive evidence (migratable `javax.*` imports, or the `jakarta.*` namespace already
+  adopted); a repo with no Spring, no migratable `javax.*`, and no Hibernate 5 now
+  reports `readiness_score: null` ("N/A — no migration target detected") instead of a
+  manufactured 100. A valid `javax.servlet` surface is kept and scored on the **Jakarta
+  EE / Tomcat 10** axis, not mislabeled "Spring Boot 3".
+- **`modernize` no longer reports framework-dispatched classes as dead code (BUG #5).**
+  Zero-static-caller classes are renamed `statically_unreferenced` (never a confident
+  "dead zone") and partitioned: classes with a dynamic-entry signature (OFBiz Service
+  Engine `Map<String,Object> name(DispatchContext, Map<…>)`, servlet/event handlers,
+  annotation-dispatched beans) or referenced from XML/SPI/properties config are listed
+  under `framework_dispatched` and excluded.
+- **Gradle dependency parsing fixed for glob strings (BUG #6).** A string-aware comment
+  stripper no longer treats `/*` inside an Ant-style glob (`'**/*.java'`) as a block
+  comment — which had silently eaten OFBiz's entire `dependencies {}` block (0 → 59
+  deps). When a `dependencies {}` block resolves to nothing, a GAP is reported instead
+  of a confident "0 dependencies".
+- **Vendored web assets excluded from code notes (BUG #7).** `is_vendor_path` now flags
+  vendored JS/CSS libraries by file name (`jquery-3.5.1.js`, `bootstrap.bundle.js`, …),
+  so third-party comments are no longer reported as the project's own notes.
+- **Vendor-neutral project-type label (BUG #1, `--compact`).** `web_mvc` (triggered by
+  server-side template engines such as FreeMarker/Thymeleaf) is labeled "Server-side
+  MVC web app", not "Spring MVC web app" — OFBiz now reads "Java server-side mvc web
+  app using FreeMarker" with no false Spring claim.
+
+No-regression: a genuine Spring Boot 2 repo keeps `boot3` applicable and a computed
+readiness; Keycloak/Petclinic golden fixtures still pass.
+
 ## [1.66.0] — 2026-06-30
 
 ### Fixed — Spring Petclinic (Boot 4.0.3 / Java 17) false positives + aggregate consistency

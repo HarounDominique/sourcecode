@@ -1500,7 +1500,10 @@ class TestEnterpriseWorkflows:
             data = json.loads(result.output)
             assert data.get("workflow") == "modernize"
             assert "hotspot_candidates" in data
-            assert "dead_zone_candidates" in data
+            # Defect 5: "dead zones" renamed to statically_unreferenced (never a
+            # confident dead-code claim) with a separate framework_dispatched bucket.
+            assert "statically_unreferenced" in data
+            assert "framework_dispatched" in data
             assert "subsystem_summary" in data
             assert "recommendation" in data
 

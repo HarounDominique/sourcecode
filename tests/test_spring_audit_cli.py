@@ -483,7 +483,10 @@ class TestGetMigrationReadinessMCP:
         assert _mcp_success(result)
         data = result["data"] if isinstance(result, dict) else json.loads(result.content[0].text)["data"]
         assert "readiness_score" in data
-        assert data["readiness_score"] == 100
+        # BUG #4: a non-Java repo has NO migration target → readiness is N/A (None),
+        # never a manufactured 100. The aggregate is explicitly not applicable.
+        assert data["readiness_score"] is None
+        assert data["readiness_aggregate"]["applicable"] is False
 
     def test_returns_schema_version(self, non_java_repo: Path):
         from sourcecode.mcp.server import get_migration_readiness

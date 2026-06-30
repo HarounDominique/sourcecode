@@ -296,7 +296,7 @@ class ProjectSummarizer:
     _TYPE_LABELS: dict[str, str] = {
         "cli": "CLI",
         "api": "API",
-        "web_mvc": "Spring MVC web app",
+        "web_mvc": "Server-side MVC web app",
         "webapp": "Web application",
         "library": "Library",
         "monorepo": "Monorepo",

@@ -4896,7 +4896,8 @@ def migrate_check_cmd(
         output, output_path, copy,
         success_msg=(
             f"Migration check written to {output_path} "
-            f"(score: {report.readiness_score}/100, {_total} findings)"
+            f"(score: {report.readiness_score if report.readiness_score is not None else 'N/A'}"
+            f"{'/100' if report.readiness_score is not None else ''}, {_total} findings)"
         ),
     )
 
@@ -5524,6 +5525,91 @@ def fix_bug_cmd(
     )
 
 
+# Method signatures that are almost always FRAMEWORK ENTRY POINTS, not dead code —
+# invoked by a dispatcher (reflection / XML / SPI), invisible to a static Java
+# call-graph. Generalizes beyond any one framework.
+_DYNAMIC_ENTRY_SIGNATURE_RE = __import__("re").compile(
+    r"\(\s*DispatchContext\b"                       # OFBiz Service Engine service
+    r"|HttpServletRequest\s+\w+\s*,\s*HttpServletResponse"  # OFBiz event / servlet handler
+    r"|@(?:Scheduled|PostConstruct|PreDestroy|EventListener|Bean|"
+    r"RequestMapping|GetMapping|PostMapping|Path|GET|POST|Provider|"
+    r"ApplicationScoped|Singleton)\b",              # annotation-dispatched entry
+)
+# Config file extensions where a framework wires classes by name (XML/props/yaml).
+_CONFIG_REF_EXTS: frozenset = frozenset({".xml", ".properties", ".yml", ".yaml", ".groovy"})
+_CONFIG_SCAN_MAX_FILES: int = 12000
+_CONFIG_SCAN_MAX_BYTES: int = 256 * 1024
+
+
+def _partition_static_unreferenced(nodes: list[dict], root: Path) -> tuple[list[dict], list[dict]]:
+    """Split zero-degree classes into (truly_unreferenced, framework_dispatched).
+
+    A class with no static callers is NOT necessarily dead: frameworks invoke
+    classes via reflection, XML/SPI config, or annotations that a static call-graph
+    cannot see (e.g. Apache OFBiz Service Engine services, JAX-RS resources,
+    ServiceLoader providers, scheduled beans). We exclude a candidate when EITHER:
+      1. its source declares a dynamic-entry method signature, OR
+      2. its simple name / FQN is referenced from a non-Java config file.
+    Whatever survives is reported as *statically_unreferenced* — never a confident
+    "dead zone".
+    """
+    import os
+    if not nodes:
+        return [], []
+    by_simple: dict[str, list[dict]] = {}
+    for n in nodes:
+        simple = (n.get("fqn") or "").rsplit(".", 1)[-1]
+        if simple:
+            by_simple.setdefault(simple, []).append(n)
+
+    dispatched_fqns: set[str] = set()
+
+    # 1. Source-signature allowlist (bounded — candidate set is small).
+    for n in nodes:
+        src = n.get("source_file")
+        if not src:
+            continue
+        try:
+            txt = (root / src).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _DYNAMIC_ENTRY_SIGNATURE_RE.search(txt):
+            dispatched_fqns.add(n["fqn"])
+
+    # 2. Config-reference scan — find candidate names wired from XML/props/yaml.
+    unresolved_simple = {s for s, ns in by_simple.items()
+                         if any(x["fqn"] not in dispatched_fqns for x in ns)}
+    if unresolved_simple:
+        files_scanned = 0
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in {".git", "build", "out", "target", "node_modules", ".gradle"}]
+            for fname in filenames:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in _CONFIG_REF_EXTS:
+                    continue
+                if files_scanned >= _CONFIG_SCAN_MAX_FILES or not unresolved_simple:
+                    break
+                fpath = os.path.join(dirpath, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
+                        text = fh.read(_CONFIG_SCAN_MAX_BYTES)
+                except OSError:
+                    continue
+                files_scanned += 1
+                for simple in list(unresolved_simple):
+                    if simple in text:
+                        for x in by_simple.get(simple, []):
+                            dispatched_fqns.add(x["fqn"])
+                        unresolved_simple.discard(simple)
+            if files_scanned >= _CONFIG_SCAN_MAX_FILES or not unresolved_simple:
+                break
+
+    unreferenced = [n for n in nodes if n["fqn"] not in dispatched_fqns]
+    dispatched = [n for n in nodes if n["fqn"] in dispatched_fqns]
+    return unreferenced, dispatched
+
+
 @app.command("modernize")
 def modernize_cmd(
     path: Path = typer.Argument(
@@ -5625,13 +5711,21 @@ def modernize_cmd(
         key=lambda n: (-n.get("in_degree", 0), n.get("fqn", "")),
     )[:20]
 
-    # Dead zones: symbols with zero in-degree AND zero out-degree (isolated)
-    dead_zones = sorted(
+    # Statically-unreferenced zones: classes with zero in-degree AND zero out-degree
+    # in the Java call-graph. These are NOT necessarily dead — framework dispatch
+    # (reflection / XML / SPI / annotations) is invisible to a static graph — so we
+    # partition out framework-dispatched entry points before reporting, and never
+    # call the survivors "dead". (Defect 5: OFBiz Service-Engine services and event
+    # handlers were false-positive "dead zones".)
+    _zero_degree = sorted(
         [n for n in graph_nodes
          if n.get("in_degree", 0) == 0 and n.get("out_degree", 0) == 0
          and n.get("type") in ("class", "interface")],
         key=lambda n: n.get("fqn", ""),
-    )[:20]
+    )
+    dead_zones, framework_dispatched = _partition_static_unreferenced(_zero_degree, root)
+    dead_zones = dead_zones[:20]
+    framework_dispatched = framework_dispatched[:20]
 
     # Hotspot candidates: high in-degree service/repository/controller nodes,
     # ranked by composite score (in_degree × 2 + git_churn) for volatility signal.
@@ -5680,7 +5774,8 @@ def modernize_cmd(
         "total_classes": len([n for n in graph_nodes if n.get("type") in ("class", "interface")]),
         "total_subsystems": len(subsystems),
         "high_coupling_nodes": len(coupling_nodes),
-        "dead_zone_candidates": len(dead_zones),
+        "statically_unreferenced": len(dead_zones),
+        "framework_dispatched": len(framework_dispatched),
     }
     _subsystem_summary = [
         {
@@ -5723,9 +5818,19 @@ def modernize_cmd(
                 {"fqn": n["fqn"], "in_degree": n.get("in_degree", 0), "role": n.get("role", "other")}
                 for n in coupling_nodes
             ],
-            "dead_zone_candidates": [
+            "statically_unreferenced": [
                 {"fqn": n["fqn"], "type": n.get("type", ""), "role": n.get("role", "other")}
                 for n in dead_zones
+            ],
+            "statically_unreferenced_note": (
+                "Zero static callers in the Java call-graph. NOT confirmed dead: verify "
+                "no framework dispatch (reflection, XML/SPI config, annotations) before "
+                "removing. Classes detected as framework-dispatched are listed separately "
+                "under framework_dispatched and excluded from this list."
+            ),
+            "framework_dispatched": [
+                {"fqn": n["fqn"], "type": n.get("type", ""), "role": n.get("role", "other")}
+                for n in framework_dispatched
             ],
             "subsystem_summary": _subsystem_summary,
             "cross_module_tangles": [
@@ -5742,7 +5847,8 @@ def modernize_cmd(
                     if hotspots else
                     "high_coupling_nodes shows the most-referenced classes — start there. "
                 )
-                + "Dead zones are safe to remove or refactor. "
+                + "statically_unreferenced lists classes with no Java callers — review "
+                + "for framework dispatch (XML/reflection/SPI) before removing. "
                 + "Cross-module tangles indicate coupling worth decomposing."
             ),
         }

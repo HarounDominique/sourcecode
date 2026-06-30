@@ -28,7 +28,11 @@ _STACK_LABELS: dict[str, str] = {
 
 _TYPE_LABELS: dict[str, str] = {
     "api": "REST API",
-    "web_mvc": "Spring MVC web app",
+    # Vendor-neutral: web_mvc is triggered by server-side template engines
+    # (Thymeleaf/FreeMarker), which are NOT exclusive to Spring (e.g. Apache OFBiz
+    # uses FreeMarker with its own framework). The detected frameworks list carries
+    # the actual stack; the type label must not assert "Spring".
+    "web_mvc": "Server-side MVC web app",
     "webapp": "Web app",
     "fullstack": "Full-stack app",
     "cli": "CLI tool",
