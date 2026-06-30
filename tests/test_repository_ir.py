@@ -11,6 +11,7 @@ from sourcecode.repository_ir import (
     _build_relations,
     _build_route_surface,
     _build_spring_summary,
+    _detect_di_framework_label,
     _detect_subsystems,
     _diff_intensity_cs,
     _diff_symbols,
@@ -3532,3 +3533,31 @@ class TestCH004GraphCompleteness:
             "com.example.web.WebCheckoutController",
             "com.example.web.AbstractCheckoutBase",
         ) in extends, f"annotation-free structural subclass pre-scan skipped: {extends!r}"
+
+
+# ── v1.68.0 regression: BUG #4 DI-framework label consistency (Eureka) ────────
+
+class TestDiFrameworkLabel:
+    """impact() must name the real DI framework from caller evidence, not guess."""
+
+    def test_guice_named_specifically(self) -> None:
+        callers = [
+            "com.netflix.discovery.guice.EurekaModule",
+            "com.netflix.discovery.guice.Jersey2EurekaModule",
+        ]
+        assert _detect_di_framework_label(callers) == "Guice"
+
+    def test_spring_named(self) -> None:
+        callers = ["org.springframework.web.MyController", "com.acme.svc.UserService"]
+        assert _detect_di_framework_label(callers) == "Spring"
+
+    def test_mixed_frameworks_joined(self) -> None:
+        callers = [
+            "com.x.guice.Module",
+            "org.springframework.boot.App",
+        ]
+        assert _detect_di_framework_label(callers) == "Guice/Spring"
+
+    def test_unidentifiable_degrades_to_generic(self) -> None:
+        callers = ["com.netflix.discovery.DiscoveryClient"]
+        assert _detect_di_framework_label(callers) == "Spring/CDI/Guice"

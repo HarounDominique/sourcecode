@@ -93,6 +93,102 @@ def test_import_lines_not_counted(tmp_path):
     assert out["count"] == 0, out
 
 
+# ── v1.68.0 regression: BUG #1 / BUG #2 (Netflix Eureka field test) ──────────
+
+_SMTP_LOG_FP = """\
+package com.netflix.discovery;
+public class DiscoveryClient {
+    public void start() {
+        try {
+            init();
+        } catch (Exception e) {
+            logger.warn("Transport initialization failure", e);
+        }
+    }
+}
+"""
+
+_REAL_JAVAMAIL = """\
+package com.x;
+import javax.mail.Transport;
+import javax.mail.internet.MimeMessage;
+public class Mailer {
+    public void send(MimeMessage msg) throws Exception {
+        Transport.send(msg);
+    }
+}
+"""
+
+_DNS_DIRCONTEXT = """\
+package com.netflix.discovery.endpoint;
+import javax.naming.directory.DirContext;
+import javax.naming.directory.InitialDirContext;
+public class DnsResolver {
+    private static final String DNS_NAMING_FACTORY = "com.sun.jndi.dns.DnsContextFactory";
+    public static DirContext getDirContext() throws Exception {
+        java.util.Hashtable<String, String> env = new java.util.Hashtable<>();
+        env.put("java.naming.factory.initial", DNS_NAMING_FACTORY);
+        return new InitialDirContext(env);
+    }
+}
+"""
+
+_UNKNOWN_DIRCONTEXT = """\
+package com.x;
+import javax.naming.directory.InitialDirContext;
+public class Resolver {
+    public Object lookup() throws Exception {
+        return new InitialDirContext(env);
+    }
+}
+"""
+
+
+def test_smtp_log_literal_not_detected(tmp_path):
+    # BUG #1: the word "Transport" inside a log string with NO JavaMail import must
+    # NOT be reported as an SMTP integration.
+    p = tmp_path / "DiscoveryClient.java"
+    p.write_text(_SMTP_LOG_FP, encoding="utf-8")
+    out = detect_integrations(["DiscoveryClient.java"], tmp_path)
+    smtp = [r for r in out["integrations"] if r["kind"] == "smtp"]
+    assert smtp == [], out
+
+
+def test_real_javamail_still_detected(tmp_path):
+    # The gate must not suppress genuine JavaMail usage.
+    p = tmp_path / "Mailer.java"
+    p.write_text(_REAL_JAVAMAIL, encoding="utf-8")
+    out = detect_integrations(["Mailer.java"], tmp_path)
+    smtp = [r for r in out["integrations"] if r["kind"] == "smtp"]
+    assert smtp, out
+    assert all(r["client"] == "javamail" for r in smtp)
+
+
+def test_jndi_dns_not_mislabeled_ldap(tmp_path):
+    # BUG #2: DirContext with DnsContextFactory is DNS, never LDAP.
+    p = tmp_path / "DnsResolver.java"
+    p.write_text(_DNS_DIRCONTEXT, encoding="utf-8")
+    out = detect_integrations(["DnsResolver.java"], tmp_path)
+    kinds = {r["kind"] for r in out["integrations"]}
+    assert "dns" in kinds, out
+    assert "ldap" not in kinds, out
+    dns = [r for r in out["integrations"] if r["kind"] == "dns"]
+    assert dns[0]["client"] == "jndi-dns"
+
+
+def test_jndi_unknown_factory_low_confidence(tmp_path):
+    # BUG #2: DirContext with no resolvable factory → explicit low-confidence
+    # unknown, never an assumed LDAP.
+    p = tmp_path / "Resolver.java"
+    p.write_text(_UNKNOWN_DIRCONTEXT, encoding="utf-8")
+    out = detect_integrations(["Resolver.java"], tmp_path)
+    kinds = {r["kind"] for r in out["integrations"]}
+    assert "ldap" not in kinds, out
+    unk = [r for r in out["integrations"] if r["kind"] == "naming-directory-unknown"]
+    assert unk, out
+    assert unk[0]["confidence"] == "low"
+
+
 def test_export_integrations_via_cli(tmp_path):
     repo = _write_repo(tmp_path)
     res = runner.invoke(app, ["export", str(repo), "--integrations", "--format", "json"])

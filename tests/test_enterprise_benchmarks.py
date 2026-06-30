@@ -1515,6 +1515,21 @@ class TestEnterpriseWorkflows:
             assert "total_classes" in summary
             assert isinstance(summary["total_classes"], int)
 
+    def test_modernize_subsystem_class_count(self, legacy_monolith_repo: Path) -> None:
+        # BUG #6 (v1.68.0): subsystem_summary must carry an unambiguous class_count
+        # (class/interface declarations only) so it is comparable to total_classes,
+        # alongside the larger graph-member member_count. class_count <= member_count
+        # for every subsystem, and the unit is documented.
+        result = runner.invoke(app, ["modernize", str(legacy_monolith_repo)])
+        if result.exit_code == 0:
+            data = json.loads(result.output)
+            subs = data.get("subsystem_summary") or []
+            assert "subsystem_summary_note" in data
+            for s in subs:
+                assert "class_count" in s
+                assert "member_count" in s
+                assert s["class_count"] <= s["member_count"]
+
     def test_modernize_bounded_output(self, endpoint_heavy_repo: Path) -> None:
         result = runner.invoke(app, ["modernize", str(endpoint_heavy_repo)])
         if result.exit_code == 0:
@@ -1937,3 +1952,47 @@ class TestChangedOnlyCleanRepo:
         # Unified schema: no legacy "note" field; use analysis_scope and _meta instead.
         assert data.get("analysis_scope") == "empty"
         assert data.get("_meta", {}).get("changed_only") is True
+
+
+# ── v1.68.0 regression: BUG #5 mapper terminology (Netflix Eureka) ────────────
+
+class TestMapperKindTerminology:
+    """A *Mapper utility class with no data layer must not be called "persistence"."""
+
+    def _repo(self, tmp_path: Path) -> Path:
+        src = tmp_path / "src" / "main" / "java" / "com" / "netflix" / "discovery"
+        src.mkdir(parents=True)
+        # Az→Region mapper: matches the name pattern "Mapper" but is pure AWS topology,
+        # no JPA/MyBatis/JDBC anywhere in the repo.
+        (src / "AzToRegionMapper.java").write_text(
+            "package com.netflix.discovery;\n"
+            "public class AzToRegionMapper {\n"
+            "    public String regionFor(String az) { return az.substring(0, az.length()-1); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (src / "DiscoveryClient.java").write_text(
+            "package com.netflix.discovery;\n"
+            "public class DiscoveryClient {\n"
+            "    private final AzToRegionMapper mapper = new AzToRegionMapper();\n"
+            "    public String region(String az) { return mapper.regionFor(az); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        return tmp_path
+
+    def test_name_heuristic_mapper_kind(self, tmp_path: Path) -> None:
+        repo = self._repo(tmp_path)
+        ir = build_repo_ir(find_java_files(repo), repo)
+        result = compute_blast_radius(ir, "AzToRegionMapper")
+        mappers = result.get("mappers_affected") or []
+        if mappers:
+            for m in mappers:
+                assert m.get("mapper_kind") == "name_heuristic", m
+
+    def test_no_persistence_word_without_persistence(self, tmp_path: Path) -> None:
+        repo = self._repo(tmp_path)
+        ir = build_repo_ir(find_java_files(repo), repo)
+        result = compute_blast_radius(ir, "AzToRegionMapper")
+        # No JPA/MyBatis/JDBC in repo → explanation must not invent a persistence tier.
+        assert "persistence" not in (result.get("explanation") or "").lower()

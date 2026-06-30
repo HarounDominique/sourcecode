@@ -1,5 +1,50 @@
 # Changelog
 
+## [1.68.0] — 2026-06-30
+
+### Fixed — narrative/structured-data parity on non-Spring DI repos (Netflix Eureka field test)
+
+A real audit of **Netflix Eureka** (Gradle multi-module, JAX-RS/Jersey 1.x + Google
+Guice, **no Spring, no Hibernate, no persistence layer**) surfaced six reliability
+defects that share one root cause: **prose that assumed a Spring/Hibernate/persistence
+context even though the same JSON's own structured fields already knew it did not
+apply.** A consumer trusting the narrative over the structured fields would have read
+false conclusions. Guiding principle applied throughout: **a narrative term (Spring,
+Guice, persistence, …) may only appear when the corresponding structured signal
+confirms it.** New regression coverage across four suites.
+
+- **SMTP false positive on a log string (BUG #1).** `export --integrations` reported
+  `kind=smtp` for `logger.warn("Transport initialization failure", e)` — the bare word
+  "Transport" in a log literal. The detector now (a) skips any token matched inside a
+  string literal and (b) gates the JavaMail tokens (`Transport`, `MimeMessage`) on a
+  `javax.mail`/`jakarta.mail`/`org.springframework.mail` import. Eureka SMTP hits 3 → 0.
+- **JNDI DNS mislabeled as LDAP (BUG #2).** `javax.naming.directory.{Dir,Initial}Context`
+  is protocol-agnostic; it is now classified by its `INITIAL_CONTEXT_FACTORY` —
+  `DnsContextFactory` → `kind=dns` (`client=jndi-dns`), `LdapCtxFactory` → `ldap`, and an
+  unresolvable factory → `kind=naming-directory-unknown` with `confidence=low`, never an
+  assumed LDAP. Eureka `DnsResolver` now reports `dns`.
+- **"Spring Boot 3" narrative on a non-Spring repo (BUG #3).** When `spring_present` is
+  `False`, every `migrate-check` finding's `explanation` is rewritten from Spring-Boot
+  framing into framework-neutral Jakarta-EE / servlet-container framing (the javax→jakarta
+  finding itself is unchanged). Guarantee: no explanation contains "Spring Boot" unless
+  the report confirms runtime Spring.
+- **Inconsistent DI-framework label (BUG #4).** `impact` emitted "Spring/CDI DI pattern"
+  in the short `explanation` but "Spring/CDI/Guice" in `via_interface_note` of the *same*
+  JSON, while `direct_callers` proved the framework was Guice. Both strings now derive
+  from one label computed from caller evidence — a `*.guice.*` caller yields "Guice".
+- **"persistence paths" for non-persistence mappers (BUG #5).** Eureka's `AzToRegionMapper`
+  classes (AWS topology, no data layer) were counted as "4 persistence paths". Each
+  `mappers_affected` entry now carries `mapper_kind` (`persistence` only for a confirmed
+  `@Repository` role or MyBatis `mapper_interface`; otherwise `name_heuristic`). The
+  explanation says "persistence path" only for confirmed entries and neutral
+  "data-mapping class" otherwise — the word "persistence" never appears for a repo with no
+  confirmed persistence signal.
+- **Ambiguous `member_count` unit in `modernize` (BUG #6).** `subsystem_summary.member_count`
+  counts all graph members (classes + methods + fields), ~5× the class count and not
+  comparable to repo-level `total_classes`. Each entry now also carries an unambiguous
+  `class_count` (class/interface declarations only, comparable to `total_classes`), with a
+  `subsystem_summary_note` documenting both units.
+
 ## [1.67.0] — 2026-06-30
 
 ### Fixed — framing accuracy on non-Spring repos (Apache OFBiz field test)

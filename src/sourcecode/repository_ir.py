@@ -20,7 +20,7 @@ import subprocess
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from sourcecode.fqn_utils import normalize_owner_fqn as _normalize_owner_fqn
 from sourcecode.path_filters import is_test_path as _is_test_path
@@ -4700,9 +4700,16 @@ def compute_blast_radius(
         )
         if is_mapper and fqn not in _seen_mapper_fqns:
             _seen_mapper_fqns.add(fqn)
+            # BUG #5 (v1.68.0): distinguish a CONFIRMED persistence mapper (a
+            # @Repository/DAO role or a MyBatis @Mapper interface) from a class that
+            # only matched the name pattern (e.g. AzToRegionMapper — an AWS topology
+            # mapper with no data layer). Only confirmed entries may be described as
+            # "persistence" in the narrative.
+            _is_persistence = role in _MAPPER_ROLES or symbol_kind == "mapper_interface"
             _mapper_entry: dict = {
                 "fqn": fqn,
                 "role": role or ("mapper" if symbol_kind == "mapper_interface" else "repository"),
+                "mapper_kind": "persistence" if _is_persistence else "name_heuristic",
                 "source_file": node_dict.get("source_file") or "",
             }
             if canonical != fqn:
@@ -4841,18 +4848,33 @@ def compute_blast_radius(
         _parts.append(f"{n_ep} endpoint{'s' if n_ep != 1 else ''} exposed")
     if n_txn:
         _parts.append(f"{n_txn} transactional boundary{'s' if n_txn != 1 else ''} touched")
-    if n_mappers:
-        _parts.append(f"{n_mappers} persistence path{'s' if n_mappers != 1 else ''} in blast cone")
+    # BUG #5 (v1.68.0): only confirmed persistence mappers earn the word "persistence".
+    # Name-heuristic matches (e.g. *Mapper utility classes with no data layer) are
+    # surfaced as neutral "data-mapping class(es)" so the prose never invents a
+    # persistence tier the repo does not have.
+    _n_persist = sum(1 for m in mappers_affected if m.get("mapper_kind") == "persistence")
+    _n_heur = n_mappers - _n_persist
+    if _n_persist:
+        _parts.append(f"{_n_persist} persistence path{'s' if _n_persist != 1 else ''} in blast cone")
+    if _n_heur:
+        _parts.append(f"{_n_heur} data-mapping class{'es' if _n_heur != 1 else ''} in blast cone")
     if n_sec:
         _parts.append(f"{n_sec} security-gated endpoint{'s' if n_sec != 1 else ''} affected")
     if n_modules > 1:
         _parts.append(f"impact crosses {n_modules} modules")
 
+    # BUG #4 (v1.68.0): derive the DI-framework label ONCE from caller evidence and
+    # reuse it for both the short explanation and the long via_interface_note, so the
+    # two never disagree (the old code hardcoded "Spring/CDI" in one and "Spring/CDI/
+    # Guice" in the other). When the actual framework is identifiable from the caller
+    # FQNs (e.g. *.guice.* packages on a Guice repo), name it specifically instead of
+    # a generic guess.
+    _di_label = _detect_di_framework_label(direct_callers)
     if _iface_bridging:
         _iface_names = [b["interface"].split(".")[-1] for b in _iface_bridging]
         _parts.append(
             f"callers resolved via interface{'s' if len(_iface_names) > 1 else ''} "
-            f"({', '.join(_iface_names)}) — Spring/CDI DI pattern"
+            f"({', '.join(_iface_names)}) — {_di_label} DI pattern"
         )
 
     # Transparency: hub-class BFS truncation must appear in explanation so the
@@ -4924,9 +4946,9 @@ def compute_blast_radius(
     if _iface_bridging:
         out["via_interface_resolution"] = _iface_bridging
         out["via_interface_note"] = (
-            "Target is a concrete class injected via interface(s) in DI frameworks "
-            "(Spring/CDI/Guice). direct_callers includes callers of the implemented "
-            "interface(s) — these are the real production dependents."
+            "Target is a concrete class injected via interface(s) in a "
+            f"{_di_label} DI framework. direct_callers includes callers of the "
+            "implemented interface(s) — these are the real production dependents."
         )
     if _bfs_truncated:
         out["bfs_truncation_reason"] = "hub_class_depth_cap"
@@ -5106,3 +5128,31 @@ def _all_callers_from_rg(fqn: str, reverse_graph: dict[str, dict[str, list[str]]
 def _simple_name(fqn: str) -> str:
     """Extract the simple class name from a fully-qualified name."""
     return fqn.split(".")[-1].split("#")[0]
+
+
+def _detect_di_framework_label(caller_fqns: "Iterable[str]") -> str:
+    """Name the DI framework(s) evidenced by the caller FQNs (BUG #4, v1.68.0).
+
+    Returns a "/"-joined label of the frameworks actually identifiable from the
+    callers' package names (e.g. "Guice" when callers live under a ``*.guice.*``
+    package, "Spring" under ``org.springframework``). When nothing is identifiable
+    the label degrades to the generic "Spring/CDI/Guice" rather than asserting a
+    framework the evidence does not support. The same label feeds both the short
+    explanation and the long via_interface_note so they cannot disagree.
+    """
+    frameworks: set[str] = set()
+    for fqn in caller_fqns:
+        low = fqn.lower()
+        if "guice" in low or "com.google.inject" in low:
+            frameworks.add("Guice")
+        if "springframework" in low or ".spring." in low:
+            frameworks.add("Spring")
+        if "jakarta.enterprise" in low or "javax.enterprise" in low or ".cdi." in low:
+            frameworks.add("CDI")
+        if "micronaut" in low:
+            frameworks.add("Micronaut")
+        if "dagger" in low:
+            frameworks.add("Dagger")
+    if frameworks:
+        return "/".join(sorted(frameworks))
+    return "Spring/CDI/Guice"

@@ -7,8 +7,14 @@ deterministic source-text matching (same approach as the JNDI datasource scan in
 
 Covered clients:
 
-  * HTTP   — ``RestTemplate``, ``WebClient``, ``@FeignClient`` (declarative)
-  * LDAP   — ``LdapTemplate``
+  * HTTP   — ``RestTemplate``, ``WebClient``, ``@FeignClient`` (declarative),
+             JDK/Apache/OkHttp clients
+  * LDAP   — ``LdapTemplate``, JNDI ``InitialLdapContext``/``LdapContext``
+  * DNS    — JNDI ``DirContext`` configured with ``DnsContextFactory`` (BUG #2:
+             ``DirContext`` is protocol-agnostic and is classified by its
+             ``INITIAL_CONTEXT_FACTORY``, not assumed to be LDAP)
+  * SMTP   — JavaMail / Jakarta Mail (BUG #1: gated on a mail import so the bare
+             word "Transport" in a log string is not a false positive)
   * JMS    — ``JmsTemplate``, ActiveMQ connection factories
 
 Each hit is reported with a ``file:line`` evidence anchor and, when a literal URL
@@ -27,6 +33,24 @@ from typing import Optional
 _URL_RE = re.compile(r'"((?:https?|ldaps?|tcp|amqp|jms|nio)://[^"]*)"')
 # First string literal on a line (fallback target, e.g. WebClient.create("x")).
 _STR_RE = re.compile(r'"([^"]+)"')
+
+# BUG #1 (v1.68.0): a JavaMail/Jakarta-Mail import is required before an SMTP token
+# (Transport, MimeMessage) is trusted. The bare word "Transport" is also a common
+# English noun that appears in log strings ( logger.warn("Transport initialization
+# failure") in non-mail code), so a mail-import gate plus a string-literal skip
+# stops those false positives.
+_MAIL_IMPORT_RE = re.compile(
+    r"^\s*import\s+(?:(?:javax|jakarta)\.mail|org\.springframework\.mail)\b",
+    re.MULTILINE,
+)
+
+# BUG #2 (v1.68.0): javax.naming.directory.{DirContext,InitialDirContext} is NOT
+# LDAP-specific — the actual protocol is decided by the value bound to
+# Context.INITIAL_CONTEXT_FACTORY. com.sun.jndi.dns.DnsContextFactory means DNS
+# (SRV/A record lookups), com.sun.jndi.ldap.LdapCtxFactory means LDAP. Classify by
+# the factory class present in the file instead of defaulting to LDAP.
+_DNS_FACTORY_RE = re.compile(r"jndi\.dns|DnsContextFactory", re.IGNORECASE)
+_LDAP_FACTORY_RE = re.compile(r"jndi\.ldap|LdapCtxFactory", re.IGNORECASE)
 
 # Declarative HTTP client. Attrs may span multiple lines, so matched on full text.
 _FEIGN_RE = re.compile(r"@FeignClient\s*\(([^)]*)\)", re.DOTALL)
@@ -82,6 +106,39 @@ def _extract_target(line: str) -> Optional[str]:
     return None
 
 
+def _in_string_literal(line: str, idx: int) -> bool:
+    """True if char offset ``idx`` falls inside a double-quoted string on ``line``.
+
+    BUG #1 (v1.68.0): a Java type token never legitimately appears inside a string
+    literal, so a match there (e.g. the word "Transport" in a log message) is noise,
+    not a real client construct. Counts unescaped quotes before ``idx``.
+    """
+    quote_count = 0
+    i = 0
+    while i < idx and i < len(line):
+        ch = line[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == '"':
+            quote_count += 1
+        i += 1
+    return quote_count % 2 == 1
+
+
+def _classify_naming_factory(text: str) -> Optional[str]:
+    """Classify a javax.naming.directory usage by its INITIAL_CONTEXT_FACTORY.
+
+    Returns ``"dns"``, ``"ldap"``, or ``None`` (factory not statically resolvable).
+    See BUG #2 — DirContext alone does not imply LDAP.
+    """
+    if _DNS_FACTORY_RE.search(text):
+        return "dns"
+    if _LDAP_FACTORY_RE.search(text):
+        return "ldap"
+    return None
+
+
 def detect_integrations(file_paths: "list[str]", root: Path) -> dict:
     """Detect outbound integrations across ``file_paths`` (relative to ``root``).
 
@@ -93,18 +150,31 @@ def detect_integrations(file_paths: "list[str]", root: Path) -> dict:
     seen: "set[tuple[str, str, Optional[str], str]]" = set()
     records: "list[dict]" = []
 
-    def _add(kind: str, client: str, target: Optional[str], rel: str, line: int) -> None:
+    def _add(
+        kind: str,
+        client: str,
+        target: Optional[str],
+        rel: str,
+        line: int,
+        confidence: Optional[str] = None,
+    ) -> None:
         evidence = f"{rel}:{line}"
         key = (kind, client, target, evidence)
         if key in seen:
             return
         seen.add(key)
-        records.append({
+        rec = {
             "kind": kind,
             "client": client,
             "target": target,
             "evidence": evidence,
-        })
+        }
+        # Per-record confidence is emitted only when the classification is uncertain
+        # (e.g. a JNDI DirContext whose factory could not be resolved). Confident hits
+        # stay schema-clean without the field.
+        if confidence is not None:
+            rec["confidence"] = confidence
+        records.append(rec)
 
     for rel in file_paths:
         try:
@@ -126,6 +196,10 @@ def detect_integrations(file_paths: "list[str]", root: Path) -> dict:
             )
             _add("http", "feign", target, rel, _line_of(text, m.start()))
 
+        # Per-file context used to disambiguate / gate uncertain tokens (BUG #1/#2).
+        has_mail_import = bool(_MAIL_IMPORT_RE.search(text))
+        naming_factory = _classify_naming_factory(text)
+
         # Token clients — per line, skipping imports/package/comment noise.
         # First pass records the declaration site and any variable name bound to
         # the client, so a later call site (where the URL literal usually lives)
@@ -146,7 +220,28 @@ def detect_integrations(file_paths: "list[str]", root: Path) -> dict:
                 m = token_re.search(line)
                 if not m:
                     continue
-                _add(kind, client, _extract_target(line), rel, lineno)
+                # BUG #1: a token matched inside a string literal (log message, doc
+                # comment text) is never a real client construct — skip it.
+                if _in_string_literal(line, m.start()):
+                    continue
+                confidence: Optional[str] = None
+                # BUG #1: SMTP tokens require a JavaMail/Jakarta-Mail import to be
+                # trusted — "Transport" / "MimeMessage" are too generic otherwise.
+                if kind == "smtp" and not has_mail_import:
+                    continue
+                # BUG #2: javax.naming.directory.{Dir,Initial}Context is protocol-
+                # agnostic. Reclassify by the configured context factory; default to
+                # an explicit low-confidence "unknown" rather than assuming LDAP.
+                if client == "jndi-ldap" and "Dir" in token_re.pattern:
+                    if naming_factory == "dns":
+                        kind, client = "dns", "jndi-dns"
+                    elif naming_factory == "ldap":
+                        kind, client = "ldap", "jndi-ldap"
+                    else:
+                        kind, client, confidence = (
+                            "naming-directory-unknown", "jndi-dircontext", "low",
+                        )
+                _add(kind, client, _extract_target(line), rel, lineno, confidence)
                 tok = m.group(0)
                 # `Type name` (field/local decl) and `name = new Type(` forms.
                 decl = re.search(re.escape(tok) + r"\s+(\w+)\b", line)
@@ -186,9 +281,13 @@ def detect_integrations(file_paths: "list[str]", root: Path) -> dict:
         "confidence": confidence,
         "coverage_note": (
             "Detects HTTP (RestTemplate/WebClient/JDK/Apache/OkHttp), LDAP (Spring "
-            "+ JNDI), SMTP (JavaMail), and JMS client constructs by source-text "
-            "matching. A count of 0 means no such construct was found, not that the "
-            "system has no outbound integrations — runtime/DI-wired clients are not "
-            "statically visible."
+            "+ JNDI), DNS (JNDI DirContext w/ DnsContextFactory), SMTP (JavaMail, "
+            "import-gated), and JMS client constructs by source-text matching. JNDI "
+            "DirContext usage is classified by its INITIAL_CONTEXT_FACTORY (dns vs "
+            "ldap); when the factory is not statically resolvable the kind is "
+            "'naming-directory-unknown' with confidence='low', never assumed LDAP. A "
+            "count of 0 means no such construct was found, not that the system has no "
+            "outbound integrations — runtime/DI-wired clients are not statically "
+            "visible."
         ),
     }

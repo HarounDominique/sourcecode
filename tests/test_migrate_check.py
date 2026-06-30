@@ -1548,3 +1548,40 @@ class TestDimensionalReadiness:
         assert report.readiness_score == 0
         assert report.jakarta_readiness == 0
         assert report.boot3_readiness == 0
+
+
+# ── v1.68.0 regression: BUG #3 framework-gated narrative (Netflix Eureka) ─────
+
+class TestNonSpringNarrative:
+    """On a non-Spring repo, migration explanations must not assert Spring Boot."""
+
+    def _non_spring_repo(self, tmp_path) -> Path:
+        # JAX-RS/Jersey style file: real javax.servlet finding, but NO Spring anywhere.
+        src = tmp_path / "src" / "main" / "java" / "com" / "netflix"
+        src.mkdir(parents=True)
+        (src / "Filter.java").write_text(
+            "package com.netflix;\n"
+            "import javax.servlet.Filter;\n"
+            "import javax.servlet.http.HttpServletRequest;\n"
+            "public class Filter {}\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "build.gradle").write_text(
+            "dependencies { implementation 'javax.servlet:servlet-api:2.5' }\n",
+            encoding="utf-8",
+        )
+        return tmp_path
+
+    def test_spring_not_present(self, tmp_path) -> None:
+        repo = self._non_spring_repo(tmp_path)
+        report = run_migrate_check(["src/main/java/com/netflix/Filter.java"], repo)
+        assert report.spring_present is False
+
+    def test_no_spring_boot_in_explanations(self, tmp_path) -> None:
+        repo = self._non_spring_repo(tmp_path)
+        report = run_migrate_check(["src/main/java/com/netflix/Filter.java"], repo)
+        # The javax.servlet finding must survive...
+        assert any(f.rule_id == "MIG-002" for f in report.findings)
+        # ...but no explanation may assert a Spring Boot context the repo lacks.
+        for f in report.findings:
+            assert "Spring Boot" not in (f.explanation or ""), f.rule_id

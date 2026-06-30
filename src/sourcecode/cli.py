@@ -5777,14 +5777,32 @@ def modernize_cmd(
         "statically_unreferenced": len(dead_zones),
         "framework_dispatched": len(framework_dispatched),
     }
+    # BUG #6 (v1.68.0): `member_count` counts ALL graph members in the subsystem —
+    # classes, methods AND fields — so it runs ~5x higher than the class count and
+    # is not comparable to the repo-level `total_classes` (which counts only
+    # class/interface nodes). Surface an unambiguous `class_count` alongside it,
+    # computed against the same class/interface node set as total_classes, so a
+    # reader does not have to reverse-engineer the unit. `member_count` is retained
+    # for backward compatibility but is now documented as the graph-member tally.
+    _class_fqns = {n["fqn"] for n in graph_nodes if n.get("type") in ("class", "interface")}
+
+    def _class_count(members: list) -> int:
+        return sum(1 for m in members if m in _class_fqns)
+
     _subsystem_summary = [
         {
             "label": s.get("label") or s.get("name") or "",
             "package_prefix": s.get("package_prefix") or s.get("pkg") or "",
+            "class_count": _class_count(s.get("members") or []),
             "member_count": len(s.get("members") or []),
         }
         for s in subsystems[:15]
     ]
+    _subsystem_summary_note = (
+        "class_count = class/interface declarations only (comparable to "
+        "summary.total_classes). member_count = all graph members in the subsystem "
+        "including methods and fields, so it is larger and not a class tally."
+    )
 
     if (not _mod_is_pro) and _mod_large(str(root)):
         # Large monolith, free tier: structural discovery preview only — no dead
@@ -5801,6 +5819,7 @@ def modernize_cmd(
             ),
             "summary": _summary,
             "subsystem_summary": _subsystem_summary,
+            "subsystem_summary_note": _subsystem_summary_note,
             "hotspot_candidates": hotspots[:3],
             "high_coupling_nodes": [
                 {"fqn": n["fqn"], "in_degree": n.get("in_degree", 0), "role": n.get("role", "other")}
@@ -5833,9 +5852,11 @@ def modernize_cmd(
                 for n in framework_dispatched
             ],
             "subsystem_summary": _subsystem_summary,
+            "subsystem_summary_note": _subsystem_summary_note,
             "cross_module_tangles": [
                 {
                     "label": s.get("label") or s.get("name") or "",
+                    "class_count": _class_count(s.get("members") or []),
                     "member_count": len(s.get("members") or []),
                 }
                 for s in tangle_modules
