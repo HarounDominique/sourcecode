@@ -1526,11 +1526,14 @@ class TestDimensionalReadiness:
         findings += [self._f("MIG-014", "medium", "java_9_plus", f"R{i}.java")
                      for i in range(25)]
         report = MigrationReport(findings=findings).finalize()
-        # high(8) + JDK advisory capped(15) = 23 → 77
-        assert report.readiness_score == 77
+        # readiness_score = min(applicable migration dims) = min(jakarta 100, boot3 92).
+        # JDK debt is EXCLUDED from the aggregate entirely (orthogonal upkeep axis),
+        # so it cannot collapse the headline — only the real Boot3 blocker counts.
+        assert report.readiness_score == 92
         assert report.jakarta_readiness == 100        # namespace fully migrated
         assert report.boot3_readiness == 92            # only the one high blocker
         assert report.jdk_modernization < 100          # debt visible in its own axis
+        assert report.readiness_aggregate["inputs"] == {"jakarta": 100, "boot3": 92}
 
     def test_real_jakarta_blockers_still_floor(self) -> None:
         findings = [self._f("MIG-001", "critical", "jakarta", f"E{i}.java")

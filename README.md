@@ -700,9 +700,21 @@ evidence. `migrate-check` enforces:
   usage; Quarkus / Micronaut / Helidon / Jakarta-pure repos report `boot3` as N/A
   (`spring_present: false`), not a contradictory `applicable: true`.
 - **Permanent `javax.*` are never jakarta debt.** JDK/JSR namespaces
-  (`javax.xml.*`, `javax.crypto.*`, `javax.naming.*`, `javax.sql.*`,
-  `javax.management.*`, `javax.security.auth.*`, …) are allowlisted across every
-  jakarta scorer.
+  (`javax.cache`, `javax.sql`, `javax.xml` JAXP, `javax.crypto`, `javax.naming`,
+  `javax.management`, `javax.security.auth`, `javax.annotation.processing`, …) are
+  allowlisted across every jakarta scorer (single source of truth:
+  `serializer._JAVAX_PERMANENT_NAMESPACES` + `migrate_check._JAKARTA_NO_MIGRATE_PREFIXES`).
+  The `javax→jakarta` dependency flag decides via **longest-prefix match**, so
+  `javax.xml.bind` (JAXB — moved) flags while `javax.xml` (JAXP) does not, and
+  `javax.annotation` (JSR-250 — moved) flags while `javax.annotation.processing`
+  (JSR-269) does not. The allowlist never silences a real migration.
+- **`readiness_score` is a traceable aggregate.** It is `min` over the applicable
+  **migration** dimensions (`jakarta` / `boot3` / `hibernate`); `jdk_modernization`
+  is orthogonal upkeep and is excluded. The exact inputs are in `readiness_aggregate{}`
+  and an invariant (`readiness_score == min(applicable migration dims)`) is asserted in
+  code. When the Hibernate version is undeclared it is inferred from the Spring Boot
+  BOM (Boot ≥3 → Hibernate ≥6 → N/A; Boot 2 → Hibernate 5 → applicable; no BOM →
+  `status: unresolved`, never a heuristic score).
 - **Three buckets: blocker ≠ hygiene ≠ test.** Only product (`main`) code counts
   toward `blocking_count`, readiness, and effort. Test harnesses
   (`testsuite/`, `test-framework/`, `integration-arquillian/`, `*-test*`,

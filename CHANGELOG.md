@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.66.0] — 2026-06-30
+
+### Fixed — Spring Petclinic (Boot 4.0.3 / Java 17) false positives + aggregate consistency
+
+A Pro audit of the canonical **Spring Petclinic** (Spring Boot 4.0.3, Java 17,
+jakarta namespace 100 %) surfaced three defects. Petclinic is now a golden
+regression fixture (`tests/test_migrate_check_petclinic_regression.py`).
+
+- **`javax.cache` no longer flagged as a jakarta migration risk (BUG #1).** A single
+  source of truth — `_JAVAX_PERMANENT_NAMESPACES` — lists JDK/JSR `javax.*` that keep
+  the `javax.*` prefix forever (`javax.cache` JSR-107, `javax.sql`, `javax.xml` JAXP,
+  `javax.naming`, `javax.management`, `javax.crypto`, `javax.net`, `javax.security.auth`,
+  `javax.annotation.processing`, `javax.tools`, `javax.lang.model`, …). The
+  `javax-to-jakarta-migration-risk` dependency flag now decides via **longest-prefix
+  match** across the renamed list and this allowlist, so `javax.xml.bind` (JAXB —
+  moved) still flags while `javax.xml` (JAXP) does not, and `javax.annotation`
+  (JSR-250 — moved) still flags while `javax.annotation.processing` (JSR-269) does not.
+  The allowlist can never silence a legitimate migration (`javax.persistence`,
+  `javax.servlet`, `javax.validation`, … still flag).
+- **Hibernate axis is version-driven, never a heuristic on absent data (BUG #2).**
+  When the Hibernate version is not declared, it is inferred from the Spring Boot BOM:
+  Boot ≥ 3 → Hibernate ORM ≥ 6 → **N/A** (`status: managed_ge6`); Boot 2 → Hibernate
+  5.x → **applicable** (`status: managed_h5`); no BOM → `status: unresolved`,
+  `applicable: false`, `score: null` — **never** a fabricated number like `91`. The
+  `reason` distinguishes "managed ≥ 6" from "unresolved". (Petclinic: hibernate N/A,
+  `managed_ge6` via Boot 4.0.3, no phantom 91.)
+- **`readiness_score` is now a traceable aggregate (BUG #3).** It is defined as
+  `min` over the applicable **migration** dimensions (`jakarta` / `boot3` / `hibernate`)
+  — `jdk_modernization` is an orthogonal upkeep axis, reported but **excluded** from
+  the headline. The exact inputs are surfaced in a new `readiness_aggregate{}` block,
+  and a consistency invariant (`readiness_score == min(applicable migration dims)`) is
+  asserted in `finalize()` and covered by a unit test. This removes the prior
+  contradiction (headline 100 while an applicable dimension scored 91).
+
 ## [1.65.0] — 2026-06-30
 
 ### Fixed — non-Spring / already-modernized repos no longer fabricate blockers (`migrate-check`)

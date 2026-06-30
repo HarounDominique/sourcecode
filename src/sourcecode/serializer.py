@@ -291,17 +291,65 @@ _JAKARTA_RENAMED_NAMESPACES: tuple[str, ...] = (
 )
 
 
+# Permanent JDK / JSR javax.* namespaces. These are part of the Java SE platform
+# (or standalone JCP specs) and were NEVER renamed to jakarta.* — Spring Boot 3/4
+# still uses them under javax.*. They must be excluded from EVERY javax→jakarta
+# detection rule (dependency coordinates AND import scanning). This is the single
+# source of truth for the allowlist — do NOT re-implement prefix checks elsewhere.
+# Counterpart in migrate_check._JAKARTA_NO_MIGRATE_PREFIXES (import side); keep both
+# in sync. NOTE: `javax.annotation.processing` is permanent (JSR-269, compiler API)
+# but bare `javax.annotation` (JSR-250 EE subset) DID move — handled below.
+_JAVAX_PERMANENT_NAMESPACES: tuple[str, ...] = (
+    "javax.cache",              # JSR-107 (JCache) — never renamed
+    "javax.sql",                # JDBC standard extension (Java SE)
+    "javax.xml",                # JAXP (parsers/transform/xpath/stream/namespace…)
+    "javax.naming",             # JNDI (Java SE)
+    "javax.management",         # JMX (Java SE)
+    "javax.crypto",             # JCE (Java SE)
+    "javax.net",                # incl. javax.net.ssl (Java SE)
+    "javax.security.auth",      # JAAS (Java SE)
+    "javax.security.cert",      # Java SE
+    "javax.security.sasl",      # Java SE
+    "javax.annotation.processing",  # JSR-269 compiler API (NOT the JSR-250 subset)
+    "javax.tools",              # Java SE compiler API
+    "javax.lang.model",         # Java SE annotation-processing model
+    "javax.sound",              # Java SE
+    "javax.imageio",            # Java SE
+    "javax.print",              # Java SE
+    "javax.accessibility",      # Java SE
+    "javax.swing",              # Java SE
+    "javax.smartcardio",        # Java SE
+)
+
+
+def _longest_namespace_match(nl: str, namespaces: "tuple[str, ...]") -> int:
+    """Length of the longest namespace in *namespaces* that is a prefix of *nl*.
+
+    Matches an exact namespace or a dotted sub-package (javax.xml → javax.xml.bind);
+    returns 0 when none match.
+    """
+    best = 0
+    for ns in namespaces:
+        if (nl == ns or nl.startswith(ns + ".")) and len(ns) > best:
+            best = len(ns)
+    return best
+
+
 def _is_jakarta_renamed_namespace(nl: str) -> bool:
     """True only for javax.* namespaces actually renamed to jakarta.* in Jakarta EE 9.
 
-    Matches exact namespace or a sub-package (e.g. javax.servlet → javax.servlet.http).
+    Decided by LONGEST-prefix match across the renamed list and the permanent
+    JDK/JSR allowlist — the more specific namespace wins. This keeps both nuanced
+    cases correct simultaneously:
+      - javax.xml.bind (renamed, len 14) beats javax.xml (permanent, len 9) → flag.
+      - javax.annotation.processing (permanent, len 27) beats javax.annotation
+        (renamed, len 16) → no flag.
     JDK/JSR namespaces that keep javax.* forever (javax.cache, javax.sql, javax.xml
-    JAXP, javax.naming, …) return False.
+    JAXP, javax.naming, …) never flag. A bare javax.* with no match also never flags.
     """
-    for ns in _JAKARTA_RENAMED_NAMESPACES:
-        if nl == ns or nl.startswith(ns + "."):
-            return True
-    return False
+    renamed = _longest_namespace_match(nl, _JAKARTA_RENAMED_NAMESPACES)
+    permanent = _longest_namespace_match(nl, _JAVAX_PERMANENT_NAMESPACES)
+    return renamed > 0 and renamed >= permanent
 
 
 def _dep_risk_flags(name: str, version: "Optional[str]") -> list[str]:

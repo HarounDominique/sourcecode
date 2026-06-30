@@ -648,6 +648,19 @@ _BOOT3_MIGRATION_TARGETS: frozenset[str] = frozenset(
 # upgrade. It is advisory only and must never sink a readiness dimension to 0 —
 # reported as a separate hygiene metric, excluded from JDK-modernization scoring.
 _BEST_PRACTICE_TARGETS: frozenset[str] = frozenset({"java_8_best_practice"})
+
+# BUG #3: the migration dimensions that feed the readiness_score aggregate, in
+# order. jdk_modernization is deliberately NOT here — it is orthogonal upkeep debt
+# reported on its own axis, never folded into the migration headline.
+_MIGRATION_DIMENSIONS: tuple[str, ...] = ("jakarta", "boot3", "hibernate")
+
+
+def _parse_major(version: "Optional[str]") -> "Optional[int]":
+    """Leading integer of a version string ('4.0.3' → 4); None when not parseable."""
+    if not version:
+        return None
+    m = re.match(r"\s*(\d+)", version)
+    return int(m.group(1)) if m else None
 # Cap on total readiness deduction from JDK-modernization findings (medium/low),
 # so reflection/date cleanups cannot collapse a jakarta-ready repo's headline.
 _JDK_ADVISORY_DEDUCTION_CAP: int = 15
@@ -1170,6 +1183,9 @@ class MigrationReport:
     # is excluded from the aggregate — it is never counted as 0. Maps dimension →
     # {"applicable": bool, "score": int|None, "reason": str}.
     applicable_dimensions: dict = field(default_factory=dict)
+    # BUG #3: how readiness_score was derived (method + the exact applicable
+    # dimension scores it aggregates) so the headline number is fully traceable.
+    readiness_aggregate: dict = field(default_factory=dict)
     blocking_count: int = 0
     estimated_effort_days: float = 0.0
     # Tri-state: True = Boot 2 confirmed, False = Boot 3+ confirmed,
@@ -1238,71 +1254,67 @@ class MigrationReport:
             1 for f in main_findings if f.severity in ("critical", "high")
         )
 
-        # BUG #4 / #6: readiness deduction. FRAMEWORK blockers (jakarta / Boot3 /
-        # Security — critical+high) are UNCAPPED so a genuinely blocked repo floors
-        # at 0. Orthogonal JDK-modernization debt (SecurityManager, sun.*, reflection)
-        # is advisory-CAPPED so it can never sink the framework headline. Best-practice
-        # hygiene (java.util.Date) is EXCLUDED entirely — it blocks no version upgrade.
-        fw = _BOOT3_MIGRATION_TARGETS
-        fw_crit = _files_by_sev(main_findings, "critical", targets=fw)
-        fw_high = _files_by_sev(main_findings, "high", targets=fw)
-        fw_med = _files_by_sev(main_findings, "medium", targets=fw)
-        fw_low = _files_by_sev(main_findings, "low", targets=fw)
-        _jdk_exclude = fw | _BEST_PRACTICE_TARGETS
-        jdk_crit = {f.source_file for f in main_findings
-                    if f.severity == "critical" and f.migration_target not in _jdk_exclude}
-        jdk_high = {f.source_file for f in main_findings
-                    if f.severity == "high" and f.migration_target not in _jdk_exclude}
-        jdk_med = {f.source_file for f in main_findings
-                   if f.severity == "medium" and f.migration_target not in _jdk_exclude}
-        jdk_low = {f.source_file for f in main_findings
-                   if f.severity == "low" and f.migration_target not in _jdk_exclude}
-        jdk_raw = len(jdk_crit) * 15 + len(jdk_high) * 8 + len(jdk_med) * 3 + len(jdk_low) * 1
-
-        deduction = (
-            len(fw_crit) * 15
-            + len(fw_high) * 8
-            + len(fw_med) * 3
-            + min(len(fw_low) * 1, _LOW_SEVERITY_DEDUCTION_CAP)
-            + min(jdk_raw, _JDK_ADVISORY_DEDUCTION_CAP)
-        )
-        self.readiness_score = max(0, 100 - deduction)
-
         # Per-dimension readiness — independent severity-weighted scores (MAIN only).
         self.jakarta_readiness = _dimension_score(main_findings, _JAKARTA_TARGETS)
         self.boot3_readiness = _dimension_score(main_findings, _BOOT3_MIGRATION_TARGETS)
         self.jdk_modernization = _dimension_score(main_findings, None)
-
-        # BUG #1: Hibernate 5→6 is its own rewrite axis and applies ONLY when the
-        # repo is actually on Hibernate < 6. A resolved Hibernate 6+ (Keycloak:
-        # 6.2.13) means the migration is already done → N/A, never a blocker. An
-        # unresolved version degrades to a low-confidence hypothesis (no headline).
-        hib = self.hibernate
-        _hibernate_applies = (
-            hib is not None and hib.detected and hib.migration_applicable
-        )
-        if hib is not None and hib.detected:
-            # Already on H6+ → nothing to migrate → 100; else the rewrite score.
-            self.hibernate_readiness = hib.readiness if hib.migration_applicable else 100
-        if _hibernate_applies and hib.classification == "rewrite_zone" \
-                and hib.version_confidence == "high":
-            # Only a CONFIRMED Hibernate-5 rewrite zone earns the headline blocker.
-            self.headline_blocker = "hibernate_rewrite"
-
-        # BUG #2 / #3: declare which dimensions apply. jakarta + JDK are always
-        # applicable to a Java repo; boot3 applies only when Spring is actually used
-        # (Quarkus/Micronaut/Jakarta-pure repos have no Boot 2→3 axis); hibernate
-        # applies only for a real Hibernate < 6. N/A dimensions carry score=None and
-        # are excluded from the aggregate — never scored as 0.
         if not self.spring_present:
             self.boot3_readiness = 100
-        if _hibernate_applies:
-            _hib_reason = f"Hibernate 5→6 rewrite axis (detected {hib.effective_version or 'version unknown'})"
-        elif hib is not None and hib.detected and not hib.migration_applicable:
-            _hib_reason = (f"N/A — already on Hibernate {hib.version_major} "
-                           f"({hib.effective_version}); no 5→6 migration pending")
-        else:
-            _hib_reason = "N/A — no Hibernate dependency or import detected"
+
+        # ── BUG #2: Hibernate applicability — version-driven, never heuristic ────
+        # The 5→6 axis is applicable ONLY when the repo is actually on Hibernate < 6.
+        #   resolved < 6        → applicable (rewrite score is a measurement)
+        #   resolved ≥ 6        → N/A (already migrated)
+        #   unresolved, Boot≥3  → N/A (Boot 3/4 BOM manages Hibernate ORM ≥6)
+        #   unresolved, Boot==2 → applicable (Boot 2 BOM manages Hibernate 5.x)
+        #   unresolved, no BOM  → N/A, status "unresolved" (NEVER a heuristic number
+        #                          that looks like a measurement on absent data)
+        hib = self.hibernate
+        hib_detected = hib is not None and hib.detected
+        boot_major = _parse_major(self.spring_boot_version_detected)
+        _hibernate_applies = False
+        _hib_score: Optional[int] = None
+        hib_status = "not_detected"
+        _hib_reason = "N/A — no Hibernate dependency or import detected"
+        if hib_detected:
+            if hib.version_confidence == "high":
+                if hib.migration_applicable:              # resolved major < 6
+                    _hibernate_applies, _hib_score = True, hib.readiness
+                    hib_status = "resolved_h5"
+                    _hib_reason = f"Hibernate 5→6 rewrite axis (resolved {hib.effective_version})"
+                else:                                     # resolved major ≥ 6
+                    hib_status = "managed_ge6"
+                    _hib_reason = (f"N/A — resolved Hibernate {hib.effective_version} (≥6); "
+                                   f"no 5→6 migration pending")
+            elif boot_major is not None and boot_major >= 3:
+                hib_status = "managed_ge6"
+                _hib_reason = (f"N/A — Hibernate version managed by Spring Boot "
+                               f"{self.spring_boot_version_detected} BOM (Hibernate ORM ≥6); "
+                               f"5→6 axis inapplicable")
+            elif boot_major == 2:
+                _hibernate_applies, _hib_score = True, hib.readiness
+                hib_status = "managed_h5"
+                _hib_reason = (f"Hibernate 5→6 rewrite axis (Hibernate 5.x managed by Spring "
+                               f"Boot {self.spring_boot_version_detected} BOM)")
+            else:
+                hib_status = "unresolved"
+                _hib_reason = ("N/A — Hibernate version unresolved (not declared and no Spring "
+                               "Boot BOM to infer from); not penalized on absent data")
+        # Top-level scalar: the rewrite score only when applicable; else 100 (nothing
+        # pending) — never a heuristic penalty on an inapplicable/unresolved axis.
+        self.hibernate_readiness = _hib_score if _hibernate_applies else 100
+        # Headline blocker only on a DIRECTLY-resolved Hibernate-5 rewrite zone.
+        if _hibernate_applies and hib is not None and hib.classification == "rewrite_zone" \
+                and hib.version_confidence == "high":
+            self.headline_blocker = "hibernate_rewrite"
+
+        # BUG #3: declare which dimensions apply, then derive readiness_score as a
+        # DOCUMENTED aggregate over the applicable MIGRATION dimensions only. jakarta
+        # is always applicable; boot3 only with Spring; hibernate only for a real
+        # Hibernate < 6. jdk_modernization is an orthogonal upkeep axis (SecurityManager,
+        # reflection, java.time) — reported but EXCLUDED from the headline so JDK debt
+        # cannot sink a framework-complete repo. N/A dimensions carry score=None and
+        # never enter the aggregate.
         self.applicable_dimensions = {
             "jakarta": {"applicable": True, "score": self.jakarta_readiness,
                         "reason": "javax→jakarta namespace migration"},
@@ -1314,13 +1326,43 @@ class MigrationReport:
                            else "N/A — no Spring usage detected (non-Spring stack)"),
             },
             "jdk_modernization": {"applicable": True, "score": self.jdk_modernization,
-                                  "reason": "orthogonal JDK modernization debt"},
+                                  "reason": "orthogonal JDK modernization debt (excluded from "
+                                            "the readiness_score aggregate)",
+                                  "in_aggregate": False},
             "hibernate": {
                 "applicable": _hibernate_applies,
                 "score": self.hibernate_readiness if _hibernate_applies else None,
                 "reason": _hib_reason,
+                "status": hib_status,
             },
         }
+
+        # ── BUG #3: aggregate invariant ─────────────────────────────────────────
+        # readiness_score == min(score of every applicable migration dimension).
+        # MIN (not mean): a migration is only as ready as its weakest applicable
+        # axis. _MIGRATION_DIMENSIONS lists exactly which dimensions feed it; the
+        # consistency invariant is asserted in finalize and covered by a unit test.
+        agg_inputs = {
+            name: self.applicable_dimensions[name]["score"]
+            for name in _MIGRATION_DIMENSIONS
+            if self.applicable_dimensions[name]["applicable"]
+        }
+        self.readiness_score = min(agg_inputs.values()) if agg_inputs else 100
+        self.readiness_aggregate = {
+            "method": "min",
+            "inputs": agg_inputs,
+            "excluded": ["jdk_modernization"],
+            "note": ("readiness_score = min over applicable migration dimensions "
+                     "(jakarta / boot3 / hibernate). jdk_modernization is an orthogonal "
+                     "upkeep axis and is intentionally excluded."),
+        }
+        # Internal consistency guard — the headline cannot diverge from the dimensions
+        # it claims to summarize (catches a future scorer change that breaks the model).
+        if agg_inputs:
+            assert self.readiness_score == min(agg_inputs.values()), (
+                "readiness_score must equal min(applicable migration dimensions); "
+                f"got {self.readiness_score} vs inputs {agg_inputs}"
+            )
 
         # BUG #5: effort over MAIN findings only — N/A axes (Hibernate-6 phantom,
         # test fixtures) no longer pad the estimate.
@@ -1375,10 +1417,13 @@ class MigrationReport:
             "jdk_modernization": self.jdk_modernization,
             "hibernate_readiness": self.hibernate_readiness,
             "applicable_dimensions": self.applicable_dimensions,
+            "readiness_aggregate": self.readiness_aggregate,
             "readiness_note": (
-                "readiness_score is a DERIVED aggregate over applicable dimensions only "
-                "(N/A dimensions excluded, never counted as 0). For migration decisions read "
-                "the per-dimension breakdown + blocking_count, not the single number."
+                "readiness_score = min over applicable MIGRATION dimensions "
+                "(jakarta / boot3 / hibernate); see readiness_aggregate for the exact "
+                "inputs. N/A dimensions are excluded (never counted as 0); "
+                "jdk_modernization is orthogonal upkeep and is NOT in the aggregate. "
+                "For decisions read the per-dimension breakdown + blocking_count."
             ),
             "headline_blocker": self.headline_blocker,
             "blocking_count": self.blocking_count,
