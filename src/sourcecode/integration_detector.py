@@ -35,10 +35,28 @@ _ATTR_NAME_RE = re.compile(r'(?:name|value)\s*=\s*"([^"]*)"')
 _FIRST_LITERAL_RE = re.compile(r'^\s*"([^"]*)"')
 
 # token -> (kind, client). Matched as whole-word usage outside imports/comments.
+# Covers Spring AND plain-Java/Jakarta stacks (Quarkus, Micronaut, Keycloak SPI):
+# the detector must not be Spring-centric, or a non-Spring repo with real LDAP /
+# SMTP / HTTP integrations falsely reports "0 integrations".
 _TOKEN_CLIENTS: "tuple[tuple[str, str, str], ...]" = (
+    # Spring HTTP clients
     ("RestTemplate", "http", "resttemplate"),
     ("WebClient", "http", "webclient"),
+    # Plain-Java / third-party HTTP clients
+    ("HttpClient", "http", "jdk-httpclient"),          # java.net.http.HttpClient
+    ("CloseableHttpClient", "http", "apache-httpclient"),
+    ("HttpClients", "http", "apache-httpclient"),
+    ("OkHttpClient", "http", "okhttp"),
+    # LDAP / directory (Spring + JNDI)
     ("LdapTemplate", "ldap", "ldaptemplate"),
+    ("InitialLdapContext", "ldap", "jndi-ldap"),
+    ("InitialDirContext", "ldap", "jndi-ldap"),
+    ("LdapContext", "ldap", "jndi-ldap"),
+    # Mail / SMTP (JavaMail / Jakarta Mail)
+    ("JavaMailSender", "smtp", "spring-mail"),
+    ("MimeMessage", "smtp", "javamail"),
+    ("Transport", "smtp", "javamail"),
+    # JMS / messaging
     ("JmsTemplate", "jms", "jmstemplate"),
     ("ActiveMQConnectionFactory", "jms", "activemq"),
 )
@@ -156,8 +174,21 @@ def detect_integrations(file_paths: "list[str]", root: Path) -> dict:
     for r in records:
         by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
 
+    # BUG #9: honest confidence. A zero count means "no detectable client
+    # construct was found", NOT "this system has no integrations" — runtime-wired
+    # clients (DI, config-driven endpoints, JCA connectors) are invisible to static
+    # text matching. Report that explicitly instead of an authoritative "0".
+    confidence = "observed" if records else "not_analyzed"
     return {
         "integrations": records,
         "by_kind": {k: by_kind[k] for k in sorted(by_kind)},
         "count": len(records),
+        "confidence": confidence,
+        "coverage_note": (
+            "Detects HTTP (RestTemplate/WebClient/JDK/Apache/OkHttp), LDAP (Spring "
+            "+ JNDI), SMTP (JavaMail), and JMS client constructs by source-text "
+            "matching. A count of 0 means no such construct was found, not that the "
+            "system has no outbound integrations — runtime/DI-wired clients are not "
+            "statically visible."
+        ),
     }

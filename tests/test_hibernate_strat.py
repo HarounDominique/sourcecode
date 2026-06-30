@@ -261,17 +261,50 @@ class TestIntegration:
         # text output includes the stratification block
         assert "Stratification" in report.to_text()
 
-    def test_report_exposes_hibernate_readiness_and_headline_blocker(self) -> None:
+    def test_headline_blocker_only_when_version_confirms_h5(self) -> None:
+        # BUG #1: a rewrite-zone SPI usage earns the headline_blocker ONLY when the
+        # effective Hibernate version is resolved to < 6. With a pinned 5.x pom the
+        # verdict is authoritative.
         from sourcecode.migrate_check import run_migrate_check
-        tmp = tempfile.mkdtemp()
-        root = Path(tmp)
+        root = Path(tempfile.mkdtemp())
+        _write(root, "pom.xml",
+               "<project><properties><hibernate.version>5.6.15.Final</hibernate.version>"
+               "</properties></project>\n")
         _write(root, "common/src/main/java/x/MoneyType.java",
                "import org.hibernate.usertype.UserType;\npublic class MoneyType implements UserType {}\n")
         report = run_migrate_check(["common/src/main/java/x/MoneyType.java"], root)
         d = report.to_dict()
-        assert "hibernate_readiness" in d
         assert d["hibernate_readiness"] < 100
         assert d["headline_blocker"] == "hibernate_rewrite"
+        assert d["hibernate"]["version_major"] == 5
+
+    def test_no_headline_blocker_when_version_unresolved(self) -> None:
+        # BUG #1 principle: never assert a framework blocker without a version.
+        # No build descriptor → version unknown → degrade to hypothesis, no headline.
+        from sourcecode.migrate_check import run_migrate_check
+        root = Path(tempfile.mkdtemp())
+        _write(root, "common/src/main/java/x/MoneyType.java",
+               "import org.hibernate.usertype.UserType;\npublic class MoneyType implements UserType {}\n")
+        report = run_migrate_check(["common/src/main/java/x/MoneyType.java"], root)
+        d = report.to_dict()
+        assert d["headline_blocker"] is None
+        assert d["hibernate"]["version_confidence"] == "none"
+
+    def test_hibernate6_is_not_applicable(self) -> None:
+        # BUG #1: already on Hibernate 6 → the 5→6 axis is N/A, never a blocker.
+        from sourcecode.migrate_check import run_migrate_check
+        root = Path(tempfile.mkdtemp())
+        _write(root, "pom.xml",
+               "<project><properties><hibernate.version>6.2.13.Final</hibernate.version>"
+               "</properties></project>\n")
+        _write(root, "common/src/main/java/x/MoneyType.java",
+               "import org.hibernate.usertype.UserType;\npublic class MoneyType implements UserType {}\n")
+        report = run_migrate_check(["common/src/main/java/x/MoneyType.java"], root)
+        d = report.to_dict()
+        assert d["headline_blocker"] is None
+        assert d["hibernate"]["effective_version"] == "6.2.13.Final"
+        assert d["hibernate"]["migration_applicable"] is False
+        assert d["applicable_dimensions"]["hibernate"]["applicable"] is False
 
     def test_clean_repo_no_headline_blocker(self) -> None:
         from sourcecode.migrate_check import run_migrate_check

@@ -12,6 +12,16 @@ _TEST_SEGMENTS = frozenset({
     "integrationtest", "integrationtests",
 })
 
+# Whole-module directories that are test harness / fixtures even though their
+# code lives under src/main (e.g. a Maven module that ships a test framework).
+# A finding under one of these modules is test infrastructure, not the product.
+_TEST_MODULE_SEGMENTS = frozenset({
+    "testsuite", "test-framework", "testframework",
+    "integration-arquillian", "arquillian",
+    "test-utils", "test-util", "testutils",
+    "test-support", "testsupport",
+})
+
 _VENDOR_SEGMENTS = frozenset({
     "vendor", "vendors",
     "third_party", "thirdparty",
@@ -83,6 +93,29 @@ def is_test_path(path: str) -> bool:
     ):
         return True
 
+    return False
+
+
+def is_test_or_fixture_path(path: str) -> bool:
+    """Return True when *path* is test code OR test-harness/fixture infrastructure.
+
+    Broader than is_test_path: also catches whole modules that are test frameworks
+    or integration-test harnesses (testsuite/, test-framework/, integration-arquillian/,
+    *-test*, *-it modules) even when their sources sit under src/main. Migration
+    tooling uses this to keep test fixtures (deprecated web.xml deployment
+    descriptors, test-only sun.* HTTP servers) out of the product's blocking count.
+    """
+    if is_test_path(path):
+        return True
+    norm = path.replace("\\", "/").lower()
+    parts = norm.split("/")
+    for part in parts[:-1]:  # skip the filename
+        bare = part.rstrip("/")
+        if bare in _TEST_MODULE_SEGMENTS:
+            return True
+        # module dirs like "adapter-test", "foo-tests", "bar-itests"
+        if bare.endswith(("-test", "-tests", "-it", "-itest", "-itests")):
+            return True
     return False
 
 

@@ -253,6 +253,75 @@ def _scan_build_dependency(root: Path) -> tuple[bool, list[str]]:
                     samples.append(snippet)
     return found, samples
 
+
+# ── BUG #1: effective Hibernate version resolution ─────────────────────────
+# A 5→6 rewrite verdict is only valid when the project is actually on Hibernate 5.
+# Resolve the effective major version from build descriptors, following Maven
+# ${properties} (incl. BOM-managed values declared as <hibernate*.version>) and
+# explicit hibernate-core / hibernate-orm coordinates. When the resolved major is
+# ≥ 6 the 5→6 axis does NOT apply (the migration is already done). When it cannot
+# be resolved the axis degrades to a low-confidence hypothesis (no headline).
+_HIB_VER = r"(\d+\.\d+(?:\.\d+)?(?:[.\-][\w]+)*)"  # 6.2.13.Final, 5.6.15, 6.2
+_HIB_PROP_RE = re.compile(
+    r"<((?:[\w.\-]*hibernate[\w.\-]*?)\.?version)>\s*" + _HIB_VER + r"\s*</\1>",
+    re.IGNORECASE,
+)
+_HIB_COORD_VERSION_RE = re.compile(
+    r"<artifactId>\s*hibernate-(?:core|orm)\s*</artifactId>\s*"
+    r"(?:<[^>]+>[^<]*</[^>]+>\s*)*?<version>\s*" + _HIB_VER,
+    re.IGNORECASE | re.DOTALL,
+)
+_HIB_GRADLE_VERSION_RE = re.compile(
+    r"org\.hibernate(?:\.orm)?:hibernate-(?:core|orm):" + _HIB_VER,
+    re.IGNORECASE,
+)
+
+
+def _ver_key(full: str) -> tuple[int, int]:
+    parts = full.split(".")
+    try:
+        major = int(parts[0])
+    except (ValueError, IndexError):
+        return (0, 0)
+    try:
+        minor = int(parts[1]) if len(parts) > 1 else 0
+    except ValueError:
+        minor = 0
+    return (major, minor)
+
+
+def _resolve_hibernate_version(root: Path) -> tuple[Optional[str], Optional[int], str]:
+    """Return (full_version_string, major, confidence) for the effective Hibernate.
+
+    confidence is "high" when a version was resolved from a build descriptor,
+    "none" when none could be determined (degrade to hypothesis). The newest
+    declared Hibernate wins in a multi-module build.
+    """
+    import os
+    best_full: Optional[str] = None
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_BUILD_SCAN_DIRS]
+        for fname in filenames:
+            if fname not in _BUILD_FILE_NAMES:
+                continue
+            try:
+                text = (Path(dirpath) / fname).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            fulls: list[str] = []
+            for m in _HIB_PROP_RE.finditer(text):
+                fulls.append(m.group(2))
+            for m in _HIB_COORD_VERSION_RE.finditer(text):
+                fulls.append(m.group(1))
+            for m in _HIB_GRADLE_VERSION_RE.finditer(text):
+                fulls.append(m.group(1))
+            for full in fulls:
+                if best_full is None or _ver_key(full) > _ver_key(best_full):
+                    best_full = full
+    if best_full is None:
+        return None, None, "none"
+    return best_full, _ver_key(best_full)[0], "high"
+
 # Escalation markers — dynamic / reflection-based persistence construction.
 _ABSTRACTION_CLASS_RE = re.compile(
     r"\b(DynamicEntityDao|DynamicEntityDaoImpl|BasicPersistenceModule|"
@@ -406,12 +475,23 @@ class HibernateStratification:
     # when backed by a build dependency or a parsed org.hibernate import, "none"
     # when detection was vetoed for lack of evidence.
     evidence: dict = field(default_factory=dict)
+    # BUG #1: effective Hibernate version + whether the 5→6 axis applies at all.
+    # When the resolved major is ≥ 6 the migration is already done → not applicable
+    # (never a blocker). When unresolved, the axis is a low-confidence hypothesis.
+    effective_version: Optional[str] = None
+    version_major: Optional[int] = None
+    version_confidence: str = "none"
+    migration_applicable: bool = True
 
     def to_dict(self) -> dict:
         return {
             "schema_version": HIBERNATE_SCHEMA_VERSION,
             "detected": self.detected,
             "evidence": self.evidence,
+            "effective_version": self.effective_version,
+            "version_major": self.version_major,
+            "version_confidence": self.version_confidence,
+            "migration_applicable": self.migration_applicable,
             "classification": self.classification,
             "classification_label": self.classification_label,
             "stratified": True,
@@ -763,6 +843,7 @@ def analyze_hibernate(file_paths: list[str], root: Path) -> HibernateStratificat
         return strat
 
     dep_present, dep_samples = _scan_build_dependency(root)
+    eff_version, version_major, version_conf = _resolve_hibernate_version(root)
 
     has_evidence = dep_present or any_hibernate_import or any_jpa_import
     evidence: dict = {
@@ -771,6 +852,9 @@ def analyze_hibernate(file_paths: list[str], root: Path) -> HibernateStratificat
         "hibernate_import_present": any_hibernate_import,
         "hibernate_import_sample": hibernate_import_sample,
         "jpa_import_present": any_jpa_import,
+        "effective_version": eff_version,
+        "version_major": version_major,
+        "version_confidence": version_conf,
         "confidence": "high" if has_evidence else "none",
     }
 
@@ -959,6 +1043,12 @@ def analyze_hibernate(file_paths: list[str], root: Path) -> HibernateStratificat
     strat = HibernateStratification()
     strat.findings = findings
     strat.evidence = evidence
+    strat.effective_version = eff_version
+    strat.version_major = version_major
+    strat.version_confidence = version_conf
+    # BUG #1: the 5→6 axis only applies when NOT already on Hibernate 6+. A
+    # resolved major ≥ 6 means the migration is complete — never a blocker.
+    strat.migration_applicable = not (version_major is not None and version_major >= 6)
     strat.rewrite_targets = sorted(
         targets, key=lambda t: (t.source_file, t.line_start, t.layer, t.id)
     )
@@ -1126,13 +1216,23 @@ def analyze_hibernate(file_paths: list[str], root: Path) -> HibernateStratificat
         stops.append("SQL/HQL shape not statically inferable (string concatenation)")
     strat.stop_conditions_triggered = stops
 
-    if stops:
+    if not strat.migration_applicable:
+        # Already on Hibernate 6+ — the 5→6 stratification below is retained as an
+        # informational exposure map, but it is NOT a migration and NOT a blocker.
+        strat.classification = CLASS_NONE
+        strat.classification_label = (
+            f"ALREADY ON HIBERNATE {strat.version_major} "
+            f"({strat.effective_version}) — NO 5→6 MIGRATION PENDING"
+        )
+        strat.stop_conditions_triggered = []
+    elif stops:
         strat.classification = CLASS_REWRITE
     elif layer_files[LAYER_CRITERIA] or concat_query_global or jpa_deprecated_seen:
         strat.classification = CLASS_UPGRADE_CARE
     else:
         strat.classification = CLASS_UPGRADE
-    strat.classification_label = _CLASS_LABELS[strat.classification]
+    if strat.migration_applicable:
+        strat.classification_label = _CLASS_LABELS[strat.classification]
 
     # ── Risk separation: observable vs inferred ─────────────────────────────
     observable: list[str] = []

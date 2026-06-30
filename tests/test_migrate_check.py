@@ -135,6 +135,9 @@ class TestMigrationFindingId:
 # Unit: MigrationReport.finalize
 # ---------------------------------------------------------------------------
 
+_RULE_TARGET = {r.id: r.migration_target for r in _ALL_RULES}
+
+
 class TestMigrationReportFinalize:
     def _make_finding(self, rule_id: str, severity: str, source_file: str) -> MigrationFinding:
         return MigrationFinding(
@@ -144,6 +147,9 @@ class TestMigrationReportFinalize:
             title="test",
             source_file=source_file,
             first_line=1,
+            # Use the rule's real migration_target so framework-vs-JDK scoring
+            # (BUG #4/#6) behaves as it does on real findings.
+            migration_target=_RULE_TARGET.get(rule_id, "jakarta"),
         )
 
     def test_perfect_score_when_no_findings(self) -> None:
@@ -169,15 +175,27 @@ class TestMigrationReportFinalize:
         assert report.readiness_score == 0
 
     def test_low_severity_deduction_is_capped(self) -> None:
-        # G-1: many low-severity advisory findings (e.g. java.time modernization)
-        # on a repo with zero blockers must NOT collapse the readiness headline.
+        # BUG #6: best-practice hygiene (MIG-016 java.util.Date → java.time) blocks
+        # no version upgrade and is EXCLUDED from readiness entirely — surfaced as a
+        # separate hygiene metric. 96 Date findings must NOT dent the headline.
         findings = [
             self._make_finding("MIG-016", "low", f"File{i}.java")
             for i in range(96)
         ]
         report = MigrationReport(findings=findings).finalize()
         assert report.blocking_count == 0
-        # 96 low files would deduct 96 (→ 4) uncapped; capped at 15 → 85.
+        assert report.readiness_score == 100
+        assert report.hygiene_findings == 96
+
+    def test_non_best_practice_low_findings_are_capped(self) -> None:
+        # G-1 cap still applies to framework low-severity findings (not hygiene):
+        # 96 low jakarta files would deduct 96 uncapped; capped at 15 → 85.
+        findings = [
+            self._make_finding("MIG-007", "low", f"File{i}.java")  # jakarta target
+            for i in range(96)
+        ]
+        report = MigrationReport(findings=findings).finalize()
+        assert report.blocking_count == 0
         assert report.readiness_score == 85
 
     def test_blockers_still_floor_score_with_low_findings_present(self) -> None:
