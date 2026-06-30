@@ -541,6 +541,47 @@ _ALL_RULES: list[_Rule] = (
 
 SEVERITY_ORDER: dict[str, int] = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
+# BUG #2 — javax.* packages that are JDK / permanent JSR namespaces and do NOT
+# migrate to jakarta. A jakarta-migration rule matching `javax.transaction` or
+# `javax.annotation` must NOT fire on these FQN prefixes (e.g. javax.transaction.xa
+# is the Java SE java.transaction.xa module; javax.annotation.processing is the
+# annotation-processing API). The allowlist is keyed on fully-qualified import
+# prefixes, never on simple class names or partial tokens.
+_JAKARTA_NO_MIGRATE_PREFIXES: tuple[str, ...] = (
+    "javax.transaction.xa.",
+    "javax.annotation.processing.",
+    "javax.xml.parsers.",
+    "javax.xml.transform.",
+    "javax.xml.xpath.",
+    "javax.xml.stream.",
+    "javax.xml.datatype.",
+    "javax.xml.namespace.",
+    "javax.xml.validation.",
+    "javax.xml.catalog.",
+    "javax.xml.crypto.",
+    "javax.sql.",
+    "javax.management.",
+    "javax.naming.",
+    "javax.crypto.",
+    "javax.net.",
+    "javax.security.auth.",
+    "javax.security.cert.",
+    "javax.security.sasl.",
+    "javax.cache.",
+    "javax.tools.",
+    "javax.imageio.",
+    "javax.sound.",
+    "javax.print.",
+    "javax.accessibility.",
+    "javax.swing.",
+    "javax.lang.model.",
+)
+
+
+def _is_no_migrate_javax(fqn: str) -> bool:
+    """True if a javax FQN belongs to a JDK/permanent namespace (no jakarta move)."""
+    return any(fqn.startswith(p) for p in _JAKARTA_NO_MIGRATE_PREFIXES)
+
 # G-1: cap on total readiness deduction from low-severity (advisory, non-blocking)
 # findings, so optional modernization cleanups cannot collapse the migration-readiness
 # headline on a repo with zero blockers. See MigrationReport.finalize.
@@ -1061,6 +1102,11 @@ class MigrationReport:
     # Names the dominant blocker class when one dimension dwarfs the headline
     # score (e.g. "hibernate_rewrite") so a reader of readiness_score is not misled.
     headline_blocker: Optional[str] = None
+    # BUG #3: which readiness dimensions actually APPLY to this repo. A dimension
+    # that does not apply (e.g. hibernate on a repo with no Hibernate) is N/A and
+    # is excluded from the aggregate — it is never counted as 0. Maps dimension →
+    # {"applicable": bool, "score": int|None, "reason": str}.
+    applicable_dimensions: dict = field(default_factory=dict)
     blocking_count: int = 0
     estimated_effort_days: float = 0.0
     # Tri-state: True = Boot 2 confirmed, False = Boot 3+ confirmed,
@@ -1142,10 +1188,31 @@ class MigrationReport:
         # Hibernate is its own rewrite axis (orthogonal to jakarta/Boot3); it does
         # NOT sink the headline readiness_score, but is surfaced as a dimension and,
         # in a rewrite zone, as the headline_blocker so 62/100 is not read as "easy".
-        if self.hibernate is not None and self.hibernate.detected:
+        _hibernate_applies = self.hibernate is not None and self.hibernate.detected
+        if _hibernate_applies:
             self.hibernate_readiness = self.hibernate.readiness
             if self.hibernate.classification == "rewrite_zone":
                 self.headline_blocker = "hibernate_rewrite"
+
+        # BUG #3: declare which dimensions apply. jakarta/boot3/jdk are always
+        # applicable to a Java/Spring repo; hibernate applies only when a real
+        # Hibernate dependency/import was found. An inapplicable dimension is N/A
+        # (score=None) and is excluded from the aggregate — never scored as 0.
+        self.applicable_dimensions = {
+            "jakarta": {"applicable": True, "score": self.jakarta_readiness,
+                        "reason": "javax→jakarta namespace migration"},
+            "boot3": {"applicable": True, "score": self.boot3_readiness,
+                      "reason": "Spring Boot 2→3 / Security 6 migration"},
+            "jdk_modernization": {"applicable": True, "score": self.jdk_modernization,
+                                  "reason": "orthogonal JDK modernization debt"},
+            "hibernate": {
+                "applicable": _hibernate_applies,
+                "score": self.hibernate_readiness if _hibernate_applies else None,
+                "reason": ("Hibernate 5→6 rewrite axis"
+                           if _hibernate_applies
+                           else "N/A — no Hibernate dependency or import detected"),
+            },
+        }
 
         self.estimated_effort_days = round(
             len(critical_files) * 0.5
@@ -1175,6 +1242,12 @@ class MigrationReport:
             "boot3_readiness": self.boot3_readiness,
             "jdk_modernization": self.jdk_modernization,
             "hibernate_readiness": self.hibernate_readiness,
+            "applicable_dimensions": self.applicable_dimensions,
+            "readiness_note": (
+                "readiness_score is a DERIVED aggregate over applicable dimensions only "
+                "(N/A dimensions excluded, never counted as 0). For migration decisions read "
+                "the per-dimension breakdown + blocking_count, not the single number."
+            ),
             "headline_blocker": self.headline_blocker,
             "blocking_count": self.blocking_count,
             "estimated_effort_days": self.estimated_effort_days,
@@ -1256,6 +1329,11 @@ def _scan_file(
 
         if rule.import_pattern is not None:
             matches = list(rule.import_pattern.finditer(source))
+            # BUG #2: for jakarta-migration rules, drop imports whose FQN belongs
+            # to a JDK/permanent javax namespace (javax.transaction.xa.*,
+            # javax.annotation.processing.*, ...). These do NOT migrate to jakarta.
+            if matches and rule.migration_target == "jakarta":
+                matches = [m for m in matches if not _is_no_migrate_javax(m.group(1).strip())]
             if matches:
                 import_first_line = source[: matches[0].start()].count("\n") + 1
                 matched_imports = [m.group(1) for m in matches]

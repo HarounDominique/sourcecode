@@ -36,7 +36,7 @@ from typing import Optional
 
 
 # Sub-schema version for the `hibernate` output section. Bump on shape changes.
-HIBERNATE_SCHEMA_VERSION = "2.0"
+HIBERNATE_SCHEMA_VERSION = "2.1"
 
 
 # ---------------------------------------------------------------------------
@@ -107,14 +107,24 @@ _JPA_DEPRECATED_RE = re.compile(
 )
 
 # Layer 2 — JPA Criteria API + legacy Hibernate Criteria.
+# BUG #1: dropped over-generic tokens (\bPredicate\b, \bRoot\s*<, \bCriterion\b,
+# \bConjunction\b, \bDisjunction\b) that collide with project-owned domain classes
+# (e.g. Alfresco's own query model has Predicate / Conjunction / Disjunction /
+# Criterion classes with NO Hibernate dependency). Real JPA Criteria code always
+# carries CriteriaBuilder / CriteriaQuery, so detection is preserved via those.
 _CRITERIA_JPA_RE = re.compile(
     r"\bCriteriaBuilder\b|\bCriteriaQuery\b|\bCriteriaUpdate\b|"
-    r"\bCriteriaDelete\b|\bRoot\s*<|\bPredicate\b|persistence\.criteria"
+    r"\bCriteriaDelete\b|persistence\.criteria"
 )
+# Legacy Hibernate Criteria. org.hibernate.Criteria / org.hibernate.criterion.*
+# are FQN-anchored (safe). The bare-name tokens (createCriteria, Restrictions,
+# Projections, DetachedCriteria) only count when the file actually imports
+# org.hibernate (see _file_imports_hibernate gate) — they are otherwise common
+# enough to collide with unrelated builder APIs.
 _CRITERIA_LEGACY_RE = re.compile(
-    r"org\.hibernate\.Criteria\b|\.createCriteria\s*\(|\bDetachedCriteria\b|"
-    r"\bRestrictions\.|\bProjections\.|\bCriterion\b|"
-    r"\bConjunction\b|\bDisjunction\b"
+    r"org\.hibernate\.Criteria\b|org\.hibernate\.criterion\b|"
+    r"\.createCriteria\s*\(|\bDetachedCriteria\b|"
+    r"\bRestrictions\.|\bProjections\."
 )
 
 # Layer 3 — HQL / native string queries. createQuery requires a string literal so
@@ -131,19 +141,117 @@ _HQL_CONCAT_RE = re.compile(
 )
 
 # Layer 4 — Hibernate SPI / internal API (CRITICAL blocker).
-_SPI_RE = re.compile(
-    r"\b(?:implements|extends)\s+\w*(?:UserType|CompositeUserType|UserCollectionType)\b|"
-    r"\bimplements\s+\w*UserType\b|"
+# BUG #1: split into FQN-anchored matches (proof of Hibernate origin — always
+# counted) and bare-name matches (e.g. `implements XInterceptor`, `extends
+# XEventListener`) that collide with project-owned AOP interceptors / event
+# listeners. Bare-name matches only count when the file actually imports
+# org.hibernate (see _file_imports_hibernate gate).
+_SPI_FQN_RE = re.compile(
     r"\borg\.hibernate\.(?:type|engine|internal|persister|metamodel|"
-    r"boot\.spi|boot\.internal|event|tuple|property\.access|loader|sql\.ast)\b|"
+    r"boot\.spi|boot\.internal|event|tuple|property\.access|loader|sql\.ast|"
+    r"usertype)\b|"
     r"\bEmptyInterceptor\b|"
+    r"\bSessionFactoryImpl\b|\bSessionImplementor\b|"
+    r"\bSharedSessionContractImplementor\b"
+)
+_SPI_SIMPLE_RE = re.compile(
+    r"\b(?:implements|extends)\s+\w*(?:UserType|CompositeUserType|UserCollectionType)\b|"
     r"\bimplements\s+\w*Interceptor\b|"
     r"\b(?:implements|extends)\s+\w*EventListener\b|"
-    r"\bSessionFactoryImpl\b|\bSessionImplementor\b|"
-    r"\bSharedSessionContractImplementor\b|"
     r"\bsetPropertyAccessStrategy\b|\bPropertyAccessStrategy\b|"
     r"\bImplicitNamingStrategy\b|\bPhysicalNamingStrategy\b"
 )
+
+# ---------------------------------------------------------------------------
+# BUG #1 — comment/string stripping + real-import & dependency evidence
+# ---------------------------------------------------------------------------
+#
+# A Hibernate 5→6 verdict is a high-cost blocker. It must be PROVEN from resolved
+# AST signals, never from a substring inside a comment, Javadoc, string literal,
+# or classpath resource path. Two guards enforce this:
+#   1. _strip_comments_strings() — all pattern scanning runs on code with comments
+#      and string/char literal CONTENT removed (quotes/newlines preserved so line
+#      numbers and call-shape tokens survive).
+#   2. _collect_hibernate_evidence() — detection only proceeds when there is real
+#      evidence: an org.hibernate:* build dependency, a parsed `import org.hibernate.*`,
+#      or a parsed `import {jakarta,javax}.persistence.*` (JPA provider in play).
+
+_JAVA_TOKEN_RE = re.compile(
+    r"(//[^\n]*)"                       # line comment
+    r"|(/\*.*?\*/)"                     # block comment
+    r"|(\"(?:\\.|[^\"\\\n])*\")"        # string literal
+    r"|('(?:\\.|[^'\\\n])*')",          # char literal
+    re.DOTALL,
+)
+
+
+def _strip_comments_strings(src: str) -> str:
+    """Remove comment and string/char-literal CONTENT, preserving line count.
+
+    Line comments are blanked in place (the trailing newline is outside the match,
+    so line numbers are unaffected). Block comments are replaced by an equal number
+    of newlines. String/char literals collapse to empty `""` / `''` tokens so that
+    call-shape detection (e.g. createQuery("...")) and concatenation (`"" + x`) still
+    match, but no pattern can match a substring that lived inside a literal.
+    """
+    def _repl(m: re.Match) -> str:
+        if m.group(1) is not None:
+            return ""
+        if m.group(2) is not None:
+            return "\n" * m.group(2).count("\n")
+        if m.group(3) is not None:
+            return '""'
+        if m.group(4) is not None:
+            return "''"
+        return m.group(0)
+    return _JAVA_TOKEN_RE.sub(_repl, src)
+
+
+# Real `import org.hibernate.*` — anchored to an import statement, not a substring.
+_REAL_HIBERNATE_IMPORT_RE = re.compile(
+    r"^[ \t]*import\s+(?:static\s+)?org\.hibernate\.", re.MULTILINE
+)
+# Real JPA import (jakarta or javax persistence) — a JPA provider is in play.
+_JPA_IMPORT_RE = re.compile(
+    r"^[ \t]*import\s+(?:static\s+)?(?:jakarta|javax)\.persistence\.", re.MULTILINE
+)
+# org.hibernate:* coordinate in a Maven/Gradle build descriptor.
+_HIBERNATE_DEP_RE = re.compile(
+    r"<groupId>\s*org\.hibernate(?:\.orm)?\s*</groupId>"
+    r"|['\"]org\.hibernate(?:\.orm)?:",
+    re.IGNORECASE,
+)
+_BUILD_FILE_NAMES: tuple[str, ...] = ("pom.xml", "build.gradle", "build.gradle.kts")
+_SKIP_BUILD_SCAN_DIRS: frozenset[str] = frozenset(
+    {"target", "build", ".git", ".gradle", "node_modules", "__pycache__", "out", "dist", "bin"}
+)
+
+
+def _file_imports_hibernate(stripped_source: str) -> bool:
+    return bool(_REAL_HIBERNATE_IMPORT_RE.search(stripped_source))
+
+
+def _scan_build_dependency(root: Path) -> tuple[bool, list[str]]:
+    """Return (org.hibernate dependency present, sample coordinate strings)."""
+    import os
+    samples: list[str] = []
+    found = False
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_BUILD_SCAN_DIRS]
+        for fname in filenames:
+            if fname not in _BUILD_FILE_NAMES:
+                continue
+            try:
+                text = (Path(dirpath) / fname).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            text = _strip_comments_strings(text) if fname.endswith((".gradle", ".kts")) else text
+            for m in _HIBERNATE_DEP_RE.finditer(text):
+                found = True
+                snippet = m.group(0).strip()
+                if snippet not in samples and len(samples) < 5:
+                    samples.append(snippet)
+    return found, samples
 
 # Escalation markers — dynamic / reflection-based persistence construction.
 _ABSTRACTION_CLASS_RE = re.compile(
@@ -294,11 +402,16 @@ class HibernateStratification:
     total_effort_range_days: dict = field(default_factory=dict)
     effort_model: dict = field(default_factory=dict)
     findings: list[HibernateFinding] = field(default_factory=list)
+    # BUG #1: auditable proof behind the detected verdict. confidence is "high"
+    # when backed by a build dependency or a parsed org.hibernate import, "none"
+    # when detection was vetoed for lack of evidence.
+    evidence: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
             "schema_version": HIBERNATE_SCHEMA_VERSION,
             "detected": self.detected,
+            "evidence": self.evidence,
             "classification": self.classification,
             "classification_label": self.classification_label,
             "stratified": True,
@@ -607,15 +720,71 @@ def analyze_hibernate(file_paths: list[str], root: Path) -> HibernateStratificat
     concat_query_global = False
     incompatible: set[str] = set()
 
+    # ── BUG #1: evidence gate ───────────────────────────────────────────────
+    # Pre-read each Java source ONCE, strip comments + string/char literals, and
+    # record real-import evidence. Detection only proceeds when there is genuine
+    # proof of Hibernate/JPA — never a substring inside a comment or a classpath
+    # resource path (e.g. Alfresco's "org.hibernate.dialect.MySQLInnoDBDialect"
+    # appears only in Javadoc + iBatis resource directory names).
+    parsed: list[tuple[str, str, bool]] = []  # (rel_path, stripped_source, imports_hibernate)
+    any_hibernate_import = False
+    any_jpa_import = False
+    hibernate_import_sample: Optional[str] = None
     for rel_path in sorted(file_paths):
         if not rel_path.endswith(".java"):
             continue
         abs_path = root / rel_path
         try:
-            source = abs_path.read_text(encoding="utf-8", errors="replace")
+            raw = abs_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        source = _strip_comments_strings(raw)
+        imports_hib = _file_imports_hibernate(source)
+        if imports_hib:
+            any_hibernate_import = True
+            if hibernate_import_sample is None:
+                hm = _REAL_HIBERNATE_IMPORT_RE.search(source)
+                # capture the full import line for the evidence record
+                line = source[hm.start():].split("\n", 1)[0].strip().rstrip(";")
+                hibernate_import_sample = line
+        if _JPA_IMPORT_RE.search(source):
+            any_jpa_import = True
+        parsed.append((rel_path, source, imports_hib))
 
+    # No Java sources → nothing to stratify; skip the (potentially large) build walk.
+    if not parsed:
+        strat = HibernateStratification()
+        strat.detected = False
+        strat.classification = CLASS_NONE
+        strat.classification_label = _CLASS_LABELS[CLASS_NONE]
+        strat.evidence = {"dependency_present": False, "dependency_coordinates": [],
+                          "hibernate_import_present": False, "hibernate_import_sample": None,
+                          "jpa_import_present": False, "confidence": "none"}
+        return strat
+
+    dep_present, dep_samples = _scan_build_dependency(root)
+
+    has_evidence = dep_present or any_hibernate_import or any_jpa_import
+    evidence: dict = {
+        "dependency_present": dep_present,
+        "dependency_coordinates": dep_samples,
+        "hibernate_import_present": any_hibernate_import,
+        "hibernate_import_sample": hibernate_import_sample,
+        "jpa_import_present": any_jpa_import,
+        "confidence": "high" if has_evidence else "none",
+    }
+
+    if not has_evidence:
+        # No resolved Hibernate/JPA evidence → never a blocker. Any org.hibernate
+        # substring lives in comments/strings/classpath paths only.
+        strat = HibernateStratification()
+        strat.detected = False
+        strat.classification = CLASS_NONE
+        strat.classification_label = _CLASS_LABELS[CLASS_NONE]
+        strat.evidence = evidence
+        return strat
+
+    for rel_path, source, file_imports_hib in parsed:
         nl = _line_index(source)
         src_lines = source.split("\n")
         classes, methods = _index_symbols(source, nl)
@@ -736,7 +905,16 @@ def analyze_hibernate(file_paths: list[str], root: Path) -> HibernateStratificat
                                  "Hibernate 6 HQL parser changes")
 
         # ── Layer 4: Hibernate SPI / internal ──────────────────────────────
-        spi_matches = list(_SPI_RE.finditer(source))
+        # FQN-anchored SPI matches are proof on their own. Bare-name matches
+        # (`implements XInterceptor`, `extends XEventListener`) only count when
+        # the file actually imports org.hibernate — otherwise they are the
+        # project's own AOP interceptors / event listeners (BUG #1).
+        spi_matches = list(_SPI_FQN_RE.finditer(source))
+        if file_imports_hib:
+            spi_matches = sorted(
+                spi_matches + list(_SPI_SIMPLE_RE.finditer(source)),
+                key=lambda m: m.start(),
+            )
         if spi_matches:
             spi_global = True
             mod["has_spi"] = True
@@ -780,6 +958,7 @@ def analyze_hibernate(file_paths: list[str], root: Path) -> HibernateStratificat
 
     strat = HibernateStratification()
     strat.findings = findings
+    strat.evidence = evidence
     strat.rewrite_targets = sorted(
         targets, key=lambda t: (t.source_file, t.line_start, t.layer, t.id)
     )
@@ -789,6 +968,8 @@ def analyze_hibernate(file_paths: list[str], root: Path) -> HibernateStratificat
     )[:25]
 
     if not findings:
+        # Evidence existed (dependency/import) but no concrete migration pattern
+        # fired — Hibernate present yet nothing in the rewrite/upgrade surface.
         strat.detected = False
         strat.classification = CLASS_NONE
         strat.classification_label = _CLASS_LABELS[CLASS_NONE]

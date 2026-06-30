@@ -4011,6 +4011,18 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
     _fn_route_files: set[str] = set()
     _fn_route_count = 0
 
+    # BUG #4: detect REST surfaces exposed by NON-Spring-MVC frameworks. These are
+    # NOT modeled by the annotation surface, so when the Spring surface is empty we
+    # must still tell the consumer "REST present, just not Spring-annotated" rather
+    # than let them infer "no API". Signal counts per framework.
+    _WEBSCRIPT_RE = _re.compile(
+        r"\bextends\s+\w*(?:AbstractWebScript|DeclarativeWebScript)\b"
+        r"|org\.springframework\.extensions\.webscripts"
+    )
+    _JAXRS_PATH_RE = _re.compile(r"^[ \t]*import\s+(?:jakarta|javax)\.ws\.rs\.", _re.MULTILINE)
+    _SERVLET_RE = _re.compile(r"\bextends\s+\w*HttpServlet\b")
+    _nonspring: dict[str, int] = {"webscripts": 0, "jax_rs": 0, "servlets": 0}
+
     for jf in java_files:
         try:
             source = jf.read_text(encoding="utf-8", errors="replace")
@@ -4025,6 +4037,12 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
             if _fn_hits:
                 _fn_route_files.add(rel)
                 _fn_route_count += _fn_hits
+        if _WEBSCRIPT_RE.search(source):
+            _nonspring["webscripts"] += 1
+        if _JAXRS_PATH_RE.search(source) and "@Path" in source:
+            _nonspring["jax_rs"] += 1
+        if _SERVLET_RE.search(source):
+            _nonspring["servlets"] += 1
         _, symbols, _ = _extract_symbols(source, rel, extra_capture=_extra_capture)
         for sym in symbols:
             all_symbols.append(sym)
@@ -4253,6 +4271,58 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
                 "do NOT read it as 'no endpoints'; the app's HTTP surface is unmodeled."
             )
         result.setdefault("warnings", []).append(_fr_msg)
+
+    # BUG #4: non-Spring-MVC REST frameworks. Count Alfresco WebScript descriptors
+    # (*.desc.xml: <url>/<authentication>/<transaction>) in addition to the Java
+    # signals gathered above.
+    _webscript_descriptors = 0
+    for _df in root.rglob("*.desc.xml"):
+        if "target/" in str(_df).replace("\\", "/"):
+            continue
+        try:
+            _dt = _df.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "<url>" in _dt or "<webscript" in _dt:
+            _webscript_descriptors += 1
+    if _webscript_descriptors:
+        _nonspring["webscripts"] += _webscript_descriptors
+
+    _nonspring_total = sum(_nonspring.values())
+    if _nonspring_total:
+        _frameworks = [k for k, v in _nonspring.items() if v]
+        result["non_spring_rest_surface"] = {
+            "detected": True,
+            "frameworks": {k: v for k, v in _nonspring.items() if v},
+            "webscript_descriptors": _webscript_descriptors,
+            "modeled": False,
+        }
+        _fw_names = {
+            "webscripts": "Alfresco WebScripts",
+            "jax_rs": "JAX-RS",
+            "servlets": "mapped Servlets",
+        }
+        _fw_label = ", ".join(_fw_names[f] for f in _frameworks)
+        # When the Spring surface is empty, the security model is genuinely
+        # UNDETERMINED — never "unknown" (which downstream reads as "no security")
+        # and never let "total: 0" be read as "no API".
+        if not endpoints:
+            if security_model in ("unknown", "xml_or_filter_chain"):
+                security_model = "undetermined"
+                result["security_model"] = security_model
+            _msg = (
+                f"REST surface present but NOT Spring-MVC-annotated: detected {_fw_label}. "
+                f"Static endpoint extraction is not supported for these frameworks, so this "
+                f"surface is EMPTY — do NOT read 'total: 0' as 'this app exposes no API'. "
+                f"security_model is 'undetermined', not 'unsecured'."
+            )
+        else:
+            _msg = (
+                f"Additional REST surface present outside Spring MVC: detected {_fw_label}. "
+                f"These endpoints are NOT modeled here; the count covers Spring-MVC-annotated "
+                f"endpoints only."
+            )
+        result.setdefault("warnings", []).append(_msg)
     return result
 
 

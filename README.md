@@ -339,6 +339,8 @@ Extracts all Spring MVC (`@GetMapping`, `@PostMapping`, `@RequestMapping`, etc.)
 
 **Functional / WebFlux routing (honest limitation).** Routes registered via the functional DSL — `route().GET("/path", handler)` / `RouterFunction` / `CustomEndpoint`, common in reactive Spring apps — are **not** modeled (their real paths depend on `nest()`/group-version prefixes that can't be resolved statically). Rather than emit partial paths that would mislead, the output reports a `functional_routing` block (`files`, `route_registrations`, `modeled: false`) plus a warning. When the annotation surface is empty but functional routes exist, the warning explicitly tells you not to read it as "no endpoints". Annotation-based (MVC/JAX-RS) repos are unaffected.
 
+**Non-Spring REST frameworks (never "no API").** When the Spring-MVC surface is empty but the repo exposes REST another way — Alfresco WebScripts (`*.desc.xml` descriptors + classes extending `AbstractWebScript`/`DeclarativeWebScript`), JAX-RS, or mapped Servlets — `security_model` is reported as `"undetermined"` (never `"unknown"`, which downstream reads as "no security"), a `non_spring_rest_surface` block names the detected frameworks, and a warning states the surface is unmodeled. `total: 0` therefore can never be read as "this application exposes no API".
+
 **Custom security annotations.** Enterprise repos often guard endpoints with a bespoke annotation instead of `@PreAuthorize`/`@Secured`. Drop a `sourcecode.config.json` at the repo root to teach the scanner about it — otherwise those endpoints report `policy: "none_detected"`:
 
 ```json
@@ -625,7 +627,17 @@ A Hibernate major upgrade is **not** a single dependency bump for systems that u
 dynamic persistence. `migrate-check` stratifies Hibernate exposure into four
 independent migration domains — never one aggregated score — and emits **actionable,
 machine-readable rewrite targets** so a migration agent can consume the output
-directly instead of re-parsing the repo. Sub-`schema_version`: `2.0`.
+directly instead of re-parsing the repo. Sub-`schema_version`: `2.1`.
+
+> **Evidence-gated (no false blockers).** Hibernate detection requires real proof —
+> an `org.hibernate:*` build dependency, a parsed `import org.hibernate.*`, or a
+> parsed `import {jakarta,javax}.persistence.*`. Absent all three,
+> `hibernate.detected` is `false` (no `hibernate_rewrite` headline, no phantom
+> effort). Scanning runs on source with comments + string/char literals stripped, so
+> an `org.hibernate.*` substring in Javadoc or a classpath resource path never
+> triggers a verdict; bare-name SPI matches (`implements XInterceptor`) require an
+> `org.hibernate` import in the same file. The proof is recorded under
+> `hibernate.evidence{}` with a `confidence`.
 
 **Four layers** (each on its own risk axis):
 
@@ -665,6 +677,12 @@ dimension alongside `jakarta_readiness` / `boot3_readiness` / `jdk_modernization
 Hibernate is an orthogonal rewrite axis, so it does not sink the headline
 `readiness_score`; instead, in a rewrite zone the top-level `headline_blocker` is set
 to `"hibernate_rewrite"` so a reader of the headline score is not misled.
+
+A dimension that does not apply (e.g. Hibernate on a repo with no Hibernate) is
+reported as **N/A** (`score: null`), never as `0`. The top-level
+`applicable_dimensions{}` records which dimensions apply and `readiness_note`
+states that `readiness_score` is a derived aggregate over applicable dimensions
+only — for decisions, read the per-dimension breakdown + `blocking_count`.
 
 ```bash
 # inspect only the Hibernate rewrite targets

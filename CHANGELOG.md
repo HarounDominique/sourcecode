@@ -1,5 +1,56 @@
 # Changelog
 
+## [1.64.0] — 2026-06-30
+
+### Fixed — zero false-positive blockers (`migrate-check` / `endpoints`)
+
+A Pro audit of a real enterprise repo (Alfresco Content Services Community, 6,549
+classes) surfaced false blockers that would have invalidated a ~2 person-month
+budget decision. A migration blocker is a high-cost claim: if the tool cannot
+**prove** it from resolved AST/dependency signals, it must not be declared. This
+release enforces that — blockers operate on parsed imports / fully-qualified type
+references, never on a substring inside a comment, Javadoc, string literal, or
+classpath resource path. The `hibernate` sub-`schema_version` is now **2.1**.
+
+- **Phantom Hibernate eliminated.** Hibernate detection now requires real evidence:
+  an `org.hibernate:*` build dependency, a parsed `import org.hibernate.*`, or a
+  parsed `import {jakarta,javax}.persistence.*`. Absent all three →
+  `hibernate.detected = false`, no `hibernate_rewrite` headline, no phantom effort.
+  All scanning runs on source with comments + string/char literals stripped (line
+  numbers preserved), so an `org.hibernate.dialect.*` substring in Javadoc or an
+  iBatis resource path can no longer trigger a verdict. Over-generic Criteria tokens
+  (`Predicate`, `Root<`, `Criterion`, `Conjunction`, `Disjunction`) were dropped —
+  they collide with project-owned domain classes. SPI bare-name matches
+  (`implements XInterceptor`, `extends XEventListener`) now require an
+  `org.hibernate` import in the same file; FQN-anchored SPI matches still count
+  on their own. New `hibernate.evidence{}` records the proof + `confidence`.
+- **MIG-004 / jakarta rules respect a JDK allowlist.** `javax.transaction.xa.*`
+  (the Java SE `java.transaction.xa` module), `javax.annotation.processing.*`,
+  `javax.sql.*`, `javax.xml.parsers/transform/...`, `javax.management.*`,
+  `javax.crypto.*`, and the other permanent JDK/JSR `javax` namespaces no longer
+  count as jakarta-migration findings. App-level `javax.transaction.Transactional`,
+  `javax.annotation.PostConstruct`, etc. are still flagged (true positives kept).
+  Matching is by fully-qualified import prefix, not simple name or partial token.
+- **`readiness_score` no longer sinks on an N/A dimension.** A dimension that does
+  not apply (e.g. Hibernate on a repo with no Hibernate) is reported as N/A
+  (`score: null`), never as 0. New `applicable_dimensions{}` and `readiness_note`
+  make the aggregate's derivation explicit — read the per-dimension breakdown +
+  `blocking_count`, not the single number.
+- **`endpoints` never implies "no API".** When the Spring-MVC surface is empty but
+  another REST framework is present (Alfresco WebScripts via `*.desc.xml` +
+  `AbstractWebScript`/`DeclarativeWebScript`, JAX-RS, or mapped Servlets),
+  `security_model` becomes `"undetermined"` (not `"unknown"`), a
+  `non_spring_rest_surface{}` block is emitted, and a warning states the surface is
+  unmodeled — so `total: 0` is never read as "this app exposes no endpoints".
+
+### Tests
+
+- New `tests/test_falsepositive_fixes.py` — positive **and** negative fixtures per
+  bug (phantom comment-only repo, project-owned `Dialect`/`Criteria`/`Interceptor`
+  classes, `javax.transaction.xa`, WebScripts) alongside the true positives that
+  must be preserved (real Hibernate, `javax.transaction.Transactional`,
+  `@RestController`). Full suite: 2827 passed.
+
 ## [1.63.0] — 2026-06-29
 
 ### Added — actionable Hibernate rewrite targets (`migrate-check`)

@@ -32,9 +32,24 @@ def _write(root: Path, rel: str, body: str) -> None:
     p.write_text(body, encoding="utf-8")
 
 
-def _analyze(files: dict[str, str]) -> HibernateStratification:
+_HIBERNATE_POM = (
+    "<project><dependencies><dependency>"
+    "<groupId>org.hibernate.orm</groupId><artifactId>hibernate-core</artifactId>"
+    "<version>5.6.15.Final</version></dependency></dependencies></project>\n"
+)
+
+
+def _analyze(files: dict[str, str], *, with_hibernate_dep: bool = True) -> HibernateStratification:
+    """Analyze an in-memory fixture repo.
+
+    By default a pom.xml declaring org.hibernate:hibernate-core is written so the
+    repo carries genuine Hibernate dependency evidence (BUG #1 gate). Tests that
+    assert *non*-detection on a non-Hibernate repo pass with_hibernate_dep=False.
+    """
     tmp = tempfile.mkdtemp()
     root = Path(tmp)
+    if with_hibernate_dep:
+        (root / "pom.xml").write_text(_HIBERNATE_POM, encoding="utf-8")
     for rel, body in files.items():
         _write(root, rel, body)
     rel_paths = list(files.keys())
@@ -82,6 +97,7 @@ class TestNoUsage:
 class TestJpaLayer:
     def test_standard_jpa_is_low_upgrade(self) -> None:
         s = _analyze({"core/src/main/java/x/E.java":
+                      "import javax.persistence.Entity;\n"
                       "@Entity\npublic class E { @Id Long id; @Column String n; }\n"})
         assert s.detected
         jpa = [r for r in s.risk_matrix if r.layer == LAYER_JPA][0]
@@ -90,6 +106,7 @@ class TestJpaLayer:
 
     def test_deprecated_annotation_escalates(self) -> None:
         s = _analyze({"core/src/main/java/x/E.java":
+                      "import javax.persistence.Entity;\n"
                       "@Entity\n@TypeDef(name=\"x\")\npublic class E { @Id Long id; }\n"})
         jpa = [r for r in s.risk_matrix if r.layer == LAYER_JPA][0]
         assert jpa.risk == "high"
@@ -103,6 +120,7 @@ class TestJpaLayer:
 class TestCriteriaLayer:
     def test_static_criteria_is_high(self) -> None:
         s = _analyze({"core/src/main/java/x/Dao.java":
+                      "import javax.persistence.criteria.CriteriaBuilder;\n"
                       "public class Dao { void f(){ CriteriaBuilder cb; CriteriaQuery cq; } }\n"})
         crit = [r for r in s.risk_matrix if r.layer == LAYER_CRITERIA][0]
         assert crit.risk == "high"
@@ -113,6 +131,7 @@ class TestCriteriaLayer:
     def test_dynamic_criteria_via_reflection_is_critical_rewrite(self) -> None:
         s = _analyze({"open-admin-platform/src/main/java/x/DynamicEntityDaoImpl.java":
                       "import java.lang.reflect.Field;\n"
+                      "import javax.persistence.criteria.CriteriaBuilder;\n"
                       "public class DynamicEntityDaoImpl {\n"
                       "  Object q(Class<?> entityClass){\n"
                       "    Field[] f = entityClass.getDeclaredFields();\n"
@@ -124,6 +143,7 @@ class TestCriteriaLayer:
 
     def test_legacy_hibernate_criteria_flagged(self) -> None:
         s = _analyze({"core/src/main/java/x/Dao.java":
+                      "import org.hibernate.criterion.Restrictions;\n"
                       "public class Dao { void f(){ session.createCriteria(Foo.class).add(Restrictions.eq(\"a\",1)); } }\n"})
         crit = [r for r in s.risk_matrix if r.layer == LAYER_CRITERIA]
         assert crit
@@ -132,6 +152,7 @@ class TestCriteriaLayer:
     def test_critical_call_chain_detected(self) -> None:
         s = _analyze({"admin/src/main/java/x/BasicPersistenceModule.java":
                       "import java.lang.reflect.Field;\n"
+                      "import javax.persistence.criteria.CriteriaBuilder;\n"
                       "public class BasicPersistenceModule {\n"
                       "  void f(){ Field[] x; CriteriaBuilder cb; } }\n"})
         assert s.critical_call_chains
@@ -145,6 +166,7 @@ class TestCriteriaLayer:
 class TestHqlLayer:
     def test_static_hql_is_medium(self) -> None:
         s = _analyze({"core/src/main/java/x/Repo.java":
+                      "import javax.persistence.EntityManager;\n"
                       "public class Repo { void f(){ em.createQuery(\"SELECT o FROM Order o\"); } }\n"})
         hql = [r for r in s.risk_matrix if r.layer == LAYER_HQL][0]
         assert hql.risk == "medium"
@@ -152,6 +174,7 @@ class TestHqlLayer:
 
     def test_concatenated_query_is_high_rewrite(self) -> None:
         s = _analyze({"core/src/main/java/x/Repo.java":
+                      "import javax.persistence.EntityManager;\n"
                       "public class Repo { void f(String st){ "
                       "em.createQuery(\"SELECT o FROM Order o WHERE s='\" + st + \"'\"); } }\n"})
         hql = [r for r in s.risk_matrix if r.layer == LAYER_HQL][0]
@@ -162,6 +185,7 @@ class TestHqlLayer:
     def test_criteria_createquery_not_counted_as_hql(self) -> None:
         # CriteriaBuilder.createQuery(Class) must not register as HQL.
         s = _analyze({"core/src/main/java/x/Dao.java":
+                      "import javax.persistence.criteria.CriteriaBuilder;\n"
                       "public class Dao { void f(){ CriteriaBuilder cb; cb.createQuery(Foo.class); } }\n"})
         assert not any(r.layer == LAYER_HQL for r in s.risk_matrix)
 
