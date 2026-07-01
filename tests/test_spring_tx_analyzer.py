@@ -669,6 +669,83 @@ class TestTX005:
         )
         assert findings == [], "catch with recovery return must not emit TX-005"
 
+    # -- v1.72.0 Broadleaf field test: TX-005 100% FP rate (4/4) ----------------
+
+    def test_noresultexception_catch_no_finding(self):
+        # Broadleaf IdGenerationDaoImpl.findNextId idiom: getSingleResult() throws
+        # NoResultException by contract when 0 rows match; catching it and inserting
+        # is normal control flow, NOT a swallowed failure. Must not emit TX-005.
+        source = dedent("""\
+            @Transactional
+            public Long findNextId(String idType) {
+                Long id;
+                try {
+                    id = (Long) query.getSingleResult();
+                } catch (NoResultException nre) {
+                    LOG.debug("no id row yet");
+                    em.persist(newId);
+                    id = 1L;
+                }
+                return id;
+            }
+        """)
+        findings = self._run_with_source(source, "com.example.Dao#findNextId")
+        assert findings == [], "NoResultException catch is expected control flow"
+
+    def test_entityexistsexception_catch_no_finding(self):
+        # Broadleaf tolerant-insert race handling: EntityExistsException is an
+        # expected outcome of a concurrent insert. Must not emit TX-005.
+        source = dedent("""\
+            @Transactional
+            public void ensureRow(String key) {
+                try {
+                    em.persist(new Row(key));
+                } catch (EntityExistsException e) {
+                    LOG.debug("row already created by a concurrent tx");
+                }
+            }
+        """)
+        findings = self._run_with_source(source, "com.example.Dao#ensureRow")
+        assert findings == [], "EntityExistsException catch is expected control flow"
+
+    def test_intentional_comment_swallow_no_finding(self):
+        # Broadleaf OrderServiceImpl.removePaymentsFromOrder idiom: a documented
+        # deliberate no-op ("do nothing--this is an acceptable condition"). The
+        # developer intent is explicit; TX-005 must not second-guess it.
+        source = dedent("""\
+            @Transactional
+            public Order removePaymentsFromOrder(Order order) {
+                try {
+                    paymentService.deletePayment(payment);
+                } catch (WorkflowException e) {
+                    // do nothing--this is an acceptable condition
+                    LOG.debug("payment removal skipped", e);
+                }
+                return order;
+            }
+        """)
+        findings = self._run_with_source(
+            source, "com.example.OrderServiceImpl#removePaymentsFromOrder"
+        )
+        assert findings == [], "documented intentional no-op must not emit TX-005"
+
+    def test_genuine_swallow_still_flagged(self):
+        # True positive must survive: an unexpected RuntimeException caught, logged,
+        # no rethrow, no recovery return, no intentional comment — still flagged.
+        source = dedent("""\
+            @Transactional
+            public void save(Entity e) {
+                try {
+                    repo.save(e);
+                } catch (RuntimeException ex) {
+                    LOG.error("save failed", ex);
+                }
+            }
+        """)
+        findings = self._run_with_source(source, "com.example.Service#save")
+        assert len(findings) == 1, "genuine unexpected-exception swallow must flag"
+        assert findings[0].pattern_id == "TX-005"
+
 
 # ---------------------------------------------------------------------------
 # E — TxPatternEngine

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -36,6 +37,11 @@ IR_SCHEMA_VERSION = "1.0.0"
 
 # Edge types excluded from reverse graph (mirrors repository_ir._REVERSE_EXCLUDE)
 _REVERSE_EXCLUDE: frozenset[str] = frozenset({"annotated_with", "mapped_to"})
+
+# A route path that looks like a Java FQN is framework dynamic-admin routing, not a
+# real REST endpoint (mirrors the filter in repository_ir.extract_java_endpoints so
+# the CIR endpoint count reconciles with the `endpoints` command). See BUG #7.
+_FQN_PATH_RE: re.Pattern = re.compile(r"/(org|com|net|io|edu)\.[a-z][a-z0-9]*\.[a-zA-Z]")
 
 
 # ---------------------------------------------------------------------------
@@ -324,9 +330,17 @@ def ir_dict_to_canonical(
     # Build canonical endpoints from route_surface — stable ordering
     route_surface = ir.get("route_surface") or []
     # Deduplicate by endpoint id (route_surface can have duplicates from multi-prefix)
+    # BUG #7 (Broadleaf field test): the `endpoints` command (extract_java_endpoints)
+    # drops routes whose path looks like a Java FQN — framework dynamic-admin routing
+    # (Broadleaf @AdminSection registers entity class FQNs as URL segments) is not a
+    # real REST surface. The CIR endpoint list feeds `spring-audit` (endpoints_analyzed),
+    # `impact` and `validation`; it must apply the SAME filter so its count reconciles
+    # with `endpoints` instead of being silently inflated by those pseudo-routes.
     _seen_ids: set[str] = set()
     raw_endpoints: list[CanonicalEndpoint] = []
     for r in route_surface:
+        if _FQN_PATH_RE.search(r.get("path", "") or ""):
+            continue
         ep = _route_to_canonical_endpoint(r)
         if ep.id not in _seen_ids:
             _seen_ids.add(ep.id)

@@ -83,6 +83,17 @@ _TOKEN_CLIENTS: "tuple[tuple[str, str, str], ...]" = (
     ("InitialLdapContext", "ldap", "jndi-ldap"),
     ("InitialDirContext", "ldap", "jndi-ldap"),
     ("LdapContext", "ldap", "jndi-ldap"),
+    # Spring Security LDAP authentication (BUG #5, Broadleaf field test): the
+    # idiomatic auth integration is a UserDetails mapper that extends
+    # LdapUserDetailsMapper and consumes DirContextOperations — neither uses
+    # LdapTemplate/ContextSource directly, so the connection-type tokens above
+    # miss it entirely. These types come from spring-security-ldap / spring-ldap
+    # and are unambiguous LDAP integration points.
+    ("LdapUserDetailsMapper", "ldap", "spring-security-ldap"),
+    ("DirContextOperations", "ldap", "spring-ldap"),
+    ("LdapContextSource", "ldap", "spring-ldap"),
+    ("DefaultSpringSecurityContextSource", "ldap", "spring-security-ldap"),
+    ("BindAuthenticator", "ldap", "spring-security-ldap"),
     # Mail / SMTP (JavaMail / Jakarta Mail)
     ("JavaMailSender", "smtp", "spring-mail"),
     ("MimeMessage", "smtp", "javamail"),

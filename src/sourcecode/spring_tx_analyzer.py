@@ -56,12 +56,60 @@ _WRITE_METHOD_RE = re.compile(
 # _CATCH_SWALLOW_RE is retained for reference but replaced by brace-counting
 # extraction in _has_swallowed_exception to avoid false positives from nested
 # braces (nested if/try blocks inside catch terminating the match prematurely).
-_CATCH_HEADER_RE = re.compile(r'\bcatch\s*\([^)]+\)\s*\{')
+_CATCH_HEADER_RE = re.compile(r'\bcatch\s*\(([^)]+)\)\s*\{')
 _LOG_IN_CATCH_RE = re.compile(r'\b(?:log|logger|LOG|System\.out|e\.print)\b')
 _RETHROW_IN_CATCH_RE = re.compile(r'\bthrow\b')
 # Non-trivial return (method call) inside a catch block indicates recovery, not
 # silent swallowing — e.g. `return findNextId(idType)` after creating a missing row.
 _RECOVERY_RETURN_RE = re.compile(r'\breturn\s+\w[\w.<>]*\s*\(')
+
+# Exception types whose catch is a documented part of normal control flow, not a
+# masked failure. Catching these is the standard JPA/Spring-Data idiom (e.g.
+# Query.getSingleResult() throws NoResultException by contract when 0 rows match;
+# a tolerant insert catches EntityExistsException on a race). Catching one of
+# these must never trigger TX-005. (Broadleaf field test: 4/4 TX-005 findings
+# were this idiom — 100% FP rate.)
+_EXPECTED_CONTROL_FLOW_EXCEPTIONS = frozenset({
+    "NoResultException",
+    "NonUniqueResultException",
+    "EntityExistsException",
+    "EntityNotFoundException",
+    "EmptyResultDataAccessException",
+    "IncorrectResultSizeDataAccessException",
+})
+# A caught type is "expected" if any of its simple-name tokens is in the set above.
+_CATCH_TYPE_TOKEN_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_.]*')
+# Lexical markers of a deliberate, developer-documented no-op inside a catch block.
+# When the catch body's leading comment says the swallow is intentional, TX-005 is
+# not reporting a bug — it is second-guessing an explicit decision.
+_INTENTIONAL_SWALLOW_COMMENT_RE = re.compile(
+    r'(?://|/\*|\*)[^\n]*?\b('
+    r'intentional|intentionally|acceptable|expected|'
+    r'do\s+nothing|no[\s\-]?op|noop|ignore[ds]?|ignoring|'
+    r'on\s+purpose|safe\s+to\s+ignore|by\s+design|not\s+an?\s+error'
+    r')\b',
+    re.IGNORECASE,
+)
+
+
+def _caught_types(catch_header_inner: str) -> list[str]:
+    """Extract caught exception simple-name tokens from a catch header inner text.
+
+    `catch_header_inner` is the text inside the parens, e.g.
+    "NoResultException nre" or "IllegalStateException | IOException e".
+    Returns simple names only (last dotted segment), lowercase-preserving.
+    """
+    # Drop the trailing variable name; split multi-catch on '|'.
+    types: list[str] = []
+    for alt in catch_header_inner.split('|'):
+        toks = _CATCH_TYPE_TOKEN_RE.findall(alt)
+        # First token(s) are the type; the last bare identifier is the var name.
+        # A type token contains '.' or starts uppercase; the var name is lowercase.
+        for tok in toks:
+            simple = tok.rsplit('.', 1)[-1]
+            if simple and simple[0].isupper():
+                types.append(simple)
+    return types
 
 
 def _extract_method_body(source: str, method_name: str) -> str:
@@ -597,7 +645,7 @@ class _TX005ExceptionSwallowing:
                     depth -= 1
                 i += 1
             body = source[brace_pos:i]
-            for catch_block in self._extract_catch_blocks(body):
+            for caught_header, catch_block in self._extract_catch_blocks(body):
                 if not _LOG_IN_CATCH_RE.search(catch_block):
                     continue
                 if _RETHROW_IN_CATCH_RE.search(catch_block):
@@ -605,18 +653,31 @@ class _TX005ExceptionSwallowing:
                 # Non-trivial return (method call) indicates recovery, not swallowing.
                 if _RECOVERY_RETURN_RE.search(catch_block):
                     continue
+                # Catching an exception that is part of normal control flow (JPA
+                # getSingleResult / tolerant insert) is not error-masking — skip.
+                caught = _caught_types(caught_header)
+                if any(t in _EXPECTED_CONTROL_FLOW_EXCEPTIONS for t in caught):
+                    continue
+                # A developer-documented deliberate no-op is an explicit decision,
+                # not a bug the tool should flag.
+                if _INTENTIONAL_SWALLOW_COMMENT_RE.search(catch_block):
+                    continue
                 return True
         return False
 
     @staticmethod
-    def _extract_catch_blocks(body: str) -> list[str]:
-        """Extract full catch block bodies from a method body using brace counting.
+    def _extract_catch_blocks(body: str) -> list[tuple[str, str]]:
+        """Extract (caught-type-header, catch-body) pairs from a method body.
 
-        Handles nested braces correctly — unlike a simple [^}]* regex which
-        terminates at the first nested '}' inside the catch block.
+        Uses brace counting so nested braces inside the catch body do not
+        terminate the match prematurely (unlike a simple [^}]* regex). The
+        caught-type-header is the text inside the catch parens (e.g.
+        "NoResultException nre"), used to distinguish expected-control-flow
+        exceptions from genuinely swallowed failures.
         """
-        blocks: list[str] = []
+        blocks: list[tuple[str, str]] = []
         for m in _CATCH_HEADER_RE.finditer(body):
+            header_inner = m.group(1)
             brace_pos = m.end() - 1
             depth = 1
             i = brace_pos + 1
@@ -627,7 +688,7 @@ class _TX005ExceptionSwallowing:
                 elif c == '}':
                     depth -= 1
                 i += 1
-            blocks.append(body[brace_pos:i])
+            blocks.append((header_inner, body[brace_pos:i]))
         return blocks
 
 

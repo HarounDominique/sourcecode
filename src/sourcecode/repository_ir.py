@@ -387,6 +387,59 @@ def _strip_java_comments(source: str) -> str:
     return source
 
 
+# Declaration keyword OR a brace — matched in source order to track nesting when
+# building minimal symbols for pre-scan-skipped files (see _minimal_class_symbols).
+_MIN_DECL_OR_BRACE_RE = re.compile(r'\b(?:class|interface|enum)\s+([A-Z]\w*)|([{}])')
+
+
+def _minimal_class_symbols(
+    source: str, package: str, rel_path: str
+) -> "list[SymbolRecord]":
+    """Nesting-aware class/interface/enum symbols for pre-scan-skipped files.
+
+    Tracks brace depth so a NESTED type gets a fully-qualified `pkg.Outer.Inner`
+    FQN (matching _extract_symbols), never a package-only `pkg.Inner`.
+
+    BUG #2 (Broadleaf field test): the previous fast path emitted every declared
+    type as `f"{pkg}.{name}"`, dropping the enclosing class. Two distinct nested
+    types with the same simple name under different outer classes in one package
+    (Broadleaf has 25 `GroupName` nested classes) therefore collapsed onto ONE
+    colliding FQN, and — since pre-scan-skipped files build no relations — those
+    zero-degree phantom nodes were reported as false `statically_unreferenced`
+    dead code. Qualifying by the enclosing class keeps them distinct and correct.
+    """
+    decl_source = _STRING_LITERAL_RE.sub('', _strip_java_comments(source))
+    syms: "list[SymbolRecord]" = []
+    stack: "list[tuple[str, int]]" = []   # (fqn, brace-depth at which body opened)
+    depth = 0
+    pending_fqn: "Optional[str]" = None
+    for m in _MIN_DECL_OR_BRACE_RE.finditer(decl_source):
+        name = m.group(1)
+        if name is not None:
+            enclosing = stack[-1][0] if stack else None
+            if enclosing:
+                pending_fqn = f"{enclosing}.{name}"
+            else:
+                pending_fqn = f"{package}.{name}" if package else name
+            continue
+        brace = m.group(2)
+        if brace == '{':
+            depth += 1
+            if pending_fqn is not None:
+                stack.append((pending_fqn, depth))
+                syms.append(SymbolRecord(
+                    symbol=pending_fqn, type="class", confidence="medium",
+                    declaring_file=rel_path,
+                ))
+                pending_fqn = None
+        else:  # '}'
+            while stack and stack[-1][1] == depth:
+                stack.pop()
+            if depth > 0:
+                depth -= 1
+    return syms
+
+
 def _parse_annotation_line(line: str) -> tuple[str, str]:
     """Parse annotation name and args from a line starting with '@'.
 
@@ -1125,6 +1178,234 @@ def _build_same_package_map(symbols: list[SymbolRecord]) -> dict[str, dict[str, 
         simple = sym.symbol.split(".")[-1]
         result.setdefault(pkg, {})[simple] = sym.symbol
     return result
+
+
+# A type-qualified member reference inside an annotation argument, e.g. the
+# `GroupName.General` / `FieldOrder.NAME` in
+# `@AdminPresentation(group = GroupName.General, order = FieldOrder.NAME)`, or the
+# fully-qualified nested form `SystemPropertyAdminPresentation.GroupOrder.General`.
+# group(0) is the whole dotted chain (UpperCamel head + `.member`… tail); the
+# resolver walks the chain through known nested types so a reference to
+# `Outer.Nested.CONST` credits the NESTED holder, not just the outer type.
+_ANN_REF_TOKEN_RE = re.compile(r'\b[A-Z]\w*(?:\.\w+)+')
+# Combined token scanner: an annotation-with-args head, a type declaration, or a
+# brace — matched in source order so annotation references can be attributed to
+# the class whose body encloses them.
+_ANN_OR_DECL_OR_BRACE_RE = re.compile(
+    r'@([A-Z]\w*)\s*\('
+    r'|\b(?:class|interface|enum)\s+([A-Z]\w*)'
+    r'|([{}])'
+)
+
+
+def _extract_annotation_type_refs(
+    source: str, package: str
+) -> "list[tuple[str, str]]":
+    """Return (enclosing_class_fqn, referenced_type_simple_name) pairs.
+
+    Walks the comment/string-stripped source tracking the nesting stack so each
+    type reference found inside an annotation argument list is attributed to the
+    class whose body encloses the annotated member. Member-level annotations sit
+    inside the class body (stack has the class); this is the common case for
+    `@AdminPresentation(group = GroupName.General)` on entity fields.
+    """
+    text = _STRING_LITERAL_RE.sub('""', _strip_java_comments(source))
+    refs: "list[tuple[str, str]]" = []
+    stack: "list[tuple[str, int]]" = []
+    depth = 0
+    pending: "Optional[str]" = None
+    # Type refs found in a CLASS-LEVEL annotation (which precedes the class body,
+    # so the stack does not yet contain the owning class) are held here and
+    # attributed to the class when its body opens — e.g. an interface annotated
+    # `@AdminTabPresentation(name = TabName.General)` that references its OWN
+    # nested constant holders.
+    pending_class_refs: "list[str]" = []
+    n = len(text)
+    idx = 0
+    while idx < n:
+        m = _ANN_OR_DECL_OR_BRACE_RE.search(text, idx)
+        if not m:
+            break
+        ann, cname, brace = m.group(1), m.group(2), m.group(3)
+        if ann is not None:
+            # Balance the annotation's parens and scan its argument text.
+            popen = m.end() - 1
+            d = 0
+            j = popen
+            while j < n:
+                c = text[j]
+                if c == '(':
+                    d += 1
+                elif c == ')':
+                    d -= 1
+                    if d == 0:
+                        break
+                j += 1
+            arg_text = text[popen + 1:j]
+            cur_class = stack[-1][0] if stack else ""
+            for tm in _ANN_REF_TOKEN_RE.finditer(arg_text):
+                if cur_class:
+                    refs.append((cur_class, tm.group(0)))
+                else:
+                    pending_class_refs.append(tm.group(0))
+            idx = j + 1
+            continue
+        if cname is not None:
+            enc = stack[-1][0] if stack else None
+            pending = f"{enc}.{cname}" if enc else (
+                f"{package}.{cname}" if package else cname
+            )
+            idx = m.end()
+            continue
+        if brace == '{':
+            depth += 1
+            if pending is not None:
+                stack.append((pending, depth))
+                # A class-level annotation on this class referenced these types.
+                for head in pending_class_refs:
+                    refs.append((pending, head))
+                pending_class_refs = []
+                pending = None
+        else:  # '}'
+            while stack and stack[-1][1] == depth:
+                stack.pop()
+            if depth > 0:
+                depth -= 1
+        idx = m.end()
+    return refs
+
+
+def _annotation_reference_edges(
+    ref_sources: "list[tuple[str, list[str], list[tuple[str, str]]]]",
+    all_symbols: "list[SymbolRecord]",
+    relations: "list[RelationEdge]",
+    same_pkg_map: "dict[str, dict[str, str]]",
+) -> "list[RelationEdge]":
+    """Emit `references` edges for static constants read inside annotation args.
+
+    BUG #2 (Broadleaf field test): `@AdminPresentation(group = GroupName.General)`
+    is a real reference to the constant-holder nested class `GroupName`, but the
+    static call-graph never counted annotation-argument reads as edges. The
+    referenced nested classes therefore had zero in-degree and were reported as
+    false `statically_unreferenced` dead code (~95% of that list on Broadleaf).
+
+    Resolution for a bare head type T referenced from class C:
+      import / same-package / wildcard  →  direct FQN, else
+      nested-type lookup: a unique repo nested type named T, or — when the simple
+      name is ambiguous (Broadleaf has 25 `GroupName`s) — the one declared by C or
+      one of C's (transitive) supertypes. Unresolvable / ambiguous refs are
+      dropped (honest: no guessed edge).
+    """
+    class_fqns: set[str] = {
+        s.symbol for s in all_symbols
+        if s.type in ("class", "interface") and "#" not in s.symbol
+    }
+    # enclosing_of[nested_fqn] = outer_fqn; nested_by_simple[simple] = {fqns}.
+    enclosing_of: dict[str, str] = {}
+    nested_by_simple: dict[str, set[str]] = {}
+    for fqn in class_fqns:
+        prefix = fqn
+        while True:
+            cut = prefix.rfind(".")
+            if cut < 0:
+                break
+            prefix = prefix[:cut]
+            if prefix in class_fqns:
+                enclosing_of[fqn] = prefix
+                nested_by_simple.setdefault(fqn[len(prefix) + 1:], set()).add(fqn)
+                break
+
+    direct_super: dict[str, set[str]] = {}
+    for e in relations:
+        if e.type in ("extends", "implements"):
+            direct_super.setdefault(e.from_symbol, set()).add(e.to_symbol)
+
+    def _super_closure(fqn: str) -> set[str]:
+        seen: set[str] = set()
+        stack = [fqn]
+        while stack:
+            cur = stack.pop()
+            for sup in direct_super.get(cur, ()):
+                if sup not in seen:
+                    seen.add(sup)
+                    stack.append(sup)
+        return seen
+
+    edges: list[RelationEdge] = []
+    seen_edges: set[tuple[str, str]] = set()
+    for package, raw_imports, ref_pairs in ref_sources:
+        if not ref_pairs:
+            continue
+        import_map: dict[str, str] = {}
+        wildcard_pkgs: list[str] = []
+        for fq in raw_imports:
+            parts = fq.split(".")
+            if parts[-1] == "*":
+                wildcard_pkgs.append(fq[:-2])
+            else:
+                import_map[parts[-1]] = fq
+        pkg_types = same_pkg_map.get(package, {})
+
+        def _resolve_head(head: str, cur_class: str) -> "Optional[str]":
+            fq = import_map.get(head) or pkg_types.get(head)
+            if fq:
+                return fq
+            for wp in wildcard_pkgs:
+                cand = same_pkg_map.get(wp, {}).get(head)
+                if cand:
+                    return cand
+            # cur_class itself may BE the head (self-qualified nested ref).
+            if cur_class.rsplit(".", 1)[-1] == head:
+                return cur_class
+            cands = nested_by_simple.get(head)
+            if not cands:
+                return None
+            if len(cands) == 1:
+                return next(iter(cands))
+            allowed = {cur_class} | _super_closure(cur_class)
+            matched = [c for c in cands if enclosing_of.get(c) in allowed]
+            if len(matched) == 1:
+                return matched[0]
+            self_nested = f"{cur_class}.{head}"
+            if self_nested in cands:
+                return self_nested
+            return None
+
+        def _resolve_chain(chain: str, cur_class: str) -> "Optional[str]":
+            parts = chain.split(".")
+            fqn = _resolve_head(parts[0], cur_class)
+            if not fqn:
+                return None
+            # Walk the remaining segments through KNOWN nested types so a
+            # `Outer.Nested.CONST` reference credits the nested holder actually read,
+            # not merely the outer type. Stop at the first non-type segment (the
+            # constant/field), which is the deepest resolvable class.
+            for seg in parts[1:]:
+                nxt = f"{fqn}.{seg}"
+                if nxt in class_fqns:
+                    fqn = nxt
+                else:
+                    break
+            return fqn
+
+        for cur_class, chain in ref_pairs:
+            if cur_class not in class_fqns:
+                continue
+            target = _resolve_chain(chain, cur_class)
+            if not target or target == cur_class or target not in class_fqns:
+                continue
+            key = (cur_class, target)
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            edges.append(RelationEdge(
+                from_symbol=cur_class,
+                to_symbol=target,
+                type="references",
+                confidence="high",
+                evidence={"type": "annotation_value", "value": chain},
+            ))
+    return edges
 
 
 # Reserved words that read like calls (`if (`, `for (`, …). Can never be sibling
@@ -3374,6 +3655,9 @@ def build_repo_ir(
     )
 
     _per_file: list[tuple[str, str, str, list[str], list[SymbolRecord]]] = []
+    # (package, imports, annotation-ref-pairs) for the reference-graph post-pass,
+    # collected from BOTH fully-parsed and pre-scan-skipped files (BUG #2).
+    _ann_ref_sources: list[tuple[str, list[str], list[tuple[str, str]]]] = []
     for rel_path in sorted(file_paths):
         abs_path = root / rel_path
         try:
@@ -3400,23 +3684,31 @@ def build_repo_ir(
             # literals before scanning so only real declarations are captured. The name
             # must also start uppercase ([A-Z]) — Java type convention, matching the
             # precision of the full _CLASS_DECL_RE used on annotated files.
-            _decl_source = _STRING_LITERAL_RE.sub('', _strip_java_comments(source))
-            _min_syms: list[SymbolRecord] = []
-            for _cm in re.finditer(r'\b(?:class|interface|enum)\s+([A-Z]\w*)', _decl_source):
-                _cls_name = _cm.group(1)
-                _fqn = f"{_pkg}.{_cls_name}" if _pkg else _cls_name
-                _min_syms.append(SymbolRecord(
-                    symbol=_fqn, type="class", confidence="medium",
-                    declaring_file=rel_path,
-                ))
+            _min_syms = _minimal_class_symbols(source, _pkg, rel_path)
             all_symbols.extend(_min_syms)
-            # No relations needed for non-annotated files
+            # No relations needed for non-annotated files. BUG #2: but a pre-scan-
+            # skipped file can still hold annotation-argument constant references —
+            # e.g. a presentation interface whose class-level @AdminTabPresentation
+            # references its own nested TabName/TabOrder holders. Capture those refs
+            # (cheaply, no full parse) so the reference-graph post-pass can resolve
+            # them and the holders are not flagged as false dead code.
+            if "@" in source:
+                _skipped_refs = _extract_annotation_type_refs(source, _pkg)
+                if _skipped_refs:
+                    _imports = re.findall(
+                        r'^\s*import\s+(?:static\s+)?([\w.]+)\s*;', source, re.MULTILINE
+                    )
+                    _ann_ref_sources.append((_pkg, _imports, _skipped_refs))
             continue
         package, symbols, raw_imports = _extract_symbols(
             source, rel_path, extra_capture=_extra_capture
         )
         all_symbols.extend(symbols)
         _per_file.append((rel_path, source, package, raw_imports, symbols))
+        if "@" in source:
+            _parsed_refs = _extract_annotation_type_refs(source, package)
+            if _parsed_refs:
+                _ann_ref_sources.append((package, raw_imports, _parsed_refs))
 
     # Build {package: {simple_name: FQN}} from every class/interface found.
     _same_pkg_map: dict[str, dict[str, str]] = _build_same_package_map(all_symbols)
@@ -3453,6 +3745,15 @@ def build_repo_ir(
                 ))
 
         all_relations.extend(relations)
+
+    # BUG #2 (Broadleaf): annotation-argument static-constant reads
+    # (@Anno(attr = SomeType.CONST)) are real references — emit them as edges so
+    # constant-holder types are not reported as zero-caller dead code. Runs as a
+    # global post-pass because bare inherited-nested references (e.g. `GroupName`
+    # from an implemented interface) need the repo-wide supertype/nested index.
+    all_relations.extend(
+        _annotation_reference_edges(_ann_ref_sources, all_symbols, all_relations, _same_pkg_map)
+    )
 
     spring_summary = _build_spring_summary(all_symbols)
 

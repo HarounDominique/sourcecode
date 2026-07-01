@@ -5764,11 +5764,63 @@ def modernize_cmd(
         key=lambda h: (-h["hotspot_score"], h["fqn"]),
     )[:15]
 
-    # Cross-module tangles: subsystems with high member count
-    tangle_modules = sorted(
-        [s for s in subsystems if len(s.get("members") or []) >= 5],
-        key=lambda s: -len(s.get("members") or []),
-    )[:10]
+    # Cross-module tangles: actual inter-subsystem coupling measured from the
+    # dependency graph, NOT a re-labelled subsystem list. For every structural
+    # edge whose endpoints live in two different subsystems we tally a directed
+    # (from_subsystem → to_subsystem) coupling count; pairs coupled in BOTH
+    # directions are the real tangles (bidirectional/cyclic module coupling).
+    _graph_edges: list = (ir.get("graph") or {}).get("edges") or []
+    # Structural coupling edge types. annotated_with / mapped_to / event edges are
+    # excluded (metadata + separate topology, not module-decomposition coupling).
+    _TANGLE_EDGE_TYPES = frozenset({
+        "imports", "injects", "extends", "implements",
+        "references", "calls", "instantiates", "returns",
+    })
+    _fqn_to_pkg: dict[str, str] = {}
+    _pkg_to_label: dict[str, str] = {}
+    for _s in subsystems:
+        _pp = _s.get("package_prefix") or _s.get("pkg") or ""
+        if not _pp:
+            continue
+        _pkg_to_label[_pp] = _s.get("label") or _s.get("name") or _pp
+        for _m in (_s.get("members") or []):
+            _fqn_to_pkg[_m] = _pp
+
+    from collections import Counter as _Counter
+    _pair_counts: "_Counter[tuple[str, str]]" = _Counter()
+    _pair_example: dict[tuple[str, str], str] = {}
+    for _e in _graph_edges:
+        if _e.get("type") not in _TANGLE_EDGE_TYPES:
+            continue
+        _a = _fqn_to_pkg.get(_e.get("from"))
+        _b = _fqn_to_pkg.get(_e.get("to"))
+        if not _a or not _b or _a == _b:
+            continue
+        _pair_counts[(_a, _b)] += 1
+        _pair_example.setdefault((_a, _b), f"{_e.get('from')} → {_e.get('to')}")
+
+    _cross_module_tangles = []
+    for (_a, _b), _cnt in sorted(
+        _pair_counts.items(), key=lambda kv: (-kv[1], kv[0])
+    ):
+        _reverse = _pair_counts.get((_b, _a), 0)
+        _cross_module_tangles.append({
+            "from_subsystem": _pkg_to_label.get(_a, _a),
+            "to_subsystem": _pkg_to_label.get(_b, _b),
+            "from_package": _a,
+            "to_package": _b,
+            "edge_count": _cnt,
+            "reverse_edge_count": _reverse,
+            # A mutual (cyclic) dependency is the actual "tangle" — both modules
+            # reference each other, so neither can be extracted independently.
+            "mutual": _reverse > 0,
+            "example": _pair_example.get((_a, _b), ""),
+        })
+    # Surface mutual tangles first (highest decomposition risk), then by strength.
+    _cross_module_tangles.sort(
+        key=lambda t: (not t["mutual"], -t["edge_count"], t["from_package"])
+    )
+    _cross_module_tangles = _cross_module_tangles[:15]
 
     _summary = {
         "total_classes": len([n for n in graph_nodes if n.get("type") in ("class", "interface")]),
@@ -5837,6 +5889,17 @@ def modernize_cmd(
                 {"fqn": n["fqn"], "in_degree": n.get("in_degree", 0), "role": n.get("role", "other")}
                 for n in coupling_nodes
             ],
+            # BUG #6 (Broadleaf field test): make the in_degree metric self-describing
+            # so it is not confused with `explain`'s caller count. They differ by design.
+            "high_coupling_nodes_note": (
+                "in_degree = raw count of incoming graph edges across ALL edge types "
+                "(imports, injects, extends/implements, references, annotations), "
+                "counted at symbol level. This is deliberately larger than and NOT "
+                "equal to `sourcecode explain`'s caller count, which reports DISTINCT "
+                "dependent classes (DI dependents + reverse-call-graph callers, "
+                "deduplicated to class level). Use in_degree for blast-radius ranking, "
+                "explain's caller list for the concrete dependents to inspect."
+            ),
             "statically_unreferenced": [
                 {"fqn": n["fqn"], "type": n.get("type", ""), "role": n.get("role", "other")}
                 for n in dead_zones
@@ -5853,14 +5916,15 @@ def modernize_cmd(
             ],
             "subsystem_summary": _subsystem_summary,
             "subsystem_summary_note": _subsystem_summary_note,
-            "cross_module_tangles": [
-                {
-                    "label": s.get("label") or s.get("name") or "",
-                    "class_count": _class_count(s.get("members") or []),
-                    "member_count": len(s.get("members") or []),
-                }
-                for s in tangle_modules
-            ],
+            "cross_module_tangles": _cross_module_tangles,
+            "cross_module_tangles_note": (
+                "Directed inter-subsystem coupling measured from structural graph "
+                "edges (imports/injects/extends/implements/references/calls). "
+                "edge_count = edges from_package→to_package; mutual=true marks a "
+                "bidirectional (cyclic) dependency — the actual tangle that blocks "
+                "independent module extraction. Empty means no cross-subsystem "
+                "structural coupling was detected."
+            ),
             # BUG-05 fix: don't recommend "Start with hotspot_candidates" when the list is empty.
             "recommendation": (
                 (

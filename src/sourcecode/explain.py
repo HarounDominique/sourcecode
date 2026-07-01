@@ -298,10 +298,15 @@ def _structural_purpose(
     head = f"Likely {role} (no DI annotations found)" if role else \
         "Likely a structurally significant class (no DI annotations found)"
     signals: list[str] = []
+    # BUG #6 (Broadleaf field test): this counts DISTINCT dependent classes (DI
+    # dependents + reverse-call-graph callers, deduped to class level), which is a
+    # different metric from modernize's node.in_degree (raw incoming-edge count
+    # across ALL edge types, symbol-level). Name it explicitly so the two numbers
+    # are not read as a contradiction when cross-referenced.
     if in_degree >= 3:
-        signals.append(f"high in-degree ({in_degree})")
+        signals.append(f"high fan-in ({in_degree} distinct caller classes)")
     elif in_degree:
-        signals.append(f"in-degree {in_degree}")
+        signals.append(f"{in_degree} distinct caller class{'es' if in_degree != 1 else ''}")
     if lifecycle:
         signals.append(f"lifecycle methods detected ({'/'.join(lifecycle)})")
     suffix = f" — {', '.join(signals)}" if signals else ""

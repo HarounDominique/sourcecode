@@ -491,6 +491,17 @@ def run_security_audit(
         limitations=_sec_limitations,
         metadata={
             "endpoints_analyzed": len(cir.endpoints),
+            "endpoints_analyzed_note": (
+                "Count of canonical endpoints analyzed for security: Spring-MVC/JAX-RS "
+                "annotated handlers plus OpenAPI-spec-recovered routes. Built from the "
+                "SAME route surface as the `endpoints` command and with the SAME "
+                "exclusion of framework dynamic-admin FQN-shaped paths, but "
+                "DEDUPLICATED by (method, path, controller, handler) — so this value is "
+                "<= the `endpoints` command total, the small difference being "
+                "multi-prefix routes that collapse to one canonical endpoint here. It "
+                "does not include the non-Spring REST surface (`endpoints` reports that "
+                "separately under non_spring_rest_surface)."
+            ),
             "security_model": cir.metadata.get("security_model", "unknown"),
             "analysis_time_ms": elapsed_ms,
         },

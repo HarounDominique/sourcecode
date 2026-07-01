@@ -1,5 +1,67 @@
 # Changelog
 
+## [1.72.0] — 2026-07-01
+
+### Fixed — correctness on a large real-world Spring Boot 3 monolith (Broadleaf Commerce CE field test)
+
+A downstream architecture audit of **BroadleafCommerce** (`97705634ac`, branch
+`develop-7.0.x`; ~3,000 Java classes, 13 Maven poms, Spring Boot 3.5 / Spring 6.2 /
+Hibernate 5.6) hand-verified against source surfaced seven reproducible
+correctness defects across `modernize`, `spring-audit`, `migrate-check`, and
+`export --integrations`. Each fix targets the root cause and adds regression
+coverage; all were re-verified against the live repo.
+
+- **`spring-audit` TX-005 — 100% false-positive rate (4/4) on expected-exception idioms.**
+  The "swallowed exception in `@Transactional`" rule flagged the standard JPA
+  control-flow idiom (`Query.getSingleResult()` → `catch (NoResultException)` →
+  insert; tolerant insert → `catch (EntityExistsException)`) and catches carrying an
+  explicit `// do nothing — acceptable condition` intent comment. TX-005 now skips
+  catches whose caught type is a well-known expected-control-flow exception
+  (`NoResultException`, `NonUniqueResultException`, `EntityExistsException`,
+  `EmptyResultDataAccessException`, …) and catches whose body documents a deliberate
+  no-op, while still flagging a genuine unexpected-exception swallow.
+- **`modernize` `statically_unreferenced` — ~95% false positives on annotation-constant nested classes.**
+  Two compounding defects: (a) the pre-scan fast path emitted nested types as
+  `pkg.Inner`, dropping the enclosing class, so distinct nested types with the same
+  simple name (Broadleaf has 25 `GroupName`s) collapsed onto one colliding FQN;
+  (b) static-constant reads inside annotation arguments
+  (`@AdminPresentation(group = GroupName.General)`, incl. the fully-qualified
+  `Outer.Nested.CONST` form and class-level annotations) were never counted as
+  references, so the constant holders read as zero-caller dead code. Now: nested
+  symbols are binary-qualified (`Outer.Inner`); a new `references` edge pass resolves
+  annotation-value reads (bare, inherited-nested via supertypes, and qualified
+  chains) in both parsed and pre-scan-skipped files. Presentation-holder false
+  positives on Broadleaf went 11→0 (the survivors are genuinely-unused declarations).
+- **`modernize` `cross_module_tangles` — re-emitted the subsystem list instead of coupling.**
+  The field echoed `{label, class_count, member_count}` per subsystem with no edge
+  data. It now measures real directed inter-subsystem coupling from structural graph
+  edges, with `edge_count`, `reverse_edge_count`, and `mutual` (bidirectional/cyclic
+  = the actual tangle) — e.g. Broadleaf `profile↔common` is now correctly flagged
+  mutual.
+- **`migrate-check` MIG-031 — test-scope config counted as a production blocker + wrong explanation.**
+  A test-only `bl-applicationContext-test-security.xml` (under `src/main/resources`,
+  loaded only by test `@ContextConfiguration`) inflated `blocking_count`; XML config
+  with a `test` filename marker is now classified `code_context: "test"`
+  (blocking_count 1→0). The explanation was a static OR-template asserting both
+  triggers; it now reports only the sub-pattern that actually matched (auto-config
+  vs versioned legacy schema).
+- **`export --integrations` — missed in-code Spring Security LDAP (false negative).**
+  Subclassing `LdapUserDetailsMapper` and using `DirContextOperations` — the
+  idiomatic Spring Security LDAP auth mapper — was undetected (Broadleaf reported 0
+  LDAP). Added `LdapUserDetailsMapper` / `DirContextOperations` / context-source
+  tokens; Broadleaf now reports 5 LDAP integration points.
+- **`explain` vs `modernize` in-degree — silently contradictory numbers.**
+  The same class showed different fan-in in the two commands with no explanation.
+  Both metrics are now self-describing: `modernize.high_coupling_nodes` documents
+  `in_degree` as the raw all-edge-type incoming count; `explain` labels its value
+  as "N distinct caller classes".
+- **`spring-audit` vs `endpoints` — unreconcilable endpoint counts.**
+  The canonical IR (feeding `spring-audit`, `impact`, `validation`) did not apply the
+  `endpoints` command's filter for framework dynamic-admin FQN-shaped paths, so its
+  count was silently inflated. The filter is now shared; `endpoints_analyzed` is
+  documented as the deduplicated canonical count (≤ `endpoints` total, difference =
+  multi-prefix collapse), reconciling 225 vs 220 on Broadleaf.
+
 ## [1.71.0] — 2026-07-01
 
 ### Fixed — framework-framing & migration reliability on a large non-Boot Spring repo (Jenkins core field test)
