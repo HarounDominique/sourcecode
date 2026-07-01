@@ -4681,7 +4681,7 @@ def spring_audit_cmd(
     import json as _json
 
     from sourcecode.repository_ir import find_java_files
-    from sourcecode.canonical_ir import build_canonical_ir
+    from sourcecode.context_graph import ContextGraph
     from sourcecode.spring_findings import SpringAuditResult, SpringFinding
     from sourcecode.spring_tx_analyzer import run_tx_audit
     from sourcecode.spring_security_audit import run_security_audit
@@ -4735,7 +4735,7 @@ def spring_audit_cmd(
                              success_msg=f"Spring audit written to {output_path}")
         return
 
-    cir = build_canonical_ir(file_list, target)
+    cir = ContextGraph.build(file_list, target).cir
     _model = SpringSemanticModel.build(cir)
 
     results: list[SpringAuditResult] = []
@@ -4993,7 +4993,7 @@ def impact_chain_cmd(
     import json as _json
 
     from sourcecode.repository_ir import find_java_files
-    from sourcecode.canonical_ir import build_canonical_ir
+    from sourcecode.context_graph import ContextGraph
     from sourcecode.spring_model import SpringSemanticModel
     from sourcecode.spring_impact import run_impact_chain
     from sourcecode.spring_findings import SpringAuditResult
@@ -5049,7 +5049,7 @@ def impact_chain_cmd(
                              success_msg=f"Impact chain written to {output_path}")
         return
 
-    cir = build_canonical_ir(file_list, target)
+    cir = ContextGraph.build(file_list, target).cir
     _model = SpringSemanticModel.build(cir)
 
     if query_type == "events":
@@ -5137,7 +5137,7 @@ def pr_impact_cmd(
     import json as _json
 
     from sourcecode.repository_ir import find_java_files
-    from sourcecode.canonical_ir import build_canonical_ir
+    from sourcecode.context_graph import ContextGraph
     from sourcecode.spring_model import SpringSemanticModel
     from sourcecode.pr_impact import run_pr_impact
 
@@ -5199,7 +5199,7 @@ def pr_impact_cmd(
                              success_msg=f"PR impact report written to {output_path}")
         return
 
-    cir = build_canonical_ir(file_list, target)
+    cir = ContextGraph.build(file_list, target).cir
     model = SpringSemanticModel.build(cir)
     report = run_pr_impact(cir, changed_files, root=target, model=model)
 
@@ -5273,7 +5273,7 @@ def explain_cmd(
     import json as _json
 
     from sourcecode.repository_ir import find_java_files
-    from sourcecode.canonical_ir import build_canonical_ir
+    from sourcecode.context_graph import ContextGraph
     from sourcecode.spring_model import SpringSemanticModel
     from sourcecode.explain import explain_class
 
@@ -5318,7 +5318,7 @@ def explain_cmd(
         )
         raise typer.Exit(code=1)
 
-    cir = build_canonical_ir(file_list, target)
+    cir = ContextGraph.build(file_list, target).cir
     model = SpringSemanticModel.build(cir)
     explanation = explain_class(class_name, cir, model)
 
