@@ -1287,6 +1287,7 @@ class MigrationReport:
     readiness_aggregate: dict = field(default_factory=dict)
     blocking_count: int = 0
     estimated_effort_days: float = 0.0
+    effort_breakdown: dict = field(default_factory=dict)
     # Tri-state: True = Boot 2 confirmed, False = Boot 3+ confirmed,
     # None = could not determine. Absence of evidence is never reported as True.
     spring_boot_2_detected: Optional[bool] = None
@@ -1499,13 +1500,32 @@ class MigrationReport:
 
         # BUG #5: effort over MAIN findings only — N/A axes (Hibernate-6 phantom,
         # test fixtures) no longer pad the estimate.
-        self.estimated_effort_days = round(
+        _file_effort = (
             len(critical_files) * 0.5
             + len(high_files) * 0.25
             + len(medium_files) * 0.1
-            + len(low_files) * 0.05,
-            1,
+            + len(low_files) * 0.05
         )
+        # BUG #1 (v1.70.0): when the Hibernate 5→6 axis APPLIES, fold its measured
+        # rewrite effort (risk_matrix → total_effort_range_days) into the headline
+        # estimate. Previously a Hibernate-5 project whose ${hibernateVersion} was
+        # misread as 6 set migration_applicable=False, which silently DROPPED this
+        # 28.9–95.6 person-day range from estimated_effort_days, under-reporting the
+        # real cost 1.5–2.6×. We add the range midpoint and expose the breakdown.
+        _hib_effort = 0.0
+        if _hibernate_applies and hib is not None:
+            _r = hib.total_effort_range_days or {}
+            _lo, _hi = _r.get("low"), _r.get("high")
+            if isinstance(_lo, (int, float)) and isinstance(_hi, (int, float)):
+                _hib_effort = (float(_lo) + float(_hi)) / 2.0
+        self.estimated_effort_days = round(_file_effort + _hib_effort, 1)
+        self.effort_breakdown = {
+            "findings_effort_days": round(_file_effort, 1),
+            "hibernate_rewrite_effort_days": round(_hib_effort, 1),
+            "hibernate_rewrite_range": (
+                hib.total_effort_range_days if (_hibernate_applies and hib is not None) else None
+            ),
+        }
 
         # BUG #6 / #8: hygiene + non-blocking buckets, surfaced separately.
         self.hygiene_findings = sum(
@@ -1561,6 +1581,7 @@ class MigrationReport:
             "headline_blocker": self.headline_blocker,
             "blocking_count": self.blocking_count,
             "estimated_effort_days": self.estimated_effort_days,
+            "effort_breakdown": self.effort_breakdown,
             "hygiene_findings": self.hygiene_findings,
             "non_blocking": self.non_blocking,
             "spring_present": self.spring_present,

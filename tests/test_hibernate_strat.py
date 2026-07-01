@@ -484,3 +484,81 @@ class TestGuardrails:
         s2 = _analyze(files)
         import json
         assert json.dumps(s1.to_dict(), sort_keys=True) == json.dumps(s2.to_dict(), sort_keys=True)
+
+
+# ── v1.70.0 regression: BUG #1 Hibernate version resolution (openmrs field test) ─
+# A pom that pins hibernate-core to 5.x via ${hibernateVersion} while a sibling
+# hibernate-search runs on 6.x must resolve the ORM version to 5.x — never the
+# Search artifact's version. The old "newest hibernate*version property wins" scan
+# declared the repo already on Hibernate 6 and silently dropped the rewrite effort.
+class TestHibernateVersionResolutionBug1:
+    def test_search_version_not_mistaken_for_orm(self) -> None:
+        from sourcecode.hibernate_strat import _resolve_hibernate_version
+        root = Path(tempfile.mkdtemp())
+        # Exact shape of openmrs-core pom.xml.
+        _write(root, "pom.xml",
+               "<project>"
+               "<dependencies>"
+               "<dependency><groupId>org.hibernate</groupId>"
+               "<artifactId>hibernate-core</artifactId>"
+               "<version>${hibernateVersion}</version></dependency>"
+               "<dependency><groupId>org.hibernate.search</groupId>"
+               "<artifactId>hibernate-search-mapper-orm</artifactId>"
+               "<version>${hibernateSearchVersion}</version></dependency>"
+               "</dependencies>"
+               "<properties>"
+               "<hibernateVersion>5.6.15.Final</hibernateVersion>"
+               "<hibernateSearchVersion>6.2.4.Final</hibernateSearchVersion>"
+               "</properties></project>\n")
+        full, major, conf = _resolve_hibernate_version(root)
+        assert full == "5.6.15.Final"
+        assert major == 5
+        assert conf == "high"
+
+    def test_search_property_excluded_in_fallback(self) -> None:
+        # No anchored hibernate-core dep; only properties present. The Search
+        # property must still be excluded so the fallback never picks 6.x.
+        from sourcecode.hibernate_strat import _resolve_hibernate_version
+        root = Path(tempfile.mkdtemp())
+        _write(root, "pom.xml",
+               "<project><properties>"
+               "<hibernate.version>5.6.15.Final</hibernate.version>"
+               "<hibernate.search.version>6.2.4.Final</hibernate.search.version>"
+               "</properties></project>\n")
+        full, major, _ = _resolve_hibernate_version(root)
+        assert full == "5.6.15.Final"
+        assert major == 5
+
+    def test_migrate_check_resolves_h5_and_includes_effort(self) -> None:
+        from sourcecode.migrate_check import run_migrate_check
+        root = Path(tempfile.mkdtemp())
+        _write(root, "pom.xml",
+               "<project><dependencies>"
+               "<dependency><groupId>org.hibernate</groupId>"
+               "<artifactId>hibernate-core</artifactId>"
+               "<version>${hibernateVersion}</version></dependency>"
+               "</dependencies><properties>"
+               "<hibernateVersion>5.6.15.Final</hibernateVersion>"
+               "<hibernateSearchVersion>6.2.4.Final</hibernateSearchVersion>"
+               "</properties></project>\n")
+        _write(root, "common/src/main/java/x/MoneyType.java",
+               "import org.hibernate.usertype.UserType;\n"
+               "public class MoneyType implements UserType {}\n")
+        d = run_migrate_check(["common/src/main/java/x/MoneyType.java"], root).to_dict()
+        assert d["hibernate"]["effective_version"] == "5.6.15.Final"
+        assert d["hibernate"]["version_major"] == 5
+        assert d["hibernate"]["migration_applicable"] is True
+
+    def test_no_same_name_readiness_contradiction(self) -> None:
+        # The nested stratification readiness was renamed to rewrite_zone_readiness
+        # so it can never collide with the document-level hibernate_readiness.
+        from sourcecode.migrate_check import run_migrate_check
+        root = Path(tempfile.mkdtemp())
+        (root / "pom.xml").write_text(_HIBERNATE_POM, encoding="utf-8")
+        _write(root, "common/src/main/java/x/MoneyType.java",
+               "import org.hibernate.usertype.UserType;\n"
+               "public class MoneyType implements UserType {}\n")
+        d = run_migrate_check(["common/src/main/java/x/MoneyType.java"], root).to_dict()
+        assert "hibernate_readiness" not in d["hibernate"]
+        assert "rewrite_zone_readiness" in d["hibernate"]
+        assert "effort_breakdown" in d

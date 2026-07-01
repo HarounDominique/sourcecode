@@ -200,6 +200,27 @@ def detect_integrations(file_paths: "list[str]", root: Path) -> dict:
         has_mail_import = bool(_MAIL_IMPORT_RE.search(text))
         naming_factory = _classify_naming_factory(text)
 
+        # BUG #3 (v1.70.0): "HttpClient" is a simple name that collides with
+        # user-defined classes (e.g. org.openmrs.util.HttpClient, a thin wrapper over
+        # java.net.HttpURLConnection — a completely different API from the JDK 11+
+        # java.net.http.HttpClient). Resolve the JDK client by its FULLY-QUALIFIED
+        # import, never by the bare class name. When the file imports/declares a
+        # different HttpClient (or none can be resolved), degrade to a low-confidence
+        # "custom-http-wrapper" rather than asserting a JDK client that isn't there.
+        import_fqns = set(
+            re.findall(r"^\s*import\s+(?:static\s+)?([\w.]+)\s*;", text, re.MULTILINE)
+        )
+        http_jdk_imported = (
+            "java.net.http.HttpClient" in import_fqns or "java.net.http.*" in import_fqns
+        )
+        declares_own_httpclient = bool(
+            re.search(r"\b(?:class|interface|enum)\s+HttpClient\b", text)
+        )
+        http_other_import = any(
+            fqn.endswith(".HttpClient") and not fqn.startswith("java.net.http.")
+            for fqn in import_fqns
+        )
+
         # Token clients — per line, skipping imports/package/comment noise.
         # First pass records the declaration site and any variable name bound to
         # the client, so a later call site (where the URL literal usually lives)
@@ -241,6 +262,27 @@ def detect_integrations(file_paths: "list[str]", root: Path) -> dict:
                         kind, client, confidence = (
                             "naming-directory-unknown", "jndi-dircontext", "low",
                         )
+                # BUG #3: resolve the ambiguous bare "HttpClient" by its import, and
+                # suppress pure type-declaration sites (field / parameter / return
+                # type) — only a construction or static call is a real network site.
+                if client == "jdk-httpclient":
+                    if not (http_jdk_imported and not declares_own_httpclient):
+                        # Not the JDK client (own class, third-party, or unresolvable).
+                        client, confidence = "custom-http-wrapper", "low"
+                        if declares_own_httpclient or http_other_import:
+                            confidence = "low"
+                    is_construction = bool(
+                        re.search(r"\bnew\s+HttpClient\b", line)
+                    ) or bool(re.search(r"\bHttpClient\s*\.", line))
+                    if not is_construction:
+                        # Type-declaration only (e.g. `HttpClient field;`,
+                        # `void setX(HttpClient c)`): track the var for the URL
+                        # second pass but do NOT emit it as an invocation site.
+                        tok = m.group(0)
+                        decl = re.search(re.escape(tok) + r"\s+(\w+)\b", line)
+                        if decl:
+                            var_to_client[decl.group(1)] = (kind, client)
+                        continue
                 _add(kind, client, _extract_target(line), rel, lineno, confidence)
                 tok = m.group(0)
                 # `Type name` (field/local decl) and `name = new Type(` forms.

@@ -1,5 +1,66 @@
 # Changelog
 
+## [1.70.0] — 2026-07-01
+
+### Fixed — reliability & internal-consistency on a large Spring 5 / Hibernate 5 repo (openmrs-core field test)
+
+A full migration audit of **openmrs-core** (`7c0144ad2`, branch `2.9.x`; ~866
+production files, Maven multi-module, Spring Framework 5 + Hibernate 5, classic
+WAR, **no Spring Boot**) surfaced four reproducible defects where a headline value
+was wrong or internally contradictory. Each fix targets the **root cause** and,
+where certainty is not achievable, degrades to an explicit low-confidence / `null`
+signal rather than asserting a concrete-but-false value. New regression coverage
+across four suites.
+
+- **`migrate-check` — Hibernate version confused a sibling artifact's version (BUG #1, CRITICAL).**
+  Hibernate ORM was resolved by scanning for *any* `<hibernate*version>` property
+  and keeping the **newest**, so on openmrs `${hibernateSearchVersion}=6.2.4.Final`
+  (Hibernate **Search**, a different artifact) beat `${hibernateVersion}=5.6.15.Final`
+  (Hibernate **ORM**). The tool declared the repo "already on Hibernate 6", set
+  `migration_applicable:false`, and silently **dropped the 28.9–95.6 person-day**
+  rewrite range from `estimated_effort_days` (under-reporting 1.5–2.6×). Resolution
+  is now **anchored to the `hibernate-core`/`hibernate-orm` dependency** — the
+  `<version>` on that coordinate, resolving a `${property}` to the *specific*
+  referenced property, and the Gradle coordinate. The property fallback (BOM-managed
+  repos) **excludes sibling artifacts** (Search/Validator/Envers/OGM/…). openmrs now
+  resolves `5.6.15.Final` / major 5 / `migration_applicable:true`, and
+  `estimated_effort_days` includes the Hibernate rewrite range via a new
+  `effort_breakdown` block. The same-name contradiction (`hibernate_readiness:100`
+  at root vs `0` nested) is removed: the nested field is renamed
+  **`rewrite_zone_readiness`** (raw rewrite-zone score, independent of applicability),
+  leaving the document-root `hibernate_readiness` as the single authoritative,
+  applicability-gated score.
+
+- **`impact-chain` — a class's own methods counted as "direct callers" (BUG #2, HIGH).**
+  For a class-level seed, the BFS folds in every method key of the class, so internal
+  method→method calls leaked into `direct_callers`. On `ConceptServiceImpl` this
+  reported **24 direct callers (22 of them own members)**, inflating `risk_score` to
+  `20.0`/`high` — ~12× the real blast radius. Callers whose owning class is a seed
+  class are now excluded (they are *members*, not external callers); the count is
+  surfaced as `self_referential_excluded` plus an `analysis_warnings` entry.
+  `ConceptServiceImpl` now reports **2 external callers**, `risk_score` recomputed to
+  `8.5`/`medium`.
+
+- **`export --integrations` — a user class classified as a JDK API by bare name (BUG #3, MEDIUM).**
+  `org.openmrs.util.HttpClient` (a thin wrapper over `java.net.HttpURLConnection`)
+  was labeled `jdk-httpclient` purely because its simple name matches
+  `java.net.http.HttpClient`. The client is now resolved by the **fully-qualified
+  import** — `jdk-httpclient` only when `java.net.http.HttpClient` is actually
+  imported and the file does not declare its own — otherwise it degrades to a
+  low-confidence **`custom-http-wrapper`**. Pure type-declaration sites (field,
+  parameter, return type such as `setImplementationIdHttpClient(HttpClient c)`) are
+  no longer emitted as network-invocation evidence; only constructions / static calls
+  count.
+
+- **`--compact` — "rest api" headline unsupported by the `endpoints` command (BUG #4, LOW).**
+  The `architecture_summary` label is driven by HTTP-framework **presence** (Spring
+  MVC on the classpath), so openmrs was headlined "Java rest api" while the
+  authoritative `endpoints` command found **only 3 endpoints** (one a test module,
+  one medium-confidence `router_dsl`). The summary now consults the same endpoint
+  extractor and, below a high-confidence-endpoint threshold, degrades to a qualified,
+  consistent phrasing ("HTTP framework present; only N endpoints detected — see
+  `endpoints`") instead of overclaiming (Java/Kotlin repos only).
+
 ## [1.69.0] — 2026-06-30
 
 ### Fixed — framing & symbol-graph fidelity on a non-framework Java library (JobRunr field test)

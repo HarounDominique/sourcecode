@@ -189,6 +189,73 @@ def test_jndi_unknown_factory_low_confidence(tmp_path):
     assert unk[0]["confidence"] == "low"
 
 
+# ── v1.70.0 regression: BUG #3 HttpClient name-collision (openmrs field test) ──
+_CUSTOM_HTTPCLIENT = """\
+package org.openmrs.util;
+import java.net.HttpURLConnection;
+import java.net.URL;
+public class HttpClient {
+    private final URL url;
+    public HttpClient(URL url) { this.url = url; }
+    public String post(String data) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        return conn.getResponseMessage();
+    }
+}
+"""
+
+_HTTPCLIENT_DECL_ONLY = """\
+package org.openmrs.api;
+import org.openmrs.util.HttpClient;
+public interface AdministrationService {
+    void setImplementationIdHttpClient(HttpClient implementationHttpClient);
+}
+"""
+
+_JDK_HTTPCLIENT = """\
+package com.x;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+public class RealJdkCaller {
+    public void fetch() {
+        HttpClient client = HttpClient.newHttpClient();
+        client.send(HttpRequest.newBuilder().build(), null);
+    }
+}
+"""
+
+
+def test_bug3_custom_httpclient_not_jdk(tmp_path):
+    # A user class named HttpClient (wrapping HttpURLConnection) must NOT be
+    # classified as the JDK java.net.http.HttpClient by bare-name match.
+    p = tmp_path / "HttpClient.java"
+    p.write_text(_CUSTOM_HTTPCLIENT, encoding="utf-8")
+    out = detect_integrations(["HttpClient.java"], tmp_path)
+    clients = {r["client"] for r in out["integrations"] if r["kind"] == "http"}
+    assert "jdk-httpclient" not in clients, out
+    if clients:
+        assert clients == {"custom-http-wrapper"}, out
+
+
+def test_bug3_type_declaration_not_invocation(tmp_path):
+    # A method-signature type declaration (setX(HttpClient c)) is not a network
+    # invocation site and must not be emitted as an integration evidence.
+    p = tmp_path / "AdministrationService.java"
+    p.write_text(_HTTPCLIENT_DECL_ONLY, encoding="utf-8")
+    out = detect_integrations(["AdministrationService.java"], tmp_path)
+    http = [r for r in out["integrations"] if r["kind"] == "http"]
+    assert http == [], out
+
+
+def test_bug3_real_jdk_httpclient_still_detected(tmp_path):
+    # The genuine java.net.http.HttpClient (imported + used) is still detected.
+    p = tmp_path / "RealJdkCaller.java"
+    p.write_text(_JDK_HTTPCLIENT, encoding="utf-8")
+    out = detect_integrations(["RealJdkCaller.java"], tmp_path)
+    clients = {r["client"] for r in out["integrations"] if r["kind"] == "http"}
+    assert "jdk-httpclient" in clients, out
+
+
 def test_export_integrations_via_cli(tmp_path):
     repo = _write_repo(tmp_path)
     res = runner.invoke(app, ["export", str(repo), "--integrations", "--format", "json"])

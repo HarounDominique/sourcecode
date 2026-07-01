@@ -262,15 +262,33 @@ def _scan_build_dependency(root: Path) -> tuple[bool, list[str]]:
 # ≥ 6 the 5→6 axis does NOT apply (the migration is already done). When it cannot
 # be resolved the axis degrades to a low-confidence hypothesis (no headline).
 _HIB_VER = r"(\d+\.\d+(?:\.\d+)?(?:[.\-][\w]+)*)"  # 6.2.13.Final, 5.6.15, 6.2
+_HIB_VER_ANCHORED = re.compile(r"^" + _HIB_VER + r"$")
 _HIB_PROP_RE = re.compile(
     r"<((?:[\w.\-]*hibernate[\w.\-]*?)\.?version)>\s*" + _HIB_VER + r"\s*</\1>",
     re.IGNORECASE,
 )
-_HIB_COORD_VERSION_RE = re.compile(
-    r"<artifactId>\s*hibernate-(?:core|orm)\s*</artifactId>\s*"
-    r"(?:<[^>]+>[^<]*</[^>]+>\s*)*?<version>\s*" + _HIB_VER,
+# A Hibernate property is ONLY a proxy for the ORM version when it is not the
+# version of a sibling Hibernate artifact (Search, Validator, Envers, OGM, …).
+# Those ship on their own version line (e.g. hibernate-search 6.x on a
+# hibernate-core 5.x project) and must never be mistaken for the ORM version.
+# BUG #1 (v1.70.0): openmrs pinned hibernate-core to 5.6.15 via ${hibernateVersion}
+# while ${hibernateSearchVersion}=6.2.4 — the old "newest wins" scan picked the
+# Search version and declared the project already on Hibernate 6.
+_HIB_NON_CORE_PROP_RE = re.compile(
+    r"search|validator|envers|ogm|reactive|spatial|jpamodelgen|"
+    r"jpa-?model|gradle|tool|commons|metamodel",
+    re.IGNORECASE,
+)
+# Anchor: capture the <version> declared inside the hibernate-core/orm
+# <dependency> block (the value may be a literal or a ${property} reference).
+_HIB_CORE_DEP_RE = re.compile(
+    r"<dependency>(?P<body>(?:(?!</dependency>).)*?"
+    r"<artifactId>\s*hibernate-(?:core|orm)\s*</artifactId>"
+    r"(?:(?!</dependency>).)*?)</dependency>",
     re.IGNORECASE | re.DOTALL,
 )
+_VERSION_TAG_RE = re.compile(r"<version>\s*([^<]+?)\s*</version>", re.IGNORECASE)
+_PROP_REF_RE = re.compile(r"^\$\{([^}]+)\}$")
 _HIB_GRADLE_VERSION_RE = re.compile(
     r"org\.hibernate(?:\.orm)?:hibernate-(?:core|orm):" + _HIB_VER,
     re.IGNORECASE,
@@ -290,37 +308,88 @@ def _ver_key(full: str) -> tuple[int, int]:
     return (major, minor)
 
 
+def _lookup_maven_property(texts: list[str], name: str) -> Optional[str]:
+    """Resolve a single Maven property by exact tag name across build files."""
+    pat = re.compile(
+        r"<" + re.escape(name) + r">\s*([^<]+?)\s*</" + re.escape(name) + r">",
+        re.IGNORECASE,
+    )
+    for t in texts:
+        m = pat.search(t)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _resolve_version_expr(texts: list[str], expr: str, depth: int = 0) -> Optional[str]:
+    """Resolve a <version> value that may be a literal or a ${property} chain."""
+    expr = expr.strip()
+    ref = _PROP_REF_RE.match(expr)
+    if ref:
+        if depth > 5:
+            return None
+        val = _lookup_maven_property(texts, ref.group(1))
+        if val is None:
+            return None
+        return _resolve_version_expr(texts, val, depth + 1)
+    return expr if _HIB_VER_ANCHORED.match(expr) else None
+
+
 def _resolve_hibernate_version(root: Path) -> tuple[Optional[str], Optional[int], str]:
     """Return (full_version_string, major, confidence) for the effective Hibernate.
 
-    confidence is "high" when a version was resolved from a build descriptor,
-    "none" when none could be determined (degrade to hypothesis). The newest
-    declared Hibernate wins in a multi-module build.
+    Resolution order (BUG #1 — never trust a same-named-but-different artifact):
+      1. The <version> anchored to the hibernate-core / hibernate-orm dependency
+         (literal, or a ${property} resolved to that specific property), and the
+         Gradle org.hibernate(.orm):hibernate-(core|orm) coordinate. HIGH conf.
+      2. Fallback: a <hibernate*version> property that is NOT a sibling-artifact
+         version (Search/Validator/Envers/…). HIGH conf.
+      3. None resolvable → degrade to hypothesis (confidence "none").
+    The newest qualifying version wins in a multi-module build.
     """
     import os
-    best_full: Optional[str] = None
+    texts: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_BUILD_SCAN_DIRS]
         for fname in filenames:
             if fname not in _BUILD_FILE_NAMES:
                 continue
             try:
-                text = (Path(dirpath) / fname).read_text(encoding="utf-8", errors="replace")
+                texts.append(
+                    (Path(dirpath) / fname).read_text(encoding="utf-8", errors="replace")
+                )
             except OSError:
                 continue
-            fulls: list[str] = []
-            for m in _HIB_PROP_RE.finditer(text):
-                fulls.append(m.group(2))
-            for m in _HIB_COORD_VERSION_RE.finditer(text):
-                fulls.append(m.group(1))
-            for m in _HIB_GRADLE_VERSION_RE.finditer(text):
-                fulls.append(m.group(1))
-            for full in fulls:
-                if best_full is None or _ver_key(full) > _ver_key(best_full):
-                    best_full = full
-    if best_full is None:
+    if not texts:
         return None, None, "none"
-    return best_full, _ver_key(best_full)[0], "high"
+
+    # 1. Anchored to the hibernate-core / hibernate-orm coordinate.
+    anchored: list[str] = []
+    for text in texts:
+        for dep in _HIB_CORE_DEP_RE.finditer(text):
+            vm = _VERSION_TAG_RE.search(dep.group("body"))
+            if vm:
+                resolved = _resolve_version_expr(texts, vm.group(1))
+                if resolved:
+                    anchored.append(resolved)
+        for m in _HIB_GRADLE_VERSION_RE.finditer(text):
+            anchored.append(m.group(1))
+    if anchored:
+        best = max(anchored, key=_ver_key)
+        return best, _ver_key(best)[0], "high"
+
+    # 2. Fallback: a Hibernate *property* that is not a sibling-artifact version.
+    prop_cands: list[str] = []
+    for text in texts:
+        for m in _HIB_PROP_RE.finditer(text):
+            if _HIB_NON_CORE_PROP_RE.search(m.group(1)):
+                continue
+            prop_cands.append(m.group(2))
+    if prop_cands:
+        best = max(prop_cands, key=_ver_key)
+        return best, _ver_key(best)[0], "high"
+
+    return None, None, "none"
 
 # Escalation markers — dynamic / reflection-based persistence construction.
 _ABSTRACTION_CLASS_RE = re.compile(
@@ -495,7 +564,13 @@ class HibernateStratification:
             "classification": self.classification,
             "classification_label": self.classification_label,
             "stratified": True,
-            "hibernate_readiness": self.readiness,
+            # BUG #1 (v1.70.0): renamed from "hibernate_readiness" to avoid a
+            # same-name contradiction with the document-level migrate-check field.
+            # This is the RAW 5→6 rewrite-zone readiness (independent of whether the
+            # axis applies). The authoritative, applicability-gated migration score
+            # lives at the document root as "hibernate_readiness"; consult that one
+            # for decisions. They diverge by design when the axis is N/A.
+            "rewrite_zone_readiness": self.readiness,
             "risk_matrix": [r.to_dict() for r in self.risk_matrix],
             "module_exposure_map": self.module_exposure,
             "incompatible_patterns": self.incompatible_patterns,

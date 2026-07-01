@@ -271,7 +271,7 @@ class TestBfsCallers:
             ("com.example.Service", "calls", "com.example.ControllerA"),
             ("com.example.Service", "calls", "com.example.ControllerB"),
         ])
-        direct, indirect, truncated = _bfs_callers(["com.example.Service"], rg, 1)
+        direct, indirect, truncated, _ = _bfs_callers(["com.example.Service"], rg, 1)
         assert set(direct) == {"com.example.ControllerA", "com.example.ControllerB"}
         assert indirect == []
         assert not truncated
@@ -281,7 +281,7 @@ class TestBfsCallers:
             ("com.example.Service", "calls", "com.example.ControllerA"),
             ("com.example.ControllerA", "calls", "com.example.Client"),
         ])
-        direct, indirect, truncated = _bfs_callers(["com.example.Service"], rg, 2)
+        direct, indirect, truncated, _ = _bfs_callers(["com.example.Service"], rg, 2)
         assert "com.example.ControllerA" in direct
         assert "com.example.Client" in indirect
 
@@ -289,10 +289,31 @@ class TestBfsCallers:
         # Build 501 direct callers to trigger the hub guard
         callers = [f"com.example.Caller{i}" for i in range(501)]
         rg = {"com.example.Hub": {"calls": callers}}
-        direct, indirect, truncated = _bfs_callers(["com.example.Hub"], rg, 4)
+        direct, indirect, truncated, _ = _bfs_callers(["com.example.Hub"], rg, 4)
         assert len(direct) == 501
         assert indirect == []
         assert truncated
+
+    def test_bug2_self_members_excluded_from_callers(self):
+        # v1.70.0 BUG #2 (openmrs ConceptServiceImpl field test): when the seed is a
+        # CLASS node, _edges_for folds in every method key of that class, so internal
+        # method→method calls were leaking into direct_callers and inflating the
+        # blast radius. A class's own members are members, not external callers.
+        rg = self._rg([
+            # external callers — these are the real blast radius
+            ("com.example.ConceptServiceImpl#saveConcept", "calls", "com.example.ServiceContext"),
+            ("com.example.ConceptServiceImpl#saveConcept", "calls", "com.example.AllergyProperties"),
+            # internal members calling each other — must be excluded
+            ("com.example.ConceptServiceImpl#saveConcept", "calls", "com.example.ConceptServiceImpl#purgeConcept"),
+            ("com.example.ConceptServiceImpl#saveConcept", "calls", "com.example.ConceptServiceImpl#retireConcept"),
+        ])
+        direct, indirect, _, self_excluded = _bfs_callers(
+            ["com.example.ConceptServiceImpl"], rg, 1
+        )
+        own = [x for x in direct if x.startswith("com.example.ConceptServiceImpl#")]
+        assert own == [], f"own-class members leaked into direct_callers: {own}"
+        assert set(direct) == {"com.example.ServiceContext", "com.example.AllergyProperties"}
+        assert self_excluded == 2
 
     def test_ic19_contained_in_excluded(self):
         rg = {
@@ -301,7 +322,7 @@ class TestBfsCallers:
                 "calls": ["com.example.ActualCaller"],
             }
         }
-        direct, indirect, _ = _bfs_callers(["com.example.Service"], rg, 1)
+        direct, indirect, _, _ = _bfs_callers(["com.example.Service"], rg, 1)
         assert "com.example.ActualCaller" in direct
         assert "com.example.Service" not in direct  # no self-reference via contained_in
 
@@ -313,7 +334,7 @@ class TestBfsCallers:
                 "injects": ["com.example.PatientServiceImpl.dao"],
             }
         }
-        direct, indirect, _ = _bfs_callers(["com.example.PatientDAO"], rg, 1)
+        direct, indirect, _, _ = _bfs_callers(["com.example.PatientDAO"], rg, 1)
         assert "com.example.PatientServiceImpl" in direct
         assert "com.example.PatientServiceImpl.dao" not in direct
         assert "com.example.PatientServiceImpl.dao" not in indirect
@@ -325,7 +346,7 @@ class TestBfsCallers:
                 "injects": ["com.example.PatientServiceImpl#<init>"],
             }
         }
-        direct, indirect, _ = _bfs_callers(["com.example.PatientDAO"], rg, 1)
+        direct, indirect, _, _ = _bfs_callers(["com.example.PatientDAO"], rg, 1)
         assert "com.example.PatientServiceImpl" in direct
         assert "com.example.PatientServiceImpl#<init>" not in direct
         assert "com.example.PatientServiceImpl#<init>" not in indirect
@@ -1586,7 +1607,7 @@ class TestRegressionBUG004ClassLevelDeadEnd:
             # No entry for "com.example.Service" itself — only method-level
             "com.example.Service#doWork": {"calls": ["com.example.Client#run"]},
         }
-        direct, indirect, _ = _bfs_callers(["com.example.Service"], rg, 1)
+        direct, indirect, _, _ = _bfs_callers(["com.example.Service"], rg, 1)
         assert "com.example.Client#run" in direct, (
             f"BUG-004: class-level seed missed method-level callers. direct={direct}"
         )
@@ -1610,7 +1631,7 @@ class TestRegressionBUG004ClassLevelDeadEnd:
                 "calls": ["com.example.Controller#create"],
             },
         }
-        direct, indirect, _ = _bfs_callers(["com.example.Repository"], rg, 2)
+        direct, indirect, _, _ = _bfs_callers(["com.example.Repository"], rg, 2)
         all_callers = set(direct) | set(indirect)
         assert "com.example.Controller#checkout" in all_callers, (
             f"BUG-004: ServiceImpl class dead-end — checkout missing. callers={all_callers}"
@@ -1625,7 +1646,7 @@ class TestRegressionBUG004ClassLevelDeadEnd:
             "com.example.Service": {"calls": ["com.example.Client#run"]},
             "com.example.Service#doWork": {"calls": ["com.example.Client#run"]},
         }
-        direct, _, _ = _bfs_callers(["com.example.Service"], rg, 1)
+        direct, _, _, _ = _bfs_callers(["com.example.Service"], rg, 1)
         assert direct.count("com.example.Client#run") == 1, (
             f"BUG-004: duplicate callers from class+method rg entries. direct={direct}"
         )

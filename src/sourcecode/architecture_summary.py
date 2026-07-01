@@ -23,6 +23,14 @@ _JAVA_EXTENSIONS = {".java", ".kt", ".scala"}
 
 _CORE_DETECTION_MODULES = {"scanner", "detectors", "classifier", "workspace"}
 
+# BUG #4 (v1.70.0): the "REST API" project-type label is driven by HTTP-framework
+# PRESENCE (Spring MVC / JAX-RS on the classpath), not by an actual endpoint count.
+# The `--compact` summary is the first (often only) thing an agent reads, so it must
+# not assert "rest api" when the authoritative `endpoints` command finds almost no
+# high-confidence surface. Below this many high-confidence endpoints we degrade the
+# headline to a qualified, consistent phrasing instead of overclaiming.
+_MIN_REST_ENDPOINTS_FOR_LABEL = 5
+
 _OPTIONAL_LABEL_MAP: dict[str, str] = {
     "DependencyAnalyzer": "dependencias",
     "GraphAnalyzer": "grafo de módulos",
@@ -41,6 +49,7 @@ class ArchitectureSummarizer:
 
     def __init__(self, root: Path) -> None:
         self.root = root
+        self._endpoint_support_cache: tuple[int, int] | None = None
 
     def generate(self, sm: SourceMap) -> str | None:
         try:
@@ -185,8 +194,38 @@ class ArchitectureSummarizer:
 
         fw_str = f" using {', '.join(fw_names)}" if fw_names else ""
         if runtime:
+            # BUG #4: never assert "rest api" in the headline unless the endpoints
+            # command actually backs it (Java/Kotlin only — that is where we have an
+            # authoritative extractor). Degrade to a qualified, consistent phrasing.
+            if sm.project_type == "api" and primary.stack in {"java", "kotlin"}:
+                total, high = self._endpoint_support()
+                if high < _MIN_REST_ENDPOINTS_FOR_LABEL:
+                    plural = "s" if total != 1 else ""
+                    return (
+                        f"{stack_label} application{fw_str} "
+                        f"(HTTP framework present; only {total} endpoint{plural} "
+                        f"detected — see `endpoints`)."
+                    )
             return f"{stack_label} {runtime.lower()}{fw_str}."
         return f"{stack_label} project{fw_str}."
+
+    def _endpoint_support(self) -> tuple[int, int]:
+        """Return (total, high_confidence) endpoint counts from the canonical
+        Java endpoint extractor — the same source the `endpoints` command uses,
+        so the summary cannot diverge from it. Cached; failure degrades to (0, 0)."""
+        if self._endpoint_support_cache is not None:
+            return self._endpoint_support_cache
+        total, high = 0, 0
+        try:
+            from sourcecode.repository_ir import extract_java_endpoints
+            data = extract_java_endpoints(self.root)
+            eps = data.get("endpoints", [])
+            total = data.get("total", len(eps))
+            high = sum(1 for e in eps if (e.get("confidence") or "high") == "high")
+        except Exception:
+            total, high = 0, 0
+        self._endpoint_support_cache = (total, high)
+        return self._endpoint_support_cache
 
     def _describe_arch_pattern(self, arch: Any) -> str:
         pattern_labels = {

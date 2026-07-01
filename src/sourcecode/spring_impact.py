@@ -121,6 +121,8 @@ class ImpactChainResult:
     resolution: str = "not_found"              # "exact" | "class_expanded" | "partial" | "not_found"
     direct_callers: list[str] = field(default_factory=list)
     indirect_callers: list[str] = field(default_factory=list)
+    # BUG #2: count of own-class members dropped from callers (members, not callers).
+    self_referential_excluded: int = 0
     implementations: list[str] = field(default_factory=list)  # in-repo subtypes of queried interface/base
     endpoints_affected: list[AffectedEndpoint] = field(default_factory=list)
     transaction_boundary: Optional[dict] = None   # TransactionBoundary.to_dict() or None
@@ -144,6 +146,7 @@ class ImpactChainResult:
             "resolution": self.resolution,
             "direct_callers": self.direct_callers,
             "indirect_callers": self.indirect_callers,
+            "self_referential_excluded": self.self_referential_excluded,
             "implementations": self.implementations,
             "endpoints_affected": [ep.to_dict() for ep in self.endpoints_affected],
             "transaction_boundary": self.transaction_boundary,
@@ -471,6 +474,15 @@ def _bfs_callers(
     indirect: list[str] = []
     was_truncated = False
 
+    # BUG #2 (v1.70.0): a class's OWN members are not "callers" of that class — they
+    # are members. When the seed is a class node, _edges_for folds in every method
+    # key of that class, so internal method→method calls (e.g.
+    # ConceptServiceImpl#purgeConcept → ConceptServiceImpl#saveConcept) were leaking
+    # into direct_callers and inflating the blast radius ~12×. Exclude any caller
+    # whose owning class is one of the seed classes.
+    seed_classes: set[str] = {normalize_owner_fqn(s) for s in seed_fqns}
+    self_excluded: int = 0
+
     # BUG-004: index class FQN → list of method-level keys in reverse_graph.
     # Callers of Foo#doWork are stored under reverse_graph["Foo#doWork"], never
     # under reverse_graph["Foo"].  Without this index, BFS silently terminates
@@ -506,7 +518,9 @@ def _bfs_callers(
     for seed in seed_fqns:
         for etype, fqn_list in _edges_for(seed):
             if etype not in _SKIP_EDGE_TYPES:
-                unique_direct_callers.update(fqn_list)
+                unique_direct_callers.update(
+                    c for c in fqn_list if normalize_owner_fqn(c) not in seed_classes
+                )
 
     effective_depth = 1 if len(unique_direct_callers) > _BFS_CALLER_CAP else max_depth
     if effective_depth < max_depth:
@@ -516,7 +530,13 @@ def _bfs_callers(
     queue: list[tuple[str, int]] = [(s, 0) for s in seed_fqns]
 
     def _add_caller(caller: str, depth: int) -> None:
+        nonlocal self_excluded
         if caller in visited:
+            return
+        # BUG #2: a member of a seed class is not an external caller — drop it.
+        if normalize_owner_fqn(caller) in seed_classes:
+            visited.add(caller)
+            self_excluded += 1
             return
         visited.add(caller)
         if depth == 0:
@@ -542,7 +562,7 @@ def _bfs_callers(
                 else:
                     _add_caller(caller, depth)
 
-    return direct, indirect, was_truncated
+    return direct, indirect, was_truncated, self_excluded
 
 
 # ---------------------------------------------------------------------------
@@ -888,9 +908,15 @@ class ImpactOrchestrator:
                 )
 
         # ── 2. BFS through reverse graph ─────────────────────────────────
-        direct_callers, indirect_callers, truncated = _bfs_callers(
+        direct_callers, indirect_callers, truncated, self_excluded = _bfs_callers(
             seed_fqns, cir.reverse_graph, depth, impl_graph=impl_graph
         )
+        if self_excluded:
+            warnings.append(
+                f"Self-referential exclusion (BUG #2): {self_excluded} member(s) of the "
+                f"analyzed class were dropped from callers — a class's own methods are "
+                f"members, not external callers (they do not count toward blast radius)."
+            )
         if truncated:
             warnings.append(
                 "Hub-class guard active: symbol has > 500 direct callers — "
@@ -1083,6 +1109,7 @@ class ImpactOrchestrator:
             resolution=resolution,
             direct_callers=direct_callers,
             indirect_callers=indirect_callers,
+            self_referential_excluded=self_excluded,
             implementations=sorted(subtype_classes_added),
             endpoints_affected=endpoints_affected,
             transaction_boundary=tx_boundary,
