@@ -2872,12 +2872,35 @@ def _assemble(
     else:
         _security_model_asm = "unknown"
 
+    # BUG #4 (Jenkins field test): the bare "unknown" string carried no reason or
+    # sub-structure — inconsistent with the not_detected+reason pattern used
+    # elsewhere (migrate-check hibernate). Emit a structured companion so a consumer
+    # sees WHY, and never reads "unknown" as "unsecured". A repo with a custom
+    # security SPI (Jenkins ACL/SecurityRealm) simply matched no RECOGNIZED pattern.
+    _security_model_detail_asm = {
+        "model": _security_model_asm,
+        "status": "detected" if _security_model_asm != "unknown" else "not_detected",
+        "spring_security_filter_chain_detected": _filter_based_asm,
+        "annotation_policies_detected": _has_ann_sec_asm,
+        "custom_spi_detected": [],
+        "reason": (
+            "recognized security model: " + _security_model_asm
+            if _security_model_asm != "unknown"
+            else "N/A — no Spring Security filter chain, no annotation-based policy, "
+                 "and no recognized custom security SPI matched. Absence of a "
+                 "recognized pattern is not evidence the repo is unsecured — it may "
+                 "use a framework-specific or custom access-control model this "
+                 "analyzer does not model."
+        ),
+    }
+
     return {
         **_base,
         "route_surface": _route_surface,
         "spring_events": _spring_events,
         "analysis_gaps": _analysis_gaps,
         "security_model": _security_model_asm,
+        "security_model_detail": _security_model_detail_asm,
         "audit": {
             "dropped_fields": dropped_fields,
         },
@@ -3510,6 +3533,15 @@ def build_repo_ir(
             ir["security_model"] = "xml_or_filter_chain"
         elif _sec_model in ("annotation_based", "mixed"):
             ir["security_model"] = "mixed"
+        # BUG #4: keep the structured detail consistent with the rewritten string.
+        _detail = ir.get("security_model_detail")
+        if isinstance(_detail, dict):
+            _detail["model"] = ir["security_model"]
+            _detail["status"] = "detected"
+            _detail["spring_security_filter_chain_detected"] = True
+            _detail["reason"] = ("XML/filter-chain security configuration detected "
+                                 "(declarative filter mapping in web.xml or Spring "
+                                 "security XML)")
         # Retag route_surface entries that have no security (would become none_detected in CIR)
         for _r in ir.get("route_surface") or []:
             _r_sec = _r.get("security_annotations")

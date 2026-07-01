@@ -263,3 +263,33 @@ def test_export_integrations_via_cli(tmp_path):
     data = json.loads(res.stdout)
     assert "integrations" in data
     assert data["integrations"]["count"] >= 4
+
+
+# ── v1.71.0 regression: BUG #5 structured coverage confidence (Jenkins) ───────
+
+def test_coverage_confidence_low_on_large_repo_few_integrations(tmp_path):
+    # A large repo (many source files) with a handful of recognized constructs —
+    # Jenkins shape (custom remoting/SCM/Update-Center SPIs invisible to static
+    # matching). The low count must be flagged, not read as low external coupling.
+    p = tmp_path / "OneHttp.java"
+    p.write_text(_JDK_HTTPCLIENT, encoding="utf-8")
+    big_file_list = ["OneHttp.java"] + [f"Filler{i}.java" for i in range(400)]
+    out = detect_integrations(big_file_list, tmp_path)
+    assert out["count"] >= 1
+    assert out["coverage_confidence"] == "low"
+    assert "under-counted" in out["coverage_confidence_reason"]
+
+
+def test_coverage_confidence_low_when_zero_integrations(tmp_path):
+    (tmp_path / "Plain.java").write_text("public class Plain {}\n", encoding="utf-8")
+    out = detect_integrations(["Plain.java"], tmp_path)
+    assert out["count"] == 0
+    assert out["coverage_confidence"] == "low"
+
+
+def test_coverage_confidence_high_when_many_integrations(tmp_path):
+    repo = _write_repo(tmp_path)
+    rels = ["src/main/java/com/x/" + f for f in ("RestCaller.java", "BillingClient.java", "Mixed.java")]
+    # Small repo with several constructs → not flagged low.
+    out = detect_integrations(rels, repo)
+    assert out["coverage_confidence"] in ("partial", "high")

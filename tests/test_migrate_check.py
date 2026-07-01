@@ -153,10 +153,21 @@ class TestMigrationReportFinalize:
         )
 
     def test_perfect_score_when_no_findings(self) -> None:
-        report = MigrationReport().finalize()
+        # A Spring Boot repo (boot3 dimension applicable) with zero findings → 100.
+        # spring_boot_present is required for boot3 to apply (Jenkins field test,
+        # BUG #2): without any applicable dimension, readiness is N/A (None), never
+        # a manufactured 100.
+        report = MigrationReport(spring_boot_present=True).finalize()
         assert report.readiness_score == 100
         assert report.blocking_count == 0
         assert report.estimated_effort_days == 0.0
+
+    def test_readiness_na_when_no_dimension_applies(self) -> None:
+        # No findings AND no Spring Boot / migration evidence → no applicable
+        # migration dimension → readiness is N/A (None), not a phantom 100.
+        report = MigrationReport().finalize()
+        assert report.readiness_score is None
+        assert report.applicable_dimensions["boot3"]["applicable"] is False
 
     def test_score_deducts_by_file_not_by_finding(self) -> None:
         # Same file, two critical rules → counted as 1 critical file
@@ -182,7 +193,9 @@ class TestMigrationReportFinalize:
             self._make_finding("MIG-016", "low", f"File{i}.java")
             for i in range(96)
         ]
-        report = MigrationReport(findings=findings).finalize()
+        # spring_boot_present makes the boot3 dimension applicable (score 100 with no
+        # blocking findings); the point is that hygiene findings don't dent it.
+        report = MigrationReport(findings=findings, spring_boot_present=True).finalize()
         assert report.blocking_count == 0
         assert report.readiness_score == 100
         assert report.hygiene_findings == 96
@@ -1548,9 +1561,12 @@ class TestDimensionalReadiness:
         assert report.readiness_aggregate["inputs"] == {"boot3": 92}
 
     def test_real_jakarta_blockers_still_floor(self) -> None:
+        # On a Spring Boot repo, jakarta blockers floor BOTH jakarta and boot3 (the
+        # jakarta namespace is part of the Boot 2→3 axis). spring_boot_present makes
+        # boot3 applicable so the shared jakarta findings feed it.
         findings = [self._f("MIG-001", "critical", "jakarta", f"E{i}.java")
                     for i in range(20)]
-        report = MigrationReport(findings=findings).finalize()
+        report = MigrationReport(findings=findings, spring_boot_present=True).finalize()
         assert report.readiness_score == 0
         assert report.jakarta_readiness == 0
         assert report.boot3_readiness == 0
@@ -1673,3 +1689,110 @@ class TestJdkExportsAllowlist:
         assert _import_package("com.sun.net.httpserver.*") == "com.sun.net.httpserver"
         # a sub-package must not be confused with its exported parent
         assert _import_package("com.sun.management.internal.Foo") == "com.sun.management.internal"
+
+
+# ── v1.71.0 regression: Jenkins field test ────────────────────────────────────
+
+class TestBoot3RequiresSpringBoot:
+    """BUG #2: the boot3 dimension needs POSITIVE Boot evidence, not merely a Spring
+    library on the classpath (Jenkins uses spring-security-web with no Spring Boot)."""
+
+    def _spring_no_boot_repo(self, tmp_path: Path) -> Path:
+        (tmp_path / "pom.xml").write_text(
+            "<project><dependencies><dependency>"
+            "<groupId>org.springframework.security</groupId>"
+            "<artifactId>spring-security-web</artifactId>"
+            "</dependency></dependencies></project>"
+        )
+        (tmp_path / "Legacy.java").write_text(
+            "import javax.servlet.Filter;\npublic class Legacy {}\n"
+        )
+        return tmp_path
+
+    def test_boot3_na_when_spring_but_no_boot(self, tmp_path: Path) -> None:
+        repo = self._spring_no_boot_repo(tmp_path)
+        report = run_migrate_check(["Legacy.java"], repo)
+        assert report.spring_present is True
+        assert report.spring_boot_present is False
+        assert report.applicable_dimensions["boot3"]["applicable"] is False
+        assert "not a Spring Boot application" in report.applicable_dimensions["boot3"]["reason"]
+        # readiness driven by the jakarta axis alone, never a phantom boot3 deficit
+        assert "boot3" not in report.readiness_aggregate["inputs"]
+
+    def test_boot3_applicable_with_spring_boot(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text(
+            "<project><parent>"
+            "<groupId>org.springframework.boot</groupId>"
+            "<artifactId>spring-boot-starter-parent</artifactId>"
+            "<version>2.7.0</version>"
+            "</parent></project>"
+        )
+        (tmp_path / "App.java").write_text("public class App {}\n")
+        report = run_migrate_check(["App.java"], tmp_path)
+        assert report.spring_boot_present is True
+        assert report.applicable_dimensions["boot3"]["applicable"] is True
+
+    def test_boot3_applicable_with_security6_finding_no_boot(self) -> None:
+        # A concrete spring_security_6 finding is positive evidence the axis is real,
+        # even without a spring-boot coordinate.
+        f = MigrationFinding(
+            id="x", rule_id="MIG-031", severity="high", title="t",
+            source_file="Sec.java", first_line=1, migration_target="spring_security_6",
+        )
+        report = MigrationReport(findings=[f], spring_present=True).finalize()
+        assert report.spring_boot_present is False
+        assert report.applicable_dimensions["boot3"]["applicable"] is True
+
+    def test_jakarta_finding_alone_does_not_enable_boot3(self) -> None:
+        # jakarta findings are shared with the jakarta axis; they must NOT by
+        # themselves make boot3 applicable on a non-Boot repo.
+        f = MigrationFinding(
+            id="x", rule_id="MIG-002", severity="high", title="t",
+            source_file="F.java", first_line=1, migration_target="jakarta",
+        )
+        report = MigrationReport(findings=[f], spring_present=True).finalize()
+        assert report.applicable_dimensions["boot3"]["applicable"] is False
+
+
+class TestDeprecatedShimNotBlocking:
+    """BUG #3: a namespace-migration finding on a class-level @Deprecated type is a
+    frozen-legacy compatibility shim, not an active blocker."""
+
+    def test_deprecated_class_servlet_finding_is_non_blocking(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project></project>")
+        (tmp_path / "OldFilter.java").write_text(
+            "import javax.servlet.Filter;\n"
+            "@Deprecated\n"
+            "public class OldFilter implements Filter {}\n"
+        )
+        report = run_migrate_check(["OldFilter.java"], tmp_path)
+        shim = [f for f in report.findings if f.rule_id == "MIG-002"]
+        assert shim and all(f.code_context == "deprecated_shim" for f in shim)
+        assert report.blocking_count == 0
+        assert report.non_blocking["by_context"].get("deprecated_shim") == 1
+
+    def test_live_class_servlet_finding_still_blocks(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project></project>")
+        (tmp_path / "ActiveFilter.java").write_text(
+            "import javax.servlet.Filter;\n"
+            "public class ActiveFilter implements Filter {}\n"
+        )
+        report = run_migrate_check(["ActiveFilter.java"], tmp_path)
+        f = [f for f in report.findings if f.rule_id == "MIG-002"]
+        assert f and all(x.code_context == "main" for x in f)
+        assert report.blocking_count == 1
+
+    def test_deprecated_method_on_live_class_still_blocks(self, tmp_path: Path) -> None:
+        # @Deprecated on a METHOD (below the class declaration) is a live class with a
+        # deprecated member — NOT a frozen shim. Must stay blocking.
+        (tmp_path / "pom.xml").write_text("<project></project>")
+        (tmp_path / "LiveClass.java").write_text(
+            "import javax.servlet.ServletException;\n"
+            "public class LiveClass {\n"
+            "    @Deprecated\n"
+            "    public void old() throws ServletException {}\n"
+            "}\n"
+        )
+        report = run_migrate_check(["LiveClass.java"], tmp_path)
+        f = [f for f in report.findings if f.rule_id == "MIG-002"]
+        assert f and all(x.code_context == "main" for x in f)

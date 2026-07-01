@@ -836,6 +836,20 @@ class TestBuildRepoIr:
         assert roles.get("com.example.service.UserService") == "service"
         assert roles.get("com.example.web.UserController") == "controller"
 
+    def test_security_model_detail_structured_when_not_detected(self, tmp_path):
+        # BUG #4 (Jenkins field test): a bare "unknown" security_model carried no
+        # reason or sub-structure. The structured companion must explain WHY and
+        # never read as "unsecured".
+        (tmp_path / "UserService.java").write_text(SIMPLE_SERVICE, encoding="utf-8")
+        ir = build_repo_ir(["UserService.java"], tmp_path)
+        assert ir["security_model"] == "unknown"
+        detail = ir["security_model_detail"]
+        assert detail["status"] == "not_detected"
+        assert detail["spring_security_filter_chain_detected"] is False
+        assert detail["annotation_policies_detected"] is False
+        assert detail["custom_spi_detected"] == []
+        assert "not evidence the repo is unsecured" in detail["reason"]
+
     def test_deterministic_multi_file(self, tmp_path):
         (tmp_path / "A.java").write_text(SIMPLE_SERVICE, encoding="utf-8")
         (tmp_path / "B.java").write_text(VALIDATOR, encoding="utf-8")

@@ -284,9 +284,42 @@ class JavaDetector(AbstractDetector):
             if parent_artifact == "spring-boot-starter-parent":
                 sb_version = (parent_elem.findtext(f"{ns}version") or "").strip() or None
 
-        text = ElementTree.tostring(root_elem, encoding="unicode").lower()
+        # BUG #1 (Jenkins field test): framework tokens must be matched only inside
+        # genuine dependency / plugin / parent coordinates, never anywhere in the
+        # serialized pom. Jenkins' war/pom.xml lists `<exclude>...:spring-web</exclude>`
+        # and `<exclude>...:spring-aop</exclude>` in an enforcer-plugin bytecode rule
+        # — those are exclusions of transitive artifacts, not declared dependencies.
+        # Serializing the whole tree let them read as "uses Spring MVC / Spring AOP".
+        # Restrict the scan to real dependency/plugin/parent artifact coordinates;
+        # `<exclusion>` and `<exclude>` elements carry neither.
+        text = self._pom_coordinate_text(root_elem, ns)
         frameworks = self._detect_jvm_frameworks(text, "pom.xml", sb_version=sb_version)
         return frameworks
+
+    def _pom_coordinate_text(self, root_elem: ElementTree.Element, ns: str) -> str:
+        """Collect groupId:artifactId coordinates from real dependency, plugin, and
+        parent declarations only. Skips `<exclusion>`/`<exclude>` (transitive-artifact
+        removals) and comments, which must never be read as usage signal."""
+        coords: list[str] = []
+
+        def _coord(elem: ElementTree.Element) -> None:
+            gid = (elem.findtext(f"{ns}groupId") or "").strip()
+            aid = (elem.findtext(f"{ns}artifactId") or "").strip()
+            if aid:
+                coords.append(f"{gid}:{aid}" if gid else aid)
+
+        # <dependency> nodes anywhere (dependencies, dependencyManagement, profiles).
+        # ElementTree never yields <dependency> under <exclusions> (those are
+        # <exclusion>), so exclusion coordinates are structurally excluded.
+        for dep in root_elem.iter(f"{ns}dependency"):
+            _coord(dep)
+        for plugin in root_elem.iter(f"{ns}plugin"):
+            _coord(plugin)
+        parent_elem = root_elem.find(f"{ns}parent")
+        if parent_elem is not None:
+            _coord(parent_elem)
+
+        return "\n".join(coords).lower()
 
     def _frameworks_from_gradle(self, path: Path) -> list[FrameworkDetection]:
         original = "\n".join(read_text_lines(path))
@@ -361,7 +394,12 @@ class JavaDetector(AbstractDetector):
             frameworks.append(FrameworkDetection(name="Thymeleaf", source=source))
         if "freemarker" in text:
             frameworks.append(FrameworkDetection(name="FreeMarker", source=source))
-        if "spring-boot-starter-security" in text or "spring-security-core" in text:
+        if (
+            "spring-boot-starter-security" in text
+            or "spring-security-core" in text
+            or "spring-security-web" in text
+            or "spring-security-config" in text
+        ):
             frameworks.append(FrameworkDetection(name="Spring Security", source=source))
         if "spring-boot-starter-data-jpa" in text or "spring-data-jpa" in text:
             frameworks.append(FrameworkDetection(name="Spring Data JPA", source=source))

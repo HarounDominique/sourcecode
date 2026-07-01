@@ -1,5 +1,68 @@
 # Changelog
 
+## [1.71.0] — 2026-07-01
+
+### Fixed — framework-framing & migration reliability on a large non-Boot Spring repo (Jenkins core field test)
+
+A migration/architecture audit of **jenkins-ci/jenkins** (`e7eef8d2cf`, branch
+`master`; ~1,900 production Java classes, Maven multi-module, uses
+`spring-security-web` but **no Spring MVC, no Spring Boot, no DI container** —
+Jenkins runs on its own Stapler web framework and ACL/SecurityRealm security SPI)
+surfaced five reproducible defects. In every case the engine already computed the
+*correct* internal signal (downgraded confidence, `spring_present`, `not_detected`,
+a prose `coverage_note`) but that signal did not propagate to the high-level field
+an automated consumer reads first. Each fix targets the root cause and adds
+regression coverage. All findings were verified against direct `grep` over the same
+repo.
+
+- **Framework detection — phantom "Spring MVC / Spring AOP" from pom exclusion blocks (BUG #1).**
+  `_frameworks_from_pom` serialized the *entire* pom to text and substring-matched
+  framework tokens, so `<exclude>org.springframework:spring-web</exclude>` and
+  `<exclude>…:spring-aop</exclude>` inside an enforcer bytecode rule in
+  `war/pom.xml` (artifact **exclusions**, not dependencies) read as "uses Spring
+  MVC / Spring AOP". Detection is now restricted to real dependency / plugin /
+  parent **coordinates** (`<exclusion>`/`<exclude>` and comments carry none) — the
+  same discipline the Gradle path already applied (JobRunr fix). The Spring Security
+  token was also broadened to the true-positive `spring-security-web` /
+  `-config` coordinates (Jenkins' real dep), so the honest label survives while the
+  phantoms disappear.
+- **`architecture_summary` — categorical "MVC pattern with … view layers" on a repo with zero controllers (BUG #1).**
+  The `mvc` pattern is a directory-name heuristic. On a Java/Kotlin repo it is now
+  cross-checked against the canonical endpoint extractor in the same run; with no
+  HTTP controllers detected it degrades to a directory-derived "Layered code
+  organization (… — no HTTP controllers detected)" note, dropping the unverified
+  "view" claim rather than asserting MVC.
+- **`migrate-check` — `boot3` dimension applicable without any Spring Boot (BUG #2).**
+  The Boot 2→3 axis was gated on `spring_present` (any `org.springframework.*`
+  coordinate), so a repo carrying only `spring-security-web` received a
+  contaminated `readiness_score` from a migration that does not exist. Applicability
+  now requires **positive evidence**: a `spring-boot*` coordinate / Gradle plugin
+  (`@SpringBootApplication` always ships one), **or** a concrete `spring_boot_3` /
+  `spring_security_6` finding in main code. jakarta findings alone no longer enable
+  boot3. A new `spring_boot_present` flag is surfaced; when N/A the dimension is
+  excluded from the aggregate with a clear reason.
+- **`migrate-check` — `MIG-002` (javax.servlet) counted `@Deprecated` frozen-legacy shims as high blockers (BUG #3).**
+  A namespace-migration finding on a **class-level `@Deprecated`** type (kept for
+  binary compat, with a live replacement — Jenkins `ChainedServletFilter` →
+  `ChainedServletFilter2`) is now classified `code_context="deprecated_shim"` and
+  excluded from `blocking_count`, readiness, and effort, alongside the existing
+  test/generated buckets. A `@Deprecated` **method** on a live class stays blocking.
+  On Jenkins this dropped `blocking_count` from 6 to 2.
+- **`repo-ir` — `security_model` was a bare `"unknown"` string with no reason (BUG #4).**
+  A structured `security_model_detail` companion now mirrors the `not_detected`
+  pattern used elsewhere: `status`, `spring_security_filter_chain_detected`,
+  `annotation_policies_detected`, `custom_spi_detected`, and a `reason` that
+  explicitly notes absence of a *recognized* pattern is not evidence the repo is
+  unsecured (Jenkins uses a custom ACL/SecurityRealm SPI).
+- **`export --integrations` — low count carried no structured coverage flag (BUG #5).**
+  The honest coverage caveat lived only in the prose `coverage_note`. A structured
+  `coverage_confidence` (`low` / `partial` / `high`) plus `coverage_confidence_reason`
+  is now emitted: a large repo (≥300 source files) with <10 recognized constructs is
+  flagged `low` so a consumer cannot read a low count as low external coupling
+  (Jenkins' custom remoting/SCM/Update-Center SPIs are invisible to static matching).
+
+New regression coverage across five suites; full suite green (2,900+ tests).
+
 ## [1.70.0] — 2026-07-01
 
 ### Fixed — reliability & internal-consistency on a large Spring 5 / Hibernate 5 repo (openmrs-core field test)

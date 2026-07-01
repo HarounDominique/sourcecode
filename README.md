@@ -373,7 +373,7 @@ Emits **structured, tool-agnostic** codebase views as plain JSON/YAML — the ki
 |------|--------|
 | `--by-directory` | One group per source directory, each symbol with a `source_file:line` reference. |
 | `--module-graph` | `{nodes, edges, summary}` — directories as modules, inter-module dependencies rolled up from class-level relation edges with hit counts + edge types. |
-| `--integrations` | Outbound integrations across Spring **and** plain-Java/Jakarta stacks: HTTP (`RestTemplate`, `WebClient`, `@FeignClient`, JDK `HttpClient`, Apache, OkHttp), LDAP (`LdapTemplate`, JNDI `InitialDirContext`/`LdapContext`), SMTP (`JavaMailSender`, JavaMail `Transport`/`MimeMessage`), and JMS — with `file:line` evidence and a literal `target` when present. Emits an explicit `confidence` (`observed` / `not_analyzed`) + `coverage_note`: a count of `0` means "no client construct found", **not** "no integrations" (runtime/DI-wired clients are not statically visible). |
+| `--integrations` | Outbound integrations across Spring **and** plain-Java/Jakarta stacks: HTTP (`RestTemplate`, `WebClient`, `@FeignClient`, JDK `HttpClient`, Apache, OkHttp), LDAP (`LdapTemplate`, JNDI `InitialDirContext`/`LdapContext`), SMTP (`JavaMailSender`, JavaMail `Transport`/`MimeMessage`), and JMS — with `file:line` evidence and a literal `target` when present. Emits an explicit `confidence` (`observed` / `not_analyzed`), a structured `coverage_confidence` (`low` / `partial` / `high`) with `coverage_confidence_reason`, and a prose `coverage_note`: a count of `0` — or a low count on a large repo (≥300 files, <10 constructs) — is flagged `low`, so a low count is never read as low external coupling (custom protocol/SPI clients are not statically visible). |
 | `--c4` | Unified document: `c4.{context, containers, components, code}` + `api_surface` + a `manifest` with per-directory content hashes for **incremental** consumers (skip directories whose hash is unchanged). `components.module_roots` rolls leaf source dirs up to architectural module roots and classifies each `layered` (DDD: ≥2 of `domain`/`application`/`infrastructure`) vs `flat` (legacy/flat package), with a verifiable `module_count` — so a consumer enumerates real modules instead of inferring boundaries from leaf directories. |
 
 The section flags compose (pass several for one multi-section document); `--c4` assembles the full export on its own. URLs assembled at runtime yield `target: null` (honest absence, never a guess); containers are derived from build files (Maven/Gradle) and reported as a limitation when none are found.
@@ -696,9 +696,20 @@ evidence. `migrate-check` enforces:
   `hibernate_rewrite` headline. An **unresolved** version degrades to a
   low-confidence hypothesis with no headline blocker. See
   `hibernate.effective_version` / `version_major` / `version_confidence`.
-- **Boot3 auto-disables without Spring.** `boot3.applicable` tracks real Spring
-  usage; Quarkus / Micronaut / Helidon / Jakarta-pure repos report `boot3` as N/A
-  (`spring_present: false`), not a contradictory `applicable: true`.
+- **Boot3 needs Spring _Boot_, not just Spring.** `boot3.applicable` requires
+  positive Spring Boot evidence — a `spring-boot*` coordinate / Gradle plugin (or
+  `@SpringBootApplication`), **or** a concrete `spring_boot_3` / `spring_security_6`
+  finding. A repo that merely carries a Spring library (e.g. `spring-security-web`
+  with no Boot — Jenkins core) reports `boot3` as N/A with a reason and is excluded
+  from the aggregate; `spring_present: true` but `spring_boot_present: false`. Quarkus
+  / Micronaut / Helidon / Jakarta-pure repos likewise report `boot3` N/A. jakarta
+  findings alone never enable boot3.
+- **Frozen-legacy `@Deprecated` shims aren't blockers.** A `javax→jakarta` finding
+  on a **class-level `@Deprecated`** type (kept for binary compat, replaced
+  elsewhere) is classified `code_context: "deprecated_shim"` and excluded from
+  `blocking_count` / readiness / effort — surfaced under `non_blocking` with a
+  "verify before removing" note. A `@Deprecated` **method** on a live class still
+  blocks.
 - **Permanent `javax.*` are never jakarta debt.** JDK/JSR namespaces
   (`javax.cache`, `javax.sql`, `javax.xml` JAXP, `javax.crypto`, `javax.naming`,
   `javax.management`, `javax.security.auth`, `javax.annotation.processing`, …) are

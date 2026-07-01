@@ -58,6 +58,13 @@ _ATTR_URL_RE = re.compile(r'url\s*=\s*"([^"]*)"')
 _ATTR_NAME_RE = re.compile(r'(?:name|value)\s*=\s*"([^"]*)"')
 _FIRST_LITERAL_RE = re.compile(r'^\s*"([^"]*)"')
 
+# BUG #5 (Jenkins field test): thresholds for the structured coverage_confidence
+# signal. A repo at/above _LARGE_REPO_FILE_THRESHOLD source files with fewer than
+# _LOW_COVERAGE_COUNT recognized integration constructs is flagged "low" coverage —
+# the count almost certainly under-represents custom-protocol/SPI integrations.
+_LARGE_REPO_FILE_THRESHOLD: int = 300
+_LOW_COVERAGE_COUNT: int = 10
+
 # token -> (kind, client). Matched as whole-word usage outside imports/comments.
 # Covers Spring AND plain-Java/Jakarta stacks (Quarkus, Micronaut, Keycloak SPI):
 # the detector must not be Spring-centric, or a non-Spring repo with real LDAP /
@@ -316,11 +323,50 @@ def detect_integrations(file_paths: "list[str]", root: Path) -> dict:
     # clients (DI, config-driven endpoints, JCA connectors) are invisible to static
     # text matching. Report that explicitly instead of an authoritative "0".
     confidence = "observed" if records else "not_analyzed"
+
+    # BUG #5 (Jenkins field test): the coverage caveat lived only inside the prose
+    # `coverage_note`. Propagate it as a STRUCTURED signal so an automated consumer
+    # does not read a low `count` as "low external coupling". A large repo with few
+    # recognized constructs (Jenkins: custom remoting/SCM/Update-Center SPIs, not
+    # RestTemplate/WebClient) is under-counted, not loosely coupled.
+    _repo_size = len(file_paths)
+    _large_repo = _repo_size >= _LARGE_REPO_FILE_THRESHOLD
+    if not records:
+        coverage_confidence = "low"
+        _cov_reason = (
+            "no recognized client-library construct found; custom protocol/SPI-based "
+            "or DI-wired integrations are not statically detectable by this analyzer. "
+            "A count of 0 does not imply the system has no outbound integrations."
+        )
+    elif _large_repo and len(records) < _LOW_COVERAGE_COUNT:
+        coverage_confidence = "low"
+        _cov_reason = (
+            f"only {len(records)} recognized construct(s) across {_repo_size} source "
+            "files; count reflects only recognized client-library patterns "
+            "(RestTemplate/WebClient/JDK/Apache/OkHttp/LDAP/JMS/…). Custom protocol/"
+            "SPI-based integrations are likely under-counted — do not read a low count "
+            "as low external coupling."
+        )
+    elif len(records) < _LOW_COVERAGE_COUNT:
+        coverage_confidence = "partial"
+        _cov_reason = (
+            "recognized client-library constructs detected; custom protocol/SPI-based "
+            "or DI-wired integrations, if any, are not statically visible."
+        )
+    else:
+        coverage_confidence = "high"
+        _cov_reason = (
+            "recognized client-library constructs cover the observable integration "
+            "surface; runtime/DI-wired clients remain out of static scope."
+        )
+
     return {
         "integrations": records,
         "by_kind": {k: by_kind[k] for k in sorted(by_kind)},
         "count": len(records),
         "confidence": confidence,
+        "coverage_confidence": coverage_confidence,
+        "coverage_confidence_reason": _cov_reason,
         "coverage_note": (
             "Detects HTTP (RestTemplate/WebClient/JDK/Apache/OkHttp), LDAP (Spring "
             "+ JNDI), DNS (JNDI DirContext w/ DnsContextFactory), SMTP (JavaMail, "

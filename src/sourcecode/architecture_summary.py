@@ -142,6 +142,7 @@ class ArchitectureSummarizer:
         # Line 2: architecture pattern + layers
         if arch and arch.pattern not in (None, "unknown", "flat"):
             arch_line = self._describe_arch_pattern(arch)
+            arch_line = self._qualify_web_pattern(arch, arch_line, sm)
             if arch_line:
                 lines.append(arch_line)
 
@@ -226,6 +227,32 @@ class ArchitectureSummarizer:
             total, high = 0, 0
         self._endpoint_support_cache = (total, high)
         return self._endpoint_support_cache
+
+    def _qualify_web_pattern(self, arch: Any, arch_line: str, sm: SourceMap) -> str:
+        """BUG #1 (Jenkins field test): the "mvc" pattern is a directory-name
+        heuristic (dirs matching controller/model/view keywords). On a Java/Kotlin
+        repo, do not assert "MVC pattern with ... view layers" in prose when the
+        canonical endpoint extractor finds no HTTP controllers in the same run —
+        Jenkins (Stapler web framework) matches model/view-ish dirs but declares
+        zero Spring MVC controllers. Cross-check against `endpoints` and degrade to
+        a consistent, non-committal phrasing instead of a categorical MVC claim."""
+        if not arch_line or arch.pattern not in ("mvc", "spring_mvc_layered"):
+            return arch_line
+        primary = next((s for s in sm.stacks if s.primary), sm.stacks[0] if sm.stacks else None)
+        if primary is None or primary.stack not in {"java", "kotlin"}:
+            return arch_line
+        _total, high = self._endpoint_support()
+        if high >= _MIN_REST_ENDPOINTS_FOR_LABEL:
+            return arch_line
+        # No controller backing → the MVC/view claim is unverified. Report the
+        # directory-derived layers without the framework label or the "view" claim.
+        layer_names = [l.name for l in arch.layers[:4] if l.name != "view"] if arch.layers else []
+        if layer_names:
+            return (
+                f"Layered code organization ({', '.join(layer_names)}; "
+                f"directory-based — no HTTP controllers detected)."
+            )
+        return ""
 
     def _describe_arch_pattern(self, arch: Any) -> str:
         pattern_labels = {

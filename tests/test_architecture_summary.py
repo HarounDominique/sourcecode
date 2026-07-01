@@ -115,6 +115,68 @@ def test_bug4_rest_api_label_degraded_when_no_endpoints(tmp_path: Path) -> None:
     assert "endpoints" in line.lower(), line
 
 
+def test_bug1_mvc_prose_degraded_when_no_controllers(tmp_path: Path) -> None:
+    # BUG #1 (Jenkins field test): the "mvc" pattern is a directory-name heuristic.
+    # On a Java repo with zero HTTP controllers, the narrative must NOT assert
+    # "MVC pattern with ... view layers" — it degrades to a directory-derived
+    # "Layered code organization" note cross-checked against the endpoints extractor.
+    from sourcecode.schema import ArchitectureAnalysis, ArchitectureLayer, FrameworkDetection
+    (tmp_path / "src").mkdir(parents=True)
+    (tmp_path / "src" / "Plain.java").write_text(
+        "package a;\npublic class Plain {}\n", encoding="utf-8",
+    )
+    sm = SourceMap(
+        file_tree={"src": {"Plain.java": None}},
+        stacks=[StackDetection(stack="java", primary=True,
+                               frameworks=[FrameworkDetection(name="Spring Security")])],
+        project_type="fullstack",
+        entry_points=[],
+    )
+    arch = ArchitectureAnalysis(
+        requested=True, pattern="mvc",
+        layers=[ArchitectureLayer(name="controller", pattern="mvc"),
+                ArchitectureLayer(name="model", pattern="mvc"),
+                ArchitectureLayer(name="view", pattern="mvc")],
+    )
+    line = ArchitectureSummarizer(tmp_path)._describe_arch_pattern(arch)
+    qualified = ArchitectureSummarizer(tmp_path)._qualify_web_pattern(arch, line, sm)
+    assert "MVC pattern" not in qualified, qualified
+    assert "no HTTP controllers detected" in qualified, qualified
+    assert "view" not in qualified, qualified  # the unverified view claim is dropped
+
+
+def test_bug1_mvc_prose_kept_with_real_controllers(tmp_path: Path) -> None:
+    from sourcecode.schema import ArchitectureAnalysis, ArchitectureLayer, FrameworkDetection
+    ctrl_dir = tmp_path / "src"
+    ctrl_dir.mkdir(parents=True)
+    handlers = "\n".join(
+        f'    @GetMapping("/r{i}")\n    public String h{i}() {{ return "x"; }}'
+        for i in range(6)
+    )
+    (ctrl_dir / "C.java").write_text(
+        "package a;\n"
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "import org.springframework.web.bind.annotation.RestController;\n"
+        f"@RestController\npublic class C {{\n{handlers}\n}}\n",
+        encoding="utf-8",
+    )
+    sm = SourceMap(
+        file_tree={"src": {"C.java": None}},
+        stacks=[StackDetection(stack="java", primary=True,
+                               frameworks=[FrameworkDetection(name="Spring MVC")])],
+        project_type="api",
+        entry_points=[],
+    )
+    arch = ArchitectureAnalysis(
+        requested=True, pattern="mvc",
+        layers=[ArchitectureLayer(name="controller", pattern="mvc"),
+                ArchitectureLayer(name="view", pattern="mvc")],
+    )
+    line = ArchitectureSummarizer(tmp_path)._describe_arch_pattern(arch)
+    qualified = ArchitectureSummarizer(tmp_path)._qualify_web_pattern(arch, line, sm)
+    assert "MVC pattern" in qualified, qualified
+
+
 def test_bug4_rest_api_label_kept_with_real_endpoints(tmp_path: Path) -> None:
     # With a genuine high-confidence REST surface (>= threshold), the label stays.
     ctrl_dir = tmp_path / "api" / "src"

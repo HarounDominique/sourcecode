@@ -172,6 +172,83 @@ def test_java_detector_detects_spring_mvc_in_child_module(tmp_path: Path) -> Non
     assert project_type == "api"
 
 
+# ── v1.71.0 regression: BUG #1 pom exclusion poison (Jenkins field test) ──────
+
+def test_pom_exclude_block_is_not_a_framework(tmp_path: Path) -> None:
+    # Jenkins' war/pom.xml lists <exclude>org.springframework:spring-web</exclude>
+    # and <exclude>...:spring-aop</exclude> inside an enforcer bytecode rule — those
+    # are exclusions of transitive artifacts, NOT declared dependencies. Serializing
+    # the whole pom made them read as "uses Spring MVC / Spring AOP". Only real
+    # dependency/plugin/parent coordinates must count.
+    (tmp_path / "pom.xml").write_text(
+        """
+<project>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-web</artifactId>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>extra-enforcer-rules</artifactId>
+        <configuration>
+          <rules>
+            <enforceBytecodeVersion>
+              <excludes>
+                <exclude>org.springframework:spring-aop</exclude>
+                <exclude>org.springframework:spring-web</exclude>
+              </excludes>
+            </enforceBytecodeVersion>
+          </rules>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+        """.strip()
+    )
+    detector = ProjectDetector([JavaDetector()])
+    stacks, _ep, _pt = detector.detect(
+        root=tmp_path, file_tree={"pom.xml": None}, manifests=["pom.xml"],
+    )
+    names = [f.name for s in stacks for f in s.frameworks]
+    # Real dependency → Spring Security; excluded artifacts → NOT frameworks.
+    assert "Spring Security" in names, names
+    assert "Spring MVC" not in names, names
+    assert "Spring AOP" not in names, names
+
+
+def test_pom_dependency_exclusion_coordinate_ignored(tmp_path: Path) -> None:
+    # A <dependency> with a nested <exclusions><exclusion> must not read the excluded
+    # coordinate as a framework — only the dependency's own coordinate counts.
+    (tmp_path / "pom.xml").write_text(
+        """
+<project>
+  <dependencies>
+    <dependency>
+      <groupId>org.example</groupId>
+      <artifactId>example-core</artifactId>
+      <exclusions>
+        <exclusion>
+          <groupId>org.springframework</groupId>
+          <artifactId>spring-webmvc</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+  </dependencies>
+</project>
+        """.strip()
+    )
+    detector = ProjectDetector([JavaDetector()])
+    stacks, _ep, _pt = detector.detect(
+        root=tmp_path, file_tree={"pom.xml": None}, manifests=["pom.xml"],
+    )
+    names = [f.name for s in stacks for f in s.frameworks]
+    assert "Spring MVC" not in names, names
+
+
 # ── v1.69.0 regression: BUG #4 framework framing (JobRunr field test) ─────────
 
 def test_gradle_subproject_name_filter_is_not_a_framework(tmp_path: Path) -> None:
