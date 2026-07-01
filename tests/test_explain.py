@@ -35,6 +35,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from sourcecode.cir_graphs import ImplementationGraph, InjectionGraph
+from sourcecode.context_graph import ContextGraph
 from sourcecode.explain import (
     ClassExplanation,
     _build_callers,
@@ -225,7 +226,7 @@ def test_exp07_private_methods_excluded():
 def test_exp08_callers_from_injection():
     deps = [{"from": "com.example.UserController", "to": "com.example.UserService", "type": "injects"}]
     cir = _FakeCIR(dependencies=deps)
-    callers = _build_callers("com.example.UserService", cir)
+    callers = _build_callers("com.example.UserService", cir, ContextGraph.from_cir(cir))
     assert "UserController" in callers
 
 
@@ -236,7 +237,7 @@ def test_exp08_callers_from_injection():
 def test_exp09_callers_from_reverse_graph():
     rev = {"com.example.UserService": {"calls": ["com.example.UserBatchJob#run"]}}
     cir = _FakeCIR(reverse_graph=rev)
-    callers = _build_callers("com.example.UserService", cir)
+    callers = _build_callers("com.example.UserService", cir, ContextGraph.from_cir(cir))
     assert "UserBatchJob" in callers
 
 
@@ -250,7 +251,7 @@ def test_exp10_outgoing_deps():
         {"from": "com.example.UserService", "to": "com.example.NotificationService", "type": "injects"},
     ]
     cir = _FakeCIR(dependencies=deps)
-    result = _build_deps("com.example.UserService", cir)
+    result = _build_deps("com.example.UserService", ContextGraph.from_cir(cir))
     assert "UserRepository" in result
     assert "NotificationService" in result
 
@@ -518,7 +519,14 @@ from sourcecode.explain import _structural_purpose, _build_purpose
 
 
 class _FakeCir:
-    """Minimal stand-in — no injection/reverse graph (in_degree resolves to 0)."""
+    """Minimal stand-in — no injection/reverse graph (in_degree resolves to 0).
+
+    Carries an empty _raw_ir so ContextGraph.from_cir can wrap it; the missing
+    injection graph makes graph.dependents_of raise, which _build_callers catches
+    and resolves to in_degree 0 — exactly the pre-migration behavior.
+    """
+
+    _raw_ir: dict = {"graph": {"nodes": []}}
 
 
 def test_structural_purpose_lifecycle_orchestrator():
@@ -528,7 +536,8 @@ def test_structural_purpose_lifecycle_orchestrator():
         {"fqn": fqn + "#stop", "symbol_kind": "method", "modifiers": ["public"]},
         {"fqn": fqn + "#pauseProcessing", "symbol_kind": "method", "modifiers": ["public"]},
     ]
-    out = _structural_purpose(fqn, raw, _FakeCir())
+    fc = _FakeCir()
+    out = _structural_purpose(fqn, raw, fc, ContextGraph.from_cir(fc))
     assert "Likely" in out
     assert "server/orchestrator" in out
     assert "start" in out and "stop" in out
@@ -539,7 +548,8 @@ def test_structural_purpose_silent_without_signal():
     # Plain helper, no lifecycle, no telling suffix, no callers → stay honest.
     fqn = "org.x.Helper"
     raw = [{"fqn": fqn + "#doThing", "symbol_kind": "method", "modifiers": ["public"]}]
-    assert _structural_purpose(fqn, raw, _FakeCir()) == ""
+    fc = _FakeCir()
+    assert _structural_purpose(fqn, raw, fc, ContextGraph.from_cir(fc)) == ""
 
 
 def test_build_purpose_uses_structural_fallback():
@@ -559,6 +569,7 @@ def test_build_purpose_uses_structural_fallback():
         {"fqn": fqn + "#start", "symbol_kind": "method", "modifiers": ["public"]},
         {"fqn": fqn + "#stop", "symbol_kind": "method", "modifiers": ["public"]},
     ]
-    out = _build_purpose(fqn, raw, "unknown", _FakeCir(), _Model())
+    fc = _FakeCir()
+    out = _build_purpose(fqn, raw, "unknown", fc, _Model(), ContextGraph.from_cir(fc))
     assert "may be a plain class or utility" not in out
     assert "Likely" in out

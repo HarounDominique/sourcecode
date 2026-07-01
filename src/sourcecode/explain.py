@@ -1,12 +1,16 @@
 """explain.py — Human-readable architectural summary for a Java class.
 
 Usage:
-    cir = build_canonical_ir(find_java_files(root), root)
+    graph = ContextGraph.build_from_root(root)   # the official access layer
+    cir = graph.cir
     model = SpringSemanticModel.build(cir)
     result = explain_class("UserService", cir, model)
     print(result.render_text())
 
-Derives all data from existing CIR + SpringSemanticModel — no new parsers.
+Derives all data from the ContextGraph façade + SpringSemanticModel — no new
+parsers. Dependency-injection queries go through the ContextGraph public API;
+remaining raw-IR reads (reverse call graph, node annotations, security index)
+are transitional and tracked for a later phase.
 """
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ from sourcecode.fqn_utils import normalize_owner_fqn
 
 if TYPE_CHECKING:
     from sourcecode.canonical_ir import CanonicalRepositoryIR
+    from sourcecode.context_graph import ContextGraph
     from sourcecode.spring_model import SpringSemanticModel
 
 
@@ -186,6 +191,7 @@ def _build_purpose(
     stereotype: str,
     cir: "CanonicalRepositoryIR",
     model: "SpringSemanticModel",
+    graph: "ContextGraph",
 ) -> str:
     # Collect class-level annotations from raw_ir node
     class_anns: list[str] = []
@@ -232,7 +238,7 @@ def _build_purpose(
     # hexagonal architectures model rich roles WITHOUT DI annotations. Infer a
     # low-confidence structural role from signals the tool already computes:
     # in-degree (coupling), lifecycle methods, and naming convention.
-    structural = _structural_purpose(class_fqn, raw_nodes, cir)
+    structural = _structural_purpose(class_fqn, raw_nodes, cir, graph)
     if structural:
         return structural
     return "No stereotype detected — may be a plain class or utility."
@@ -269,10 +275,11 @@ def _structural_purpose(
     class_fqn: str,
     raw_nodes: list[dict],
     cir: "CanonicalRepositoryIR",
+    graph: "ContextGraph",
 ) -> str:
     """Infer a low-confidence stereotype from structural signals (no annotations)."""
     try:
-        in_degree = len(_build_callers(class_fqn, cir))
+        in_degree = len(_build_callers(class_fqn, cir, graph))
     except Exception:
         in_degree = 0
 
@@ -333,13 +340,16 @@ def _build_public_methods(class_fqn: str, raw_nodes: list[dict]) -> list[str]:
     return sorted(set(methods))
 
 
-def _build_callers(class_fqn: str, cir: "CanonicalRepositoryIR") -> list[str]:
+def _build_callers(
+    class_fqn: str, cir: "CanonicalRepositoryIR", graph: "ContextGraph"
+) -> list[str]:
     """DI dependents + reverse call graph callers, deduplicated, simple names."""
     seen: set[str] = set()
     result: list[str] = []
 
-    # DI injection dependents
-    for fqn in (getattr(cir, "injection_graph", None) and cir.injection_graph.dependents_of(class_fqn) or []):
+    # DI injection dependents — via the ContextGraph public API (thin passthrough
+    # over the injection graph; identical result to the raw index call).
+    for fqn in graph.dependents_of(class_fqn):
         s = _simple(fqn)
         if s not in seen:
             seen.add(s)
@@ -361,9 +371,9 @@ def _build_callers(class_fqn: str, cir: "CanonicalRepositoryIR") -> list[str]:
     return result
 
 
-def _build_deps(class_fqn: str, cir: "CanonicalRepositoryIR") -> list[str]:
-    """DI injected dependencies, simple names."""
-    deps = (getattr(cir, "injection_graph", None) and cir.injection_graph.dependencies_of(class_fqn) or [])
+def _build_deps(class_fqn: str, graph: "ContextGraph") -> list[str]:
+    """DI injected dependencies, simple names — via the ContextGraph public API."""
+    deps = graph.injected_dependencies_of(class_fqn)
     return sorted({_simple(d) for d in deps})
 
 
@@ -509,6 +519,11 @@ def explain_class(
             f"Showing first: {class_fqn}"
         )
 
+    # ContextGraph is the official access layer: DI queries below go through its
+    # public API. from_cir wraps the already-built CIR (no re-parse, no rebuild).
+    from sourcecode.context_graph import ContextGraph
+    graph = ContextGraph.from_cir(cir)
+
     raw_nodes = _get_raw_nodes(cir)
 
     try:
@@ -517,7 +532,7 @@ def explain_class(
         stereotype = "unknown"
 
     try:
-        purpose = _build_purpose(class_fqn, raw_nodes, stereotype, cir, model)
+        purpose = _build_purpose(class_fqn, raw_nodes, stereotype, cir, model, graph)
     except Exception:
         purpose = f"{stereotype} class"
 
@@ -527,12 +542,12 @@ def explain_class(
         public_methods = []
 
     try:
-        incoming_callers = _build_callers(class_fqn, cir)
+        incoming_callers = _build_callers(class_fqn, cir, graph)
     except Exception:
         incoming_callers = []
 
     try:
-        outgoing_deps = _build_deps(class_fqn, cir)
+        outgoing_deps = _build_deps(class_fqn, graph)
     except Exception:
         outgoing_deps = []
 
