@@ -101,11 +101,32 @@ _TOKEN_CLIENTS: "tuple[tuple[str, str, str], ...]" = (
     # JMS / messaging
     ("JmsTemplate", "jms", "jmstemplate"),
     ("ActiveMQConnectionFactory", "jms", "activemq"),
+    # BUG #5 (Alfresco field test): the connection-factory family beyond the plain
+    # ActiveMQConnectionFactory — Alfresco wires ActiveMQSslConnectionFactory and
+    # pooled/caching factories as Spring @Beans, none of which were recognized.
+    ("ActiveMQSslConnectionFactory", "jms", "activemq"),
+    ("PooledConnectionFactory", "jms", "activemq-pooled"),
+    ("CachingConnectionFactory", "jms", "spring-jms"),
 )
 _TOKEN_RES = tuple(
     (re.compile(r"\b" + re.escape(tok) + r"\b"), kind, client)
     for tok, kind, client in _TOKEN_CLIENTS
 )
+
+# BUG #5: Apache Camel route detection. Only applied inside a confirmed Camel file.
+_CAMEL_CONTEXT_RE = re.compile(r"org\.apache\.camel\b|\bextends\s+RouteBuilder\b")
+# A from()/to() endpoint with a literal scheme URI, e.g. from("activemq:queue:foo").
+_CAMEL_URI_RE = re.compile(r'\b(from|to)\s*\(\s*"([a-z][a-z0-9+.\-]*):([^"]*)"')
+# A route anchored by from(<non-string>) — endpoint URI comes from a variable/property.
+_CAMEL_VAR_ROUTE_RE = re.compile(r'\bfrom\s*\(\s*[A-Za-z_]')
+# Camel URI scheme → integration kind (jms-family messaging schemes collapse to "jms").
+_CAMEL_SCHEME_KIND: "dict[str, str]" = {
+    "activemq": "jms", "amq": "jms", "jms": "jms", "sjms": "jms", "sjms2": "jms",
+    "amqp": "jms", "stomp": "jms",
+    "kafka": "kafka", "mqtt": "mqtt", "paho": "mqtt",
+    "http": "http", "https": "http", "http4": "http", "rest": "http",
+    "smtp": "smtp", "smtps": "smtp",
+}
 
 
 def _line_of(text: str, idx: int) -> int:
@@ -322,6 +343,28 @@ def detect_integrations(file_paths: "list[str]", root: Path) -> dict:
                     if re.search(r"\b" + re.escape(var) + r"\s*\.", line):
                         _add(kind, client, url.group(1), rel, lineno)
                         break
+
+        # BUG #5 (Alfresco field test): Apache Camel routes are messaging/integration
+        # endpoints declared as a fluent DSL (from(...)/to(...)) inside a RouteBuilder,
+        # NOT as JmsTemplate/connection-factory constructs — so they were invisible.
+        # Only trust from()/to() inside a confirmed Camel file (import org.apache.camel
+        # or `extends RouteBuilder`) to avoid matching unrelated fluent `.to(...)`.
+        if _CAMEL_CONTEXT_RE.search(text):
+            for m in _CAMEL_URI_RE.finditer(text):
+                scheme = m.group(2).lower()
+                uri = f"{scheme}:{m.group(3)}"
+                kind = _CAMEL_SCHEME_KIND.get(scheme, "messaging")
+                _add(kind, f"camel-{scheme}", uri, rel, _line_of(text, m.start()))
+            # Routes whose endpoint URI is a variable/property (Alfresco's
+            # from(sourceQueue).to(targetTopic)) cannot yield a literal target, but the
+            # route IS a real messaging integration point — record it honestly with a
+            # null target and low confidence rather than dropping it.
+            if not any(r["client"].startswith("camel-") and r["evidence"].startswith(f"{rel}:")
+                       for r in records):
+                vm = _CAMEL_VAR_ROUTE_RE.search(text)
+                if vm:
+                    _add("messaging", "camel-route", None, rel,
+                         _line_of(text, vm.start()), confidence="low")
 
     records.sort(key=lambda r: (r["kind"], r["client"], r["evidence"]))
 

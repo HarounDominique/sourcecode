@@ -1,9 +1,32 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Optional
+
+_MAVEN_PROP_REF_RE = re.compile(r'\$\{([\w.\-]+)\}')
+
+
+def substitute_maven_properties(text: str, props: "dict[str, str]") -> str:
+    """Resolve Maven ${prop} references in *text* against *props*.
+
+    Shared single source of truth for Maven property resolution across
+    subcommands (BUG #1, Alfresco field test): both the --compact Java-stack
+    detector and migrate-check must resolve `${java.version}` → `21` identically.
+    Multi-level references (${a} where a=${b}) resolve in up to 3 passes; a
+    reference with no matching property is left verbatim (honest, not blanked).
+    """
+    if not props or "${" not in text:
+        return text
+    resolved = text
+    for _ in range(3):
+        new = _MAVEN_PROP_REF_RE.sub(lambda m: props.get(m.group(1), m.group(0)), resolved)
+        if new == resolved:
+            break
+        resolved = new
+    return resolved
 
 
 def load_json_file(path: Path) -> Optional[dict[str, Any]]:

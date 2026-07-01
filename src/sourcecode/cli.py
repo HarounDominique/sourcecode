@@ -4221,6 +4221,7 @@ def _build_c4_export(
     edges: "list[dict]",
     endpoints: "list[dict]",
     integrations: "dict",
+    endpoint_meta: "Optional[dict]" = None,
 ) -> "dict":
     """Assemble a unified, tool-agnostic C4 architecture export + incremental manifest.
 
@@ -4236,6 +4237,15 @@ def _build_c4_export(
     # consumer counts/classifies modules instead of inferring them from leaf dirs.
     module_graph["module_roots"] = _detect_module_roots(by_directory)
     api_surface = _group_endpoints_by_controller(endpoints)
+    # BUG #7 (Alfresco field test): carry the endpoint extractor's structured
+    # zero-result explanation and non-Spring REST surface into api_surface, so a
+    # C4 consumer seeing 0 controllers understands WHY (unrecognized routing, e.g.
+    # WebScripts) instead of concluding the system has no public API.
+    if endpoint_meta:
+        if endpoint_meta.get("zero_result_reason"):
+            api_surface["zero_result_reason"] = endpoint_meta["zero_result_reason"]
+        if endpoint_meta.get("non_spring_rest_surface"):
+            api_surface["non_spring_rest_surface"] = endpoint_meta["non_spring_rest_surface"]
     containers = _detect_containers(root)
 
     limitations: "list[str]" = []
@@ -4364,7 +4374,8 @@ def export_cmd(
         from sourcecode.repository_ir import extract_java_endpoints
         ir = build_repo_ir(file_list, root)
         graph = ir.get("graph", {})
-        endpoints = extract_java_endpoints(root).get("endpoints", [])
+        _ep_data = extract_java_endpoints(root)
+        endpoints = _ep_data.get("endpoints", [])
         data = _build_c4_export(
             root,
             file_list,
@@ -4372,6 +4383,7 @@ def export_cmd(
             graph.get("edges", []),
             endpoints,
             detect_integrations(file_list, root),
+            endpoint_meta=_ep_data,
         )
         output = _serialize_dict(data, format)
         _emit_command_output(output, output_path, copy,
@@ -5215,14 +5227,16 @@ def explain_cmd(
         Path("."),
         help="Repository root (default: current directory)",
     ),
-    format: str = typer.Option(
-        "text", "--format", "-f",
-        help="Output format: text (default) or json.",
-        show_default=True,
+    format: Optional[str] = typer.Option(
+        None, "--format", "-f",
+        help="Output format: text (default) or json. If unset and --output ends "
+             "in .json, JSON is written automatically.",
     ),
     output_path: Optional[Path] = typer.Option(
         None, "--output", "-o",
-        help="Write output to a file instead of stdout.",
+        help="Write output to a file instead of stdout. NOTE: the default format is "
+             "human-readable text/Markdown, NOT JSON — pass --format json (or use a "
+             ".json output path) for machine-readable output.",
     ),
     copy: bool = typer.Option(
         False, "--copy", "-c",
@@ -5230,6 +5244,11 @@ def explain_cmd(
     ),
 ) -> None:
     """Human-readable architectural summary for a class.
+
+    \b
+    OUTPUT FORMAT: defaults to text/Markdown (human-oriented). Unlike most
+    subcommands this is NOT JSON by default — pass --format json, or give an
+    --output path ending in .json, for a machine-readable envelope.
 
     \b
     Generates a structured explanation derived entirely from static analysis:
@@ -5278,6 +5297,15 @@ def explain_cmd(
         )
         raise typer.Exit(code=1)
 
+    # BUG #2 (Alfresco field test): `explain -o out.json` previously wrote Markdown
+    # to a .json file, breaking any programmatic consumer that assumed JSON parity
+    # with the other subcommands. Infer JSON from a .json output extension when
+    # --format is unset; an explicit --format always wins.
+    if format is None:
+        if output_path and str(output_path).lower().endswith(".json"):
+            format = "json"
+        else:
+            format = "text"
     _enforce_format("explain", format)
 
     file_list = find_java_files(target)

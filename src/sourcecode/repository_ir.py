@@ -4735,6 +4735,41 @@ def extract_java_endpoints(root: Path) -> "dict[str, Any]":
                 f"endpoints only."
             )
         result.setdefault("warnings", []).append(_msg)
+
+    # BUG #7 (Alfresco field test): a bare "total: 0" must never be read by an
+    # automated consumer as "this service exposes no public API". Emit a first-class
+    # structured `zero_result_reason` (mirroring integrations.coverage_note /
+    # security_model_detail.reason) naming the routing patterns that WERE searched and
+    # any non-Spring surface detected, so a 0 is understood as "no RECOGNIZED pattern",
+    # not "no surface". Only when the Spring/annotation surface is genuinely empty.
+    if not endpoints:
+        _searched = (
+            "@RestController/@Controller + @RequestMapping/@GetMapping/@PostMapping/"
+            "@PutMapping/@DeleteMapping/@PatchMapping, JAX-RS @Path, functional "
+            "RouterFunction routing, and OpenAPI-spec-recovered routes"
+        )
+        if _nonspring_total:
+            _fw_names = {
+                "webscripts": "Alfresco WebScripts (XML descriptor + handler class)",
+                "jax_rs": "JAX-RS",
+                "servlets": "mapped Servlets",
+            }
+            _detected = ", ".join(
+                _fw_names.get(k, k) for k, v in _nonspring.items() if v
+            )
+            result["zero_result_reason"] = (
+                f"0 endpoints recognized. Searched: {_searched}. A NON-Spring REST "
+                f"surface WAS detected ({_detected}) but is not statically modeled — "
+                f"do NOT read this as 'no public API'. Inspect that framework's routing "
+                f"(e.g. *.desc.xml descriptors for WebScripts) to enumerate the surface."
+            )
+        else:
+            result["zero_result_reason"] = (
+                f"0 endpoints recognized. Searched: {_searched}. No recognized routing "
+                f"construct was found; a framework this analyzer does not model may "
+                f"still expose an HTTP surface — verify manually before concluding the "
+                f"service has no public API."
+            )
     return result
 
 

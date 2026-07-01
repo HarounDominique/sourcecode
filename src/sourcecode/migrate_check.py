@@ -1168,18 +1168,10 @@ def _resolve_maven_properties(text: str) -> str:
     props: dict[str, str] = {}
     for m in re.finditer(r'<([A-Za-z][\w.\-]*)>\s*([^<${}]+?)\s*</\1>', text):
         props[m.group(1)] = m.group(2).strip()
-    if not props:
-        return text
-
-    resolved = text
-    for _ in range(3):
-        def _sub(m: re.Match) -> str:  # noqa: E306
-            return props.get(m.group(1), m.group(0))
-        resolved_new = re.sub(r'\$\{([\w.\-]+)\}', _sub, resolved)
-        if resolved_new == resolved:
-            break
-        resolved = resolved_new
-    return resolved
+    # Shared ${...} substitution core (BUG #1): identical resolution semantics as
+    # the --compact Java-stack detector.
+    from sourcecode.detectors.parsers import substitute_maven_properties
+    return substitute_maven_properties(text, props)
 
 
 def _scan_dep_file(text: str, rel_path: str) -> list["MigrationFinding"]:

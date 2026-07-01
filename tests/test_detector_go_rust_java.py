@@ -71,7 +71,17 @@ def test_java_detector_detects_spring_boot_application(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main").mkdir()
     (tmp_path / "src" / "main" / "java").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "src" / "main" / "java" / "DemoApplication.java").write_text("class DemoApplication {}")
+    # Must be a REAL bootstrap class (main() + @SpringBootApplication), not just a
+    # *Application.java filename — see BUG #3 (Alfresco XSD-generated Application.java
+    # false positives). A name alone no longer qualifies as an entry point.
+    (tmp_path / "src" / "main" / "java" / "DemoApplication.java").write_text(
+        "@SpringBootApplication\n"
+        "public class DemoApplication {\n"
+        "    public static void main(String[] args) {\n"
+        "        SpringApplication.run(DemoApplication.class, args);\n"
+        "    }\n"
+        "}\n"
+    )
 
     detector = ProjectDetector([JavaDetector()])
     stacks, entry_points, project_type = detector.detect(

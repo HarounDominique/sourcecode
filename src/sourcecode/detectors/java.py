@@ -10,7 +10,11 @@ from sourcecode.detectors.base import (
     EntryPoint,
     StackDetection,
 )
-from sourcecode.detectors.parsers import read_text_lines, unique_strings
+from sourcecode.detectors.parsers import (
+    read_text_lines,
+    substitute_maven_properties as _resolve_maven_property,
+    unique_strings,
+)
 from sourcecode.schema import FrameworkDetection
 from sourcecode.tree_utils import flatten_file_tree
 
@@ -55,6 +59,14 @@ _JAX_RS_PROVIDER_RE = re.compile(r'@Provider\b')
 
 # --- CDI / Jakarta EE scopes ---
 _CDI_SCOPED_RE = re.compile(r'@(?:ApplicationScoped|RequestScoped|SessionScoped|Singleton|Dependent)\b')
+# BUG #3: a genuine bootstrap entry declares a real main() or a bootstrap annotation
+# / WAR initializer supertype — never merely a `*Application.java` filename.
+_MAIN_METHOD_RE = re.compile(r'\bstatic\b[^;{}()]*\bmain\s*\(\s*(?:final\s+)?String')
+_BOOTSTRAP_ANNOTATION_RE = re.compile(
+    r'@(?:SpringBootApplication|QuarkusMain|MicronautApplication|'
+    r'EnableAutoConfiguration|SpringBootConfiguration)\b'
+    r'|\bextends\s+SpringBootServletInitializer\b'
+)
 
 # --- Keycloak / Quarkus SPI ---
 # Matches "implements EventListenerProvider" or "implements Foo, EventListenerProvider, Bar"
@@ -151,6 +163,18 @@ class JavaDetector(AbstractDetector):
         # Spring profiles — check src/main/options/, src/main/resources/
         spring_profiles = self._detect_spring_profiles(context.root, all_paths)
 
+        # BUG #4 (Alfresco field test): a `org.mybatis` coordinate in the pom is not
+        # proof the app USES MyBatis mappers. Alfresco declares org.mybatis:mybatis
+        # yet has zero @Mapper interfaces and zero *Mapper.xml — its SQL layer is
+        # iBatis-style *-SqlMap.xml (surfaced separately). Emitting "MyBatis" as an
+        # architecture framework then contradicted the tool's own evidence block
+        # (mapper_interfaces:0, xml_files:0) and mislabeled bean DTO mappers. Keep
+        # the label only with real usage evidence: a *Mapper.xml or an @Mapper interface.
+        if any(f.name == "MyBatis" for f in frameworks) and not self._has_mybatis_usage(
+            context.root, all_paths
+        ):
+            frameworks = [f for f in frameworks if f.name != "MyBatis"]
+
         entry_points = self._collect_entry_points(context)
         transactional_classes = self._collect_transactional_classes(context, all_paths)
         stack = StackDetection(
@@ -210,6 +234,17 @@ class JavaDetector(AbstractDetector):
                                 result["language_version"] = val.strip()
                                 break
                     break
+
+        # BUG #1 (Alfresco field test): a picked value can be a Maven property
+        # reference — Alfresco's <maven.compiler.source>${java.version}</...> chains
+        # to <java.version>21</java.version> in the SAME <properties> block. Resolve
+        # ${...} references against the pom's own properties so --compact reports the
+        # concrete version ("21") instead of the literal "${java.version}", matching
+        # what migrate-check already surfaces. Bounded iteration guards ref cycles.
+        if "language_version" in result:
+            result["language_version"] = _resolve_maven_property(
+                result["language_version"], props
+            )
 
         return result
 
@@ -425,15 +460,25 @@ class JavaDetector(AbstractDetector):
         # Exclude test trees: test helpers like AdminApplication.java in
         # integration/src/test/java/ must not be treated as production entrypoints.
         from sourcecode.path_filters import is_test_path as _is_test_path
+        # BUG #3 (Alfresco field test): a `*Application.java` / `*Main.java` NAME does
+        # not make a file a bootstrap entry point. Alfresco has XSD-generated JAXB
+        # `Application.java` model classes (no main(), no bootstrap annotation) in a
+        # WAR with no own entry point — flagging them as `application` polluted the
+        # executive summary. Emit `kind="application"` ONLY when the file actually
+        # declares a `main(String[])` method or a bootstrap annotation.
         app_candidates = [
-            p for p in all_java
-            if p.endswith(("Application.java", "Main.java"))
-            and not _is_test_path(p)
+            p for p in unique_strings([
+                q for q in all_java
+                if q.endswith(("Application.java", "Main.java")) and not _is_test_path(q)
+            ])
         ]
-        entry_points: list[EntryPoint] = [
-            EntryPoint(path=p, stack="java", kind="application", source="manifest")
-            for p in unique_strings(app_candidates)
-        ]
+        entry_points: list[EntryPoint] = []
+        for p in app_candidates:
+            verified = self._verify_bootstrap_entry(context.root / p)
+            if verified:
+                entry_points.append(EntryPoint(
+                    path=p, stack="java", kind="application", source=verified,
+                ))
 
         # 2. Annotation-based scan: @RestController, @WebFilter, FilterRegistrationBean
         # Prioritize Controller-named files so all REST controllers are detected
@@ -480,6 +525,52 @@ class JavaDetector(AbstractDetector):
                 seen.add(key)
                 unique_eps.append(ep)
         return unique_eps
+
+    def _has_mybatis_usage(self, root: Path, all_paths: list[str]) -> bool:
+        """True when the repo shows real MyBatis usage, not just a pom coordinate.
+
+        Evidence = a *Mapper.xml file OR a *Mapper.java carrying the MyBatis
+        @Mapper annotation. iBatis-style *-SqlMap.xml is deliberately NOT counted
+        here — it is a distinct legacy pattern surfaced elsewhere (BUG #4).
+        """
+        if any(p.endswith("Mapper.xml") for p in all_paths):
+            return True
+        from sourcecode.path_filters import is_test_path as _is_test_path
+        mapper_java = [
+            p for p in all_paths
+            if p.endswith("Mapper.java") and not _is_test_path(p)
+        ]
+        for rel in mapper_java[:_MAX_JAVA_ENTRY_SCAN]:
+            try:
+                abs_path = root / rel
+                if abs_path.stat().st_size > _MAX_FILE_SIZE:
+                    continue
+                content = abs_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if "org.apache.ibatis.annotations.Mapper" in content or "@Mapper" in content:
+                return True
+        return False
+
+    def _verify_bootstrap_entry(self, abs_path: Path) -> "str | None":
+        """Return the evidence source when *abs_path* is a real bootstrap entry.
+
+        A file is a genuine application entry point only if it declares a
+        `main(String[])` method OR carries a recognized bootstrap annotation /
+        WAR initializer supertype. Returns "main_method" / "bootstrap_annotation"
+        accordingly, else None (name alone is never sufficient — see BUG #3).
+        """
+        try:
+            if abs_path.stat().st_size > _MAX_FILE_SIZE:
+                return None
+            content = abs_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        if _BOOTSTRAP_ANNOTATION_RE.search(content):
+            return "bootstrap_annotation"
+        if _MAIN_METHOD_RE.search(content):
+            return "main_method"
+        return None
 
     def _augment_deep_java_controllers(self, context: DetectionContext, all_java: list[str]) -> None:
         """Scan standard Java source roots for *Controller*.java files not in all_java.

@@ -1,5 +1,57 @@
 # Changelog
 
+## [1.73.0] — 2026-07-01
+
+### Fixed — audit reliability on a large non-Boot Spring monolith (Alfresco Community Repo field test)
+
+A real architecture audit of **alfresco-community-repo** (`fe6dd26c3f`; 6,549
+classes, 24 Maven modules, Spring 7 **without Spring Boot**, iBatis persistence,
+Camel/ActiveMQ messaging, Acegi-derived security, WebScript REST surface)
+surfaced seven defects — each capable of leading an automated consultant to a
+false conclusion. All fixed at root cause with regression coverage and
+re-verified on the live repo.
+
+- **`--compact` did not resolve `language_version` from a Maven property (BUG #1).**
+  Alfresco declares `<maven.compiler.source>${java.version}</...>` chained to
+  `<java.version>21</java.version>`; the Java-stack detector picked the first key
+  and emitted the literal `${java.version}` while `migrate-check` resolved it. A
+  shared `substitute_maven_properties` resolver (in `detectors/parsers.py`) now
+  backs BOTH paths — `--compact` reports `21`.
+- **`explain --output` wrote Markdown to a `.json` file with no warning (BUG #2).**
+  Broke any consumer assuming JSON parity across subcommands. `explain` now infers
+  JSON from a `.json` output extension (an explicit `--format` always wins), and
+  `--help` documents that its default output is human-readable text/Markdown.
+- **`entry_points.bootstrap` false positives on `*Application.java` by name (BUG #3).**
+  Alfresco's XSD/JAXB-generated `Application.java` model classes (no `main()`, no
+  bootstrap annotation, in a WAR) were listed as application entry points. A file
+  now qualifies only with a real `main(String[])` or a bootstrap annotation
+  (`@SpringBootApplication` / WAR `SpringBootServletInitializer` / `@QuarkusMain`
+  / …); the serializer's name-based bootstrap fallback was removed.
+- **"MyBatis" framework declared against the tool's own zero evidence (BUG #4).**
+  A `org.mybatis:mybatis` pom coordinate alone produced a "MyBatis" framework label
+  while the `mybatis` block reported `mapper_interfaces: 0, xml_files: 0` (Alfresco's
+  SQL layer is iBatis-style `*-SqlMap.xml`, surfaced separately). MyBatis is now
+  emitted only with real usage evidence — an `@Mapper` interface or a `*Mapper.xml`.
+- **`export --integrations` missed ActiveMQ/Camel messaging (BUG #5).**
+  JMS detection recognized little beyond a direct `JmsTemplate`, reporting 1
+  integration on a repo with an ActiveMQ connection-factory config and Camel routes.
+  Added `ActiveMQSslConnectionFactory` / pooled / caching connection-factory tokens
+  and an Apache Camel route pass (literal `activemq:`/`jms:` endpoint URIs, plus
+  variable-URI `from()/to()` routes inside a `RouteBuilder` as honest low-confidence
+  `camel-route` messaging records). Alfresco JMS/messaging surface: 1 → 5.
+- **`readiness_score` Hibernate false-positive — regression test (BUG #6).**
+  v1.63.0 once scored this Hibernate-free repo 42/100 with a phantom
+  `hibernate_rewrite` headline (~46 days). Already fixed by v1.72.0; added an
+  explicit regression test (`no Hibernate/JPA imports → hibernate.detected False,
+  headline_blocker never hibernate_rewrite`) so a future detector refactor cannot
+  reintroduce it.
+- **`endpoints` / C4 `api_surface` returned 0 with no explanation (BUG #7).**
+  On an obvious API server (WebScripts: XML descriptor + handler class, not
+  `@RestController`), a bare `total: 0` reads as "no public API". `endpoints` now
+  emits a first-class `zero_result_reason` naming the routing patterns searched and
+  any non-Spring surface detected (Alfresco: 482 WebScript descriptors / 901 handler
+  classes), and the C4 export's `api_surface` carries the same explanation.
+
 ## [1.72.0] — 2026-07-01
 
 ### Fixed — correctness on a large real-world Spring Boot 3 monolith (Broadleaf Commerce CE field test)

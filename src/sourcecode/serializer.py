@@ -702,7 +702,12 @@ def _bootstrap_structured(eps: list) -> "Optional[dict[str, Any]]":
         kind = getattr(ep, "kind", "")
         stem = _Path(path).stem
 
-        if kind == "application" or any(k in stem for k in ("Application", "Main", "Initializer", "Bootstrap")):
+        # BUG #3 (Alfresco field test): bootstrap membership is driven by the
+        # VERIFIED entry kind ("application" is emitted only when the detector
+        # confirmed a main()/bootstrap annotation), never by a `*Application*`
+        # filename alone — XSD-generated Application.java model classes must not
+        # appear here.
+        if kind == "application":
             if path not in seen_b:
                 seen_b.add(path)
                 bootstrap.append(path)
