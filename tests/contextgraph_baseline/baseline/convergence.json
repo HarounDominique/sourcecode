@@ -2,6 +2,7 @@
   "_consumers": [
     "architecture_summary.py",
     "cli.py",
+    "context_graph.py",
     "explain.py",
     "pr_impact.py",
     "spring_event_topology.py",
@@ -50,8 +51,8 @@
   ],
   "consume_and_parse": 7,
   "direct_java_parsers": 34,
-  "ir_consumers": 11,
-  "modules_scanned": 68,
-  "parse_entry_points": 23,
-  "pct_engine_on_contextgraph": 16.2
+  "ir_consumers": 12,
+  "modules_scanned": 69,
+  "parse_entry_points": 24,
+  "pct_engine_on_contextgraph": 17.4
 }
