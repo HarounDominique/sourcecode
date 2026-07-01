@@ -35,6 +35,10 @@ Thumbs.db
 
 .planning
 
+# ContextGraph baseline — full canonical outputs (multi-MB, from external repos).
+# The light oracle (index.json) and convergence.json ARE committed.
+tests/contextgraph_baseline/baseline/artifacts/
+
 # Supabase local temp
 supabase/.temp/
 # Internal agent playbook (not distributed)

@@ -1,0 +1,952 @@
+{
+  "cells": {
+    "BroadleafCommerce::endpoints": {
+      "bytes": 63361,
+      "exit_code": 0,
+      "sha256": "eb1d54d561f63dd51cbd1155401dc0b521a2a476e031467125eef29fb89cdd52",
+      "stats": {
+        "endpoints": 225
+      },
+      "status": "ok",
+      "wall_ms": 2096.6
+    },
+    "BroadleafCommerce::export-by-directory": {
+      "bytes": 6443478,
+      "exit_code": 0,
+      "sha256": "10d405a0858064fcf037acd6e7eda3c859c6fe23bdee7d6946851ac0407d79b4",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 5794.1
+    },
+    "BroadleafCommerce::export-c4": {
+      "bytes": 7746838,
+      "exit_code": 0,
+      "sha256": "f704219469e6b6d13dd73e692212199bc933a252d6f8fff2ab3c616fe8436731",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 10048.4
+    },
+    "BroadleafCommerce::export-integrations": {
+      "bytes": 6430,
+      "exit_code": 0,
+      "sha256": "37b782f4f64cb6bac7a43c9b8f3198436c7e76cf08b1ce2cc4f963d8b9bcaa5f",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 2472.5
+    },
+    "BroadleafCommerce::export-module-graph": {
+      "bytes": 831063,
+      "exit_code": 0,
+      "sha256": "489c1207247f7da4a12c5f45b43cb106ae3f3cbf67d41569d3c360f8bc852a3d",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 5802.1
+    },
+    "BroadleafCommerce::migrate-check": {
+      "bytes": 1207811,
+      "exit_code": 0,
+      "sha256": "cdb0262f9f7fb3dde3a18af417c2573b2d0e36724518bcd455b7146cedc0d1f3",
+      "stats": {
+        "findings": 170
+      },
+      "status": "ok",
+      "wall_ms": 5033.4
+    },
+    "BroadleafCommerce::repo-ir": {
+      "bytes": 98040,
+      "exit_code": 0,
+      "sha256": "3df6f8e65fd7b85099f3b8f32499ee39fe6943fd29f47c5c922297203ad3c49e",
+      "stats": {
+        "edges": 0,
+        "nodes": 0
+      },
+      "status": "ok",
+      "wall_ms": 5943.4
+    },
+    "BroadleafCommerce::spring-audit": {
+      "bytes": 1813,
+      "exit_code": 0,
+      "sha256": "99baada5432a9a6daaf877364d69fc12ea9edc7eb886cb5f24d4d09c59fc1e5c",
+      "stats": {
+        "findings": 0
+      },
+      "status": "ok",
+      "wall_ms": 5931.9
+    },
+    "BroadleafCommerce::validation": {
+      "bytes": 504,
+      "exit_code": 0,
+      "sha256": "19792fd3860fa0d9a8202cb32ec047d427b5ea78601478f7924bc101f5f9d652",
+      "stats": {
+        "endpoints": 0
+      },
+      "status": "ok",
+      "wall_ms": 2288.2
+    },
+    "alfresco-community-repo::endpoints": {
+      "bytes": 1172,
+      "exit_code": 0,
+      "sha256": "43cf192e48884113f90f703422a992c1f181fff5ad675c4babc9fd57728f32a7",
+      "stats": {
+        "endpoints": 0
+      },
+      "status": "ok",
+      "wall_ms": 6549.1
+    },
+    "alfresco-community-repo::export-by-directory": {
+      "bytes": 12022689,
+      "exit_code": 0,
+      "sha256": "a94b4a97949b4c485bc582a72bac7ef46a0d1cceb6f2fceedac850e71d430bb7",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 24427.2
+    },
+    "alfresco-community-repo::export-c4": {
+      "bytes": 14767084,
+      "exit_code": 0,
+      "sha256": "fdfbbbea998213f0997d7c2dfb01a618a14ba1d25624d43ebee3d61bc71e0ba0",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 38646.0
+    },
+    "alfresco-community-repo::export-integrations": {
+      "bytes": 22137,
+      "exit_code": 0,
+      "sha256": "48790ca9c8240351e2e031d5e000141983b135116b814876a891f168319ff95c",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 7336.7
+    },
+    "alfresco-community-repo::export-module-graph": {
+      "bytes": 1897288,
+      "exit_code": 0,
+      "sha256": "251677ea7e04a91fb65f99d1842b541d8ba84c60523b5bea5d10e217687ac0cd",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 24400.6
+    },
+    "alfresco-community-repo::migrate-check": {
+      "bytes": 488198,
+      "exit_code": 0,
+      "sha256": "e7b22329a8db433f05da3bb2f26ce2ce593065598b1851e7581088bbea296feb",
+      "stats": {
+        "findings": 441
+      },
+      "status": "ok",
+      "wall_ms": 10504.1
+    },
+    "alfresco-community-repo::repo-ir": {
+      "bytes": 81866,
+      "exit_code": 0,
+      "sha256": "6480ed94d1991f60d3a83a884d75c8a25eadd7d5159a8cd20d51d5135cc10a5e",
+      "stats": {
+        "edges": 0,
+        "nodes": 0
+      },
+      "status": "ok",
+      "wall_ms": 24881.4
+    },
+    "alfresco-community-repo::spring-audit": {
+      "bytes": 1735,
+      "exit_code": 0,
+      "sha256": "cc29485868765eb397cda100c0c4e1b88e87fd049fe2c4be8107943ff097e336",
+      "stats": {
+        "findings": 0
+      },
+      "status": "ok",
+      "wall_ms": 24609.6
+    },
+    "alfresco-community-repo::validation": {
+      "bytes": 504,
+      "exit_code": 0,
+      "sha256": "19792fd3860fa0d9a8202cb32ec047d427b5ea78601478f7924bc101f5f9d652",
+      "stats": {
+        "endpoints": 0
+      },
+      "status": "ok",
+      "wall_ms": 6431.1
+    },
+    "eureka::endpoints": {
+      "bytes": 4984,
+      "exit_code": 0,
+      "sha256": "6030011134b721bc8ad6e290ebdd2c1896237764a701fe714f62c930088ba1c6",
+      "stats": {
+        "endpoints": 18
+      },
+      "status": "ok",
+      "wall_ms": 385.7
+    },
+    "eureka::export-by-directory": {
+      "bytes": 620305,
+      "exit_code": 0,
+      "sha256": "59de6a88db90862cfd54745b42d055ec913e06659ebfcb3f7d0ae7920397beb2",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 833.4
+    },
+    "eureka::export-c4": {
+      "bytes": 744896,
+      "exit_code": 0,
+      "sha256": "27e15a0ba1678877075df8e1dcfba66b7929bcd0f349cbdf4d02c09e8be03893",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 1404.1
+    },
+    "eureka::export-integrations": {
+      "bytes": 1137,
+      "exit_code": 0,
+      "sha256": "17cd54876ea13406e8fe92e6eb87bee725f3bcf153da9ab947210b209e3e5f98",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 406.1
+    },
+    "eureka::export-module-graph": {
+      "bytes": 72470,
+      "exit_code": 0,
+      "sha256": "b1671428722d3c08b26153ffb39443da666a1753505456397a5bf0fe7f07f615",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 831.4
+    },
+    "eureka::migrate-check": {
+      "bytes": 118951,
+      "exit_code": 0,
+      "sha256": "0e78f6685fbd1a5e230d3ad32d69be1ea48a9f5a9905d2556999e1cc9d54150b",
+      "stats": {
+        "findings": 131
+      },
+      "status": "ok",
+      "wall_ms": 531.7
+    },
+    "eureka::repo-ir": {
+      "bytes": 58442,
+      "exit_code": 0,
+      "sha256": "1b6d291b5ad371e1e6e58a8b831f5efa50ed332701c2b06f031bc4e6fbcd4a9d",
+      "stats": {
+        "edges": 0,
+        "nodes": 0
+      },
+      "status": "ok",
+      "wall_ms": 857.2
+    },
+    "eureka::spring-audit": {
+      "bytes": 1734,
+      "exit_code": 0,
+      "sha256": "c0ae8db8c016830f74b272fabff3e69b6a079c4e6a2733207594879e289db4c2",
+      "stats": {
+        "findings": 0
+      },
+      "status": "ok",
+      "wall_ms": 858.6
+    },
+    "eureka::validation": {
+      "bytes": 504,
+      "exit_code": 0,
+      "sha256": "19792fd3860fa0d9a8202cb32ec047d427b5ea78601478f7924bc101f5f9d652",
+      "stats": {
+        "endpoints": 0
+      },
+      "status": "ok",
+      "wall_ms": 403.6
+    },
+    "examples::endpoints": {
+      "bytes": 1173,
+      "exit_code": 0,
+      "sha256": "fd4dc76fef23583b0fe4f12e4cfb151374016a259aa50b6a668c423c139b76a7",
+      "stats": {
+        "endpoints": 3
+      },
+      "status": "ok",
+      "wall_ms": 230.5
+    },
+    "examples::export-by-directory": {
+      "bytes": 66055,
+      "exit_code": 0,
+      "sha256": "c14c04012b3c6651badcb3beb2be159fa893c828dfa6b75d6db23dac61b2f6ad",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 242.2
+    },
+    "examples::export-c4": {
+      "bytes": 85971,
+      "exit_code": 0,
+      "sha256": "fa51aa1536d34914f19f8fef1de82302ebf7762069268351b93c5dd02193b19d",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 416.4
+    },
+    "examples::export-integrations": {
+      "bytes": 997,
+      "exit_code": 0,
+      "sha256": "4300cf1e1c86d5f236f842c66332c06249bc90819a339524ceacec4367cb6bb5",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 169.3
+    },
+    "examples::export-module-graph": {
+      "bytes": 6815,
+      "exit_code": 0,
+      "sha256": "ff1b3e107375e2fb156ba9d0d8ea7ecdec523952aaa7ac1314a274e9cf92f132",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 242.7
+    },
+    "examples::migrate-check": {
+      "bytes": 10602,
+      "exit_code": 0,
+      "sha256": "53a79bcfe014dcaffa94036515c92a1f38b5c5412da5d011d9f982e1dfcb67bf",
+      "stats": {
+        "findings": 5
+      },
+      "status": "ok",
+      "wall_ms": 269.0
+    },
+    "examples::repo-ir": {
+      "bytes": 18542,
+      "exit_code": 0,
+      "sha256": "91059f6d68676e091f5e2548adc573542254730dce144194a859282bca4a260a",
+      "stats": {
+        "edges": 0,
+        "nodes": 0
+      },
+      "status": "ok",
+      "wall_ms": 260.4
+    },
+    "examples::spring-audit": {
+      "bytes": 1731,
+      "exit_code": 0,
+      "sha256": "f39121520de1dee6c40043e3df545c866d54613434160c3689b7fdfb9ea1bd17",
+      "stats": {
+        "findings": 0
+      },
+      "status": "ok",
+      "wall_ms": 267.1
+    },
+    "examples::validation": {
+      "bytes": 504,
+      "exit_code": 0,
+      "sha256": "19792fd3860fa0d9a8202cb32ec047d427b5ea78601478f7924bc101f5f9d652",
+      "stats": {
+        "endpoints": 0
+      },
+      "status": "ok",
+      "wall_ms": 245.5
+    },
+    "jenkins::endpoints": {
+      "bytes": 558,
+      "exit_code": 0,
+      "sha256": "ff827c69475dd30683ece78597d0471097b7828f81be627c5a99f0071e65d48c",
+      "stats": {
+        "endpoints": 0
+      },
+      "status": "ok",
+      "wall_ms": 1628.4
+    },
+    "jenkins::export-by-directory": {
+      "bytes": 2628091,
+      "exit_code": 0,
+      "sha256": "9701caa8f6970171df6159d57234f65dad3f7a31f98f5c49b5488b396d5a201a",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 3671.4
+    },
+    "jenkins::export-c4": {
+      "bytes": 2998251,
+      "exit_code": 0,
+      "sha256": "61f7d74ba23b9ad78774f2cfab2c153f1ea6522beaa3fbf1dabeee8f06b35c1c",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 6641.1
+    },
+    "jenkins::export-integrations": {
+      "bytes": 1799,
+      "exit_code": 0,
+      "sha256": "232bb9c6a84468192de13e997538f54c40a64091ac3aa5c0020dbcdb67379dae",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 1530.4
+    },
+    "jenkins::export-module-graph": {
+      "bytes": 182973,
+      "exit_code": 0,
+      "sha256": "1f8c25735ffe42765211ef3a945cbc582943ea0bdc2d7506505071f6e8055db6",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 3682.3
+    },
+    "jenkins::migrate-check": {
+      "bytes": 69110,
+      "exit_code": 0,
+      "sha256": "704d73fed9d3a9f2d203e23d8b9e6b06ef11997d99ad9d0baaab2ab34c6f35a4",
+      "stats": {
+        "findings": 60
+      },
+      "status": "ok",
+      "wall_ms": 2402.9
+    },
+    "jenkins::repo-ir": {
+      "bytes": 51699,
+      "exit_code": 0,
+      "sha256": "f50345ca9e2990034b9af2c45a6c1005ae05ad421638a0f67cfc1e15a6df7736",
+      "stats": {
+        "edges": 0,
+        "nodes": 0
+      },
+      "status": "ok",
+      "wall_ms": 3827.4
+    },
+    "jenkins::spring-audit": {
+      "bytes": 1736,
+      "exit_code": 0,
+      "sha256": "1bc93e7865708b3b82002b866915672b71885bb0ad38b5ddd302268cc229b5f4",
+      "stats": {
+        "findings": 0
+      },
+      "status": "ok",
+      "wall_ms": 3872.8
+    },
+    "jenkins::validation": {
+      "bytes": 504,
+      "exit_code": 0,
+      "sha256": "19792fd3860fa0d9a8202cb32ec047d427b5ea78601478f7924bc101f5f9d652",
+      "stats": {
+        "endpoints": 0
+      },
+      "status": "ok",
+      "wall_ms": 1761.8
+    },
+    "jobrunr::endpoints": {
+      "bytes": 3737,
+      "exit_code": 0,
+      "sha256": "ddb159233f49c8e9c54902a482bb3edbd9be3cd1a60a7831595dd894bb86f4e1",
+      "stats": {
+        "endpoints": 12
+      },
+      "status": "ok",
+      "wall_ms": 524.6
+    },
+    "jobrunr::export-by-directory": {
+      "bytes": 872504,
+      "exit_code": 0,
+      "sha256": "7db869fe816c1bb4869ffbcf3ad1f8402fdbabe1243d68630bc7c1a879e18f0b",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 856.9
+    },
+    "jobrunr::export-c4": {
+      "bytes": 1101853,
+      "exit_code": 0,
+      "sha256": "ed63f56c3deece8fbf2a72033fcdd0abc5d3f0b00a31f7b9c0e87b6cbc19b793",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 1598.3
+    },
+    "jobrunr::export-integrations": {
+      "bytes": 997,
+      "exit_code": 0,
+      "sha256": "4300cf1e1c86d5f236f842c66332c06249bc90819a339524ceacec4367cb6bb5",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 440.2
+    },
+    "jobrunr::export-module-graph": {
+      "bytes": 137343,
+      "exit_code": 0,
+      "sha256": "e9a3a7fc7e827128963b35a99375ac1acac0737c97712bf8ed52f367b793ea59",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 857.4
+    },
+    "jobrunr::migrate-check": {
+      "bytes": 13032,
+      "exit_code": 0,
+      "sha256": "b34995bf7bcc2a34b7ffd075abbe1b8de8cc9685593d7a6796b423783c66c7f0",
+      "stats": {
+        "findings": 7
+      },
+      "status": "ok",
+      "wall_ms": 636.1
+    },
+    "jobrunr::repo-ir": {
+      "bytes": 57311,
+      "exit_code": 0,
+      "sha256": "71caa02471db1cf176421a1c186835cdd255dd3bfe24a0cf3788cce0ca293e86",
+      "stats": {
+        "edges": 0,
+        "nodes": 0
+      },
+      "status": "ok",
+      "wall_ms": 903.2
+    },
+    "jobrunr::spring-audit": {
+      "bytes": 1732,
+      "exit_code": 0,
+      "sha256": "14a4266b0df693576cc6828b2f267ea108520c922bd941fe404c0621707686e4",
+      "stats": {
+        "findings": 0
+      },
+      "status": "ok",
+      "wall_ms": 883.9
+    },
+    "jobrunr::validation": {
+      "bytes": 504,
+      "exit_code": 0,
+      "sha256": "19792fd3860fa0d9a8202cb32ec047d427b5ea78601478f7924bc101f5f9d652",
+      "stats": {
+        "endpoints": 0
+      },
+      "status": "ok",
+      "wall_ms": 573.4
+    },
+    "keycloak::endpoints": {
+      "bytes": 193770,
+      "exit_code": 0,
+      "sha256": "368087b70e5e2dd7a5e73de5fa65d3c7f0279a71e3285d47eb562f046253c47d",
+      "stats": {
+        "endpoints": 689
+      },
+      "status": "ok",
+      "wall_ms": 5026.6
+    },
+    "keycloak::export-by-directory": {
+      "bytes": 11341500,
+      "exit_code": 0,
+      "sha256": "94fe2327a9a7449d7d171cb66bb74b2c435cc0732543acb3a5c7fdff879d78c7",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 23692.5
+    },
+    "keycloak::export-c4": {
+      "bytes": 13939012,
+      "exit_code": 0,
+      "sha256": "e0d08e1994a1427762d3a3c78e429888412e1a24fdcf571ab1fabbf4fd51d5eb",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 40420.3
+    },
+    "keycloak::export-integrations": {
+      "bytes": 15893,
+      "exit_code": 0,
+      "sha256": "4254078b3062b258c8c1685cd8930fb018c0c0aaf3c9b77a39d9ce0afea7e7a9",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 11145.8
+    },
+    "keycloak::export-module-graph": {
+      "bytes": 1649505,
+      "exit_code": 0,
+      "sha256": "99406d00f93389fdbfa2f2ebf6581cbe4240e58cc0371edb49897b67b9aeb425",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 24786.4
+    },
+    "keycloak::migrate-check": {
+      "bytes": 693604,
+      "exit_code": 0,
+      "sha256": "1f79990ccf23c6103fce9d8715e998d5baf84176a0ef84415a82e9aa4d8f1b47",
+      "stats": {
+        "findings": 89
+      },
+      "status": "ok",
+      "wall_ms": 10504.7
+    },
+    "keycloak::repo-ir": {
+      "bytes": 105060,
+      "exit_code": 0,
+      "sha256": "99da0e18a57ed5e8d525e5b54ced928a74be12b01e05b0b8884ef71e9ca5f001",
+      "stats": {
+        "edges": 0,
+        "nodes": 0
+      },
+      "status": "ok",
+      "wall_ms": 12949.4
+    },
+    "keycloak::spring-audit": {
+      "bytes": 1738,
+      "exit_code": 0,
+      "sha256": "d6d8db4c04cf47f49d44785c9ef07d389f8106e6f390f727576ca1189e199eee",
+      "stats": {
+        "findings": 0
+      },
+      "status": "ok",
+      "wall_ms": 12840.0
+    },
+    "keycloak::validation": {
+      "bytes": 2739,
+      "exit_code": 0,
+      "sha256": "8e62c3d30e82b8a16d74e231476989e09f5c4b2b77be0f09fb94afe9e39f522c",
+      "stats": {
+        "endpoints": 1
+      },
+      "status": "ok",
+      "wall_ms": 5504.0
+    },
+    "ofbiz-framework::endpoints": {
+      "bytes": 1070,
+      "exit_code": 0,
+      "sha256": "5de4ff1d439a044cdaa8ee79f115cc35fda50feacd79072b0e48f592c684a123",
+      "stats": {
+        "endpoints": 0
+      },
+      "status": "ok",
+      "wall_ms": 2393.7
+    },
+    "ofbiz-framework::export-by-directory": {
+      "bytes": 2971082,
+      "exit_code": 0,
+      "sha256": "603bc95b577dff763b13459ee6d392d02fe0cca5402544d2ee8ee3831d2ec59e",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 6644.1
+    },
+    "ofbiz-framework::export-c4": {
+      "bytes": 3430404,
+      "exit_code": 0,
+      "sha256": "c380a5f3ec84ae6741ea3f877a10fa2032f8cf3036848017fa0041f47cab5e83",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 11926.8
+    },
+    "ofbiz-framework::export-integrations": {
+      "bytes": 14751,
+      "exit_code": 0,
+      "sha256": "c92eb6c6cd9e8432f83e896cc817bd579ae727b07e34ce9827c6cb88121a7e4e",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 3201.4
+    },
+    "ofbiz-framework::export-module-graph": {
+      "bytes": 244048,
+      "exit_code": 0,
+      "sha256": "a8085b051d6e4d7e7ec5e20af3111a2386ee798f30c1a8c644c9a540c8dc7b18",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 6590.8
+    },
+    "ofbiz-framework::migrate-check": {
+      "bytes": 320987,
+      "exit_code": 0,
+      "sha256": "50e9a646d4fd846888de4c634b42663720a7be4e0bc139a56e0493bef7e10be5",
+      "stats": {
+        "findings": 309
+      },
+      "status": "ok",
+      "wall_ms": 4020.2
+    },
+    "ofbiz-framework::repo-ir": {
+      "bytes": 63150,
+      "exit_code": 0,
+      "sha256": "04a21b29694b7f8e210f62254bec969a6608f958447be77632755da92577cb19",
+      "stats": {
+        "edges": 0,
+        "nodes": 0
+      },
+      "status": "ok",
+      "wall_ms": 6781.3
+    },
+    "ofbiz-framework::spring-audit": {
+      "bytes": 1736,
+      "exit_code": 0,
+      "sha256": "0f205e888da6744d04105866c9cc80649bb5134606de7c8d6369466e1afb6d3f",
+      "stats": {
+        "findings": 0
+      },
+      "status": "ok",
+      "wall_ms": 6879.5
+    },
+    "ofbiz-framework::validation": {
+      "bytes": 504,
+      "exit_code": 0,
+      "sha256": "19792fd3860fa0d9a8202cb32ec047d427b5ea78601478f7924bc101f5f9d652",
+      "stats": {
+        "endpoints": 0
+      },
+      "status": "ok",
+      "wall_ms": 2509.9
+    },
+    "openmrs-core::endpoints": {
+      "bytes": 1226,
+      "exit_code": 0,
+      "sha256": "f7daeedaf13d69cf9d3efa639d2519c05e5774a70ea7013294248f599637553b",
+      "stats": {
+        "endpoints": 3
+      },
+      "status": "ok",
+      "wall_ms": 1024.9
+    },
+    "openmrs-core::export-by-directory": {
+      "bytes": 1882098,
+      "exit_code": 0,
+      "sha256": "8a058cf32d9fa03c011ce8b421115056573f35f61dcdda55de262f6a1b06efe5",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 2895.8
+    },
+    "openmrs-core::export-c4": {
+      "bytes": 2088177,
+      "exit_code": 0,
+      "sha256": "9ecd843a5b44666697fbe5961215089dd3bdd8cb46b728eb0eefc0760e86f961",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 4730.2
+    },
+    "openmrs-core::export-integrations": {
+      "bytes": 2083,
+      "exit_code": 0,
+      "sha256": "6018c81d583c681f8a8bd362430ff5d1563c735c093c23195d0df642ad0692ec",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 1003.5
+    },
+    "openmrs-core::export-module-graph": {
+      "bytes": 93288,
+      "exit_code": 0,
+      "sha256": "5ee7f3cecf2eec38ecead7ee96cb3fc2121f2e655e758dc55a8a8a6218c022ea",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 2897.6
+    },
+    "openmrs-core::migrate-check": {
+      "bytes": 908368,
+      "exit_code": 0,
+      "sha256": "0b2aee27a40b85e73440ea743f2b18509db76c806d0008fa9b68b412d298e0ac",
+      "stats": {
+        "findings": 310
+      },
+      "status": "ok",
+      "wall_ms": 1951.6
+    },
+    "openmrs-core::repo-ir": {
+      "bytes": 48514,
+      "exit_code": 0,
+      "sha256": "aae06bfafec4910b6104da719c02fafcc3134882dae37fbfaf2406060a3c5912",
+      "stats": {
+        "edges": 0,
+        "nodes": 0
+      },
+      "status": "ok",
+      "wall_ms": 2998.1
+    },
+    "openmrs-core::spring-audit": {
+      "bytes": 3214,
+      "exit_code": 0,
+      "sha256": "acb6391d0585c2debe7f183740442f470acc050c4bfb041f4950a71b053e1d79",
+      "stats": {
+        "findings": 1
+      },
+      "status": "ok",
+      "wall_ms": 2989.1
+    },
+    "openmrs-core::validation": {
+      "bytes": 504,
+      "exit_code": 0,
+      "sha256": "19792fd3860fa0d9a8202cb32ec047d427b5ea78601478f7924bc101f5f9d652",
+      "stats": {
+        "endpoints": 0
+      },
+      "status": "ok",
+      "wall_ms": 1092.9
+    },
+    "spaghetti-api::endpoints": {
+      "bytes": 1743,
+      "exit_code": 0,
+      "sha256": "6e41c00b8c5b5a0e69324a37187e66698049b5e8d54147f99caf4f900be800e0",
+      "stats": {
+        "endpoints": 7
+      },
+      "status": "ok",
+      "wall_ms": 124.4
+    },
+    "spaghetti-api::export-by-directory": {
+      "bytes": 5470,
+      "exit_code": 0,
+      "sha256": "e06c17f1e60ebd95765adb6764abb59801a337fd330296adf90b682a25a06183",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 116.3
+    },
+    "spaghetti-api::export-c4": {
+      "bytes": 8931,
+      "exit_code": 0,
+      "sha256": "cd87859a64994ab9e53b0c28a2b83e93000d8680a2303955c1e157a1222d17cf",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 130.5
+    },
+    "spaghetti-api::export-integrations": {
+      "bytes": 997,
+      "exit_code": 0,
+      "sha256": "4300cf1e1c86d5f236f842c66332c06249bc90819a339524ceacec4367cb6bb5",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 110.5
+    },
+    "spaghetti-api::export-module-graph": {
+      "bytes": 285,
+      "exit_code": 0,
+      "sha256": "4336a976662618914a63aacb53bada3d526c84d20d1e1c13ef8edde042ae43fe",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 116.2
+    },
+    "spaghetti-api::migrate-check": {
+      "bytes": 5353,
+      "exit_code": 0,
+      "sha256": "6b33a59625528d6a40bc674c26f181dc0633174ceed370c9728abb56925128e0",
+      "stats": {
+        "findings": 0
+      },
+      "status": "ok",
+      "wall_ms": 155.1
+    },
+    "spaghetti-api::repo-ir": {
+      "bytes": 11029,
+      "exit_code": 0,
+      "sha256": "2334abdffac3418c0243238b876f6502a3bebcb5f7b0544535e8d9da28b7a8dd",
+      "stats": {
+        "edges": 0,
+        "nodes": 0
+      },
+      "status": "ok",
+      "wall_ms": 140.0
+    },
+    "spaghetti-api::spring-audit": {
+      "bytes": 2834,
+      "exit_code": 0,
+      "sha256": "2124f51baa7918951ef8d92c5ef9197440675a56cbf058f7d30b6443fabb0358",
+      "stats": {
+        "findings": 1
+      },
+      "status": "ok",
+      "wall_ms": 139.1
+    },
+    "spaghetti-api::validation": {
+      "bytes": 504,
+      "exit_code": 0,
+      "sha256": "19792fd3860fa0d9a8202cb32ec047d427b5ea78601478f7924bc101f5f9d652",
+      "stats": {
+        "endpoints": 0
+      },
+      "status": "ok",
+      "wall_ms": 122.2
+    },
+    "spring-petclinic::endpoints": {
+      "bytes": 4231,
+      "exit_code": 0,
+      "sha256": "a6e5432de91a6a1070eef3201f86c1aabb572b34f9adf11c7bfb6d1aacf5dd84",
+      "stats": {
+        "endpoints": 17
+      },
+      "status": "ok",
+      "wall_ms": 138.8
+    },
+    "spring-petclinic::export-by-directory": {
+      "bytes": 28263,
+      "exit_code": 0,
+      "sha256": "f05b106a8fd7c41799f5dabe9cd093624f1404e6a37be0bd2bf305514e9cc8d5",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 143.4
+    },
+    "spring-petclinic::export-c4": {
+      "bytes": 37152,
+      "exit_code": 0,
+      "sha256": "ccad24684c58d4b343e3744b4db9cf5a57bd114d3497fcfabf674974c6430cae",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 180.3
+    },
+    "spring-petclinic::export-integrations": {
+      "bytes": 997,
+      "exit_code": 0,
+      "sha256": "4300cf1e1c86d5f236f842c66332c06249bc90819a339524ceacec4367cb6bb5",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 120.4
+    },
+    "spring-petclinic::export-module-graph": {
+      "bytes": 1969,
+      "exit_code": 0,
+      "sha256": "16821f03b0941fdd6cf2d2f2b04ec3f2ee01a1878c471959250b35a924b5df71",
+      "stats": {},
+      "status": "ok",
+      "wall_ms": 142.5
+    },
+    "spring-petclinic::migrate-check": {
+      "bytes": 10121,
+      "exit_code": 0,
+      "sha256": "2600d3b59db2c8567a3e8e0e8a055c44f4168c20ebe8c9218b427b502203f277",
+      "stats": {
+        "findings": 0
+      },
+      "status": "ok",
+      "wall_ms": 172.1
+    },
+    "spring-petclinic::repo-ir": {
+      "bytes": 28519,
+      "exit_code": 0,
+      "sha256": "d32a1b337d3bb6fb69e33ee116693eab4ba1d58cdadf9a35590e139d1c84caf4",
+      "stats": {
+        "edges": 0,
+        "nodes": 0
+      },
+      "status": "ok",
+      "wall_ms": 148.0
+    },
+    "spring-petclinic::spring-audit": {
+      "bytes": 1760,
+      "exit_code": 0,
+      "sha256": "8925e4377a3db565b77ba41df92a15c6a55ac896fb107c8720e25bf98b6dd3d3",
+      "stats": {
+        "findings": 0
+      },
+      "status": "ok",
+      "wall_ms": 158.3
+    },
+    "spring-petclinic::validation": {
+      "bytes": 4311,
+      "exit_code": 0,
+      "sha256": "56857248e949a9d9fab6c55d6bb1585d2f92a496938bb6cfad3122b4d6bcfd16",
+      "stats": {
+        "endpoints": 5
+      },
+      "status": "ok",
+      "wall_ms": 142.8
+    }
+  },
+  "repos": {
+    "BroadleafCommerce": {
+      "head": "97705634ac10c35828a90fea6177940d5f0f4f9d"
+    },
+    "alfresco-community-repo": {
+      "head": "fe6dd26c3f0b67b2bb76ece0923db208db5a98d9"
+    },
+    "eureka": {
+      "head": "8227a727534338909ef8c3b5ee3dca7641921f62"
+    },
+    "examples": {
+      "head": "bedab35879d015f60a805b80f805871f7e192d97"
+    },
+    "jenkins": {
+      "head": "e7eef8d2cf84ca0e671730e7fa5fcd2c8490cacb"
+    },
+    "jobrunr": {
+      "head": "76d53c8637477f5f7f718de3a11ae0d71ae25f16"
+    },
+    "keycloak": {
+      "head": "c3f34c3515ffdc122c1bfb3f1d980e60859b0025"
+    },
+    "ofbiz-framework": {
+      "head": "dba044c706c250c6f24a8552de6e617eba846087"
+    },
+    "openmrs-core": {
+      "head": "7c0144ad26bf0acf3b834705a325451a81fdb597"
+    },
+    "spaghetti-api": {
+      "head": "998b0fced7714366781edfe8eedd2a8c46413db2"
+    },
+    "spring-petclinic": {
+      "head": "45649e015752726c9db0e1a33128b367a92a97be"
+    }
+  }
+}
