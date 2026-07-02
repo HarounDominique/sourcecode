@@ -53,6 +53,6 @@
   "direct_java_parsers": 34,
   "ir_consumers": 12,
   "modules_scanned": 69,
-  "parse_entry_points": 24,
+  "parse_entry_points": 19,
   "pct_engine_on_contextgraph": 17.4
 }
