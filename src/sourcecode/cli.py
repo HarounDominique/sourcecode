@@ -4491,8 +4491,10 @@ def validation_cmd(
         )
         raise typer.Exit(code=1)
 
+    from sourcecode.context_graph import ContextGraph
     from sourcecode.validation_surface import build_validation_surface
-    data = build_validation_surface(target)
+    # Structural facts come from the ContextGraph — the single access layer.
+    data = build_validation_surface(target, graph=ContextGraph.build_from_root(target))
 
     if path_prefix:
         data["endpoints"] = [

@@ -46,11 +46,10 @@
     "spring_model.py",
     "spring_security_audit.py",
     "spring_semantic.py",
-    "summarizer.py",
-    "validation_surface.py"
+    "summarizer.py"
   ],
-  "consume_and_parse": 7,
-  "direct_java_parsers": 34,
+  "consume_and_parse": 6,
+  "direct_java_parsers": 33,
   "ir_consumers": 12,
   "modules_scanned": 69,
   "parse_entry_points": 19,

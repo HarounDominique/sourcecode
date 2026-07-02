@@ -1,4 +1,4 @@
-"""Validation surface extraction (Phase 20).
+"""Validation surface extraction (Phase 20; ContextGraph-backed since Phase 3).
 
 Combines the two sources of bean-validation truth in a Spring repo into one
 per-endpoint view an agent can reason about before touching a request body:
@@ -16,6 +16,11 @@ The output is a per-endpoint validation surface (which body fields are validated
 and how), the custom-validator catalog discovered in source, and the set of
 validation gaps (body endpoints with no declared constraint at all).
 
+Structural facts come exclusively from the **ContextGraph** (annotation-type
+nodes, field nodes with captured constraint arguments, validated handler
+parameters) — this module performs no source parsing of its own. The string
+helpers below operate on strings the graph already carries.
+
 Design notes mirror :mod:`sourcecode.openapi_surface`: pure extraction (never a
 conformance check), defensive (malformed input yields a partial surface, never an
 exception), and deterministic ordering for stable JSON.
@@ -26,9 +31,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from sourcecode.path_filters import is_test_path
+
+if TYPE_CHECKING:
+    from sourcecode.context_graph import ContextGraph
 
 # Built-in constraint keys (as emitted by FieldConstraint.to_dict) that count as
 # "this field is validated".
@@ -41,21 +49,17 @@ _BUILTIN_CONSTRAINT_KEYS = (
     "enum",
 )
 
-# How many java files to scan for custom validators, to stay fast on big repos.
-_SCAN_CAP = 5000
+# validatedBy = {A.class, B.class} (or single entry) inside @Constraint(...) args.
+_VALIDATED_BY_RE = re.compile(r"validatedBy\s*=\s*\{?([^)}]*)\}?\s*$")
 
-_CONSTRAINT_RE = re.compile(
-    r"@Constraint\s*\(\s*validatedBy\s*=\s*\{?([^)}]*)\}?\s*\)", re.DOTALL
+# implements ... ConstraintValidator<Annotation, Type> — from the class node's
+# declaration signature (the graph preserves generic arguments verbatim).
+_IMPL_SIG_RE = re.compile(
+    r"implements\s+(?:[\w.<>\[\], ]+,\s*)?ConstraintValidator\s*<\s*(\w+)\s*,\s*([\w.<>\[\] ]+?)\s*>"
 )
-_INTERFACE_RE = re.compile(r"@interface\s+(\w+)")
-_MESSAGE_RE = re.compile(
-    r"String\s+message\s*\(\s*\)\s*default\s*\"([^\"]*)\"", re.DOTALL
-)
-_TARGET_RE = re.compile(r"@Target\s*\(\s*\{?([^)}]*)\}?\s*\)", re.DOTALL)
-_VALIDATOR_IMPL_RE = re.compile(
-    r"class\s+(\w+)\s+implements\s+ConstraintValidator\s*<\s*(\w+)\s*,\s*([\w.<>\[\] ]+?)\s*>",
-    re.DOTALL,
-)
+
+# declaration `class X extends Y` — from the class node's signature.
+_EXTENDS_SIG_RE = re.compile(r"\bextends\s+([\w.]+)")
 
 
 @dataclass
@@ -102,81 +106,73 @@ def _split_class_list(raw: str) -> "list[str]":
     return out
 
 
-def discover_custom_validators(root: Path) -> "dict[str, CustomConstraint]":
-    """Scan non-test Java source for custom ``@Constraint`` validators.
+def _is_excluded(source_file: "Optional[str]") -> bool:
+    """Replicates the raw scan's exclusions on a graph node's source file."""
+    norm = (source_file or "").replace("\\", "/")
+    return (not norm) or is_test_path(norm) or "/target/" in norm or "/build/" in norm
 
-    Returns a map keyed by the annotation's simple name. Never raises; an
-    unreadable or malformed file is skipped.
+
+def _build_graph(root: Path) -> "ContextGraph":
+    from sourcecode.context_graph import ContextGraph
+
+    return ContextGraph.build_from_root(Path(root))
+
+
+def discover_custom_validators(
+    root: Path, graph: "Optional[ContextGraph]" = None
+) -> "dict[str, CustomConstraint]":
+    """Discover custom ``@Constraint`` validators from the ContextGraph.
+
+    Returns a map keyed by the annotation's simple name. Never raises; nodes
+    with missing/partial metadata simply yield a partial catalog entry.
     """
-    root = Path(root)
+    if graph is None:
+        graph = _build_graph(root)
+
     catalog: "dict[str, CustomConstraint]" = {}
-    # annotation name -> validated types, harvested from ConstraintValidator impls.
-    impl_types: "dict[str, list[str]]" = {}
-    impl_validators: "dict[str, list[str]]" = {}
 
-    scanned = 0
-    for p in sorted(root.rglob("*.java")):
-        if scanned >= _SCAN_CAP:
-            break
-        norm = str(p).replace("\\", "/")
-        if is_test_path(norm) or "/target/" in norm or "/build/" in norm:
+    # @interface declarations carrying @Constraint(validatedBy = ...).
+    for ann in graph.annotation_types():
+        if _is_excluded(ann.source_file):
             continue
-        try:
-            text = p.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        if "@Constraint" not in ann.annotations:
             continue
-        scanned += 1
-
-        if "@Constraint" not in text and "ConstraintValidator" not in text:
-            continue
-        rel = norm[len(str(root).replace("\\", "/")) :].lstrip("/") or norm
-
-        # @interface declarations carrying @Constraint(validatedBy = ...).
-        for m in _CONSTRAINT_RE.finditer(text):
-            tail = text[m.end() :]
-            iface = _INTERFACE_RE.search(tail)
-            if not iface:
-                continue
-            ann_name = iface.group(1)
-            cc = catalog.setdefault(ann_name, CustomConstraint(name=ann_name))
-            cc.source_file = cc.source_file or rel
+        name = _simple(ann.fqn)
+        cc = catalog.setdefault(name, CustomConstraint(name=name))
+        cc.source_file = cc.source_file or ann.source_file
+        m = _VALIDATED_BY_RE.search(ann.annotation_values.get("@Constraint", ""))
+        if m:
             for v in _split_class_list(m.group(1)):
                 if v not in cc.validators:
                     cc.validators.append(v)
-            # Default message + @Target sit within this @interface body.
-            body = tail[iface.end() :]
-            msg = _MESSAGE_RE.search(body)
-            if msg and cc.message is None:
-                cc.message = msg.group(1)
-            tgt = _TARGET_RE.search(text[: m.start()][-400:] + tail[: iface.end()])
-            if tgt:
-                for t in tgt.group(1).split(","):
-                    t = _simple(t)
-                    if t and t not in cc.targets:
-                        cc.targets.append(t)
+        tgt = ann.annotation_values.get("@Target", "")
+        if tgt:
+            for t in tgt.strip("{} ").split(","):
+                t = _simple(t)
+                if t and t not in cc.targets:
+                    cc.targets.append(t)
+        # Default message template — the @interface member's `default` literal.
+        member = graph.symbol(f"{ann.fqn}#message")
+        if member is not None and cc.message is None:
+            d = member.annotation_values.get("_default", "")
+            if len(d) >= 2 and d.startswith('"') and d.endswith('"'):
+                cc.message = d[1:-1]
 
-        # ConstraintValidator<Annotation, Type> implementations.
-        for m in _VALIDATOR_IMPL_RE.finditer(text):
-            validator_cls, ann_name, vtype = m.group(1), m.group(2), _simple(m.group(3))
-            impl_types.setdefault(ann_name, [])
-            if vtype and vtype not in impl_types[ann_name]:
-                impl_types[ann_name].append(vtype)
-            impl_validators.setdefault(ann_name, [])
-            if validator_cls not in impl_validators[ann_name]:
-                impl_validators[ann_name].append(validator_cls)
-
-    # Fold validator-impl findings back into the catalog (handles validators
-    # declared in a different file than the annotation).
-    for ann_name, types in impl_types.items():
+    # ConstraintValidator<Annotation, Type> implementations (may live in a
+    # different file than the annotation — folded into the same catalog).
+    for t in graph.types():
+        if _is_excluded(t.source_file):
+            continue
+        m = _IMPL_SIG_RE.search(t.signature or "")
+        if not m:
+            continue
+        ann_name, vtype = m.group(1), _simple(m.group(2))
+        validator_cls = _simple(t.fqn)
         cc = catalog.setdefault(ann_name, CustomConstraint(name=ann_name))
-        for t in types:
-            if t not in cc.validated_types:
-                cc.validated_types.append(t)
-    for ann_name, vals in impl_validators.items():
-        cc = catalog.setdefault(ann_name, CustomConstraint(name=ann_name))
-        for v in vals:
-            if v not in cc.validators:
-                cc.validators.append(v)
+        if vtype and vtype not in cc.validated_types:
+            cc.validated_types.append(vtype)
+        if validator_cls not in cc.validators:
+            cc.validators.append(validator_cls)
     return catalog
 
 
@@ -184,11 +180,13 @@ def discover_custom_validators(root: Path) -> "dict[str, CustomConstraint]":
 # Source-derived constraints (no OpenAPI spec)
 #
 # When a repo ships no OpenAPI spec, declarative DTO constraints still live in
-# the Java source as bean-validation annotations. We recover them directly:
-# locate the handler's validated body parameter (@Valid/@Validated), resolve
-# that DTO class in-repo, and read its fields' constraint annotations. This is
-# pure extraction — it never fabricates constraints, and it is reported with
-# source="source-derived" + a lower confidence than spec-carried constraints.
+# the Java source as bean-validation annotations — and, since Phase 3, in the
+# ContextGraph as annotated field nodes. We recover them from the graph: locate
+# the handler's validated body parameter (@Valid/@Validated, captured on the
+# handler node), resolve that DTO class in-repo, and read its field nodes'
+# constraint annotations. This is pure extraction — it never fabricates
+# constraints, and it is reported with source="source-derived" + a lower
+# confidence than spec-carried constraints.
 # ---------------------------------------------------------------------------
 
 # jakarta/javax bean-validation built-in constraints. @Valid marks nested
@@ -203,41 +201,21 @@ _VALIDATE_MARKERS = frozenset({"Valid", "Validated"})
 # A class-typed identifier (starts uppercase) — heuristic for "a DTO type".
 _CLASS_TYPE_RE = re.compile(r"^[A-Z][\w]*$")
 _ANN_TOKEN_RE = re.compile(r"@(\w+)\s*(?:\(([^)]*)\))?")
-_FIELD_DECL_RE = re.compile(
-    r"^\s*(?:private|protected|public)\s+"
-    r"(?:final\s+|static\s+|transient\s+|volatile\s+)*"
-    r"[\w.$<>\[\], ]+?\s+(\w+)\s*[;=]"
-)
-_CLASS_EXTENDS_RE = re.compile(r"\bclass\s+\w+\s+extends\s+(\w+)")
 
 
-def _index_repo_classes(root: Path) -> "dict[str, Path]":
-    """Map a class's simple name → its source file (first non-test match)."""
-    index: "dict[str, Path]" = {}
-    count = 0
-    for jf in root.rglob("*.java"):
-        rel = str(jf).replace("\\", "/")
-        if is_test_path(rel) or "/target/" in rel:
-            continue
-        count += 1
-        if count > _SCAN_CAP:
-            break
-        index.setdefault(jf.stem, jf)
+def _index_repo_classes(graph: "ContextGraph") -> "dict[str, str]":
+    """Map a class's simple name → its FQN (first non-test match in
+    source-path order, replicating the old sorted-file-scan semantics)."""
+    pairs = [
+        (t.source_file, t.fqn)
+        for t in graph.types()
+        if not _is_excluded(t.source_file)
+    ]
+    pairs.sort()
+    index: "dict[str, str]" = {}
+    for _, fqn in pairs:
+        index.setdefault(_simple(fqn), fqn)
     return index
-
-
-def _balanced_parens(src: str, open_idx: int) -> "Optional[str]":
-    """Given the index of a '(', return the inner text up to its matching ')'."""
-    depth = 0
-    for i in range(open_idx, len(src)):
-        c = src[i]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return src[open_idx + 1:i]
-    return None
 
 
 def _split_top_level(params: str) -> "list[str]":
@@ -260,105 +238,100 @@ def _split_top_level(params: str) -> "list[str]":
     return out
 
 
-def _handler_body_dto(controller_src: str, handler: str) -> "Optional[tuple[str, str]]":
-    """Find ``handler``'s validated body parameter. Returns (dto_simple, binding)
-    where binding is 'body' (@RequestBody), 'form' (@ModelAttribute / implicit),
-    or None when the handler has no @Valid/@Validated DTO parameter."""
-    for m in re.finditer(r"\b" + re.escape(handler) + r"\s*\(", controller_src):
-        params = _balanced_parens(controller_src, m.end() - 1)
-        if params is None:
+def _handler_body_dto(
+    graph: "ContextGraph", controller_fqn: str, handler: str
+) -> "Optional[tuple[str, str]]":
+    """Find ``handler``'s validated body parameter from its graph node. Returns
+    (dto_simple, binding) where binding is 'body' (@RequestBody) or 'form'
+    (@ModelAttribute / implicit), or None when the handler has no
+    @Valid/@Validated DTO parameter."""
+    node = graph.symbol(f"{controller_fqn}#{handler}")
+    if node is None:
+        return None
+    params = node.annotation_values.get("_validated_params", "")
+    if not params:
+        return None
+    for raw in _split_top_level(params):
+        raw = raw.strip()
+        if not raw:
             continue
-        for raw in _split_top_level(params):
-            raw = raw.strip()
-            if not raw:
-                continue
-            anns = {a.group(1) for a in _ANN_TOKEN_RE.finditer(raw)}
-            if not (anns & _VALIDATE_MARKERS):
-                continue
-            # Strip annotations, then read the parameter's declared type.
-            without_ann = _ANN_TOKEN_RE.sub("", raw).strip()
-            without_ann = re.sub(r"^final\s+", "", without_ann)
-            parts = without_ann.split()
-            if not parts:
-                continue
-            dto = re.sub(r"<.*", "", parts[0]).strip()
-            if not _CLASS_TYPE_RE.match(dto):
-                continue
-            binding = "body" if "RequestBody" in anns else "form"
-            return dto, binding
+        anns = {a.group(1) for a in _ANN_TOKEN_RE.finditer(raw)}
+        if not (anns & _VALIDATE_MARKERS):
+            continue
+        # Strip annotations, then read the parameter's declared type.
+        without_ann = _ANN_TOKEN_RE.sub("", raw).strip()
+        without_ann = re.sub(r"^final\s+", "", without_ann)
+        parts = without_ann.split()
+        if not parts:
+            continue
+        dto = re.sub(r"<.*", "", parts[0]).strip()
+        if not _CLASS_TYPE_RE.match(dto):
+            continue
+        binding = "body" if "RequestBody" in anns else "form"
+        return dto, binding
     return None
 
 
 def _dto_field_constraints(
+    graph: "ContextGraph",
     dto: str,
-    class_index: "dict[str, Path]",
+    class_index: "dict[str, str]",
     catalog: "dict[str, CustomConstraint]",
     _seen: "Optional[set[str]]" = None,
 ) -> "list[dict[str, Any]]":
-    """Read a DTO's validated fields (own file + in-repo supertypes, depth-guarded)."""
+    """Read a DTO's validated field nodes (own class + in-repo supertypes,
+    depth-guarded), in declaration order."""
     if _seen is None:
         _seen = set()
     if dto in _seen or dto not in class_index:
         return []
     _seen.add(dto)
-    try:
-        src = class_index[dto].read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
+    dto_fqn = class_index[dto]
 
     fields: "list[dict[str, Any]]" = []
-    pending: "list[tuple[str, str]]" = []  # (annotation, args)
-    for line in src.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("@"):
-            mt = _ANN_TOKEN_RE.match(stripped)
-            if mt:
-                pending.append((mt.group(1), (mt.group(2) or "").strip()))
-            continue
-        fm = _FIELD_DECL_RE.match(line)
-        if fm:
-            rules: "list[dict[str, Any]]" = []
-            customs: "list[dict[str, Any]]" = []
-            for ann, args in pending:
-                if ann in _BEAN_CONSTRAINTS:
-                    rule: "dict[str, Any]" = {"kind": ann}
-                    if args:
-                        rule["value"] = args
-                    rules.append(rule)
-                elif ann in catalog:
-                    customs.append({"annotation": ann, "resolved": True})
-            if rules or customs:
-                entry: "dict[str, Any]" = {"name": fm.group(1)}
-                if rules:
-                    entry["rules"] = rules
-                if customs:
-                    entry["customValidators"] = customs
-                fields.append(entry)
-            pending = []
-        elif stripped and not stripped.startswith("//") and not stripped.startswith("*"):
-            # Any other meaningful line breaks the annotation→field adjacency.
-            pending = []
+    for f in graph.fields_of(dto_fqn):
+        rules: "list[dict[str, Any]]" = []
+        customs: "list[dict[str, Any]]" = []
+        for ann in f.annotations:
+            bare = ann.lstrip("@")
+            if bare in _BEAN_CONSTRAINTS:
+                rule: "dict[str, Any]" = {"kind": bare}
+                args = f.annotation_values.get(ann, "")
+                if args:
+                    rule["value"] = args
+                rules.append(rule)
+            elif bare in catalog:
+                customs.append({"annotation": bare, "resolved": True})
+        if rules or customs:
+            entry: "dict[str, Any]" = {"name": _simple(f.fqn)}
+            if rules:
+                entry["rules"] = rules
+            if customs:
+                entry["customValidators"] = customs
+            fields.append(entry)
 
     # Follow a single in-repo supertype so inherited constraints are not lost.
-    ext = _CLASS_EXTENDS_RE.search(src)
+    node = graph.symbol(dto_fqn)
+    ext = _EXTENDS_SIG_RE.search((node.signature or "") if node else "")
     if ext:
         seen_names = {f["name"] for f in fields}
-        for inherited in _dto_field_constraints(ext.group(1), class_index, catalog, _seen):
+        for inherited in _dto_field_constraints(
+            graph, _simple(ext.group(1)), class_index, catalog, _seen
+        ):
             if inherited["name"] not in seen_names:
                 fields.append(inherited)
     return fields
 
 
 def _recover_source_endpoints(
-    root: Path,
+    graph: "ContextGraph",
     endpoints: "list[dict[str, Any]]",
     catalog: "dict[str, CustomConstraint]",
 ) -> "tuple[list[dict[str, Any]], int]":
     """Build validation routes for source endpoints whose handler validates a
     DTO. Returns (routes, validated_field_count). Only body-shaped verbs are
     considered, matching the OpenAPI path's scope."""
-    class_index = _index_repo_classes(root)
-    controller_cache: "dict[str, Optional[str]]" = {}
+    class_index = _index_repo_classes(graph)
     routes: "list[dict[str, Any]]" = []
     total = 0
     for ep in endpoints:
@@ -368,21 +341,11 @@ def _recover_source_endpoints(
         handler = ep.get("handler")
         if not controller or not handler or controller not in class_index:
             continue
-        if controller not in controller_cache:
-            try:
-                controller_cache[controller] = class_index[controller].read_text(
-                    encoding="utf-8", errors="replace"
-                )
-            except OSError:
-                controller_cache[controller] = None
-        csrc = controller_cache[controller]
-        if csrc is None:
-            continue
-        dto_binding = _handler_body_dto(csrc, str(handler))
+        dto_binding = _handler_body_dto(graph, class_index[controller], str(handler))
         if dto_binding is None:
             continue
         dto, binding = dto_binding
-        validated = _dto_field_constraints(dto, class_index, catalog)
+        validated = _dto_field_constraints(graph, dto, class_index, catalog)
         if not validated:
             continue
         total += len(validated)
@@ -419,21 +382,26 @@ def _is_body_endpoint(ep: "dict[str, Any]") -> bool:
 def build_validation_surface(
     root: Path,
     endpoints_data: "Optional[dict[str, Any]]" = None,
+    graph: "Optional[ContextGraph]" = None,
 ) -> "dict[str, Any]":
     """Build the per-endpoint validation surface for a repo.
 
     ``endpoints_data`` is the result of :func:`extract_java_endpoints`; when not
-    supplied it is computed (so the command can run standalone). Returns a JSON-
-    ready dict: ``endpoints`` (validated fields per route), ``custom_validators``
-    (catalog), ``gaps`` (body routes with no declared constraint), and ``summary``.
+    supplied it is computed (so the command can run standalone). ``graph`` is
+    the repo's ContextGraph; when not supplied it is built once here and shared
+    by every lookup below. Returns a JSON-ready dict: ``endpoints`` (validated
+    fields per route), ``custom_validators`` (catalog), ``gaps`` (body routes
+    with no declared constraint at all), and ``summary``.
     """
     root = Path(root)
     if endpoints_data is None:
         from sourcecode.repository_ir import extract_java_endpoints
 
         endpoints_data = extract_java_endpoints(root)
+    if graph is None:
+        graph = _build_graph(root)
 
-    catalog = discover_custom_validators(root)
+    catalog = discover_custom_validators(root, graph)
 
     out_endpoints: "list[dict[str, Any]]" = []
     gaps: "list[dict[str, Any]]" = []
@@ -524,12 +492,12 @@ def build_validation_surface(
         result["openapi_spec"] = spec_path
     else:
         # No OpenAPI spec on disk / under target/generated-sources. Recover
-        # declarative constraints directly from the Java DTOs that handlers
-        # validate (@Valid/@Validated body params), so a repo without a spec is
-        # no longer reported as a sea of zeros.
+        # declarative constraints from the graph's DTO field nodes (bean-
+        # validation annotations on @Valid/@Validated handler bodies), so a
+        # repo without a spec is no longer reported as a sea of zeros.
         result["openapi_spec"] = None
         source_routes, source_fields = _recover_source_endpoints(
-            root, endpoints_data.get("endpoints", []), catalog
+            graph, endpoints_data.get("endpoints", []), catalog
         )
         if source_routes:
             existing = {(r.get("method"), r.get("path")) for r in out_endpoints}

@@ -285,7 +285,10 @@ def compare(timeout: float = 600.0, write_diffs: bool = True) -> int:
 
 def convergence() -> int:
     src = REPO_ROOT / "src" / "sourcecode"
-    consumer_re = re.compile(r"\b(repository_ir|canonical_ir|cir_graphs)\b")
+    # Phase 3: `context_graph` added — a module consuming the façade is on the
+    # ContextGraph access layer (the metric's whole point). Earlier snapshots
+    # (P0–P2) predate this and undercount by the façade-only consumers.
+    consumer_re = re.compile(r"\b(repository_ir|canonical_ir|cir_graphs|context_graph)\b")
     # Signals that a module runs its own Java parse rather than consuming the IR.
     parser_re = re.compile(r"\.java\b|_CLASS_DECL_RE|re\.compile\([^)]*(class|interface|@[A-Z])")
     entry_re = re.compile(r"\b(build_repo_ir|build_canonical_ir)\s*\(")
