@@ -938,6 +938,22 @@ def _extract_symbols(
                     if ")" in _after_paren:
                         _params_str = _after_paren[:_after_paren.index(")")]
                         _param_types = _parse_param_types(_params_str)
+                        # Phase 3.2 (ContextGraph): capture the raw parameter list
+                        # when it carries a bean-validation marker, so consumers
+                        # (validation_surface) can resolve the validated body DTO
+                        # from the graph instead of re-reading controller source.
+                        if "@Valid" in _params_str or "@Validated" in _params_str:
+                            pending_ann_values["_validated_params"] = _params_str.strip()
+                        # Phase 3.2: annotation-member default. In Java grammar a
+                        # post-paren `default X;` exists ONLY on @interface members
+                        # (`String message() default "...";`) — interface default
+                        # methods put `default` BEFORE the signature. Capture the
+                        # default value so custom-constraint metadata (message
+                        # template) is derivable from the graph.
+                        _post_paren = _after_paren[_after_paren.index(")") + 1:]
+                        _def_m = re.match(r'\s*default\s+(.+?)\s*;\s*$', _post_paren)
+                        if _def_m:
+                            pending_ann_values["_default"] = _def_m.group(1).strip()
                     else:
                         _param_types = []  # multi-line param list — deterministically empty
 

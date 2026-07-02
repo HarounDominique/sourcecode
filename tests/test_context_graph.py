@@ -121,6 +121,11 @@ def spring_repo(tmp_path: Path) -> Generator[Path, None, None]:
             public String hello() {
                 return service.greet("world");
             }
+
+            @PostMapping("/greetings")
+            public String create(@Valid @RequestBody GreetingRequest request) {
+                return service.greet("x");
+            }
         }
     """)
 
@@ -207,9 +212,10 @@ class TestFacadeQueries:
 
     def test_endpoints_of_controller(self, graph: ContextGraph):
         eps = graph.endpoints_of("com.example.GreetingController")
-        assert len(eps) == 1
-        assert eps[0].path == "/api/hello"
-        assert eps[0].method == "GET"
+        assert len(eps) == 2
+        by_path = {ep.path: ep.method for ep in eps}
+        assert by_path["/api/hello"] == "GET"
+        assert by_path["/api/greetings"] == "POST"
 
     def test_queries_are_deterministic(self, graph: ContextGraph):
         assert graph.symbols() == graph.symbols()
@@ -321,3 +327,29 @@ class TestFacadeMembers:
 
     def test_fields_of_unknown_type_is_empty(self, graph: ContextGraph):
         assert graph.fields_of("com.example.Nope") == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.2 — annotation-member defaults + validated handler params
+# ---------------------------------------------------------------------------
+
+class TestFacadeMemberDefaults:
+    def test_annotation_member_default_captured(self, graph: ContextGraph):
+        # `String message() default "invalid name";` inside the @interface —
+        # the member method node carries the default under "_default".
+        member = graph.symbol("com.example.ValidName#message")
+        assert member is not None
+        assert member.annotation_values.get("_default") == '"invalid name"'
+
+    def test_validated_param_captured_on_handler(self, graph: ContextGraph):
+        # `create(@Valid @RequestBody GreetingRequest request)` — the handler
+        # node records the raw validated parameter list under "_validated_params".
+        handler = graph.symbol("com.example.GreetingController#create")
+        assert handler is not None
+        raw = handler.annotation_values.get("_validated_params", "")
+        assert "@Valid" in raw and "@RequestBody" in raw and "GreetingRequest" in raw
+
+    def test_non_validated_handler_has_no_param_capture(self, graph: ContextGraph):
+        handler = graph.symbol("com.example.GreetingController#hello")
+        assert handler is not None
+        assert "_validated_params" not in handler.annotation_values
