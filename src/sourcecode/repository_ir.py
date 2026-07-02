@@ -270,9 +270,20 @@ _LOMBOK_CTOR_ANNOTATIONS: frozenset[str] = frozenset({
 # Transaction annotations whose args must be captured for semantic analysis.
 _TX_ANNOTATIONS: frozenset[str] = frozenset({"@Transactional", "@TransactionalEventListener"})
 
+# Phase 3 (ContextGraph): bean-validation constraints + constraint-machinery
+# annotations whose args carry the validation semantics (@Pattern regexp,
+# @Size max, @Constraint validatedBy, @Target element types). Captured so the
+# validation surface can be derived from the graph instead of re-parsing Java.
+_VALIDATION_ANNOTATIONS: frozenset[str] = frozenset({
+    "@Pattern", "@Size", "@Min", "@Max", "@DecimalMin", "@DecimalMax",
+    "@Digits", "@NotNull", "@NotEmpty", "@NotBlank", "@Email",
+    "@Constraint", "@Target",
+})
+
 # Combined set used in _extract_symbols annotation-value capture.
 _CAPTURE_ANN_ARGS: frozenset[str] = (
-    _ENDPOINT_ANNOTATIONS | _PERMISSION_ANNOTATIONS | _PATH_ANNOTATIONS | _TX_ANNOTATIONS
+    _ENDPOINT_ANNOTATIONS | _PERMISSION_ANNOTATIONS | _PATH_ANNOTATIONS
+    | _TX_ANNOTATIONS | _VALIDATION_ANNOTATIONS
 )
 
 _JAVA_ROLE_MAP: dict[str, str] = {
@@ -1005,7 +1016,14 @@ def _extract_symbols(
                 _pop_closed(class_stack, depth)
                 continue
 
-            if pending_anns and any(a in _INJECT_ANNOTATIONS for a in pending_anns):
+            # Phase 3 (ContextGraph): emit a field symbol for ANY annotated field,
+            # not only DI-injected ones. Bean-validation (@NotNull/@Size), JPA
+            # (@Column/@Id), custom constraint annotations, etc. become first-class
+            # graph nodes so consumers (validation_surface, JPA analysis) can read
+            # them from the ContextGraph instead of re-parsing Java source.
+            # DI `injects` edges remain gated on _INJECT_ANNOTATIONS in the edge
+            # builder — a non-DI annotated field never produces an injection edge.
+            if pending_anns:
                 fld_m = _FIELD_DECL_RE.match(stripped)
                 if fld_m:
                     fname = fld_m.group("name")
@@ -1032,6 +1050,7 @@ def _extract_symbols(
                             source_file=rel_path,
                             line=cur_line,
                             signature=f"{ftype} {fname}",
+                            annotation_values=dict(pending_ann_values),
                         ))
                         pending_anns = []
                         pending_ann_values = {}
@@ -1580,9 +1599,17 @@ def _build_relations(
                 ))
 
         if sym.type == "field":
+            # Phase 3 (ContextGraph): field symbols now exist for ANY annotated
+            # field, so an injection edge must be gated on a real DI annotation.
+            # (Before Phase 3 the emission gate guaranteed one, making the old
+            # "@Autowired" fallback dead code — this preserves the exact same
+            # `injects` edge set.) A @Column/@NotNull field is not a dependency
+            # injection and must never enter the DI graph.
             _inject_ann = next(
-                (a for a in sym.annotations if a in _INJECT_ANNOTATIONS), "@Autowired"
+                (a for a in sym.annotations if a in _INJECT_ANNOTATIONS), None
             )
+            if _inject_ann is None:
+                continue
             _field_targets: set[str] = set(sym.imports_used)
             # Same-package field injection: imports_used is empty when the field type
             # shares a package with the declaring class (no import needed in Java).
@@ -3619,6 +3646,16 @@ def build_repo_ir(
         # dropping their injects edges, so impact-chain cannot reach callers through
         # them (Broadleaf: AbstractCheckoutController → checkout endpoints went missing).
         '@Autowired', '@Resource', '@Qualifier', '@Value',
+        # Phase 3 (ContextGraph): bean-validation constraints + constraint
+        # machinery. A DTO whose only annotations are validation constraints
+        # (no stereotype, no inheritance) must still be fully parsed so its
+        # field symbols reach the graph — validation_surface derives the
+        # validation surface from these nodes instead of re-parsing source.
+        # A file declaring a custom constraint (@interface + @Constraint) also
+        # promotes that annotation to a marker via the custom-meta scan above.
+        '@NotNull', '@NotBlank', '@NotEmpty', '@Size', '@Pattern',
+        '@Min', '@Max', '@DecimalMin', '@DecimalMax', '@Digits', '@Email',
+        '@Constraint', '@Valid', '@Validated',
         '@PersistenceContext', '@PersistenceUnit',
         # JPA / persistence (needed for stereotype detection in all commands)
         '@Entity', '@MappedSuperclass', '@Embeddable',

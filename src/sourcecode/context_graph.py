@@ -274,6 +274,28 @@ class ContextGraph:
             (s for s in self._nodes if s.is_type), key=lambda s: s.fqn
         )
 
+    def fields_of(self, type_fqn: str) -> list[Symbol]:
+        """Annotated field symbols declared directly on a type (the IR emits a
+        field node when the field carries at least one annotation). Excludes
+        nested-class fields. Sorted by declaration order (source line), so
+        consumers see fields as the source declares them."""
+        prefix = type_fqn + "."
+        out = [
+            s
+            for s in self._nodes
+            if s.kind == "field"
+            and s.fqn.startswith(prefix)
+            and "." not in s.fqn[len(prefix):]
+        ]
+        out.sort(key=lambda s: (s.source_file, s.line if s.line is not None else 0, s.fqn))
+        return out
+
+    def annotation_types(self) -> list[Symbol]:
+        """Annotation-type (`@interface`) declarations, sorted by FQN. Their
+        own annotations/annotation_values carry meta-annotations such as
+        @Target or @Constraint."""
+        return self.symbols(kind="annotation")
+
     # -- role convenience (framework-neutral sugar over symbols(role=…)) -----
     # Each is a one-line filter on the generic `role` axis. They read naturally
     # for Java/Spring today but impose no framework coupling on the API shape.

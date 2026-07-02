@@ -66,6 +66,40 @@ def spring_repo(tmp_path: Path) -> Generator[Path, None, None]:
         }
     """)
 
+    _write(root, "src/main/java/com/example/GreetingRequest.java", """
+        package com.example;
+
+        import jakarta.validation.constraints.NotBlank;
+        import jakarta.validation.constraints.Pattern;
+        import jakarta.validation.constraints.Size;
+
+        public class GreetingRequest {
+
+            @NotBlank
+            @Size(max = 30)
+            private String name;
+
+            @Pattern(regexp = "\\\\d{5}", message = "{zip.invalid}")
+            private String zipCode;
+
+            private String note;
+        }
+    """)
+
+    _write(root, "src/main/java/com/example/ValidName.java", """
+        package com.example;
+
+        import jakarta.validation.Constraint;
+        import java.lang.annotation.ElementType;
+        import java.lang.annotation.Target;
+
+        @Target({ElementType.FIELD})
+        @Constraint(validatedBy = ValidNameValidator.class)
+        public @interface ValidName {
+            String message() default "invalid name";
+        }
+    """)
+
     _write(root, "src/main/java/com/example/GreetingController.java", """
         package com.example;
 
@@ -249,3 +283,41 @@ class TestFacadeConstruction:
     def test_repr_is_informative(self, graph: ContextGraph):
         r = repr(graph)
         assert "ContextGraph(" in r and "nodes=" in r
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — member-level extraction surfaced through the façade
+# ---------------------------------------------------------------------------
+
+class TestFacadeMembers:
+    def test_fields_of_returns_annotated_fields_in_declaration_order(self, graph: ContextGraph):
+        fields = graph.fields_of("com.example.GreetingRequest")
+        names = [f.fqn.rsplit(".", 1)[-1] for f in fields]
+        # `note` has no annotation → no field node (emission rule).
+        assert names == ["name", "zipCode"]
+        assert all(f.kind == "field" for f in fields)
+
+    def test_field_annotations_and_values_captured(self, graph: ContextGraph):
+        fields = {f.fqn.rsplit(".", 1)[-1]: f for f in graph.fields_of("com.example.GreetingRequest")}
+        name = fields["name"]
+        assert "@NotBlank" in name.annotations and "@Size" in name.annotations
+        assert "max = 30" in name.annotation_values.get("@Size", "")
+        zipc = fields["zipCode"]
+        assert "regexp" in zipc.annotation_values.get("@Pattern", "")
+        assert "message" in zipc.annotation_values.get("@Pattern", "")
+
+    def test_non_di_field_produces_no_injects_edge(self, graph: ContextGraph):
+        # A bean-validation field must never enter the DI graph.
+        for f in graph.fields_of("com.example.GreetingRequest"):
+            assert not graph.relations(kind="injects", source=f.fqn)
+
+    def test_annotation_types_surface_constraint_machinery(self, graph: ContextGraph):
+        anns = graph.annotation_types()
+        valid_name = next(s for s in anns if s.fqn == "com.example.ValidName")
+        assert valid_name.kind == "annotation"
+        assert "@Constraint" in valid_name.annotations
+        assert "validatedBy" in valid_name.annotation_values.get("@Constraint", "")
+        assert "FIELD" in valid_name.annotation_values.get("@Target", "")
+
+    def test_fields_of_unknown_type_is_empty(self, graph: ContextGraph):
+        assert graph.fields_of("com.example.Nope") == []
